@@ -78,21 +78,22 @@ Construct a small original synthetic program reproducing the relevant behavior.
 ## Latest local GT4 boundary
 
 With the user's ISO mounted, the BIOS-free startup test passes CSR initialization
-and GsPutIMR, completes SetGsCrt for interlaced NTSC output, then stops at the
-unsupported VIF0 FBRST register write (address 0x10003810). It retires 5,968,896
+and GsPutIMR, completes SetGsCrt for interlaced NTSC output, VIF0/VIF1 reset,
+VU control initialization and VIF error masks, then stops at the unsupported
+GIF_CTRL reset write (address 0x10003000). It retires 5,968,911
 instructions and services 108 kernel calls. No scanout edge is reached by this
 short interval after mode setup; scanout behavior is verified by synthetic tests.
 Three interrupt dispatches completed and five IOP packets were consumed.
 
 The guest binds to FILEIO on its first attempt and completes its version query.
 It then passes additional startup functions, unaligned word operations, packed
-string operations, OSD2 byte reads and scratchpad accesses. At the VIF stop it has
+string operations, OSD2 byte reads and scratchpad accesses. At the GIF stop it has
 issued one FILEIO request (version), zero successful opens, and zero bytes read.
 Actual file reads are verified by the synthetic disc/RPC integration test;
 the game has not yet exercised them. Fewer instructions than the previous
 300-million-instruction wait reflect removal of the FILEIO bind retry loop.
 The local regression again expects diagnostic exit 3, with a ten-million-step
-budget and checks for the VIF stop, instruction count and FILEIO counters.
+budget and checks for the GIF stop, instruction count and FILEIO counters.
 
 The existing hardware-register integration suite covers GS reset and identity,
 display register lane writes and aliases, IMR access through MMIO and HLE,
@@ -103,6 +104,12 @@ alternating fields, PAL phase preservation across fragmented advancement, invali
 mode rejection and reset cancellation. Before configuration no video events occur.
 The generated-code suite delivers GS, VBlank-start and VBlank-end interrupts to
 registered synthetic guest handlers and checks return/context restoration.
+
+VIF initialization extends the same hardware suite: both units, idle stop/break/
+cancel, reset configuration preservation, row/column data, aliases and isolation,
+register holes, unsupported widths, FIFO access and reverse transfers. Generated
+C++ tests execute CFC2/CTC2 control roundtrips, per-unit VU resets, preservation
+of upper GPR lanes, idle status and rejection of microprogram activation.
 
 Synthetic generated-code tests separately verify thread switching and restarting,
 full register preservation, priority changes, equal-priority ordering, and

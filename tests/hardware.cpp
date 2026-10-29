@@ -88,10 +88,50 @@ void gs_scanout() {
     batch.advance_cycles(1);
     check(batch.take_interrupts() == 4,"PAL blanking edge missing");
 }
+void vif_initialization() {
+    nt::hardware::SystemBus bus;
+    for (const auto base : {0x10003800U,0x10003c00U}) {
+        check(bus.load(base,4) == 0 && bus.load(base+0x60,4) == 0,"VIF cold state is not idle");
+        bus.store(base+0x20,4,~0U);
+        bus.store(base+0x30,4,0x12345678);
+        bus.store(base+0x50,4,2);
+        bus.store(base+0x70,4,0x12345678);
+        for (unsigned lane=0;lane<8;++lane) bus.store(base+0x100+lane*16,4,0x12340000+lane);
+        bus.store(base+0x10,4,6);
+        check(bus.load(base,4) == 0x300 && bus.load(base+0x10,4) == 0,"VIF stop/break strobes differ");
+        bus.store(base+0x10,4,8);
+        check(bus.load(base,4) == 0 && bus.load(base+0x20,4) == 7,"VIF cancel damaged configuration");
+        bus.store(base+0x10,4,7);
+        check(bus.load(base,4) == 0 && bus.load(base+0x20,4) == 0 &&
+              bus.load(base+0x30,4) == 0x5678 && bus.load(base+0x50,4) == 2 &&
+              bus.load(base+0x70,4) == 0x12345678,"VIF soft reset/configuration differs");
+        for (unsigned lane=0;lane<8;++lane)
+            check(bus.load(base+0x100+lane*16,4) == 0x12340000+lane,"VIF reset lost row/column data");
+        bus.store(base+0x10,4,2);
+        bus.store(base,4,0); // Read-only status cannot clear a force break.
+        check(bus.load(base,4) == 0x200,"VIF STAT write modified read-only flags");
+        bus.store(base+0x10,4,8);
+        rejects([&] { bus.store(base+0x10,8,1); });
+        rejects([&] { bus.store(base+0x14,4,1); });
+        rejects([&] { bus.store(base+0x80,4,1); });
+        rejects([&] { bus.load(base+0x180,4); });
+    }
+    bus.store(0x90003830,4,0xabcd);
+    check(bus.load(0x10003830,4) == 0xabcd && bus.load(0x10003c30,4) == 0x5678,"VIF units/aliases are not isolated");
+    rejects([&] { bus.store(0x10003c00,4,1U<<23); });
+    rejects([&] { bus.load(0x100038a0,4); });
+    for (const auto fifo : {0x10004000U,0x10005000U}) {
+        rejects([&] { bus.store(fifo,4,0); });
+        rejects([&] { bus.store_quad(fifo,{}); });
+        rejects([&] { bus.load_quad(fifo); });
+    }
+    check(bus.load(0x10003c00,4) == 0 && !bus.interrupt_pending(),"Rejected VIF operation changed idle state");
+}
 int main() {
     try {
         gs_initialization();
         gs_scanout();
+        vif_initialization();
         nt::hardware::SystemBus bus;
         bus.store(0x80001000,4,0x11223344);
         check(bus.load(0xa0001000,4) == 0x11223344 && bus.load(0x1000,4) == 0x11223344,"RAM aliases disagree");

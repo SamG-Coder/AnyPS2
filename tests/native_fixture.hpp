@@ -85,6 +85,10 @@ inline std::map<std::uint32_t, std::uint32_t> words() {
     w[0x9900] = (28U<<26)|special(8,1,2,2,27); w[0x9910] = (28U<<26)|special(8,1,2,2,23); w[0x9920] = (28U<<26)|special(8,1,2,2,19);
     w[0x9a00] = special(44,1,2,3); w[0x9a10] = special(46,1,2,3); w[0x9a20] = imm(24,1,3,1);
     // Compile every supported opcode shape as part of the same generated file.
+    w[0x9b00] = (18U<<26)|(6U<<21)|(1U<<16)|(28U<<11)|1;
+    w[0x9b04] = (18U<<26)|(2U<<21)|(2U<<16)|(28U<<11);
+    w[0x9b10] = (18U<<26)|(2U<<21)|(3U<<16)|(29U<<11)|1;
+    w[0x9b20] = (18U<<26)|(6U<<21)|(1U<<16)|(31U<<11);
     std::uint32_t pc = 0x20000; // Keep opcode-shape fixtures outside the HLE syscall table.
     for (unsigned op = 0; op < 64; ++op) {
         if (op == 0 || op == 1 || op == 28) continue;

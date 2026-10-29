@@ -66,6 +66,19 @@ performance.
 
 ## Acceptance boundaries
 
+VIF0/VIF1 share an initialization register model with independent state. Cold
+state is idle with an empty FIFO; soft reset clears status and error masks while
+preserving configuration and row/column data. FBRST stop, force-break and cancel
+operate on idle units, and command bits are not retained. Widths, alignment,
+register holes, reverse transfers and unsupported command-managed writes are
+checked before mutation. FIFO payloads and active DMA remain unsupported.
+
+CFC2/CTC2 generation forwards VU control accesses to a separate device interface.
+FBRST supports the two units' control masks and reset strobes; VPU_STAT reports
+idle because every execution-start path is still unsupported. Interlocked forms
+are valid only under this idle-unit limitation. Other control registers and VU
+microprogram execution stop explicitly. These interfaces require no BIOS code.
+
 The hardware library owns a separate GS privileged-register model. Display
 configuration is stored without producing pixels. CSR exposes
 an empty FIFO and reference-compatible identity, accepts acknowledgements and

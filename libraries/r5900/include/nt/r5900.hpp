@@ -13,7 +13,7 @@ enum class Op {
     addiu, daddiu, slti, sltiu, andi, ori, xori, lui,
     lb, lbu, lh, lhu, lw, lwu, ld, lq, ldl, ldr, lwl, lwr, sb, sh, sw, sd, sq, sdl, sdr, swl, swr,
     pand, por, pxor, pnor, padduw, pceqb, pceqh, pceqw, ppac5, pext5, ppacb, ppach, ppacw, mfhi1, mthi1, mflo1, mtlo1, mfsa, mtsa, mtsab, mtsah,
-    mfc1, mtc1, cfc1, ctc1, adda_s, pcpyh, pcpyld, pcpyud, ei, di, mfc0, mtc0, eret, plzcw, cache
+    mfc1, mtc1, cfc1, ctc1, cfc2, ctc2, adda_s, pcpyh, pcpyld, pcpyud, ei, di, mfc0, mtc0, eret, plzcw, cache
 };
 struct Instruction {
     std::uint32_t pc, word;

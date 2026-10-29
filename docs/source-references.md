@@ -70,6 +70,14 @@ Play!'s `GSHandler::SetCrt` supplies the public mode/SMODE2 relationship.
 PCSX2 `Counters.cpp` supplies interlaced NTSC/PAL field rates, blanking lengths,
 delayed GS field events and separate INTC blanking edges. The independent integer
 scanout model is diagnostic timing, not a copy of BIOS CRT programming tables.
+PCSX2 `Vif.cpp`, `Vif.h` and `Hw.h`, together with Play! `ee/Vif.cpp` and
+`ee/Vif.h`, informed the independent VIF register model: register addresses,
+idle stop/break/cancel flags, reset commands, row/column preservation, and VIF1
+reverse-transfer control. Command execution and active DMA are not inferred
+from idle-register behavior.
+PCSX2 `VU0.cpp`, `VU0micro.cpp` and `VU1micro.cpp` define the CFC2/CTC2
+FBRST control masks and per-unit reset clearing used by the initialization-only
+VU control interface. No vector instruction or microprogram implementation is copied.
 
 The local reference checkouts under `third_party` are ignored. Game images,
 extracted executables, generated guest code, and runtime traces stay under the

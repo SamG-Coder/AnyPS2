@@ -101,10 +101,13 @@ C++ service implementation, not a complete IOP emulator. DMA completion does not
 imply a successful RPC operation. See [SIF implementation](docs/sif.md).
 The local GT4 test passes timer interrupt delivery and now binds to a mounted
 file-I/O service. With the disc mounted it passes GS CSR initialization and
-GsPutIMR and SetGsCrt, then stops at VIF0 register initialization. The GS component
+GsPutIMR, SetGsCrt, VIF0/VIF1 reset and VU control initialization, then stops at
+GIF register initialization. The GS component
 supports privileged register storage, CSR reset/acknowledgement, IMR masks, and
 diagnostic interlaced NTSC/PAL scanout events. GIF processing and rendering remain
 unfinished. No visible game boot is verified.
+The shared VIF register model supports idle reset/stop/cancel, error masks and
+configuration readback. VIF command streams, DMA and VU execution remain unsupported.
 
 The generator uses bounded dispatch functions and instruction guards. Efficient
 basic blocks and measured performance are goals; producing a native executable

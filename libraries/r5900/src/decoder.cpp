@@ -34,6 +34,13 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
     } else if (opcode == 17) {
         switch (i.rs) { F(0,mfc1); F(2,cfc1); F(4,mtc1); F(6,ctc1); }
         if (i.rs == 16 && fn == 24) i.op = Op::adda_s;
+    } else if (opcode == 18) {
+        // Bit zero selects interlock. No VU execution is currently accepted,
+        // so either form observes an idle unit at the device boundary.
+        if ((w & 0x7fe) == 0) {
+            if (i.rs == 2) i.op = Op::cfc2;
+            if (i.rs == 6) i.op = Op::ctc2;
+        }
     } else if (opcode == 28) {
         if (fn == 4 && i.rt == 0 && i.sa == 0) i.op = Op::plzcw;
         if (fn == 8 && i.sa == 30) i.op = Op::pext5;
@@ -98,6 +105,7 @@ std::string_view name(Op op) {
     N(mfhi1); N(mthi1); N(mflo1); N(mtlo1); N(mfsa); N(mtsa);
     N(mtsab); N(mtsah);
     N(mfc1); N(mtc1); N(cfc1); N(ctc1); N(adda_s);
+    N(cfc2); N(ctc2);
     N(pcpyh); N(pcpyld); N(pcpyud); N(ei); N(di); N(mfc0); N(mtc0);
     N(eret); N(plzcw); N(cache);
     N(sdl); N(sdr); N(lwl); N(lwr); N(swl); N(swr); N(add); N(sub); N(addi);

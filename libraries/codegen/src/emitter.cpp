@@ -128,6 +128,8 @@ void operation(std::ostream& o, const r5900::Instruction& i) {
         if (i.rd == 31) o << "s.fcr31 = std::uint32_t(" << rt << ");\n";
         break;
     case Op::cfc1: set(i.rt, i.rd == 31 ? "sx32(s.fcr31)" : i.rd == 0 ? "0x2e00U" : "0U"); break;
+    case Op::cfc2: set(i.rt,"sx32(bus.read_cop2_control(" + std::to_string(i.rd) + "))"); break;
+    case Op::ctc2: o << "bus.write_cop2_control(" << unsigned(i.rd) << ",static_cast<std::uint32_t>(" << rt << "));\n"; break;
     case Op::adda_s:
         // Exact guarded specialization, not host IEEE floating point. All other
         // operands stop until EE floating point behavior is implemented/validated.

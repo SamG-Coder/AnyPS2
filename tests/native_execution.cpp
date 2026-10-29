@@ -152,6 +152,23 @@ void scanout_interrupt_delivery(unsigned line) {
           state.gpr[29].lo == 0x1fff000 && !bus.interrupt_pending(),
           "Scanout interrupt did not execute generated guest handler and restore context");
 }
+void vu_initialization() {
+    nt::hardware::SystemBus bus;
+    for (const auto& [pc,word] : fixture::words()) bus.store(pc,4,word);
+    for (const auto value : {0xc0cU,0xc0eU,0xe0cU,0xe0eU}) {
+        auto state = at(0x9b00); state.set(1,value); state.gpr[2].hi = 0x12345678;
+        auto expected = value & 0xc0c;
+        if (value & 2) expected &= ~0xffU;
+        if (value & 0x200) expected &= ~0xff00U;
+        check(nt_generated_run(state,bus,2).reason == Stop::budget && state.gpr[2].lo == expected &&
+              state.gpr[2].hi == 0x12345678,"Compiled VU reset/control roundtrip differs");
+    }
+    auto state = at(0x9b10);
+    check(nt_generated_run(state,bus,1).reason == Stop::budget && state.gpr[3].lo == 0,"Idle VPU status differs");
+    state = at(0x9b20); state.set(1,0x100);
+    check(nt_generated_run(state,bus,1).reason == Stop::memory_fault && state.pc == 0x9b20 && state.executed == 0,
+          "VU microprogram execution was silently accepted");
+}
 void test(RamBus& bus) {
     for (auto pc : {0x9a00U,0x9a10U,0x9a20U}) {
         auto state=at(pc); state.set(1,pc==0x9a10 ? 0x8000000000000000ULL : 0x7fffffffffffffffULL);
@@ -560,6 +577,7 @@ int main() {
         dma_interrupt_mask();
         sif_interrupt_delivery();
         timer_interrupt_delivery();
+        vu_initialization();
         for (const auto line : {0U,2U,3U}) scanout_interrupt_delivery(line);
         semaphore_switches(bus);
         std::cout << "Compiled native instruction, memory, control-flow and stop-boundary tests passed\n";

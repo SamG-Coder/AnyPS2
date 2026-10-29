@@ -40,6 +40,8 @@ public:
     virtual void store_quad(std::uint32_t address, Register value) = 0;
     virtual void synchronize_cache(unsigned operation) = 0;
     virtual void advance_cycles(std::uint64_t cycles) = 0;
+    virtual std::uint32_t read_cop2_control(unsigned) { throw MemoryFault("VU control unavailable on this bus"); }
+    virtual void write_cop2_control(unsigned, std::uint32_t) { throw MemoryFault("VU control unavailable on this bus"); }
     virtual void set_gs_crt(std::uint32_t, std::uint32_t, std::uint32_t) {
         throw MemoryFault("GS CRT services unavailable on this bus");
     }
