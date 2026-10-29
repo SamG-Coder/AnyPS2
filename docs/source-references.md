@@ -654,3 +654,107 @@ field-selection contract, iomanX.c modex2mode access/type mapping, and iox_stat.
 alignment/layout. Original native encoding preserves the legacy private word;
 zero-initialized scratch and unchanged EOF/error output avoid propagating
 uninitialized wrapper storage. No upstream implementation is copied.
+
+
+Compiled ioctl/ioctl2 dispatch follows the pinned public iomanX.c handle/type
+checks and iomanX.h operation slots/signatures. Original native validation and
+continuation code invokes compiled callbacks; synthetic commands and instruction
+fixtures are original and contain no commercial driver implementation.
+
+
+Compiled path dispatch uses the pinned public ioman.c io_remove/path_common
+contracts and ioman_sbv.c's legacy mkdir default of 0755 for extended drivers.
+Native record ownership, retry handling and fixtures are original implementations;
+no filesystem driver or commercial instruction data is copied.
+
+
+Native devctl uses pinned iomanX.c/iomanX.h's extended-device check, temporary
+file record and seven-argument operation contract. O32 argument relocation and
+buffer validation are original native code, exercised by synthetic callbacks.
+
+
+Extended chdir/sync/umount dispatch follows pinned iomanX exports.tab, xx_dir,
+iomanX_umount and handle_result contracts: extended type checks, operation slots,
+flag forwarding, success normalization and negative errors. Native ownership and
+synthetic callbacks are original implementations.
+
+
+Compiled readlink follows pinned iomanX_readlink and iomanX.h's extended-device,
+four-argument callback and unnormalized-result contract. Buffer validation,
+continuations and the bounded synthetic link callback are original code.
+
+
+Rename/symlink routing follows pinned iomanX.c xx_rename and iomanX.h operation
+signatures, including relative destinations, cross-device/unit rejection and
+result normalization. Bounded parsing, native ownership and synthetic callbacks
+are original implementations.
+
+
+Native GetDevType follows pinned iomanX_GetDevType's descriptor lookup, EBADF and
+device type contract, with public iomanX.h FS/FSEXT flags. The native ISO service
+uses extended filesystem flags (also used by the public cdrom driver). Metadata
+ownership and validation are original native implementations.
+
+
+Mount dispatch follows pinned iomanX_mount/iomanX.h's extended-device requirement,
+six-argument callback, optional opaque arguments and result normalization. Native
+stack preparation, bounds checks and synthetic callbacks are original code.
+
+
+Native look_ctype_table uses the pinned public sysclib exports.tab, ctype.h flags
+and nonstd/ctype.c ASCII-domain contract. Classification is an original arithmetic
+implementation; no upstream table bytes or proprietary code are copied. The
+undefined non-ASCII table access is rejected explicitly.
+
+
+Native prnt follows pinned sysclib.h's callback/va_list signature and the public
+sysclib eyalroz_printf/printf.c prnt wrapper's 513-flush/512-reset sequence and
+return count. No formatter source is copied: the original bounded native formatter
+is reused with a distinct argument reader and compiled continuation delivery.
+Snapshot ordering and unsupported formats are documented explicitly.
+
+
+Native strcmp/strlen/strncmp use the pinned public sysclib export signatures and
+standard unsigned-byte comparison, termination and count contracts. The bounded
+reader and native loops are original implementations, with synthetic strings.
+
+
+String-search imports follow pinned sysclib exports.tab and public strchr/index,
+strrchr/rindex byte-search signatures. The bounded native scan is shared with the
+original length/comparison implementation; no upstream string implementation is
+copied.
+
+
+Native strcpy/strncpy use pinned sysclib exports.tab and the public C string-copy
+contracts. Bounds validation, explicit overlap rejection and the shared native
+copy implementation are original code with synthetic test strings.
+
+
+Native bzero and _wmemset follow pinned sysclib exports/signatures and the public
+nonstd/_wmemset.c contract: byte count, complete aligned word stores and original
+destination return. The native fill/validation implementation is original; no
+reference loop or table is copied.
+
+
+Native sprintf follows pinned sysclib exports/signatures and the public C
+formatting return/termination contract. It reuses AnyPS2's original bounded
+formatter and O32 argument reader; no upstream formatting implementation is copied.
+
+
+Native strcat uses the pinned sysclib export/signature and C append/return
+contract. The implementation composes AnyPS2's existing bounded length and copy
+code with synthetic strings; no upstream implementation is copied.
+
+
+Native strtol follows the pinned sysclib Makefile's default USE_SIZE_OPTIMIZED=0
+selection and public embeddedartistry_libc/stdlib/strtol.c behavioral contract,
+including binary prefixes, saturation, end-pointer rules and absent errno writes.
+The alternative size_optimized variant differs and is documented as such.
+Implementation is original bounded parsing with widened intermediate arithmetic;
+no upstream algorithm/source is copied or adapted.
+
+
+Native reboot-mode metadata follows pinned loadcore exports.tab and
+SetRebootTimeLibraryHandlingMode's mask-6 update/error contract. Original native
+registry validation replaces firmware linked-list handling; no reboot success or
+policy application is synthesized.

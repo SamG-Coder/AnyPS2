@@ -918,3 +918,143 @@ privdata and output canaries. A budgeted callback is completed separately, then
 its return is retried after a truncated-arena fault to verify no duplicate cursor
 advance. Entry/EOF/error completions must release temporary storage; EOF/errors
 preserve caller output. Exhausting the heap returns ENOMEM without calling dread.
+
+
+Compiled control integration covers scalar ioctl parameters and signed results,
+extended ioctl2 on a directory, O32 stack arguments, aliased input/output buffers,
+zero-length unused pointers, missing handles, legacy rejection, oversized input,
+truncated input/output, code destinations and overflowing stack addresses. The
+private synthetic callbacks must be discovered from descriptor tables and run as
+LLVM-compiled code. Run the related LLVM execution and standalone-project tests.
+
+
+Compiled path integration invokes synthetic remove/mkdir/rmdir callbacks through
+registered operation tables. It checks device-unit and relative-path arguments,
+legacy/extended mkdir permissions, negative callback results, released heap and
+handle ownership, blocked driver removal during a budgeted callback, and retryable
+cleanup after a truncated heap. Existing native ISO mutation rejection remains
+covered in the same LLVM integration test. Run only the LLVM execution/project
+Release tests for this milestone.
+
+
+The LLVM device-control milestone discovers a private devctl callback from an
+extended operation table, passes all seven driver arguments, and verifies unit,
+relative path, command result, payload, restored SP and unchanged caller stack
+arguments. It checks legacy rejection, bad input, code output, stack overflow,
+frame/payload overlap, size limits and temporary resource cleanup. These are
+synthetic commands, not evidence of commercial device-command compatibility.
+
+
+Extended path tests compile private chdir/sync/umount callbacks discovered from
+an extended table. Legacy devices reject all three; extended calls normalize
+positive success, preserve negative results and sync flag bits, and release
+temporary resources. The existing path-continuation regression covers delayed
+completion and cleanup retries shared by these operations. Run the related LLVM
+execution and standalone-project Release tests.
+
+
+Compiled readlink coverage discovers a private synthetic callback through its
+extended operation slot, checks aliased pointers, a positive byte count and an
+untouched trailing canary, zero length with an invalid unused pointer, negative
+callback results and temporary ownership cleanup. Invalid/truncated destinations,
+code destinations and oversized output stop before invocation. Legacy drivers
+reject the operation. Run the LLVM execution/project Release tests.
+
+
+The two-path LLVM regression invokes rename and symlink with relative and
+qualified destinations through privately discovered callbacks. A synthetic
+negative result depends on both path bytes, checking argument routing. Tests
+cover legacy rejection, device/unit mismatch, null and unterminated destinations,
+invalid memory without state changes, positive-success normalization and released
+temporary ownership. Run the LLVM execution/project Release tests.
+
+
+The device-type regression queries compiled legacy files, extended directories
+and a simultaneously open native ISO file through the shared router. It covers
+missing/closed descriptors and rejects a changed registered type without retiring
+the call. The LLVM execution/project Release tests exercise the newly bound import.
+
+
+The compiled mount integration checks all six driver arguments with synthetic
+payload output, signed flags/errors, success normalization, original caller stack
+preservation and temporary resource cleanup. It rejects legacy devices, invalid
+names/payloads, overflowing stack addresses, frame overlap and oversized lengths.
+A callback ignoring optional arguments verifies null device names and unused
+zero-length pointers. Run the LLVM execution/project Release tests.
+
+
+Native sysclib classification runs the compiled import for every defined ASCII
+byte with nonzero upper argument bits, checking public flags, pending-load result
+replacement and unchanged memory. An out-of-domain byte must stop without
+retirement. The standalone-project test compiles the host with the new provider.
+Run the LLVM execution/project Release tests.
+
+
+The prnt milestone compiles a privately discovered synthetic character callback,
+runs one-operation slices, and checks formatted bytes, final 513/512 controls,
+byte count, caller state and ignored callback returns. Empty output still flushes
+and resets without reading unused va_list memory. Concurrent calls, unsupported
+formats, invalid va_list memory and uncompiled callbacks stop before output.
+Existing printf/Kprintf regressions exercise the extracted shared formatter.
+Run the LLVM execution/project Release tests.
+
+
+Compiled string-import integration covers empty/ordinary lengths, aliased
+addresses, unsigned high-byte ordering, count-limited comparisons, zero counts
+with invalid pointers, early mismatches and terminators at the final RAM byte.
+Unterminated boundary reads must fault without retiring the call or changing
+memory. The existing LLVM execution/project Release tests cover these imports.
+
+
+The compiled string-search milestone covers all four import aliases, repeated
+matches, first/last selection, pointer-alias preservation, high-byte needles,
+missing matches, NUL searches and empty strings. Boundary tests prove first-match
+early exit and reject an unterminated last-match scan without returning a partial
+pointer or retiring the call. Run the LLVM execution/project Release tests.
+
+
+The compiled copy milestone checks strcpy terminator/canaries, aliased return
+pointers, strncpy padding and truncation, unused zero-count pointers, and a source
+terminator at the final RAM byte. Invalid source/destination extents, overlapping
+aliases, code writes and oversized counts must fail without partial writes or
+retiring pending loads. Run the LLVM execution/project Release tests.
+
+
+The native fill milestone compiles bzero/_wmemset imports and verifies byte
+canaries, full 32-bit values, byte-count rounding, unchanged tails and aliased
+returns. Zero-write requests accept unused pointers. Misalignment, truncated
+ranges, excessive extents and code destinations must stop without partial writes.
+Existing copy regressions cover the shared destination validator. Run the LLVM
+execution/project Release tests.
+
+
+The sprintf LLVM milestone checks mixed register/stack arguments, signed decimal,
+zero-padded hex, strings/characters, returned length, pointer aliases, trailing NUL
+and surrounding canaries. Empty output at the last RAM byte must succeed without
+reading unused stack arguments. Bad destinations, code writes, unsupported
+formats, overflowed argument stacks and invalid strings leave output and pending
+call state untouched. Existing printf/Kprintf/prnt regressions cover formatter
+reuse. Run the LLVM execution/project Release tests.
+
+
+The strcat milestone exercises an ordinary append, empty source/destination,
+aliased pointers, retained prefix/terminator and canaries, and an empty append at
+the final RAM byte. Overflowing output, unterminated input/destination, overlapping
+prefixes and code destinations must stop without partial writes. Run the LLVM
+execution/project Release tests.
+
+
+The strtol LLVM milestone covers whitespace/signs, automatic octal/hex/binary,
+base 36, signed limits, positive/negative overflow with complete digit consumption,
+missing digits, prefix-only inputs, default-reference base 1 and invalid bases.
+It verifies aliased end pointers and pending-load return state. Invalid input,
+unterminated boundary digits, non-ASCII classification, misaligned end pointers
+and code destinations stop without mutation. Invalid bases with unused input
+pointers do not read memory. Run the LLVM execution/project Release tests.
+
+
+The compiled library milestone checks reboot-mode updates before registration,
+input-bit masking, registration with recorded modes, updates on active libraries,
+unchanged resolution, clearing/release, null/unknown tables, mutated exports and
+truncated descriptors. Failed requests cannot partially update the mode word.
+Run the LLVM execution/project Release tests.

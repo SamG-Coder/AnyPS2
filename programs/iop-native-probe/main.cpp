@@ -1,4 +1,6 @@
 #include <nt/iop_native_heap.hpp>
+#include <nt/iop_native_sysclib.hpp>
+#include <nt/iop_native_prnt.hpp>
 #include <nt/iop_native_libraries.hpp>
 #include <nt/iop_native_boot.hpp>
 #include <nt/iop_native_disc.hpp>
@@ -62,6 +64,8 @@ int main(int argc,char** argv) {
         const auto heap_begin=(module.base+module.memory_size+255)&~255U;
         nt::iop::NativeHeapServices heap(ram_size,heap_begin,stack_begin);
         nt::iop::NativeLibraryServices libraries(nt_iop_generated_libraries(),nt_iop_generated_imports());
+        nt::iop::NativeSysclibServices sysclib;
+        nt::iop::NativePrntServices prnt;
         nt::iop::NativeDriverServices drivers;
         nt::iop::NativeFileDescriptors descriptors;
         nt::iop::NativeDriverFiles driver_files(drivers,descriptors,heap);
@@ -84,7 +88,7 @@ int main(int argc,char** argv) {
         nt::iop::NativeSifCommandSession command_session(events,system,sif_control);
         inbound.connect(commands,command_session,sif_control,&rpc_servers);
         nt::iop::NativeStdioServices stdio([](std::string_view text) { std::cout.write(text.data(),static_cast<std::streamsize>(text.size())); return bool(std::cout); });
-        std::vector<nt::iop::NativeServices*> providers{&drivers,&driver_files,&heap,&libraries,&boot,&interrupts,&events,&semaphores,&mailboxes,&threads,&system,&alarms,&sif,&sif_control,&stdio,&commands,&command_session,&rpc_servers,&rpc_data};
+        std::vector<nt::iop::NativeServices*> providers{&prnt,&sysclib,&drivers,&driver_files,&heap,&libraries,&boot,&interrupts,&events,&semaphores,&mailboxes,&threads,&system,&alarms,&sif,&sif_control,&stdio,&commands,&command_session,&rpc_servers,&rpc_data};
         if (!disc_path.empty()) { disc=std::make_unique<nt::iop::NativeDiscServices>(disc_path,&descriptors); providers.push_back(disc.get()); }
         nt::iop::NativeServiceRouter services(std::move(providers));
         const auto entries=nt_iop_generated_entries();

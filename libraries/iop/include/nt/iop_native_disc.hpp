@@ -15,7 +15,7 @@ public:
         if (incoming.kind!=NativeServiceKind::ioman) return {};
         auto request=incoming;
         const bool descriptor_call=(request.selector>=5 && request.selector<=9) ||
-            request.selector==14 || request.selector==15 || request.selector==30 || request.selector==34;
+            request.selector==14 || request.selector==15 || request.selector==22 || request.selector==30 || request.selector==34;
         if (descriptor_call) {
             const auto entry=descriptors_.find(request.arguments[0]);
             if (entry && entry->owner!=this) return {};
@@ -28,6 +28,10 @@ public:
         }
         const auto& args=request.arguments;
         const auto returned=[](std::int32_t value) { return NativeServiceReply{NativeServiceStatus::returned,static_cast<std::uint32_t>(value)}; };
+        if (request.selector==22) {
+            if (args[0]<3) return {};
+            return files_.contains(args[0]) ? returned(0x10000010) : returned(-9);
+        }
         // Disc descriptors are opened read-only. Validate access before touching
         // the caller's source buffer, including zero-length writes. Standard
         // streams belong to an explicit console provider, not this disc mount.

@@ -4,6 +4,8 @@
 #include <nt/iop_native_boot.hpp>
 #include <nt/iop_native_disc.hpp>
 #include <nt/iop_native_drivers.hpp>
+#include <nt/iop_native_sysclib.hpp>
+#include <nt/iop_native_prnt.hpp>
 #include <nt/iop_native_driver_files.hpp>
 #include <nt/iop_native_interrupts.hpp>
 #include <nt/iop_native_events.hpp>
@@ -104,6 +106,29 @@ int main() {
         auto invalid_library=initial(); invalid_library.pc=0x13b0; invalid_library.registers[4]=0x200000;
         check(run_native(nt_iop_generated_run,invalid_library,ram,1,&router).reason==NativeStop::address_fault &&
               !invalid_library.executed && !libraries.resolve("fixture",0x100,0),"Invalid export pointer changed native registry");
+        const auto reboot_mode=[&](unsigned address,unsigned mode) {
+            auto state=initial(); state.pc=0x1524; state.registers[4]=address; state.registers[5]=mode;
+            check(run_native(nt_iop_generated_run,state,ram,1,&router).reason==NativeStop::budget &&
+                  state.pc==0x5000,"Library reboot mode call did not return through compiled import");
+            return state.registers[2];
+        };
+        check(reboot_mode(0x80001214,0xffffffff)==0 && load_native_word(ram,0x121c)==0x60100 &&
+              !libraries.resolve("fixture",0x100,0),"Reboot mode did not mask flags or implicitly activated exports");
+        check(library_call(6,0x1214)==0 && libraries.resolve("fixture",0x100,0)==0x10f0 &&
+              reboot_mode(0x1214,2)==0 && load_native_word(ram,0x121c)==0x20100 &&
+              libraries.resolve("fixture",0x100,0)==0x10f0,"Mode update broke registration or active bindings");
+        check(reboot_mode(0,6)==static_cast<std::uint32_t>(-214) &&
+              reboot_mode(0x1800,6)==static_cast<std::uint32_t>(-213),"Invalid reboot-mode table succeeded");
+        store_native_word(ram,0x1228,0x4000);
+        check(reboot_mode(0x1214,4)==static_cast<std::uint32_t>(-214) && load_native_word(ram,0x121c)==0x20100,
+              "Mode update accepted a changed compiled export declaration");
+        store_native_word(ram,0x1228,0x10f0);
+        check(reboot_mode(0x1214,0)==0 && load_native_word(ram,0x121c)==0x100 && library_call(7,0x1214)==0,
+              "Mode clearing/release lost registry ownership");
+        auto truncated_mode=initial(); truncated_mode.pc=0x1524; truncated_mode.registers[4]=0x1214;
+        const auto before_mode=ram;
+        check(run_native(nt_iop_generated_run,truncated_mode,std::span(ram).first(0x1220),1,&router).reason==NativeStop::address_fault &&
+              !truncated_mode.executed && ram==before_mode,"Truncated mode descriptor partially changed state");
         // Library query reads a bounded identity and returns the registered
         // compiled export array, with the same version selection as resolution.
         store_native_word(ram,0x1808,0x1ff);
@@ -2092,6 +2117,257 @@ int main() {
         check(result.reason==NativeStop::branch_in_delay && !cpu.executed,
               "Branch-in-delay changed generated execution state");
         {
+            NativePrntServices prnt;
+            const auto setup=[&](const std::string& format) {
+                std::copy(format.begin(),format.end(),ram.begin()+0xc400); ram[0xc400+format.size()]=0;
+                store_native_word(ram,0xc000,0xc100);
+                auto cpu=initial(); cpu.pc=0x2b90; cpu.registers[5]=0xc000; cpu.registers[6]=0xc400;
+                cpu.registers[7]=0x8000c500; cpu.registers[28]=0x1234;
+                return cpu;
+            };
+            auto print=setup("v=%d %%"); store_native_word(ram,0xc500,static_cast<std::uint32_t>(-7));
+            print.load_register=2; print.load_value=77;
+            auto stopped=run_native(nt_iop_generated_run,print,ram,5,&prnt);
+            check(stopped.reason==NativeStop::budget && print.native_call_owner==&prnt,
+                  "prnt did not enter a budgeted compiled callback");
+            auto reentrant=setup("v=%d %%");
+            reentrant.pc=0x2adc; reentrant.registers[4]=0x2dd0;
+            check(run_native(nt_iop_generated_run,reentrant,ram,1,&prnt).reason==NativeStop::import_request &&
+                  !reentrant.executed,"prnt accepted a concurrent invocation");
+            for (unsigned step=0;step<200 && stopped.reason==NativeStop::budget;++step)
+                stopped=run_native(nt_iop_generated_run,print,ram,1,&prnt);
+            const std::string expected="v=-7 %";
+            check(stopped.reason==NativeStop::unmapped_code && print.pc==0x5000 &&
+                  print.registers[2]==expected.size() && print.registers[28]==0x1234 && !print.native_call_owner,
+                  "prnt did not restore the caller or ignored its character count");
+            for (unsigned index=0;index<expected.size();++index)
+                check(load_native_word(ram,0xc100+index*4)==static_cast<unsigned char>(expected[index]),
+                      "prnt duplicated or changed a callback character");
+            check(load_native_word(ram,0xc100+expected.size()*4)==513 &&
+                  load_native_word(ram,0xc104+expected.size()*4)==512 &&
+                  load_native_word(ram,0xc000)==0xc100+(expected.size()+2)*4,
+                  "prnt lost flush/reset ordering");
+            print=setup(""); print.registers[7]=0xffffffff;
+            check(run_native(nt_iop_generated_run,print,ram,128,&prnt).reason==NativeStop::unmapped_code &&
+                  print.registers[2]==0 && load_native_word(ram,0xc100)==513 && load_native_word(ram,0xc104)==512,
+                  "Empty prnt failed to flush/reset or read unused arguments");
+            for (const auto format : {"%f","%d"}) {
+                print=setup(format); print.pc=0x2adc; print.registers[4]=0x2dd0; print.registers[7]=0xfffffffc;
+                const auto before=ram;
+                check(run_native(nt_iop_generated_run,print,ram,128,&prnt).reason==
+                      (format==std::string("%f") ? NativeStop::import_request : NativeStop::address_fault) &&
+                      !print.executed && ram==before,"Invalid prnt emitted partial output");
+            }
+            print=setup("x"); print.pc=0x2adc; print.registers[4]=0xc800;
+            check(run_native(nt_iop_generated_run,print,ram,1,&prnt).reason==NativeStop::unmapped_code &&
+                  !print.executed,"prnt accepted an uncompiled callback");
+        }
+        {
+            NativeSysclibServices sysclib;
+            const std::string punctuation="!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+            for (unsigned byte=0;byte<128;++byte) {
+                unsigned expected=0;
+                if (byte<32 || byte==127) expected=32;
+                if (byte>=9 && byte<=13) expected=8;
+                if (byte==32) expected=24;
+                if (punctuation.find(static_cast<char>(byte))!=std::string::npos) expected=16;
+                if (std::string("0123456789").find(static_cast<char>(byte))!=std::string::npos) expected=4;
+                if (std::string("ABCDEFGHIJKLMNOPQRSTUVWXYZ").find(static_cast<char>(byte))!=std::string::npos) expected=1;
+                if (std::string("abcdefghijklmnopqrstuvwxyz").find(static_cast<char>(byte))!=std::string::npos) expected=2;
+                if (std::string("ABCDEFabcdef").find(static_cast<char>(byte))!=std::string::npos) expected|=64;
+                auto cpu=initial(); cpu.pc=0x2ad4; cpu.registers[4]=byte|0x12340000;
+                cpu.load_register=2; cpu.load_value=0xdeadbeef;
+                const auto before=ram;
+                check(run_native(nt_iop_generated_run,cpu,ram,2,&sysclib).reason==NativeStop::unmapped_code &&
+                      cpu.pc==0x5000 && cpu.registers[2]==expected && !cpu.load_register && ram==before,
+                      "Native sysclib byte classification or return ABI differs");
+            }
+            const auto string_call=[&](unsigned pc,unsigned a,unsigned b=0,unsigned count=0) {
+                auto state=initial(); state.pc=pc; state.registers[4]=a; state.registers[5]=b; state.registers[6]=count;
+                state.load_register=2; state.load_value=99;
+                const auto before=ram;
+                check(run_native(nt_iop_generated_run,state,ram,2,&sysclib).reason==NativeStop::unmapped_code &&
+                      state.pc==0x5000 && !state.load_register && ram==before,"Native string import lost caller state or wrote memory");
+                return state.registers[2];
+            };
+            const std::array<std::uint8_t,5> text{'a',0x80,'z',0,0xff};
+            std::copy(text.begin(),text.end(),ram.begin()+0xc800);
+            std::copy(text.begin(),text.end(),ram.begin()+0xc900);
+            check(string_call(0x2cb4,0x8000c800)==3 && string_call(0x2cb4,0xc803)==0 &&
+                  string_call(0x2ae4,0xc800,0xa000c900)==0,"String length/equality or address alias differs");
+            ram[0xc901]=0x7f;
+            check(string_call(0x2ae4,0xc800,0xc900)==1 && string_call(0x2ae4,0xc900,0xc800)==0xffffffff &&
+                  string_call(0x2cbc,0xc800,0xc900,1)==0 && string_call(0x2cbc,0xc800,0xc900,2)==1 &&
+                  string_call(0x2cbc,0xffffffff,0xffffffff,0)==0,"String comparison lost unsigned bytes or count bounds");
+            ram.back()=0;
+            check(string_call(0x2cb4,0xffff)==0 && string_call(0x2ae4,0xffff,0xc803)==0,
+                  "String import read past a terminal byte at the RAM boundary");
+            ram.back()='a'; ram[0xc900]='b';
+            check(string_call(0x2ae4,0xffff,0xc900)==0xffffffff && string_call(0x2cbc,0xffff,0xc800,1)==0,
+                  "String import read beyond a decisive comparison/count");
+            for (const auto pc : {0x2cb4U,0x2ae4U,0x2cbcU}) {
+                auto bad=initial(); bad.pc=pc; bad.registers[4]=0xffff; bad.registers[5]=0xc800; bad.registers[6]=2;
+                const auto before=ram;
+                check(run_native(nt_iop_generated_run,bad,ram,1,&sysclib).reason==NativeStop::address_fault &&
+                      !bad.executed && ram==before,"Unterminated boundary string did not fault without mutation");
+            }
+            ram[0xc800]='a'; ram[0xc801]=0x80; ram[0xc802]='a'; ram[0xc803]=0;
+            for (const auto pc : {0x2cc4U,0x2cccU,0x2cd4U,0x2cdcU}) {
+                const bool last=pc==0x2cd4 || pc==0x2cdc;
+                check(string_call(pc,0x8000c800,'a')==(last ? 0x8000c802U : 0x8000c800U) &&
+                      string_call(pc,0xa000c800,0x180)==0xa000c801 &&
+                      string_call(pc,0xc800,0)==0xc803 && string_call(pc,0xc800,'!')==0 &&
+                      string_call(pc,0xc803,'a')==0,"String search lost first/last, byte truncation, NUL or alias semantics");
+                ram.back()=0;
+                check(string_call(pc,0xffff,0)==0xffff,"String search read beyond the terminal boundary byte");
+                ram.back()='a';
+                if (!last) check(string_call(pc,0xffff,'a')==0xffff,"First-match search scanned beyond its match");
+                auto bad=initial(); bad.pc=pc; bad.registers[4]=0xffff; bad.registers[5]=last ? 'a' : 'z';
+                const auto before=ram;
+                check(run_native(nt_iop_generated_run,bad,ram,1,&sysclib).reason==NativeStop::address_fault &&
+                      !bad.executed && ram==before,"Unterminated search returned a partial match or changed state");
+            }
+            const auto copy_call=[&](unsigned pc,unsigned destination,unsigned source,unsigned count,NativeStop expected) {
+                auto state=initial(); state.pc=pc; state.registers[4]=destination; state.registers[5]=source; state.registers[6]=count;
+                state.load_register=2; state.load_value=123;
+                const auto before=ram;
+                const auto stop=run_native(nt_iop_generated_run,state,ram,2,&sysclib);
+                check(stop.reason==expected,"String copy returned an unexpected stop");
+                if (expected==NativeStop::unmapped_code)
+                    check(state.pc==0x5000 && state.registers[2]==destination && !state.load_register,
+                          "String copy lost destination alias or pending-load return semantics");
+                else check(!state.executed && state.load_register==2 && ram==before,"Rejected string copy partially wrote memory");
+            };
+            std::fill_n(ram.begin()+0xca00,12,0xa5);
+            copy_call(0x2ce4,0xa000ca01,0x8000c800,0,NativeStop::unmapped_code);
+            check(std::equal(ram.begin()+0xc800,ram.begin()+0xc804,ram.begin()+0xca01) && ram[0xca00]==0xa5 && ram[0xca05]==0xa5,
+                  "strcpy lost its terminator or crossed its destination extent");
+            copy_call(0x2cec,0xca01,0xc800,7,NativeStop::unmapped_code);
+            check(ram[0xca04]==0 && ram[0xca05]==0 && ram[0xca06]==0 && ram[0xca07]==0 && ram[0xca08]==0xa5,
+                  "strncpy did not pad exactly its remaining destination");
+            ram[0xca03]=0x55;
+            copy_call(0x2cec,0xca01,0xc800,2,NativeStop::unmapped_code);
+            check(ram[0xca01]=='a' && ram[0xca02]==0x80 && ram[0xca03]==0x55,"Truncated strncpy added a terminator");
+            copy_call(0x2cec,0xffffffff,0xffffffff,0,NativeStop::unmapped_code);
+            ram.back()=0;
+            copy_call(0x2cec,0xca00,0xffff,4,NativeStop::unmapped_code);
+            check(load_native_word(ram,0xca00)==0,"strncpy read beyond an early terminator instead of padding");
+            ram.back()='x';
+            copy_call(0x2cec,0xca00,0xffff,1,NativeStop::unmapped_code);
+            for (const auto pc : {0x2ce4U,0x2cecU}) {
+                copy_call(pc,0xca00,0xffff,2,NativeStop::address_fault);
+                copy_call(pc,0xffff,0xc800,4,NativeStop::address_fault);
+                copy_call(pc,0x1000,0xc800,4,NativeStop::code_write);
+                copy_call(pc,0x8000c801,0xc800,4,NativeStop::import_request);
+            }
+            copy_call(0x2cec,0xca00,0xc800,0x100001,NativeStop::import_request);
+            const auto fill_call=[&](unsigned pc,unsigned destination,unsigned value,unsigned count,NativeStop expected) {
+                auto state=initial(); state.pc=pc; state.registers[4]=destination; state.registers[5]=value; state.registers[6]=count;
+                const auto before=ram;
+                check(run_native(nt_iop_generated_run,state,ram,2,&sysclib).reason==expected,"Native fill returned an unexpected stop");
+                if (expected==NativeStop::unmapped_code) {
+                    check(state.pc==0x5000 && (pc!=0x2d6c || state.registers[2]==destination),"Word fill lost its destination return");
+                } else check(!state.executed && ram==before,"Rejected native fill partially wrote memory");
+            };
+            std::fill_n(ram.begin()+0xca00,24,0xa5);
+            fill_call(0x2d64,0xa000ca01,7,0,NativeStop::unmapped_code);
+            check(std::all_of(ram.begin()+0xca01,ram.begin()+0xca08,[](auto byte){return byte==0;}) &&
+                  ram[0xca00]==0xa5 && ram[0xca08]==0xa5,"bzero changed the wrong byte extent");
+            fill_call(0x2d6c,0x8000ca04,0x12345678,11,NativeStop::unmapped_code);
+            check(load_native_word(ram,0xca04)==0x12345678 && load_native_word(ram,0xca08)==0x12345678 &&
+                  ram[0xca0c]==0xa5 && ram[0xca0e]==0xa5,"Word fill lost byte count, value or trailing-byte preservation");
+            fill_call(0x2d64,0xffffffff,0,0,NativeStop::unmapped_code);
+            fill_call(0x2d6c,0xffffffff,99,3,NativeStop::unmapped_code);
+            fill_call(0x2d6c,0xca01,1,4,NativeStop::address_fault);
+            fill_call(0x2d64,0xffff,2,0,NativeStop::address_fault);
+            fill_call(0x2d6c,0xfffc,1,8,NativeStop::address_fault);
+            fill_call(0x2d64,0xca00,0xffffffff,0,NativeStop::address_fault);
+            fill_call(0x2d6c,0xca00,1,0xffffffff,NativeStop::address_fault);
+            fill_call(0x2d64,0x1001,1,0,NativeStop::code_write);
+            fill_call(0x2d6c,0x1000,1,4,NativeStop::code_write);
+            const auto sprintf_call=[&](const std::string& format,unsigned destination,NativeStop expected,unsigned stack=0x8000c500) {
+                std::copy(format.begin(),format.end(),ram.begin()+0xc400); ram[0xc400+format.size()]=0;
+                auto state=initial(); state.pc=0x2aec; state.registers[4]=destination; state.registers[5]=0xa000c400;
+                state.registers[6]=static_cast<std::uint32_t>(-7); state.registers[7]=0x2a; state.registers[29]=stack;
+                state.load_register=2; state.load_value=123;
+                const auto before=ram;
+                check(run_native(nt_iop_generated_run,state,ram,2,&sysclib).reason==expected,"sprintf returned an unexpected stop");
+                if (expected==NativeStop::unmapped_code)
+                    check(state.pc==0x5000 && !state.load_register && state.registers[29]==stack,"sprintf lost its caller state");
+                else check(!state.executed && state.load_register==2 && ram==before,"Rejected sprintf partially wrote output");
+                return state.registers[2];
+            };
+            ram[0xc600]='o'; ram[0xc601]='k'; ram[0xc602]=0;
+            store_native_word(ram,0xc510,0x8000c600); store_native_word(ram,0xc514,'!');
+            std::fill_n(ram.begin()+0xcb00,32,0xa5);
+            const std::string printed="-7 002a ok !";
+            check(sprintf_call("%d %04x %s %c",0x8000cb01,NativeStop::unmapped_code)==printed.size() &&
+                  std::equal(printed.begin(),printed.end(),ram.begin()+0xcb01) && ram[0xcb01+printed.size()]==0 &&
+                  ram[0xcb00]==0xa5 && ram[0xcb02+printed.size()]==0xa5,"sprintf lost register/stack arguments or terminator bounds");
+            check(sprintf_call("",0xffff,NativeStop::unmapped_code,0xffffffff)==0 && ram.back()==0,
+                  "Empty sprintf did not write exactly a terminator or read unused arguments");
+            sprintf_call("%d",0xffff,NativeStop::address_fault);
+            sprintf_call("%d",0x1000,NativeStop::code_write);
+            sprintf_call("prefix %f",0xcb00,NativeStop::import_request);
+            sprintf_call("%d %x %s",0xcb00,NativeStop::address_fault,0xfffffff8);
+            store_native_word(ram,0xc510,0xffffffff);
+            sprintf_call("%d %x %s",0xcb00,NativeStop::address_fault);
+            ram[0xcc00]='A'; ram[0xcc01]=0; ram[0xcc02]=0xa5; ram[0xcc05]=0xa5;
+            ram[0xc800]='b'; ram[0xc801]='c'; ram[0xc802]=0;
+            copy_call(0x2e64,0x8000cc00,0xa000c800,0,NativeStop::unmapped_code);
+            check(ram[0xcc00]=='A' && ram[0xcc01]=='b' && ram[0xcc02]=='c' && ram[0xcc03]==0 && ram[0xcc05]==0xa5,
+                  "strcat lost its prefix, append contents or terminator");
+            copy_call(0x2e64,0xcc00,0xc802,0,NativeStop::unmapped_code);
+            ram[0xcc00]=0;
+            copy_call(0x2e64,0xcc00,0xc800,0,NativeStop::unmapped_code);
+            check(ram[0xcc00]=='b' && ram[0xcc01]=='c' && ram[0xcc02]==0,"strcat could not append to an empty destination");
+            ram.back()=0;
+            copy_call(0x2e64,0xffff,0xc802,0,NativeStop::unmapped_code);
+            copy_call(0x2e64,0xffff,0xc800,0,NativeStop::address_fault);
+            ram.back()='a';
+            copy_call(0x2e64,0xffff,0xc800,0,NativeStop::address_fault);
+            copy_call(0x2e64,0xcc00,0xffff,0,NativeStop::address_fault);
+            copy_call(0x2e64,0xcc00,0x8000cc00,0,NativeStop::import_request);
+            copy_call(0x2e64,0xcc00,0xcc01,0,NativeStop::import_request);
+            copy_call(0x2e64,0x1000,0xc800,0,NativeStop::code_write);
+            const auto number_call=[&](const std::string& text,unsigned base,unsigned expected,unsigned consumed) {
+                std::copy(text.begin(),text.end(),ram.begin()+0xcd00); ram[0xcd00+text.size()]=0;
+                store_native_word(ram,0xce00,0xdeadbeef);
+                auto state=initial(); state.pc=0x2e6c; state.registers[4]=0x8000cd00;
+                state.registers[5]=0xa000ce00; state.registers[6]=base;
+                state.load_register=2; state.load_value=123;
+                check(run_native(nt_iop_generated_run,state,ram,2,&sysclib).reason==NativeStop::unmapped_code &&
+                      state.pc==0x5000 && state.registers[2]==expected && !state.load_register &&
+                      load_native_word(ram,0xce00)==0x8000cd00+consumed,"strtol value/end pointer or ABI differs");
+            };
+            number_call("  -42!",10,static_cast<unsigned>(-42),5);
+            number_call("+17",0,17,3); number_call("0779",0,63,3);
+            number_call("0xAf?",0,175,4); number_call("0B1012",0,5,5);
+            number_call("zZ",36,1295,2); number_call("-2147483648",10,0x80000000,11);
+            number_call("2147483647",10,0x7fffffff,10);
+            number_call("2147483648999x",10,0x7fffffff,13);
+            number_call("-999999999999!",10,0x80000000,13);
+            number_call("+",10,0,0); number_call("0x",0,0,0); number_call("xyz",10,0,0);
+            number_call("001",1,0,2); number_call("123",37,0,0);
+            const auto bad_number=[&](unsigned source,unsigned end,unsigned base,NativeStop expected) {
+                auto state=initial(); state.pc=0x2e6c; state.registers[4]=source; state.registers[5]=end; state.registers[6]=base;
+                const auto before=ram;
+                check(run_native(nt_iop_generated_run,state,ram,1,&sysclib).reason==expected && !state.executed && ram==before,
+                      "Rejected strtol changed output or retired its call");
+            };
+            bad_number(0xcd00,0x1000,10,NativeStop::code_write);
+            bad_number(0xcd00,0xce01,10,NativeStop::address_fault);
+            bad_number(0xffffffff,0xce00,10,NativeStop::address_fault);
+            ram.back()='1'; bad_number(0xffff,0xce00,10,NativeStop::address_fault);
+            ram[0xcd00]=0x80; bad_number(0xcd00,0xce00,10,NativeStop::import_request);
+            auto no_end=initial(); no_end.pc=0x2e6c; no_end.registers[4]=0xffffffff; no_end.registers[6]=37;
+            check(run_native(nt_iop_generated_run,no_end,ram,2,&sysclib).reason==NativeStop::unmapped_code &&
+                  no_end.registers[2]==0,"Invalid-base strtol read its unused input");
+            auto cpu=initial(); cpu.pc=0x2ad4; cpu.registers[4]=0xffffffff;
+            check(run_native(nt_iop_generated_run,cpu,ram,1,&sysclib).reason==NativeStop::import_request &&
+                  !cpu.executed,"Undefined non-ASCII classification silently succeeded");
+        }
+        {
             NativeDriverServices drivers;
             store_native_word(ram,0xc000,0xc040); store_native_word(ram,0xc004,0x10);
             store_native_word(ram,0xc008,0); store_native_word(ram,0xc010,0xc020);
@@ -2169,7 +2445,7 @@ int main() {
                 auto cpu=initial();
                 const std::map<unsigned,std::uint32_t> entries{{4,0x1614},{5,0x161c},{6,0x1624},{8,0x162c},
                     {16,0x2394},{13,0x239c},{14,0x23a4},{15,0x23ac},{7,0x23b4},{10,0x23bc},{11,0x23c4},
-                    {12,0x23cc},{17,0x23d4},{18,0x23dc},{9,0x23ec},{34,0x2814}};
+                    {12,0x23cc},{17,0x23d4},{18,0x23dc},{9,0x23ec},{34,0x2814},{22,0x2f44}};
                 cpu.pc=entries.at(ordinal);
                 cpu.registers[4]=a; cpu.registers[5]=b; cpu.registers[6]=c;
                 const auto stop=run_native(nt_iop_generated_run,cpu,ram,1,&files);
@@ -2264,12 +2540,97 @@ int main() {
                           "Compiled wide seek lost its continuation, stack or pending load");
                     return std::bit_cast<std::int64_t>(std::uint64_t(cpu.registers[2])|(std::uint64_t(cpu.registers[3])<<32));
                 };
+                const auto control2=[&](unsigned handle,unsigned input,unsigned input_size,unsigned output,unsigned output_size,
+                                        NativeStop expected=NativeStop::unmapped_code,unsigned stack=0x8000c460) {
+                    auto cpu=initial(); cpu.pc=0x2814; cpu.registers[4]=handle; cpu.registers[5]=0xfffffff9;
+                    cpu.registers[6]=input; cpu.registers[7]=input_size; cpu.registers[29]=stack;
+                    store_native_word(ram,0xc470,output); store_native_word(ram,0xc474,output_size);
+                    const auto before=ram;
+                    const auto stop=run_native(nt_iop_generated_run,cpu,ram,128,&router);
+                    check(stop.reason==expected,"Compiled ioctl2 produced an unexpected stop");
+                    if (expected==NativeStop::unmapped_code)
+                        check(cpu.pc==0x5000 && !cpu.native_call_owner && cpu.registers[29]==stack,
+                              "Compiled ioctl2 lost caller ownership or stack");
+                    else check(!cpu.executed && ram==before,"Rejected ioctl2 changed state before dispatch");
+                    return cpu.registers[2];
+                };
+                const auto devctl=[&](unsigned path,unsigned input,unsigned length,unsigned output,unsigned size,
+                                        NativeStop expected=NativeStop::unmapped_code,unsigned stack=0x8000c460) {
+                    auto cpu=initial(); cpu.pc=0x282c; cpu.registers[4]=path; cpu.registers[5]=0xfffffff9;
+                    cpu.registers[6]=input; cpu.registers[7]=length; cpu.registers[29]=stack;
+                    store_native_word(ram,0xc470,output); store_native_word(ram,0xc474,size);
+                    const auto before=ram;
+                    const auto stop=run_native(nt_iop_generated_run,cpu,ram,128,&router);
+                    check(stop.reason==expected,"Compiled devctl produced an unexpected stop");
+                    if (expected==NativeStop::unmapped_code)
+                        check(cpu.pc==0x5000 && !cpu.native_call_owner && cpu.registers[29]==stack &&
+                              load_native_word(ram,0xc470)==output && load_native_word(ram,0xc474)==size,
+                              "Compiled devctl lost caller stack or arguments");
+                    else check(!cpu.executed && ram==before,"Rejected devctl modified memory");
+                    return cpu.registers[2];
+                };
+                const auto mount_call=[&](unsigned name,unsigned payload,unsigned size,unsigned flags,
+                                          NativeStop expected=NativeStop::unmapped_code,unsigned stack=0x8000c460) {
+                    auto cpu=initial(); cpu.pc=0x2f4c; cpu.registers[4]=0xc080; cpu.registers[5]=name;
+                    cpu.registers[6]=flags; cpu.registers[7]=payload; cpu.registers[29]=stack;
+                    store_native_word(ram,0xc470,size);
+                    const auto before=ram;
+                    const auto stop=run_native(nt_iop_generated_run,cpu,ram,128,&router);
+                    check(stop.reason==expected,"Mount produced an unexpected stop");
+                    if (expected==NativeStop::unmapped_code)
+                        check(cpu.pc==0x5000 && !cpu.native_call_owner && cpu.registers[29]==stack &&
+                              load_native_word(ram,0xc470)==size,"Mount lost its caller stack/continuation");
+                    else check(!cpu.executed && ram==before,"Rejected mount changed state");
+                    return cpu.registers[2];
+                };
                 const auto free_bytes=[&] { return heap.invoke({8,{},NativeServiceKind::sysmem},ram).value; };
                 const auto initial_free=free_bytes();
+                store_native_word(ram,0xc324,0x2e00); store_native_word(ram,0xc328,0x2e40); store_native_word(ram,0xc32c,0x2880);
+                store_native_word(ram,0xc35c,0x2e80);
+                store_native_word(ram,0xc350,0x2a80);
+                store_native_word(ram,0xc364,0x2f80);
+                store_native_word(ram,0xc344,0x2fc0); store_native_word(ram,0xc360,0x2fc0);
+                store_native_word(ram,0xc348,0x2e00); store_native_word(ram,0xc34c,0x2e40); store_native_word(ram,0xc354,0x2880);
+                store_native_word(ram,0xc320,0x2d80); store_native_word(ram,0xc368,0x2da0);
                 check(call(0x281c,0xc000)==0,"File driver initialization failed");
+                check(call(0x23bc,0x8000c080)=='Q'+7 && call(0x23c4,0xc080)==0 &&
+                      call(0x23cc,0xc080)==0xffffffff && free_bytes()==initial_free && !descriptors.find(4),
+                      "Compiled path calls lost unit/path, callback result or temporary ownership");
+                auto removing=initial(); removing.pc=0x23bc; removing.registers[4]=0xc080;
+                check(run_native(nt_iop_generated_run,removing,ram,1,&router).reason==NativeStop::budget &&
+                      removing.pc==0x2e00 && descriptors.find(4) && free_bytes()<initial_free,
+                      "Path callback did not retain its temporary record");
+                auto deleting=initial(); deleting.pc=0x2824; deleting.registers[4]=0xc040;
+                check(run_native(nt_iop_generated_run,deleting,ram,1,&router).reason==NativeStop::import_request,
+                      "Driver removed during an active path callback");
+                check(nt_iop_generated_run(removing,ram,128).reason==NativeStop::unmapped_code &&
+                      removing.pc==native_service_return,"Path callback failed to reach its return");
+                check(run_native(nt_iop_generated_run,removing,std::span(ram).first(0xd100),1,&router).reason==NativeStop::address_fault &&
+                      descriptors.find(4),"Path cleanup discarded ownership on a truncated heap");
+                check(run_native(nt_iop_generated_run,removing,ram,1,&router).reason==NativeStop::unmapped_code &&
+                      removing.pc==0x5000 && removing.registers[2]=='Q'+7 && free_bytes()==initial_free && !descriptors.find(4),
+                      "Retried path cleanup lost its result or leaked ownership");
+                check(devctl(0xc080,0xffffffff,1,0xffffffff,20)==static_cast<std::uint32_t>(-48),
+                      "Legacy driver accepted devctl");
+                for (const auto pc : {0x2f14U,0x2f1cU,0x2f24U,0x2f2cU})
+                    check(call(pc,0xc080,1)==static_cast<std::uint32_t>(-48) && free_bytes()==initial_free,
+                          "Legacy device accepted an extended path operation");
+                check(call(0x2f34,0xc080,0xc089)==static_cast<std::uint32_t>(-48) &&
+                      call(0x2f3c,0xc080,0xc089)==static_cast<std::uint32_t>(-48),
+                      "Legacy device accepted two-path operations");
+                check(mount_call(0xffffffff,0xffffffff,99,0)==static_cast<std::uint32_t>(-48),
+                      "Legacy device accepted mount");
                 const auto driver_fd=call(0x1614,0x8000c080,1);
                 check(driver_seek64(0x7fffffff,0,0)==-9 && driver_seek64(driver_fd,0,0)==-48,"Legacy device accepted an extended seek or lost signed error width");
                 const auto record=descriptors.find(driver_fd);
+                check(call(0x2f44,driver_fd)==0x10 && call(0x2f44,fd)==0x10000010 &&
+                      call(0x2f44,0x7fffffff)==static_cast<std::uint32_t>(-9),
+                      "Device type query lost descriptor ownership or invalid-handle errors");
+                store_native_word(ram,0xc004,0x10000010);
+                auto changed_type=initial(); changed_type.pc=0x2f44; changed_type.registers[4]=driver_fd;
+                check(run_native(nt_iop_generated_run,changed_type,ram,1,&router).reason==NativeStop::import_request &&
+                      !changed_type.executed,"Device query silently accepted an unsupported type mutation");
+                store_native_word(ram,0xc004,0x10);
                 check(driver_fd==4 && record && record->owner==&driver_files &&
                       load_native_word(ram,record->local)==1 && load_native_word(ram,record->local+4)==7 &&
                       load_native_word(ram,record->local+8)==0xc000 && load_native_word(ram,record->local+12)==0xc089,
@@ -2294,12 +2655,14 @@ int main() {
                       !rejected.executed && drivers.size()==1,"Driver was removed while its file was open");
                 check(call(0x161c,driver_fd)==static_cast<std::uint32_t>(-7) && !descriptors.find(driver_fd) &&
                       free_bytes()==initial_free,"Failed close leaked the file record or descriptor");
+                check(call(0x2f44,driver_fd)==static_cast<std::uint32_t>(-9),"Closed descriptor still reported a device type");
                 const auto disc_fd=file_call(4,0x2000,1);
                 check(disc_fd==driver_fd && file_call(5,disc_fd)==0,"ISO mount could not reuse a released driver descriptor");
                 store_native_word(ram,0xc008,0xffffffff);
                 check(call(0x1614,0xc080,1)==0xffffffffU && free_bytes()==initial_free && !descriptors.find(4),
                       "Failed compiled open leaked allocation or published its handle");
                 store_native_word(ram,0xc008,1);
+                check(control2(0x7fffffff,0,0,0,0)==static_cast<std::uint32_t>(-9),"ioctl2 accepted a missing handle");
                 const auto write_only=call(0x1614,0xc080,2);
                 check(write_only==4 && call(0x1624,write_only,0xffffffff,1)==static_cast<std::uint32_t>(-9) &&
                       call(0x161c,write_only)==static_cast<std::uint32_t>(-7),"Read ignored the descriptor access mode");
@@ -2317,6 +2680,11 @@ int main() {
                       call(0x23b4,writable,0xc220,0x100001)==static_cast<std::uint32_t>(-22),
                       "Invalid compiled-write source changed state or reached the callback");
                 check(call(0x161c,writable)==static_cast<std::uint32_t>(-7),"Read/write file close failed");
+                const auto control_file=call(0x1614,0xc080,1);
+                check(call(0x23ec,control_file,123,0xfffffffd)==0xfffffffd &&
+                      control2(control_file,0xffffffff,99,0xffffffff,99)==static_cast<std::uint32_t>(-48),
+                      "Legacy control lost its scalar argument/result or accepted ioctl2");
+                check(call(0x161c,control_file)==static_cast<std::uint32_t>(-7),"Control file cleanup failed");
                 const auto directory=call(0x239c,0xc080),other_directory=call(0x239c,0xc080);
                 check(directory==4 && other_directory==5 && call(0x161c,directory)==static_cast<std::uint32_t>(-9) &&
                       call(0x1624,directory,0xc500,1)==static_cast<std::uint32_t>(-21),
@@ -2346,9 +2714,104 @@ int main() {
                       "File driver teardown or heap accounting failed");
                 store_native_word(ram,0xc004,0x10000010);
                 check(call(0x281c,0xc000)==0,"Extended device registration failed");
+                ram[0xc600]=0x5a;
+                check(devctl(0x8000c080,0xa000c600,1,0xc620,20)==0xfffffff9 &&
+                      load_native_word(ram,0xc620)=='X' && load_native_word(ram,0xc624)==7 &&
+                      load_native_word(ram,0xc628)==1 && load_native_word(ram,0xc62c)==20 &&
+                      load_native_word(ram,0xc630)==0x5a && free_bytes()==initial_free && !descriptors.find(4),
+                      "Compiled devctl lost shifted arguments, relative path, unit or temporary ownership");
+                devctl(0xc080,0xffff,2,0xc620,20,NativeStop::address_fault);
+                devctl(0xc080,0xc600,1,0x1000,20,NativeStop::code_write);
+                devctl(0xc080,0xc600,1,0xc620,20,NativeStop::address_fault,0xfffffff8);
+                devctl(0xc080,0xc440,1,0xc620,20,NativeStop::import_request);
+                check(devctl(0xc080,0xc600,0x100001,0xc620,20)==static_cast<std::uint32_t>(-22) &&
+                      free_bytes()==initial_free && !descriptors.find(4),"Rejected devctl leaked temporary ownership");
+                check(call(0x2f14,0x8000c080)==0 && call(0x2f1c,0xc080,123)==0 &&
+                      call(0x2f1c,0xc080,0xfffffff9)==0xfffffff9 && call(0x2f24,0xc080)==0xffffffff &&
+                      free_bytes()==initial_free && !descriptors.find(4),
+                      "Extended path operations lost success normalization, signed flags/results or cleanup");
+                ram[0xc650]=0; ram[0xc651]=0xa5;
+                check(call(0x2f2c,0x8000c080,0xa000c650,1)==1 && ram[0xc650]=='X' && ram[0xc651]==0xa5 &&
+                      call(0x2f2c,0xc080,0xffffffff,0)==0 && free_bytes()==initial_free && !descriptors.find(4),
+                      "Compiled readlink lost its byte count, extent, zero length or temporary ownership");
+                for (const auto output : {0x1000U,0xffffU}) {
+                    auto link=initial(); link.pc=0x2f2c; link.registers[4]=0xc080;
+                    link.registers[5]=output; link.registers[6]=2;
+                    const auto before=ram;
+                    check(run_native(nt_iop_generated_run,link,ram,128,&router).reason==
+                          (output==0x1000 ? NativeStop::code_write : NativeStop::address_fault) &&
+                          !link.executed && ram==before && free_bytes()==initial_free && !descriptors.find(4),
+                          "Invalid readlink destination changed state");
+                }
+                check(call(0x2f2c,0xc080,0xc650,0x100001)==static_cast<std::uint32_t>(-22),
+                      "Readlink accepted an oversized output");
+                store_native_word(ram,0xc364,0x2880);
+                check(call(0x2f2c,0xc080,0xc650,1)==0xffffffff && free_bytes()==initial_free && !descriptors.find(4),
+                      "Readlink error lost its result or leaked ownership");
+                store_native_word(ram,0xc364,0x2f80);
+                const auto destination=[&](const std::string& text) {
+                    std::copy(text.begin(),text.end(),ram.begin()+0xc900); ram[0xc900+text.size()]=0;
+                };
+                for (const auto pc : {0x2f34U,0x2f3cU}) {
+                    destination("Y");
+                    check(call(pc,0x8000c080,0xa000c900)==static_cast<std::uint32_t>(-('X'+'Y')),
+                          "Two-path callback lost a relative destination or negative result");
+                    destination("fixture7:Z");
+                    check(call(pc,0xc080,0xc900)==static_cast<std::uint32_t>(-('X'+'Z')),
+                          "Two-path callback did not strip a matching device prefix");
+                    for (const auto path : {"fixture8:Z","other7:Z"}) {
+                        destination(path);
+                        check(call(pc,0xc080,0xc900)==static_cast<std::uint32_t>(-18),
+                              "Two-path call crossed a device or unit");
+                    }
+                    check(call(pc,0xc080,0)==static_cast<std::uint32_t>(-18),"Null second path was accepted");
+                    std::fill_n(ram.begin()+0xc900,256,'A');
+                    check(call(pc,0xc080,0xc900)==static_cast<std::uint32_t>(-36),"Unterminated second path was accepted");
+                    auto bad=initial(); bad.pc=pc; bad.registers[4]=0xc080; bad.registers[5]=0xffffffff;
+                    const auto before=ram;
+                    check(run_native(nt_iop_generated_run,bad,ram,128,&router).reason==NativeStop::address_fault &&
+                          !bad.executed && ram==before && free_bytes()==initial_free && !descriptors.find(4),
+                          "Invalid second path changed state or leaked resources");
+                }
+                store_native_word(ram,0xc344,0x2e00); destination("Y");
+                check(call(0x2f34,0xc080,0xc900)==0 && free_bytes()==initial_free && !descriptors.find(4),
+                      "Rename success was not normalized or leaked resources");
+                store_native_word(ram,0xc344,0x2fc0);
+                destination("disk0:");
+                check(mount_call(0x8000c900,0xa000c700,16,123)==0 && load_native_word(ram,0xc700)=='X' &&
+                      load_native_word(ram,0xc704)=='d' && load_native_word(ram,0xc708)==7 && load_native_word(ram,0xc70c)==16 &&
+                      mount_call(0xc900,0xc700,16,0xfffffff9)==0xfffffff9 && free_bytes()==initial_free && !descriptors.find(4),
+                      "Compiled mount lost arguments, normalization or temporary cleanup");
+                mount_call(0xffffffff,0xc700,16,0,NativeStop::address_fault);
+                mount_call(0xc900,0xffff,16,0,NativeStop::address_fault);
+                mount_call(0xc900,0xc700,16,0,NativeStop::address_fault,0xfffffff8);
+                mount_call(0xc900,0xc440,16,0,NativeStop::import_request);
+                check(mount_call(0xc900,0xc700,0x100001,0)==static_cast<std::uint32_t>(-22),
+                      "Mount accepted an oversized payload");
+                store_native_word(ram,0xc350,0x2880);
+                check(mount_call(0,0xffffffff,0,0)==0xffffffff && free_bytes()==initial_free && !descriptors.find(4),
+                      "Mount dereferenced unused optional arguments or leaked ownership");
+                store_native_word(ram,0xc350,0x2a80);
+                check(call(0x23c4,0xc080)==0755 && free_bytes()==initial_free && !descriptors.find(4),
+                      "Extended mkdir lost the legacy wrapper default permissions");
                 store_native_word(ram,0xc338,0x2d00);
                 const auto extended_directory=call(0x239c,0xc080);
                 const auto directory_record=descriptors.find(extended_directory)->local;
+                check(call(0x2f44,extended_directory)==0x10000010,"Extended directory type query failed");
+                ram[0xc600]=0x5a; ram[0xc620]=0;
+                check(control2(extended_directory,0x8000c600,1,0xa000c620,1)==0xfffffff9 && ram[0xc620]==0x5a &&
+                      control2(extended_directory,0xffffffff,0,0xffffffff,0)==0xfffffff9,
+                      "Extended directory control lost payload, zero-length semantics or signed return");
+                control2(extended_directory,0xffff,2,0xc620,1,NativeStop::address_fault);
+                control2(extended_directory,0xc600,1,0xffff,2,NativeStop::address_fault);
+                control2(extended_directory,0xc600,1,0x1000,1,NativeStop::code_write);
+                control2(extended_directory,0xc600,1,0xc620,1,NativeStop::address_fault,0xfffffff8);
+                check(control2(extended_directory,0xc600,0x100001,0xc620,1)==static_cast<std::uint32_t>(-22),
+                      "ioctl2 accepted an oversized input");
+                check(call(0x23ec,extended_directory,7,0xffffffff)==0xffffffff,
+                      "Directory ioctl lost its scalar parameter");
+                store_native_word(ram,directory_record+12,0); // Reset synthetic cursor after control commands.
+
                 const auto directory_free=free_bytes();
                 check(extended_directory==4 && load_native_word(ram,directory_record)==8,
                       "Extended directory did not receive its public open-mode flag");

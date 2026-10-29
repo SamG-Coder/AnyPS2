@@ -8,7 +8,7 @@ namespace nt::iop_codegen::ir {
 namespace {
 std::optional<Operation> native_operation(const elf::IopImport& import) {
     // Minor revisions share an ordinal ABI; only explicitly implemented entries bind.
-    if (import.library=="loadcore" && (import.version>>8)==1 && ((import.ordinal>=6 && import.ordinal<=9) || import.ordinal==11 || import.ordinal==12))
+    if (import.library=="loadcore" && (import.version>>8)==1 && ((import.ordinal>=6 && import.ordinal<=9) || import.ordinal==11 || import.ordinal==12 || import.ordinal==27))
         return Operation::native_import;
     if (import.library=="intrman" && (import.version>>8)==1 &&
         ((import.ordinal>=4 && import.ordinal<=9) || import.ordinal==17 || import.ordinal==18 || import.ordinal==23))
@@ -25,12 +25,13 @@ std::optional<Operation> native_operation(const elf::IopImport& import) {
     if (import.library=="thevent" && (import.version>>8)==1 &&
         ((import.ordinal>=4 && import.ordinal<=11) || import.ordinal==13 || import.ordinal==14))
         return Operation::native_import;
-    if (import.library=="ioman" && (import.version>>8)==1 && ((import.ordinal>=4 && import.ordinal<=9) || (import.ordinal>=10 && import.ordinal<=18) || import.ordinal==20 || import.ordinal==21 || import.ordinal==30 || import.ordinal==34))
+    if (import.library=="ioman" && (import.version>>8)==1 && ((import.ordinal>=4 && import.ordinal<=9) || (import.ordinal>=10 && import.ordinal<=18) || import.ordinal==20 || import.ordinal==21 || import.ordinal==22 || import.ordinal==25 || import.ordinal==26 || import.ordinal==27 || import.ordinal==28 || import.ordinal==29 || import.ordinal==30 || import.ordinal==31 || import.ordinal==32 || import.ordinal==33 || import.ordinal==34))
         return Operation::native_import;
     if (import.library=="sysmem" && (import.version>>8)==1 && ((import.ordinal>=4 && import.ordinal<=10) || import.ordinal==14))
         return Operation::native_import;
     if (import.library!="sysclib" || (import.version>>8)!=1) return {};
     switch (import.ordinal) {
+    case 8: case 17: case 18: case 19: case 20: case 21: case 22: case 23: case 25: case 26: case 27: case 29: case 30: case 32: case 36: case 41: return Operation::native_import;
     case 12: return Operation::memory_copy;
     case 13: return Operation::memory_move;
     case 14: return Operation::memory_fill;
@@ -147,7 +148,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         }
         Instruction call; call.address=module.base+import.offset;
         call.operation=*operation; call.flow=Flow::native_return;
-        call.immediate=import.ordinal|(!host ? 0x20000U : import.library=="loadcore" ? 0x10000U : import.library=="ioman" ? 0x30000U : import.library=="intrman" ? 0x40000U : import.library=="thevent" ? 0x50000U : import.library=="thbase" ? 0x60000U : import.library=="sifman" ? 0x70000U : import.library=="stdio" ? 0x80000U : import.library=="sifcmd" ? 0x90000U : import.library=="thsemap" ? 0xa0000U : import.library=="thmsgbx" ? 0xb0000U : 0U);
+        call.immediate=import.ordinal|(!host ? 0x20000U : import.library=="loadcore" ? 0x10000U : import.library=="ioman" ? 0x30000U : import.library=="intrman" ? 0x40000U : import.library=="thevent" ? 0x50000U : import.library=="thbase" ? 0x60000U : import.library=="sifman" ? 0x70000U : import.library=="stdio" ? 0x80000U : import.library=="sifcmd" ? 0x90000U : import.library=="thsemap" ? 0xa0000U : import.library=="thmsgbx" ? 0xb0000U : import.library=="sysclib" ? 0xc0000U : 0U);
         native_imports.emplace(call.address,call);
         if (!host) {
             auto bound=import; bound.offset+=module.base; bound.table_offset+=module.base;
@@ -216,6 +217,8 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                 for (const auto address : *input.registers[4]) if (address) discover_callback(address);
             if (instruction.operation==Operation::native_import && instruction.immediate==0x70020 && input.registers[6])
                 for (const auto address : *input.registers[6]) if (address) discover_callback(address);
+            if (instruction.operation==Operation::native_import && instruction.immediate==0xc0012 && input.registers[4])
+                for (const auto address : *input.registers[4]) if (address) discover_callback(address);
             if (instruction.operation==Operation::native_import && instruction.immediate==0x30014 && input.registers[4]) {
                 const auto initial_word=[&](std::uint32_t address)->std::optional<std::uint32_t> {
                     const auto physical=physical_address(address);
@@ -233,14 +236,16 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                     if (descriptor>0xffffffffU-16) continue;
                     const auto operations=initial_word(descriptor+16);
                     if (!operations || *operations>0xffffffffU-56) continue;
-                    for (const auto offset : {0U,4U,12U,16U,20U,24U,28U,48U,52U,56U}) {
+                    for (const auto offset : {0U,4U,12U,16U,20U,24U,28U,32U,36U,40U,44U,48U,52U,56U}) {
                         const auto function=initial_word(*operations+offset);
                         if (function && *function) discover_callback(*function);
                     }
                     const auto type=initial_word(descriptor+4);
-                    if (type && (*type&0xf0000000U)==0x10000000U && *operations<=0xffffffffU-88) {
-                        const auto function=initial_word(*operations+88);
-                        if (function && *function) discover_callback(*function);
+                    if (type && (*type&0xf0000000U)==0x10000000U && *operations<=0xffffffffU-104) {
+                        for (const auto offset : {68U,72U,76U,80U,84U,88U,92U,96U,100U,104U}) {
+                            const auto function=initial_word(*operations+offset);
+                            if (function && *function) discover_callback(*function);
+                        }
                     }
                 }
             }

@@ -236,7 +236,7 @@ int main(int argc,char** argv) {
         std::copy_n(loader_name,8,module.memory.begin()+client_table+72);
         client_word(80,0x03e00008); client_word(84,0x24000008);
         client_word(88,0x03e00008); client_word(92,0x24000009);
-        module.memory.resize(0x52c);
+        module.memory.resize(0x534);
         const auto query_word=[&](unsigned at,std::uint32_t word) {
             for (unsigned byte=0;byte<4;++byte) module.memory[0x500+at+byte]=static_cast<std::uint8_t>(word>>(byte*8));
         };
@@ -244,6 +244,7 @@ int main(int argc,char** argv) {
         std::copy_n(loader_name,8,module.memory.begin()+0x50c);
         query_word(20,0x03e00008); query_word(24,0x2400000b);
         query_word(28,0x03e00008); query_word(32,0x2400000c);
+        query_word(36,0x03e00008); query_word(40,0x2400001b);
         module.memory.resize(0x63c);
         const auto file_word=[&](unsigned at,std::uint32_t word) {
             for (unsigned byte=0;byte<4;++byte) module.memory[0x600+at+byte]=static_cast<std::uint8_t>(word>>(byte*8));
@@ -253,7 +254,7 @@ int main(int argc,char** argv) {
         std::copy(std::begin(file_name),std::end(file_name),module.memory.begin()+0x60c);
         const unsigned file_ordinals[]{4,5,6,8};
         for (unsigned index=0;index<4;++index) { file_word(20+index*8,0x03e00008); file_word(24+index*8,0x24000000|file_ordinals[index]); }
-        module.memory.resize(0x1e00);
+        module.memory.resize(0x2000);
         const auto irq_word=[&](unsigned address,std::uint32_t word) {
             for (unsigned byte=0;byte<4;++byte) module.memory[address-module.base+byte]=static_cast<std::uint8_t>(word>>(byte*8));
         };
@@ -329,6 +330,7 @@ int main(int argc,char** argv) {
         irq_word(0x2814,0x03e00008); irq_word(0x2818,0x24000022);
         irq_word(0x281c,0x03e00008); irq_word(0x2820,0x24000014);
         irq_word(0x2824,0x03e00008); irq_word(0x2828,0x24000015);
+        irq_word(0x282c,0x03e00008); irq_word(0x2830,0x2400001f);
         // Lifecycle routines are private: only the AddDrv descriptor discovers them.
         irq_word(0x2840,0x240428c0); irq_word(0x2844,0x08000a07); irq_word(0x2848,0);
         irq_word(0x2860,0x8c820008); irq_word(0x2864,0x03e00008); irq_word(0x2868,0);
@@ -365,7 +367,73 @@ int main(int argc,char** argv) {
         irq_word(0x2ba0,0x24042bc0); irq_word(0x2ba4,0x08000a07); irq_word(0x2ba8,0);
         irq_word(0x2bc0,0x28e0); irq_word(0x2bc4,0x10000010); irq_word(0x2bd0,0x2c00);
         irq_word(0x2c00,0x2860); irq_word(0x2c04,0x2880); irq_word(0x2c0c,0x2940); irq_word(0x2c10,0x2960);
+        irq_word(0x2c48,0x2e00); irq_word(0x2c4c,0x2e40); irq_word(0x2c54,0x2880);
+        irq_word(0x2f00,0x41e00000); irq_word(0x2f08,0x104);
+        std::copy(std::begin(stat_library),std::end(stat_library),module.memory.begin()+0x1f0c);
+        for (const auto [offset,ordinal] : {std::pair{20U,26U},{28U,27U},{36U,29U},{44U,33U},{52U,25U},{60U,32U},{68U,22U},{76U,28U}}) {
+            irq_word(0x2f00+offset,0x03e00008); irq_word(0x2f04+offset,0x24000000|ordinal);
+        }
+        irq_word(0x2c64,0x2f80);
+        irq_word(0x2c44,0x2fc0); irq_word(0x2c60,0x2fc0);
+        // Return the negative sum of both initial path bytes to expose routing.
+        constexpr std::uint32_t pair_driver[]{0x90a80000,0x90c90000,0,0x01091021,0x00021023,0x03e00008,0};
+        for (unsigned i=0;i<std::size(pair_driver);++i) irq_word(0x2fc0+i*4,pair_driver[i]);
+        // Bounded synthetic link: return the first relative-path byte, no terminator.
+        constexpr std::uint32_t readlink_driver[]{0x10e00006,0x24020000,0x90a80000,0,0xa0c80000,
+            0x24020001,0,0x03e00008,0};
+        for (unsigned i=0;i<std::size(readlink_driver);++i) irq_word(0x2f80+i*4,readlink_driver[i]);
+        irq_word(0x2ac0,0x41e00000); irq_word(0x2ac8,0x104);
+        std::copy(std::begin(library),std::end(library),module.memory.begin()+0x1acc);
+        irq_word(0x2ad4,0x03e00008); irq_word(0x2ad8,0x24000008);
+        irq_word(0x2adc,0x03e00008); irq_word(0x2ae0,0x24000012);
+        irq_word(0x2ae4,0x03e00008); irq_word(0x2ae8,0x24000016);
+        irq_word(0x2aec,0x03e00008); irq_word(0x2af0,0x24000013);
+        irq_word(0x2e50,0x41e00000); irq_word(0x2e58,0x104);
+        std::copy(std::begin(library),std::end(library),module.memory.begin()+0x1e5c);
+        irq_word(0x2e64,0x03e00008); irq_word(0x2e68,0x24000014);
+        irq_word(0x2e6c,0x03e00008); irq_word(0x2e70,0x24000024);
+        irq_word(0x2d50,0x41e00000); irq_word(0x2d58,0x104);
+        std::copy(std::begin(library),std::end(library),module.memory.begin()+0x1d5c);
+        irq_word(0x2d64,0x03e00008); irq_word(0x2d68,0x24000011);
+        irq_word(0x2d6c,0x03e00008); irq_word(0x2d70,0x24000029);
+        irq_word(0x2ca0,0x41e00000); irq_word(0x2ca8,0x104);
+        std::copy(std::begin(library),std::end(library),module.memory.begin()+0x1cac);
+        irq_word(0x2cb4,0x03e00008); irq_word(0x2cb8,0x2400001b);
+        irq_word(0x2cbc,0x03e00008); irq_word(0x2cc0,0x2400001d);
+        for (const auto [address,ordinal] : {std::pair{0x2cc4U,21U},{0x2cccU,25U},{0x2cd4U,26U},{0x2cdcU,32U},{0x2ce4U,23U},{0x2cecU,30U}}) {
+            irq_word(address,0x03e00008); irq_word(address+4,0x24000000|ordinal);
+        }
+        irq_word(0x2b90,0x24042dd0); irq_word(0x2b94,0x08000ab7); irq_word(0x2b98,0);
+        constexpr std::uint32_t print_callback[]{0x8c880000,0,0xad050000,0x25080004,0xac880000,0x03e00008,0x2402ffff};
+        for (unsigned i=0;i<std::size(print_callback);++i) irq_word(0x2dd0+i*4,print_callback[i]);
         irq_word(0x2c58,0x2c80);
+        irq_word(0x2c5c,0x2e80);
+        irq_word(0x2c50,0x2a80);
+        // Mount writes the observed ABI arguments into its synthetic payload.
+        constexpr std::uint32_t mount_driver[]{0x8fa80010,0x8fa90014,0x90aa0000,0x90cb0000,
+            0x8c8c0004,0,0xad0a0000,0xad0b0004,0xad0c0008,0xad09000c,0x03e00008,0x00e01021};
+        for (unsigned i=0;i<std::size(mount_driver);++i) irq_word(0x2a80+i*4,mount_driver[i]);
+        // Read the shifted O32 arguments and expose path, unit and input length.
+        constexpr std::uint32_t devctl_driver[]{0x8fa80010,0x8fa90014,0x8faa0018,0x90ab0000,
+            0x8c8c0004,0,0xad2b0000,0xad2c0004,0xad280008,0xad2a000c,
+            0x90eb0000,0,0xad2b0010,0x03e00008,0x00c01021};
+        for (unsigned i=0;i<std::size(devctl_driver);++i) irq_word(0x2e80+i*4,devctl_driver[i]);
+        for (const auto table : {0x28f0U,0x2c00U}) {
+            irq_word(table+36,0x2e00); irq_word(table+40,0x2e40); irq_word(table+44,0x2880);
+        }
+        // Path operation exposes the unit and relative name through its result.
+        constexpr std::uint32_t remove_driver[]{0x8c880004,0x90a90000,0,0x01091021,0x03e00008,0};
+        constexpr std::uint32_t mkdir_driver[]{0x03e00008,0x00c01021};
+        for (unsigned i=0;i<std::size(remove_driver);++i) irq_word(0x2e00+i*4,remove_driver[i]);
+        for (unsigned i=0;i<std::size(mkdir_driver);++i) irq_word(0x2e40+i*4,mkdir_driver[i]);
+        irq_word(0x2910,0x2d80); irq_word(0x2c20,0x2d80); irq_word(0x2c68,0x2da0);
+        // ioctl accepts a scalar parameter and returns it unchanged.
+        constexpr std::uint32_t control_driver[]{0xac85000c,0x03e00008,0x00c01021};
+        for (unsigned i=0;i<std::size(control_driver);++i) irq_word(0x2d80+i*4,control_driver[i]);
+        // ioctl2 copies one byte only when both extents are nonzero; returns cmd.
+        constexpr std::uint32_t control2_driver[]{0x8fa80010,0x8fa90014,0x10e00007,0x00a01021,
+            0x11200005,0,0x90ca0000,0,0xa10a0000,0xac87000c,0x03e00008,0};
+        for (unsigned i=0;i<std::size(control2_driver);++i) irq_word(0x2da0+i*4,control2_driver[i]);
         irq_word(0x2c30,0x2b00); irq_word(0x2c34,0x2b80); irq_word(0x2c38,0x2d00);
         auto extended_read=std::to_array(directory_read);
         extended_read[6]=0x240921d0; // Extended regular-file type and access bits.
@@ -433,7 +501,7 @@ int main(int argc,char** argv) {
         for (unsigned index=0;index<std::size(create_from_data);++index) irq_word(0x1f20+index*4,create_from_data[index]);
         module.initialized_size=static_cast<std::uint32_t>(module.memory.size());
         std::vector<std::uint32_t> bundle_roots=entries;
-        bundle_roots.insert(bundle_roots.end(),{0x13ec,0x1418,0x1420,0x1514,0x151c,0x1614,0x161c,0x1624,0x162c,0x171c,0x1724,0x172c,0x1734,0x173c,0x1744,0x174c,0x1754,0x1a40,0x1a50,0x1b00,0x1b40,0x1c00,0x1d00,0x1d80,0x1dc0,0x1e00,0x1e40,0x1f20,0x2140,0x2180,0x21c0,0x2314,0x2354,0x2394,0x239c,0x23a4,0x23ac,0x23b4,0x23bc,0x23c4,0x23cc,0x23d4,0x23dc,0x23e4,0x23ec,0x2814,0x2824,0x2840,0x2ba0,0x2414,0x241c,0x242c,0x2434,0x243c,0x2444,0x244c,0x2454,0x245c,0x2464,0x246c,0x2480,0x251c,0x2524,0x252c,0x2534,0x253c,0x2544,0x254c,0x2580,0x2600,0x2680,0x2714,0x271c,0x2724,0x272c,0x2734,0x273c,0x2744,0x274c,0x2794,0x279c,0x27a4,0x27ac,0x27b4,0x27bc,0x27c4,0x27cc});
+        bundle_roots.insert(bundle_roots.end(),{0x13ec,0x1418,0x1420,0x1514,0x151c,0x1524,0x1614,0x161c,0x1624,0x162c,0x171c,0x1724,0x172c,0x1734,0x173c,0x1744,0x174c,0x1754,0x1a40,0x1a50,0x1b00,0x1b40,0x1c00,0x1d00,0x1d80,0x1dc0,0x1e00,0x1e40,0x1f20,0x2140,0x2180,0x21c0,0x2314,0x2354,0x2394,0x239c,0x23a4,0x23ac,0x23b4,0x23bc,0x23c4,0x23cc,0x23d4,0x23dc,0x23e4,0x23ec,0x2f14,0x2f1c,0x2f24,0x2f2c,0x2f34,0x2f3c,0x2f44,0x2f4c,0x2ad4,0x2ae4,0x2aec,0x2cb4,0x2cbc,0x2cc4,0x2ccc,0x2cd4,0x2cdc,0x2ce4,0x2cec,0x2d64,0x2d6c,0x2e64,0x2e6c,0x2b90,0x2814,0x2824,0x282c,0x2840,0x2ba0,0x2414,0x241c,0x242c,0x2434,0x243c,0x2444,0x244c,0x2454,0x245c,0x2464,0x246c,0x2480,0x251c,0x2524,0x252c,0x2534,0x253c,0x2544,0x254c,0x2580,0x2600,0x2680,0x2714,0x271c,0x2724,0x272c,0x2734,0x273c,0x2744,0x274c,0x2794,0x279c,0x27a4,0x27ac,0x27b4,0x27bc,0x27c4,0x27cc});
         for (unsigned index=0;index<std::size(thread_ordinals);++index)
             if (thread_ordinals[index]!=4 && thread_ordinals[index]!=35) bundle_roots.push_back(0x1914+index*8);
         for (unsigned index=0;index<std::size(event_ordinals);++index) bundle_roots.push_back(0x1814+index*8);

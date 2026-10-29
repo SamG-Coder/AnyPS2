@@ -1434,7 +1434,7 @@ manager behavior. DelDrv stops while a file retains the registration.
 
 Pending calls preserve their caller and service owner across LLVM budget slices.
 This initial provider serializes file callbacks and stops on nested/concurrent
-file operations. Device controls for compiled drivers remain unfinished; the native ISO implementation retains its
+file operations. Compiled ioctl/ioctl2 dispatch is described below; the native ISO implementation retains its
 existing supported operations. No interpreter or host-pointer dispatch is used.
 
 Compiled writes reuse the descriptor access check and bounded buffer validation,
@@ -1491,3 +1491,259 @@ fields. Completion validates the original heap arena and output again; a fault
 retains the saved result and allocation so retrying does not invoke dread twice.
 Allocation failure returns ENOMEM before the callback and does not advance its
 cursor. Unknown extended type encodings remain unsupported.
+
+
+## Compiled driver controls
+
+Legacy ioctl invokes operation slot 8 with the public file record, command and
+unchanged parameter. The parameter can be a scalar or command-specific pointer;
+the manager does not invent a payload layout. Actual memory accesses retain LLVM
+memory guards. Both regular files and directory handles accept controls.
+
+Extended ioctl2 requires the extended device type and operation slot 26. Its O32
+output pointer and length remain at sp+16/sp+20 while the first argument becomes
+the driver file record. Stack extents, readable input and writable output are
+validated before dispatch, including code-write guards and the 1 MiB transfer
+bound. Zero-length buffers do not dereference unused pointers. Legacy devices
+return EUNSUP. The compiled callback determines command behavior and return value;
+no command succeeds through a manager stub. Unknown targets stop explicitly.
+Initialized tables seed ioctl discovery for all drivers and ioctl2 discovery only
+for extended descriptors. These callbacks share existing saved continuations and
+do not add an interpreter or dynamic compiler.
+
+
+## Compiled path operations
+
+Legacy ioman remove/mkdir/rmdir route registered device paths to compiled operation
+slots 9/10/11. They reuse open's bounded device/unit parsing, native heap record,
+shared descriptor reservation and retained registration. The public record starts
+with zero mode/private data, the parsed unit and original device pointer. The
+callback receives the relative path. Legacy mkdir has no permissions argument;
+extended drivers receive the legacy wrapper default of 0755. Callback results
+are forwarded and temporary records are released on both success and failure.
+Unmatched device paths continue to the native mount, whose ISO is read-only.
+
+Return cleanup for temporary path records, close and failed open validates the
+heap arena before releasing ownership. A truncated-memory completion can retry
+without losing the saved callback result, invoking the operation again or leaking
+a descriptor. Active path calls prevent driver removal. Static operation tables
+supply discovery roots; unresolved callbacks remain explicit conversion/runtime
+stops. The synthetic tests exercise argument routing rather than claiming a
+complete writable filesystem implementation.
+
+
+## Compiled device control by path
+
+Ioman devctl (31) resolves a registered extended device and invokes operation slot
+23 with a temporary file record and relative path. The compiler binds the import
+and discovers initialized extended devctl pointers. Command behavior belongs to
+that compiled callback; unresolved device names or implementations remain stops.
+
+Devctl shares ioctl2 input/output validation. Its seven-argument driver signature
+adds the relative path after the file record, shifting command/input into a2/a3
+and input length/output/output length to stack offsets 16/20/24. A validated
+32-byte outgoing frame below the original stack supplies these values. Native
+callback metadata can override SP for the call; the saved continuation restores
+the caller SP and leaves the caller's original stack arguments intact. Overlap
+with live path/payload buffers or the temporary record stops before writes.
+Legacy devices return EUNSUP; temporary records use the existing cleanup/retry
+path. No command-specific successful result is fabricated.
+
+
+## Extended path services
+
+Ioman chdir/sync/umount (26/27/29) invoke extended operation slots 18/19/21.
+They reuse bounded path parsing and temporary-record ownership, require the
+extended device type, and discover callbacks only through extended initialized
+tables. Sync forwards the original flag bits. The native continuation returns
+zero after a nonnegative callback and preserves negative errors, matching the
+public extended-manager contract. Cleanup completes before the caller resumes.
+These services do not invent a native working directory, flush or unmount success:
+the converted device callback performs the operation. Unsupported device names
+and uncompiled callbacks remain explicit stops.
+
+
+## Compiled link reads
+
+Ioman readlink (33) requires an extended driver and invokes operation slot 25
+with a temporary file record, relative path, output pointer and length. It shares
+extended path routing and cleanup but preserves the callback's byte count or
+negative error instead of normalizing success to zero. The full output extent is
+validated before allocating a record or invoking compiled code, including code
+write protection and the 1 MiB limit. Zero length ignores the unused destination.
+The manager adds no NUL terminator or link contents. The callback retains LLVM
+store guards. Initialized extended tables supply private callback discovery.
+
+
+## Compiled two-path operations
+
+Ioman rename/symlink (25/32) use extended operation slots 17/24 and the same
+native temporary-record lifecycle. A shared bounded text reader validates both
+paths. The first path selects the registered device and unit. A destination
+without a colon is passed unchanged; a qualified destination is stripped only
+when its registered device and unit match. Cross-device/unit and null destination
+requests return EXDEV before allocation or callback dispatch. Malformed strings
+and invalid memory retain explicit bounds errors. Legacy devices return EUNSUP.
+Compiled callbacks receive file record, relative source and destination; their
+negative errors are preserved and nonnegative success becomes zero. The manager
+does not rename host files or fabricate symbolic links. Both private operation
+pointers are discovered from initialized extended tables.
+
+
+## Native device type queries
+
+Ioman GetDevType (22) resolves a file or directory descriptor through the shared
+native ownership table. Compiled drivers return their registered type after
+validating the public file record and current device type. Unsupported descriptor
+mutation stops explicitly. The native ISO filesystem reports FS|FSEXT
+(0x10000010), consistent with its extended filesystem service interface. Providers
+decline foreign handles; missing or closed ordinary handles return EBADF, and
+reserved console handles remain for an explicit console provider. This is a
+metadata query, so it invokes no driver callback and changes no filesystem state.
+
+
+## Compiled mount dispatch
+
+Ioman mount (28) selects an extended filesystem driver and operation slot 20.
+The callback receives temporary file record, relative filesystem path, unchanged
+optional device name, flags, payload and length. The same validated outgoing
+32-byte stack frame used by devctl supplies the two trailing arguments and the
+saved continuation restores SP. The manager bounds device-name text and readable
+payload (1 MiB maximum), rejects negative lengths and frame overlap, and ignores
+unused pointers for zero-length payloads. A null device name remains optional.
+Nonnegative callback results normalize to zero; errors and cleanup use the shared
+path lifecycle. No host mount or successful device setup is synthesized. Private
+mount callbacks are discovered only from initialized extended driver tables.
+
+
+## Native sysclib classification
+
+The native sysclib provider binds look_ctype_table (8) through a distinct service
+kind. It computes the public ASCII classification flags with explicit ranges,
+independent of host locale and signed-char behavior. The char argument uses its
+low byte. Space retains combined whitespace/punctuation flags; tab through CR
+have whitespace flags, and hexadecimal letters retain case plus hex flags.
+The public reference defines 128 entries, so bytes 128..255 stop explicitly rather
+than reading outside a table or inventing classifications. No proprietary table
+or firmware is embedded. The standalone LLVM host installs this provider.
+get_ctype_table remains unsupported; callback formatting is described below.
+
+
+## Native callback formatting
+
+Sysclib prnt (18) uses the same bounded formatter as native printf/Kprintf, with
+an O32 va_list reader instead of register/stack variadic arguments. The formatting
+core is shared in iop_native_format.hpp. Its existing integer/string/character
+subset and bounds apply; floating point, unsupported length modifiers and other
+unimplemented formatting remain explicit stops. It validates and snapshots the
+formatted text before calling the output callback, so callback mutation does not
+alter an already validated format or argument. This deliberate ordering differs
+from implementations that interleave input reads with output callbacks.
+
+A native continuation delivers unsigned character values to compiled
+callback(context,character), then 513 (flush) and 512 (reset), including for empty
+output. Callback returns are ignored; prnt returns the formatted byte count.
+Caller GP, return state and pending loads are preserved. The callback target must
+already be compiled; known constant callbacks become discovery roots. Delivery
+can suspend at every callback budget boundary without replaying emitted bytes.
+The service serializes prnt calls and rejects nested/concurrent invocations;
+foreign owner tags cannot consume its completion. Chained callback returns use
+the shared native-call bridge and consume bounded execution slices. No callback
+is invoked through an unchecked host function pointer.
+
+
+## Native read-only string operations
+
+Sysclib strcmp/strlen/strncmp (22/27/29) use a shared native byte reader. Reads
+retain guest pointer aliases, detect address/extent faults and stop at the first
+terminator or decisive comparison. Comparisons use unsigned bytes and return
+their signed difference. Zero-length strncmp does not read either pointer. Scans
+and explicit counts are bounded to 1 MiB; exhaustion without a terminator or an
+oversized count stops explicitly. These operations never write guest memory or
+cast a guest address to a host string pointer.
+
+
+String searches strchr/index and strrchr/rindex (21/25 and 32/26) share the native
+bounded reader. They return the first or last matching byte address, preserve the
+input pointer's guest alias, and include the terminating NUL in the search.
+Character arguments use the low byte. A first match can return immediately;
+a last-match search must reach the terminator and cannot return a partial result
+after a memory fault. Missing matches return zero. The existing 1 MiB scan bound
+and no-write behavior apply.
+
+
+## Native string copies
+
+Sysclib strcpy/strncpy (23/30) share a bounded native copy implementation. It scans
+the readable source first, then validates the complete destination and compiled
+code guards before changing memory. Strcpy includes the terminator; strncpy
+copies at most the count and pads the remainder with zero after an early NUL,
+without adding a terminator when truncated. Zero count ignores both pointers.
+The original destination alias is returned. Undefined overlapping ranges stop
+explicitly; scans/counts retain the 1 MiB bound. Invalid sources, destinations and
+code writes leave all memory and the pending call unchanged.
+
+
+## Native byte clearing and word fill
+
+Sysclib bzero (17) clears its byte count; _wmemset (41) writes the supplied 32-bit
+value using a byte count rounded down to complete words, preserving remaining
+trailing bytes. Word writes require aligned destinations. Requests with no actual
+writes do not dereference the destination. The shared writable-span validator
+checks complete extents and compiled-code guards before mutation, and is reused
+by string copies. The implementation encodes guest words explicitly, independent
+of host alignment/endianness. _wmemset returns the original destination alias;
+bzero's void return has no guest-visible value contract.
+
+
+## Native sprintf
+
+Sysclib sprintf (19) shares the bounded formatter and O32 register/stack argument
+reader with native printf/Kprintf. Its two named parameters place initial format
+arguments in a2/a3, followed by sp+16 onward. The reader validates full words and
+address overflow. Formatting completes in temporary native storage before the
+entire output plus NUL is checked for writable extent and compiled code. Only
+then is output committed. The result excludes the terminator. Empty output still
+writes one NUL, without reading unused variadic arguments. The existing supported
+format subset applies; unsupported formats stop before mutation. Snapshotting
+inputs before output also avoids partial writes on malformed input; overlapping
+input/output is not claimed as a portable C contract.
+
+
+Native strcat (sysclib 20) reuses the bounded length scan and copy implementation.
+It validates the existing destination terminator, appends the complete source
+including its NUL, and returns the original destination alias. Source overlap
+with either the existing prefix or appended range is rejected explicitly.
+All destination/code guards complete before mutation; invalid source or
+unterminated destination reads cannot leave a partially appended string.
+
+
+## Native strtol
+
+Sysclib strtol (36) uses explicit 32-bit arithmetic and the pinned public PS2SDK
+default-build contract. It accepts ASCII whitespace and one sign, supports base
+selection including 0x/0b prefixes, clamps overflow to signed 32-bit limits, and
+continues consuming valid digits after overflow. No digits leaves the end pointer
+at the original input. Invalid signed bases return zero with the original end
+pointer without reading input. The default reference's base-1 zero-digit behavior
+is retained. No host-long width or locale behavior is used and no errno is set,
+matching that reference. The alternative size-optimized reference has different
+parsing semantics and is not claimed equivalent.
+
+The optional aligned end-pointer destination is checked for bounds/code writes
+before parsing, but written only after a successful parse. Input scanning is
+bounded to 1 MiB; invalid memory or undefined non-ASCII classification stops with
+no output mutation. End pointers preserve the caller's guest address alias.
+
+
+## Library reboot-mode metadata
+
+Loadcore SetRebootTimeLibraryHandlingMode (27) updates mode bits 1 and 2 of a
+known compiled export declaration. Native registry metadata and the public
+version/mode word change together after full declaration validation. Other input
+mode bits are ignored. Setting a mode does not register a library, rebind clients
+or execute a reboot; registration accepts the recorded mode while preserving
+compiled target checks. Active libraries retain their current bindings. Null and
+unknown tables fail, malformed declarations cannot change flags, and truncated
+memory/code destinations stop before mutation. Native reboot execution and policy
+application remain unfinished; this service implements only the metadata setter.

@@ -2,7 +2,7 @@
 #include <nt/iop_native.hpp>
 
 namespace nt::iop {
-enum class NativeServiceKind { syscall, sysmem, loadcore, library_call, ioman, intrman, thevent, thbase, sifman, stdio, sifcmd, thsemap, thmsgbx, native_return };
+enum class NativeServiceKind { syscall, sysmem, loadcore, library_call, ioman, intrman, thevent, thbase, sifman, stdio, sifcmd, thsemap, thmsgbx, native_return, sysclib };
 struct NativeServiceRequest {
     std::uint32_t selector;
     std::array<std::uint32_t,4> arguments;
@@ -21,6 +21,7 @@ struct NativeServiceCall {
     std::array<std::uint32_t,4> arguments{};
     std::uint32_t global_pointer=0;
     const void* owner=nullptr;
+    std::optional<std::uint32_t> stack_pointer;
 };
 inline constexpr std::uint32_t native_service_return=0xfffffff0U;
 struct NativeServiceReply {
@@ -69,6 +70,7 @@ inline NativeResult run_native(NativeEntry entry,Cpu& cpu,std::span<std::uint8_t
         case 9: kind=NativeServiceKind::sifcmd; break;
         case 10: kind=NativeServiceKind::thsemap; break;
         case 11: kind=NativeServiceKind::thmsgbx; break;
+        case 12: kind=NativeServiceKind::sysclib; break;
         default: return result;
         }
         const auto resume=imported ? reg(31) : cpu.pc+4;
@@ -88,11 +90,12 @@ inline NativeResult run_native(NativeEntry entry,Cpu& cpu,std::span<std::uint8_t
             continue;
         }
         if (reply.status==NativeServiceStatus::called) {
-            if (returning || !reply.call) return result;
+            if (!reply.call) return result;
             if (cpu.load_register) cpu.registers[cpu.load_register]=cpu.load_value;
             cpu.load_register=0;
             for (unsigned index=0;index<4;++index) cpu.registers[4+index]=reply.call->arguments[index];
             cpu.native_call_owner=reply.call->owner;
+            if (reply.call->stack_pointer) cpu.registers[29]=*reply.call->stack_pointer;
             cpu.registers[28]=reply.call->global_pointer; cpu.registers[31]=native_service_return;
             cpu.registers[0]=0; cpu.pc=reply.value; ++cpu.executed; --budget;
             if (!budget) return {NativeStop::budget,cpu.pc};

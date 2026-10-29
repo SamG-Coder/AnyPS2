@@ -1,5 +1,6 @@
 #pragma once
 #include <nt/iop_native_services.hpp>
+#include <nt/iop_native_code.hpp>
 #include <algorithm>
 #include <string>
 #include <string_view>
@@ -24,7 +25,7 @@ struct NativeImportSpec {
 class NativeLibraryServices final : public NativeServices {
 public:
     explicit NativeLibraryServices(std::vector<NativeLibrarySpec> libraries,std::vector<NativeImportSpec> imports={})
-        : libraries_(std::move(libraries)), active_(libraries_.size()), imports_(std::move(imports)),
+        : libraries_(std::move(libraries)), active_(libraries_.size()), modes_(libraries_.size()), imports_(std::move(imports)),
           bindings_(imports_.size()), enabled_(imports_.size(),true) {
         for (std::size_t index=0;index<imports_.size();++index) {
             const auto& import=imports_[index];
@@ -59,7 +60,8 @@ public:
                     return {NativeServiceStatus::transferred,libraries_[*bindings_[index]].functions[request.selector]};
             return {};
         }
-        if (request.kind!=NativeServiceKind::loadcore || request.selector<6 || (request.selector>9 && request.selector!=11)) return {};
+        if (request.kind!=NativeServiceKind::loadcore || request.selector<6 || (request.selector>9 && request.selector!=11 && request.selector!=27)) return {};
+        if (request.selector==27 && !request.arguments[0]) return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-214)};
         const auto address=ram_offset(request.arguments[0],4,ram.size());
         if (!address) return {NativeServiceStatus::address_fault,0,request.arguments[0]};
         if (request.selector==11) {
@@ -101,13 +103,20 @@ public:
         // Validate the live declaration against the compiled descriptor before
         // exposing any function. Mutable data cannot introduce executable code.
         if (load_native_word(ram,*address)!=0x41c00000 || load_native_word(ram,*address+4)!=0 ||
-            load_native_word(ram,*address+8)!=found->version) return reply(-214);
+            load_native_word(ram,*address+8)!=(found->version|(std::uint32_t(modes_[index])<<16))) return reply(-214);
         for (unsigned byte=0;byte<found->name.size();++byte)
             if (ram[*address+12+byte]!=static_cast<unsigned char>(found->name[byte])) return reply(-214);
         if (found->name.size()<8 && ram[*address+12+found->name.size()]!=0) return reply(-214);
         for (std::size_t ordinal=0;ordinal<found->functions.size();++ordinal)
             if (load_native_word(ram,*address+20+static_cast<std::uint32_t>(ordinal)*4)!=found->functions[ordinal]) return reply(-214);
         if (load_native_word(ram,*address+20+static_cast<std::uint32_t>(found->functions.size())*4)) return reply(-214);
+        if (request.selector==27) {
+            if (nt_iop_native_code_word(*address+8)) return {NativeServiceStatus::code_write,0,request.arguments[0]+8};
+            const auto mode=static_cast<std::uint16_t>((modes_[index]&~6U)|(request.arguments[1]&6U));
+            store_native_word(ram,*address+8,found->version|(std::uint32_t(mode)<<16));
+            modes_[index]=mode;
+            return reply(0);
+        }
         for (std::size_t other=0;other<libraries_.size();++other)
             if (active_[other] && libraries_[other].name==found->name && (libraries_[other].version>>8)==(found->version>>8) &&
                 libraries_[other].version>=found->version) return reply(-212);
@@ -119,6 +128,7 @@ public:
 private:
     std::vector<NativeLibrarySpec> libraries_;
     std::vector<bool> active_;
+    std::vector<std::uint16_t> modes_;
     std::vector<NativeImportSpec> imports_;
     std::vector<std::optional<std::size_t>> bindings_;
     std::vector<bool> enabled_;
