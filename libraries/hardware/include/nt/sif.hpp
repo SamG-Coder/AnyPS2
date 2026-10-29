@@ -1,0 +1,56 @@
+#pragma once
+#include <nt/runtime.hpp>
+#include <deque>
+
+namespace nt::hardware {
+// Diagnostic SIF transport. This endpoint owns IOP RAM, not an IOP BIOS or CPU.
+// A future IOP kernel/CPU supplies commands through the same transport.
+class Sif {
+public:
+    Sif();
+    static bool maps(std::uint32_t address);
+    std::uint32_t read(std::uint32_t address) const;
+    void write(std::uint32_t address, std::uint32_t value);
+    void step(runtime::RamBus& ee, bool enabled);
+    std::uint32_t take_completions();
+    void iop_write_register(unsigned index, std::uint32_t value);
+    std::uint32_t iop_read_register(unsigned index) const;
+    void iop_install(std::uint32_t address, std::span<const std::uint8_t> bytes);
+    std::span<const std::uint8_t> iop_memory() const { return iop_ram_; }
+    void iop_send(std::uint32_t source, std::uint32_t destination, std::uint32_t quadwords);
+    bool iop_send_pending() const { return transmit_.active; }
+    std::uint64_t iop_received_packets() const { return received_packets_; }
+    void initialize_commands();
+    std::uint32_t submit(std::span<const runtime::SifTransfer> transfers);
+    std::int32_t status(std::uint32_t id) const;
+    std::uint32_t ee_command_address() const { return ee_command_address_; }
+    std::uint32_t command_register(unsigned index) const { return command_registers_.at(index); }
+private:
+    struct Channel { std::uint32_t control = 0, address = 0, count = 0, tag = 0; bool end = false; };
+    struct Transfer { std::uint32_t source = 0, destination = 0, count = 0; bool active = false, tagged = false; };
+    Channel receive_, send_;
+    Transfer transmit_;
+    std::deque<std::uint32_t> to_ee_, to_iop_;
+    std::vector<std::uint8_t> iop_ram_;
+    std::array<std::uint32_t,4> registers_{};
+    std::uint32_t control_ = 0, completion_ = 0;
+    std::uint32_t iop_destination_ = 0, iop_remaining_ = 0;
+    bool iop_packet_ = false;
+    std::uint32_t iop_packet_address_ = 0, iop_packet_bytes_ = 0;
+    bool commands_ready_ = false;
+    bool rpc_ready_ = false;
+    std::uint32_t ee_command_address_ = 0;
+    std::array<std::uint32_t,32> command_registers_{};
+    std::uint64_t received_packets_ = 0;
+    std::vector<runtime::SifTransfer> job_;
+    std::size_t job_index_ = 0;
+    std::uint32_t job_id_ = 0, job_offset_ = 0;
+    bool job_tagged_ = false;
+    std::uint64_t job_completion_ = 0;
+    void receive_step(runtime::RamBus& ee);
+    void send_step(runtime::RamBus& ee);
+    void iop_step();
+    void dispatch_command();
+    void job_step(runtime::RamBus& ee);
+};
+}
