@@ -1,4 +1,5 @@
 #pragma once
+#include <nt/ee_state.hpp>
 #include <array>
 #include <nt/word_merge.hpp>
 #include <bit>
@@ -10,7 +11,6 @@
 #include <vector>
 
 namespace nt::runtime {
-struct Register { std::uint64_t lo = 0, hi = 0; };
 inline Register masked_vector(Register original, Register value, unsigned mask) {
     const auto low = ((mask & 8) ? 0xffffffffULL : 0ULL) | ((mask & 4) ? 0xffffffff00000000ULL : 0ULL);
     const auto high = ((mask & 2) ? 0xffffffffULL : 0ULL) | ((mask & 1) ? 0xffffffff00000000ULL : 0ULL);
@@ -19,19 +19,6 @@ inline Register masked_vector(Register original, Register value, unsigned mask) 
 inline Register rotate_vector(Register value) {
     return {(value.lo >> 32) | (value.hi << 32),(value.hi >> 32) | (value.lo << 32)};
 }
-struct State {
-    std::array<Register, 32> gpr{};
-    std::array<std::uint32_t, 32> fpr{};
-    std::uint32_t fcr31 = 0, accumulator = 0;
-    std::uint32_t cop0_status = 0;
-    std::uint32_t cop0_epc = 0, cop0_error_epc = 0;
-    std::uint64_t hi = 0, lo = 0, executed = 0;
-    std::uint64_t hi1 = 0, lo1 = 0, sa = 0;
-    std::uint32_t pc = 0, pending_target = 0, branch_pc = 0;
-    bool delay_slot = false;
-    void set(unsigned reg, std::uint64_t value) { if (reg) gpr[reg].lo = value; }
-    void set128(unsigned reg, Register value) { if (reg) gpr[reg] = value; }
-};
 enum class Stop { budget, syscall, breakpoint, unsupported, unmapped_code, code_changed, memory_fault, branch_in_delay, interrupt_pending };
 inline void compare_scalar(State& state, unsigned left, unsigned right, unsigned condition) {
     const auto ordered = [](std::uint32_t bits) {

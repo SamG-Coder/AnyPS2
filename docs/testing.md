@@ -1133,3 +1133,119 @@ A drained ready queue is not proof that waiting services or a game have booted.
 The FILEIO entry returned zero after 51 compiled operations; draining its workers
 then stopped at sifman ordinal 5 (SIF initialization) because the standalone host
 has no converted EE peer. No readiness acknowledgement was fabricated.
+
+
+### EE LLVM execution milestone
+
+Build `ee-llvm-tests` in Release and run `ctest --test-dir build -C Release -R
+"^ee-llvm-execution$" --output-on-failure`. The fixture generator rejects unsupported
+and inconsistent regions without partial output, emits an original synthetic
+scalar program, and invokes Clang to produce the object linked into the test.
+Execution verifies word sign extension, 64-bit arithmetic, logical/arithmetic
+shifts, bitwise results, preserved upper register halves, register-zero semantics,
+budget resumption, stable syscall stops, unmapped PCs and malformed delay-slot state.
+The same native executable covers a three-iteration loop, J/JAL and JR/JALR,
+call/return links, taken and untaken 64-bit comparisons, delay-slot execution across
+budget boundaries, target capture before an overlapping link-register write or
+delay-slot mutation, and unaligned destinations. Conversion rejects branches and
+syscalls in delay slots before emitting output.
+The executable links the test source, generated object and shared numeric primitive plus platform
+libraries: no decoder, diagnostic runtime, interpreter or JIT. This milestone
+proves bounded EE-region execution only; it does not establish GT4 boot compatibility.
+
+
+The EE LLVM milestone also executes signed/unsigned byte, halfword, word and
+64-bit loads, and byte/halfword/word/64-bit stores through physical and both kernel
+aliases. Checks cover little-endian output bytes, preserved register halves,
+unaligned/unmapped/device addresses, truncated and null backing storage, and
+code-write protection through every supported alias. A faulting delay-slot store
+must leave the pending branch intact and complete exactly once after correction.
+Loads into register zero must still fault on invalid addresses. Run only the
+related `ee-llvm-execution` Release test for these compiler changes.
+
+
+The `ee-llvm-project` Release test generates an original ELF with separate code
+and data segments and BSS. It converts the ELF, builds the emitted CMake project,
+removes the input ELF and executes the native result. The program loads initialized
+and zero-filled data, stores a result, calls and returns through sparse code, and
+stops at a syscall with the expected return value and operation count. Unreachable
+unsupported bytes after the syscall do not become executable code. Overlapping
+segments, unsupported entry code, existing output directories, operation budgets
+and mismatched data are checked. The generated build inputs are inspected for
+execution-scaffolding dependencies. Run `ee-llvm-execution`, `ee-llvm-project` and
+`analysis` after changes to this shared discovery integration.
+
+
+The compiled EE milestone now checks packed unsigned saturation for exact-limit,
+overflow and non-overflow lanes in both register halves, including destination
+aliasing either source and zero-register reads/writes. HI/LO transfer coverage
+checks full 64-bit values, preservation of destination upper halves, zero-register
+behavior and isolation of both accumulator banks. The related LLVM execution and
+standalone-project tests are the acceptance gates.
+
+
+The EE LLVM milestone exercises shift-amount masking across all low-five-bit
+source combinations with nonzero upper bits and a negative immediate. It checks
+MFSA upper-half preservation and zero-register behavior. Raw MTC1/MFC1 coverage
+uses negative zero, NaN-like patterns and ordinary bits, checking integer sign
+extension, unchanged FCR31 and zero-register handling. Both related EE LLVM tests
+pass.
+
+
+The compiled EE floating-add milestone covers normal addition/subtraction,
+accumulator writes, destination/source aliasing, cancellation, signed zeros,
+denormal operands, chopped precision and signed underflow. Expected values are
+checked under all four host rounding modes. Extended operands/results in a delay
+slot must preserve the pending branch, accumulator and flags; corrected inputs
+then resume successfully. SYNC coverage verifies both accepted modes retire without
+changing data state, checks the emitted LLVM fence and rejects a reserved mode.
+The shared arithmetic extraction also requires the related hardware-registers
+regression because VU finite arithmetic uses the same implementation.
+
+FCR31 transfer tests cover writable-bit masking, preservation of other fields,
+sign extension, zero-register handling and rejection of unsupported selectors.
+LQ/SQ coverage exercises all 16 address low-bit combinations through physical and
+both kernel aliases, distinct register halves, zero-register loads/stores and
+address/destination aliasing. Truncated 16-byte accesses and code writes must leave
+all memory and destination state untouched.
+
+The current local GT4 milestone generated an LLVM project, compiled it through
+`ps2-build`, and initially executed 33,238 native EE operations to SetupHeap. After native heap
+setup was connected, rebuilding that existing prefix executed 33,239 operations
+and stopped at the first uncompiled continuation instruction. Fresh discovery following SetupHeap now passes the former 4,096-instruction bound
+and rejects unsupported EI before output emission. The larger continuation has
+not yet compiled.
+Build inputs and DLL dependencies were inspected: generated object, probe, binary
+reader and numeric helper, with platform/runtime libraries only. No decoder,
+interpreter, JIT or hardware model is linked. All commercial input, LLVM, data and
+native output remain ignored under `work/`. This proves initial converted EE
+execution, not game boot, rendering, or a playable conversion.
+
+
+SetupThread integration executes the compiled syscall and its continuation with
+one-operation and larger slices. It verifies stack/metadata ownership, returned SP,
+empty launch arguments, argument aliases, duplicate setup rejection, and unchanged
+state/memory on invalid or code-backed outputs. Correcting a rejected request must
+allow one successful retirement. The standalone ELF project test additionally
+checks automatic discovery and execution beyond SetupThread to an unknown syscall.
+Run the two EE LLVM Release milestones and the related bios-free-kernel regression
+when changing the shared initial-stack planner.
+
+
+The compiled startup lifecycle now covers fixed/automatic/empty heap extents,
+EndOfHeap, calls before required initialization, stack overlap and address wrap.
+Rejected changes preserve previous heap metadata, memory and retirement state.
+One-operation and larger slices must produce the same results. The standalone ELF
+fixture discovers, compiles and executes SetupThread, SetupHeap and EndOfHeap
+continuations before stopping at an unknown syscall. Related Release EE LLVM and
+bios-free-kernel tests passed after sharing heap extent planning.
+
+
+The partitioning milestone extends the synthetic program beyond 4,096 instructions
+and inspects every emitted part for the 512-instruction bound. Native execution
+crosses multiple parts with budgets of 1, 511, 512, 513 and 10,000 operations, including
+a branch positioned at a proposed partition edge, its delay-slot pause/resume,
+a backward indirect transfer to another part, holes and unaligned destinations.
+A store from the small startup part into a distant compiled part must stop without
+memory mutation. Both EE LLVM Release tests passed. The native dispatcher is
+iterative and does not decode instructions or invoke an interpreter/JIT.

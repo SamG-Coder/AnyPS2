@@ -14,7 +14,7 @@ int main(int argc, char** argv) {
         std::cout << "AnyPS2 - generic BIOS-free PS2-to-PC toolchain\n"
             "Usage: AnyPS2 <import|inspect|iop-recompile|recompile|build> [arguments]\n"
             "Each command is a separate C++ program. Run a command without arguments for its usage.\n"
-            "LLVM is the only conversion backend. EE conversion is not yet available.\n";
+            "LLVM is the only conversion backend. EE entry-flow conversion is experimental and stops at syscalls.\n";
         return 0;
     }
     try {

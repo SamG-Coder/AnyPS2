@@ -1,0 +1,114 @@
+#include <nt/ee_codegen.hpp>
+#include "disc_fixture.hpp"
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <stdexcept>
+int main(int argc,char** argv) {
+    if (argc!=2 && argc!=3) return 1;
+    // Original scalar program: word sign extension, 64-bit addition and syscall.
+    const std::uint32_t words[]{0x3c088000,0x2509ffff,0x652a0001,0x350b0001,0x000b6102,0x000b68c3,0x010a702d,0x010b7827,0x24000001,0x0000000c,
+        0x24080003,0x24090000,0x2508ffff,0x1500fffe,0x25290001,0x0c000414,0x240a0007,0x0000000c,
+        0x00800008,0x24040000,0x03e05821,0x03e00008,0x254a0001,
+        0x00802009,0x258c0001,0x0000000c,0x10850002,0x25ad0001,0x0000000c,0x0000000c,0x08000409,0x25ce0001,
+        0xfc880000,0x80890000,0x908a0000,0x848b0000,0x948c0000,0x8c8d0000,0x9c8e0000,0xdc8f0000,
+        0xa0880008,0xa488000a,0xac88000c,0x0000000c,
+        0x10000002,0xac880000,0x0000000c,0x0000000c,0x8c800000,0x0000000c};
+    std::vector<nt::r5900::Instruction> code;
+    for (auto word:words) code.push_back(nt::r5900::decode(0x1000+static_cast<std::uint32_t>(code.size())*4,word));
+    const auto append=[&](std::uint32_t word) {
+        code.push_back(nt::r5900::decode(0x1000+static_cast<std::uint32_t>(code.size())*4,word));
+    };
+    for (const auto destination : {10U,8U,9U,0U}) {
+        append((28U<<26)|(8U<<21)|(9U<<16)|(destination<<11)|(16U<<6)|40U);
+        append(12); // syscall
+    }
+    append((28U<<26)|(9U<<16)|(10U<<11)|(16U<<6)|40U); append(12);
+    for (const auto word : {0x01000011U,0x01200013U,0x00005010U,0x00005812U,12U,
+                            0x00000011U,0x00000013U,0x00000010U,0x00000012U,12U}) append(word);
+    for (const auto word : {0x71000011U,0x71200013U,0x70005010U,0x70005812U,12U,
+                            0x70000011U,0x70000013U,0x70000010U,0x70000012U,12U}) append(word);
+    for (const auto selector : {24U,25U}) {
+        append((1U<<26)|(8U<<21)|(selector<<16)|0xfffaU);
+        append((10U<<11)|40U); append(12);
+    }
+    append((1U<<26)|(25U<<16)); append(40U); append(12);
+    for (const auto word : {0x44881000U,0x44091000U,0x44801800U,0x44001000U,12U}) append(word);
+    for (const auto word : {0x46031018U,12U,0x46031100U,12U,0x46031101U,12U,
+                            0x10000002U,0x46031018U,12U,12U,0x46031080U,12U}) append(word);
+    append(15); append((16U<<6)|15U); append(12);
+    for (const auto word : {0x44c8f800U,0x4449f800U,12U,0x44c0f800U,0x4440f800U,12U}) append(word);
+    for (const auto word : {0x7c880000U,0x78890000U,0x7c800010U,0x78800000U,12U,0x78840000U,12U}) append(word);
+    for (const auto word : {0x2403003cU,12U,0x0040e821U,0x2403007fU,12U}) append(word);
+    for (const auto word : {0x2403003dU,12U,0x00408021U,0x2403003eU,12U,0x00408821U,0x2403007fU,12U}) append(word);
+    auto invalid=code; invalid[3]=nt::r5900::decode(0x100c,0xc4880000);
+    std::ostringstream rejected; bool failed=false;
+    try { nt::ee_codegen::emit_llvm(rejected,invalid); } catch (const std::runtime_error&) { failed=true; }
+    if (!failed || !rejected.str().empty()) throw std::runtime_error("Unsupported EE code emitted partial output");
+    invalid=code; invalid[2].rs=31; failed=false;
+    try { nt::ee_codegen::emit_llvm(rejected,invalid); } catch (const std::invalid_argument&) { failed=true; }
+    if (!failed || !rejected.str().empty()) throw std::runtime_error("Inconsistent decoded EE code accepted");
+    for (const auto word : {0x08000400U,0x0000000cU}) {
+        invalid=code; invalid[4]=nt::r5900::decode(invalid[4].pc,0x08000400);
+        invalid[5]=nt::r5900::decode(invalid[5].pc,word); failed=false;
+        try { nt::ee_codegen::emit_llvm(rejected,invalid); } catch (const std::invalid_argument&) { failed=true; }
+        if (!failed || !rejected.str().empty()) throw std::runtime_error("Unsupported delay slot emitted output");
+    }
+    invalid=code; invalid[0]=nt::r5900::decode(invalid[0].pc,(1U<<6)|15U); failed=false;
+    try { nt::ee_codegen::emit_llvm(rejected,invalid); } catch (const std::invalid_argument&) { failed=true; }
+    if (!failed || !rejected.str().empty()) throw std::runtime_error("Reserved SYNC mode emitted output");
+    for (const auto word : {0x44c80000U,0x44490000U}) {
+        invalid=code; invalid[0]=nt::r5900::decode(invalid[0].pc,word); failed=false;
+        try { nt::ee_codegen::emit_llvm(rejected,invalid); } catch (const std::invalid_argument&) { failed=true; }
+        if (!failed || !rejected.str().empty()) throw std::runtime_error("Unsupported FCR selector emitted output");
+    }
+    while (code.size()<512) append(0);
+    constexpr std::uint32_t large_base=0x100000;
+    for (unsigned index=0;index<4608;++index) {
+        auto word=index ? 0x26940001U : 0x24140000U;
+        if (index==511) word=(2U<<26)|((large_base+1024*4)>>2);
+        if (index==512) word=0x26940007;
+        code.push_back(nt::r5900::decode(large_base+index*4,word));
+    }
+    code.push_back(nt::r5900::decode(large_base+4608*4,12));
+    code.push_back(nt::r5900::decode(large_base+4609*4,0x00800008));
+    code.push_back(nt::r5900::decode(large_base+4610*4,0x26b50001));
+    std::ostringstream generated; nt::ee_codegen::emit_llvm(generated,code);
+    if (generated.str().find("fence seq_cst")==std::string::npos) throw std::runtime_error("Native SYNC ordering was omitted");
+    const auto text=generated.str();
+    unsigned functions=0;
+    for (std::size_t start=0;(start=text.find("define internal i32 @nt_ee_part_",start))!=std::string::npos;) {
+        const auto end=text.find("\n}",start);
+        unsigned blocks=0;
+        for (auto block=text.find("\nblock",start);block<end;block=text.find("\nblock",block+1)) ++blocks;
+        if (!blocks || blocks>nt::ee_codegen::function_instruction_limit) throw std::runtime_error("EE function instruction bound violated");
+        ++functions; start=end;
+    }
+    if (functions<10) throw std::runtime_error("Large EE program was not partitioned");
+    std::ofstream output(argv[1]); output<<text;
+    if (argc==3) {
+        nt::Bytes elf(0x184,0);
+        const std::uint8_t identity[]{0x7f,'E','L','F',1,1,1};
+        std::copy(std::begin(identity),std::end(identity),elf.begin());
+        const auto word=[&](std::size_t at,std::uint32_t value) { fixture::put32(elf,at,value); };
+        word(16,0x00080002); word(20,1); word(24,0x1000); word(28,52);
+        word(40,0x00200034); word(44,2);
+        word(52,1); word(56,0x100); word(60,0x1000); word(68,0x80); word(72,0x80); word(76,5); word(80,4);
+        word(84,1); word(88,0x180); word(92,0x2000); word(100,4); word(104,32); word(108,6); word(112,4);
+        const std::uint32_t entry[]{0x24042000,0x8c880000,0x8c890004,0x25080001,0xac880004,0x0c000410,0x25290001,0x0000000c};
+        for (unsigned i=0;i<std::size(entry);++i) word(0x100+i*4,entry[i]);
+        word(0x120,0xffffffff); // Unreachable after the syscall: must not be translated.
+        word(0x140,0x8c820004); word(0x144,0x03e00008); word(0x148,0x00491021); word(0x180,41);
+        nt::write_file(argv[2],elf);
+        const auto original=elf;
+        const std::uint32_t startup[]{0x24040000,0x24054000,0x24061000,0x24072000,0x24081040,
+            0x2403003c,12,0x0040e821,0x24043000,0x2405ffff,0x2403003d,12,
+            0x00408021,0x2403003e,12,0x2403007f,12};
+        for (unsigned i=0;i<std::size(startup);++i) word(0x100+i*4,startup[i]);
+        nt::write_file(std::string(argv[2])+".startup",elf);
+        elf=original;
+        word(92,0x1000); nt::write_file(std::string(argv[2])+".overlap",elf);
+        word(92,0x2000); word(0x100,0xc4880000); nt::write_file(std::string(argv[2])+".unsupported",elf);
+    }
+    return output ? 0 : 1;
+}

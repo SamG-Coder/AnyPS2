@@ -794,3 +794,47 @@ continuations are original implementations; no firmware loop or assembly is copi
 Pre-connection local SIF publication follows the pinned public sifman
 sceSifGetSMFlag/sceSifSetSMFlag interface, which has no peer-readiness precondition.
 The native service retains published local state without creating a peer.
+
+
+EE LLVM PADDUW lowering uses the pinned public PCSX2 MMI operation contract:
+four independent unsigned 32-bit sums saturate at the maximum lane value. The
+implementation maps this behavior to LLVM's vector unsigned saturating-add
+intrinsic; no upstream implementation is copied. Scalar HI/LO transfers and their
+secondary-bank counterparts use the public 64-bit transfer contracts. Shared
+state offsets and original synthetic operands verify the native implementation.
+
+
+EE LLVM MTSAB/MTSAH/MFSA follow the pinned public PCSX2 opcode contracts,
+cross-checked against Play!'s EE instruction lowering. The references use different
+internal shift units: AnyPS2 stores the byte count observed by MFSA, with MTSAH
+producing an even byte count. Direct MTSA is not added in this milestone. MTC1/MFC1
+follow the public raw 32-bit transfer and integer sign-extension contracts;
+no upstream execution code is copied and no host floating-point conversion occurs.
+
+
+Finite EE LLVM addition reuses AnyPS2's original integer arithmetic implementation,
+with public FPU.cpp accumulator destinations and status-flag contracts informing
+the adapter. Extended numeric ranges remain explicitly unsupported. SYNC uses
+native LLVM fence semantics for the public ordering boundary; console pipeline
+and cache implementations are not copied or linked.
+
+
+FCR31 writable condition/status bits follow the pinned Play! COP_FPU.cpp mask;
+CFC1 sign extension is consistent with the public PCSX2 transfer contract.
+Implementation/revision selectors are intentionally unsupported because the
+references expose different processor identities. LQ/SQ's address rounding and
+full-register transfer contract were checked in the pinned public PCSX2 opcode
+implementation; native LLVM vector accesses reuse AnyPS2's existing bounds checks.
+
+
+Native EE SetupThread uses the pinned public PS2SDK startup argument order and
+syscall number. The implementation reuses AnyPS2's existing initial-stack planning
+policy and provides an explicit empty launch context. The native descriptor,
+compiled-code protection and budgeted continuation adapter are original; no BIOS
+thread structures or proprietary setup implementation are reproduced.
+
+
+Native SetupHeap and EndOfHeap use the pinned public PS2SDK syscall numbers and
+heap-start/size interface. The implementation reuses AnyPS2's existing bounded
+heap-to-main-stack policy through a shared extent planner. It owns metadata only;
+no BIOS allocator or proprietary memory-management implementation is copied.

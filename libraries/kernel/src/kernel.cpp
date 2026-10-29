@@ -1,4 +1,5 @@
 #include <nt/kernel.hpp>
+#include <nt/ee_startup.hpp>
 #include <limits>
 #include <algorithm>
 
@@ -77,9 +78,8 @@ bool Kernel::service(runtime::State& state, runtime::Bus& memory) {
     case 0x3c: { // SetupThread(gp, stack, stack_size, args, root)
         if (thread_.id) return false; // Reinitialization/scheduling is not implemented.
         const auto stack_size = arg(2), args = arg(3);
-        const auto top = arg(1) == 0xffffffffU ? std::uint64_t(ram_size - 4096) : std::uint64_t(arg(1)) + stack_size;
-        require(stack_size >= stack_reserve && top >= stack_size && top <= ram_size && top % 16 == 0,
-                "SetupThread: invalid stack extent/alignment");
+        const auto stack = runtime::initial_stack(arg(1),stack_size,ram_size);
+        require(stack.has_value(),"SetupThread: invalid stack extent/alignment");
         require(args % 4 == 0 && args < ram_size - 7, "SetupThread: invalid argument buffer");
         // Initial launch has no application arguments: argc=0 and argv[0]=null.
         // Validate both stores before mutating the guest argument block.
@@ -87,21 +87,20 @@ bool Kernel::service(runtime::State& state, runtime::Bus& memory) {
         memory.store(args,4,0); memory.store(args + 4,4,0);
         thread_.id = 1;
         thread_.gp = arg(0);
-        thread_.stack_base = static_cast<std::uint32_t>(top - stack_size);
+        thread_.stack_base = stack->base;
         thread_.stack_size = stack_size;
         thread_.root = arg(4);
         threads_.emplace(1,Thread{1,0,thread_.stack_base,stack_size,thread_.gp,0,0,0,0,{},0});
         current_thread_ = 1;
-        state.set(2, static_cast<std::uint32_t>(top - stack_reserve));
+        state.set(2, stack->pointer);
         return true;
     }
     case 0x3d: { // SetupHeap(begin, size), -1 extends up to the main stack.
         if (!thread_.id) return false;
-        const auto begin = arg(0), size = arg(1);
-        const auto end = size == 0xffffffffU ? std::uint64_t(thread_.stack_base) : std::uint64_t(begin) + size;
-        require(begin <= end && end <= thread_.stack_base, "SetupHeap: heap overlaps stack or wraps");
-        thread_.heap_begin = begin;
-        thread_.heap_end = static_cast<std::uint32_t>(end);
+        const auto heap=runtime::initial_heap(arg(0),arg(1),thread_.stack_base);
+        require(heap.has_value(),"SetupHeap: heap overlaps stack or wraps");
+        thread_.heap_begin = heap->begin;
+        thread_.heap_end = heap->end;
         thread_.heap_ready = true;
         state.set(2, thread_.heap_end);
         return true;

@@ -44,9 +44,15 @@ target_link_libraries(ps2-iop-recompile PRIVATE nt_iop_codegen)
 
 add_library(nt_r5900 libraries/r5900/src/decoder.cpp)
 target_include_directories(nt_r5900 PUBLIC libraries/r5900/include)
+add_library(nt_ee_native INTERFACE)
+target_include_directories(nt_ee_native INTERFACE libraries/ee_codegen/include libraries/runtime/include)
+add_library(nt_ee_codegen libraries/ee_codegen/src/llvm.cpp libraries/ee_codegen/src/project.cpp)
+target_include_directories(nt_ee_codegen PUBLIC libraries/ee_codegen/include)
+target_link_libraries(nt_ee_codegen PUBLIC nt_r5900 nt_ee_native)
 add_library(nt_analysis libraries/analysis/src/discover.cpp)
 target_include_directories(nt_analysis PUBLIC libraries/analysis/include)
 target_link_libraries(nt_analysis PUBLIC nt_elf nt_r5900)
+target_link_libraries(nt_ee_codegen PRIVATE nt_analysis)
 add_library(nt_runtime libraries/runtime/src/runtime.cpp)
 target_include_directories(nt_runtime PUBLIC libraries/runtime/include)
 target_link_libraries(nt_runtime PUBLIC nt_binary)
@@ -67,6 +73,7 @@ target_link_libraries(ps2-import PRIVATE nt_disc nt_elf)
 add_executable(ps2-inspect programs/ps2-inspect/main.cpp)
 target_link_libraries(ps2-inspect PRIVATE nt_analysis)
 add_executable(ps2-recompile programs/ps2-recompile/main.cpp)
+target_link_libraries(ps2-recompile PRIVATE nt_ee_codegen)
 add_executable(ps2-build programs/ps2-build/main.cpp)
 target_link_libraries(ps2-build PRIVATE nt_process)
 add_executable(AnyPS2 programs/AnyPS2/main.cpp)
@@ -80,6 +87,22 @@ if(BUILD_TESTING)
     target_link_libraries(emit-iop-fixture PRIVATE nt_iop_codegen)
     find_program(ANYPS2_CLANG NAMES clang)
     if(ANYPS2_CLANG AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|amd64|x86_64")
+        add_executable(emit-ee-fixture tests/emit_ee_fixture.cpp)
+        target_link_libraries(emit-ee-fixture PRIVATE nt_ee_codegen nt_binary)
+        add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj"
+            COMMAND emit-ee-fixture "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.ll"
+            COMMAND "${ANYPS2_CLANG}" -target x86_64-pc-windows-msvc -Werror -Wno-override-module -O2 -c
+                "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.ll" -o "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj"
+            DEPENDS emit-ee-fixture VERBATIM)
+        add_executable(ee-llvm-tests tests/ee_native.cpp libraries/ee_native/src/numeric.cpp "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj")
+        target_link_libraries(ee-llvm-tests PRIVATE nt_ee_native)
+        add_test(NAME ee-llvm-execution COMMAND ee-llvm-tests)
+        add_test(NAME ee-llvm-project COMMAND "${CMAKE_COMMAND}"
+            "-DFIXTURE=$<TARGET_FILE:emit-ee-fixture>" "-DCONVERTER=$<TARGET_FILE:ps2-recompile>"
+            "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}" "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/ee-project-tests"
+            "-DGENERATOR=${CMAKE_GENERATOR}" "-DPLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+            "-DEXE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ee_project.cmake")
+        set_tests_properties(ee-llvm-project PROPERTIES TIMEOUT 120)
         add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/iop-llvm-fixture.obj"
             COMMAND emit-iop-fixture "${CMAKE_CURRENT_BINARY_DIR}/iop-llvm-reference.ll"
                 "${CMAKE_CURRENT_BINARY_DIR}/iop-llvm-fixture.irx" "${CMAKE_CURRENT_BINARY_DIR}/iop-llvm-fixture.ll"
@@ -158,7 +181,7 @@ if(BUILD_TESTING)
         set_tests_properties(local-startup PROPERTIES LABELS "local;integration" TIMEOUT 70)
     endif()
 endif()
-foreach(target nt_binary nt_disc nt_elf nt_iop nt_iop_codegen nt_r5900 nt_analysis nt_runtime nt_fileio nt_hardware nt_kernel nt_process ps2-import ps2-inspect ps2-recompile ps2-iop-recompile ps2-build AnyPS2)
+foreach(target nt_ee_codegen nt_binary nt_disc nt_elf nt_iop nt_iop_codegen nt_r5900 nt_analysis nt_runtime nt_fileio nt_hardware nt_kernel nt_process ps2-import ps2-inspect ps2-recompile ps2-iop-recompile ps2-build AnyPS2)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /permissive-)
     else()

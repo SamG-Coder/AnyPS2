@@ -78,9 +78,24 @@ Import and generation require new output directories.
 .\build\Release\AnyPS2.exe inspect work\game\boot.elf --flow
 ```
 
-Boot ELF import and inspection are available. EE LLVM conversion is not yet
-implemented: `AnyPS2 recompile` reports that limitation without producing output.
-Use the standalone IOP workflow below for supported native module conversion.
+Boot ELF import and inspection are available. Experimental EE entry-flow conversion
+now emits LLVM IR, initialized data and a CMake project. It supports the documented
+scalar/control-flow and RAM subset, with native SetupThread, SetupHeap and EndOfHeap
+services. Other unsupported syscall boundaries stop explicitly. Most syscall services and the converted EE/IOP connection are unfinished.
+An existing local GT4 startup prefix executes through SetupThread and SetupHeap;
+its next instruction is not compiled. The larger continuation now passes the former
+discovery-size limit and stops at unsupported EI. Visible boot and gameplay are not established.
+
+```powershell
+.\build\Release\AnyPS2.exe recompile work\game\boot.elf work\ee-project
+.\build\Release\AnyPS2.exe build work\ee-project .
+.\work\ee-project\build\Release\ps2-native.exe work\ee-project\program.data
+```
+
+The last command reports a diagnostic stop, not a successful game boot. Unsupported
+reachable instructions reject conversion before creating output. Existing output
+directories are never overwritten. Keep all commercial input and generated output
+under ignored `work/`.
 
 ## Standalone IOP conversion
 
@@ -243,7 +258,7 @@ the data as instructions. Keep all converted commercial content under `work/`.
 | `AnyPS2` | Front door for the separate command-line tools |
 | `ps2-import` | Read ISO9660, resolve SYSTEM.CNF, validate and extract boot ELF |
 | `ps2-inspect` | Inspect ELF metadata and discovered control flow |
-| `ps2-recompile` | Report that EE LLVM conversion is not yet implemented |
+| `ps2-recompile` | Generate an experimental EE LLVM entry-flow project from a boot ELF |
 | `ps2-iop-recompile`, `nt_iop_codegen` | Convert supported IOP modules into LLVM projects |
 | `ps2-build` | Invoke CMake and compiler with explicit process arguments |
 | `nt_binary`, `nt_disc`, `nt_elf` | Bounded input parsing |

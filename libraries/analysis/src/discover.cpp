@@ -5,7 +5,7 @@
 
 namespace nt::analysis {
 Program discover(ByteView bytes, const elf::Executable& elf, std::size_t limit,
-                 std::span<const std::uint32_t> additional_entries) {
+                 std::span<const std::uint32_t> additional_entries, bool stop_at_syscall) {
     const auto word_at = [&](std::uint32_t pc) -> std::optional<std::uint32_t> {
         if (pc % 4) return {};
         for (const auto& s : elf.segments)
@@ -30,7 +30,7 @@ Program discover(ByteView bytes, const elf::Executable& elf, std::size_t limit,
         const auto instruction = r5900::decode(pc, *word);
         result.instructions.emplace(pc, instruction);
         if (result.instructions.size() > limit) throw std::runtime_error("Analysis instruction limit exceeded");
-        if (delay || instruction.terminal()) continue;
+        if (delay || instruction.terminal() || (stop_at_syscall && instruction.op==r5900::Op::syscall)) continue;
         if (instruction.branch()) {
             pending.emplace_back(pc + 4, true);
             if (!instruction.indirect()) pending.emplace_back(instruction.target(), false);
