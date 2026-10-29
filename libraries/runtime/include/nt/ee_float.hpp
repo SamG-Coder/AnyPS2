@@ -41,5 +41,18 @@ inline FiniteFloatResult add_subtract_finite(std::uint32_t a, std::uint32_t b, b
     return {sign_bit | (static_cast<std::uint32_t>(result_exponent) << 23) |
             (static_cast<std::uint32_t>(significand) & 0x7fffff)};
 }
+inline FiniteFloatResult multiply_finite(std::uint32_t a,std::uint32_t b) {
+    const auto ea=(a>>23)&255,eb=(b>>23)&255;
+    if (ea==255 || eb==255) return {0,false,false};
+    const auto sign=(a^b)&0x80000000U;
+    if (!ea || !eb) return {sign};
+    // Exact 24-bit significand product followed by explicit truncation.
+    const auto product=std::uint64_t((a&0x7fffff)|0x800000)*((b&0x7fffff)|0x800000);
+    const unsigned high=(product&(1ULL<<47)) ? 47 : 46;
+    const int exponent=int(ea+eb)-127+int(high)-46;
+    if (exponent>=255) return {0,false,false};
+    if (exponent<=0) return {sign,true};
+    return {sign|(std::uint32_t(exponent)<<23)|(std::uint32_t(product>>(high-23))&0x7fffff)};
+}
 
 }

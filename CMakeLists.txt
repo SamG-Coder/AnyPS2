@@ -94,7 +94,7 @@ if(BUILD_TESTING)
             COMMAND "${ANYPS2_CLANG}" -target x86_64-pc-windows-msvc -Werror -Wno-override-module -O2 -c
                 "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.ll" -o "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj"
             DEPENDS emit-ee-fixture VERBATIM)
-        add_executable(ee-llvm-tests tests/ee_native.cpp libraries/ee_native/src/numeric.cpp "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj")
+        add_executable(ee-llvm-tests tests/ee_native.cpp libraries/ee_native/src/numeric.cpp libraries/ee_native/src/vector.cpp "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj")
         target_link_libraries(ee-llvm-tests PRIVATE nt_ee_native)
         add_test(NAME ee-llvm-execution COMMAND ee-llvm-tests)
         add_test(NAME ee-llvm-project COMMAND "${CMAKE_COMMAND}"

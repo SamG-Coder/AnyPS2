@@ -1213,7 +1213,7 @@ The current local GT4 milestone generated an LLVM project, compiled it through
 `ps2-build`, and initially executed 33,238 native EE operations to SetupHeap. After native heap
 setup was connected, rebuilding that existing prefix executed 33,239 operations
 and stopped at the first uncompiled continuation instruction. Fresh discovery following SetupHeap now passes the former 4,096-instruction bound
-and rejects unsupported EI before output emission. The larger continuation has
+and rejects an undecoded MULT1 instruction before output emission. The larger continuation has
 not yet compiled.
 Build inputs and DLL dependencies were inspected: generated object, probe, binary
 reader and numeric helper, with platform/runtime libraries only. No decoder,
@@ -1249,3 +1249,105 @@ a backward indirect transfer to another part, holes and unaligned destinations.
 A store from the small startup part into a distant compiled part must stop without
 memory mutation. Both EE LLVM Release tests passed. The native dispatcher is
 iterative and does not decode instructions or invoke an interpreter/JIT.
+
+
+The EE LLVM execution milestone now covers EI/DI across all privilege-mode
+encodings, EDI/EXL/ERL overrides, event masking, repeated unacknowledged stops,
+explicit acknowledgement, and delivery after a branch delay slot across budget
+slices. Comparison coverage includes signed boundaries, 64-bit values above the
+32-bit range, negative immediates, and preserved upper lanes. Both EE LLVM Release
+tests pass. Local GT4 conversion passes EI and SLTU validation and next rejects
+PCEQB; no larger project or visible game boot is claimed.
+
+
+The scalar-control-flow milestone additionally covers MOVZ/MOVN source/condition
+aliasing, full-width conditions, destination-zero suppression and upper-lane
+preservation. Ten newly supported conditional branch forms are exercised with
+zero, positive, high-word and negative operands, budget splits, and faulting delay
+loads. Untaken likely branches suppress those faults. Twelve added shift forms
+cover zero, sign-bit and mixed-bit inputs with counts at and above each width;
+all compile and execute through LLVM. Both related Release tests pass. The latest
+local GT4 conversion now rejects MUL.S after passing the conditional-move,
+branch-likely and shift operations. This remains conversion progress, not boot.
+
+
+Floating memory/control-flow coverage now exercises raw LWC1/SWC1 transfers,
+FPR0 writes, negative offsets, RAM aliases, alignment/extent failures and protected
+code stores. Bit patterns include signed zeros, denormals and exponent-255 values;
+transfers preserve them without numeric interpretation. The unsupported-instruction
+fixture now uses MUL.S because LWC1 is supported.
+
+Finite comparison tests cover signs, equality, denormal-to-zero behavior,
+condition-bit preservation, and explicit extended-range rejection. All four BC1
+forms execute across budget slices, with taken and untaken likely branches. Both
+EE LLVM Release tests pass. Local GT4 conversion now advances through the floating
+memory and control-flow operations and rejects MTC0 before project emission.
+
+
+Native vector-control boundary tests compile CFC2/CTC2 calls and exercise missing
+owners, pending/retry, selector and wait propagation, sign extension, unchanged
+upper lanes, low-word writes, integer-zero behavior and a read stalled in a branch
+delay slot. Test callbacks are original synthetic service owners, not evidence
+of a production VU implementation. Both EE LLVM Release tests pass. Local GT4
+conversion now passes these control-transfer operations and rejects SQC2; it has
+not produced a larger executable, and the production vector service is unconnected.
+
+
+The vector-transfer milestone exercises missing/active storage, full 128-bit
+round trips, VF0's constant and ignored writes, aliases, unaligned/out-of-range
+faults and protected-code stores. Floating move/sign tests cover raw bit patterns,
+source/destination aliasing, unchanged MOV.S flags and ABS.S/NEG.S current-flag
+clearing. Both EE LLVM Release tests pass. GT4 conversion now passes SQC2 and
+MOV.S and next rejects SUB; no larger executable or visible boot is established.
+
+
+The system/arithmetic milestone tests disabled performance setup, both counter
+writes/readback, sign extension, zero-source reset, ignored control encodings,
+and mutation-free rejection of active measurement. Integer multiply/divide tests
+cover signed extremes, divide-by-zero, overflow, low-word operands and accumulator
+isolation. BREAK is tested at ordinary and branch-delay boundaries, including
+repeated stops. Both related LLVM Release tests pass. Local GT4 conversion now
+passes performance setup, DIV and BREAK and rejects SDL; no larger executable
+or visible boot is established.
+
+
+Finite multiplication tests execute generated code under all four host rounding
+modes, covering signs, signed zero, denormal inputs, underflow, truncation, aliases,
+and mutation-free extended-range rejection. Vector add/subtract tests cover normal
+and broadcast operands, MAC/status, masked lanes, aliased destinations, zero lane
+masks and atomic rejection when a later lane is unsupported. Both EE LLVM tests
+pass; hardware-registers also passed after extracting the shared arithmetic helpers.
+Local GT4 conversion now passes MUL.S and VSUB and next rejects SUB.
+
+
+Vector move tests execute all 16 masks for ordinary copies and in-place rotations,
+including raw extended float patterns, VF0, unchanged MAC/status and unavailable
+storage. LDL/LDR tests cover every byte offset, preserved destination bytes, RAM
+aliases, paired loads across aligned-word boundaries, upper lanes and faulting
+zero-register loads. Both related LLVM Release tests pass. Local GT4 conversion
+now passes VMOVE and LDL and next rejects an undecoded MULT1 instruction before project emission.
+
+
+Unaligned-store coverage includes every byte offset, aliases, cross-word pairs,
+zero source, preserved bytes, bounds failures and executable protection. System
+metadata tests cover visibility masks, sign extension, zero-source writes and
+interrupt delivery after enabling status. PLZCW tests cover sign extremes, zero,
+aliased destinations and upper-lane preservation. Both EE LLVM Release tests pass.
+Local GT4 conversion now passes SDL, system metadata transfers and PLZCW, then
+rejects PCEQB before producing the larger project.
+
+
+Signed arithmetic tests cover positive/negative overflow, immediate forms, both
+word widths, integer-zero destinations, preserved output and an overflow stopped
+inside a branch delay slot. Packed-copy tests cover both source aliases, lane
+ordering, halfword replication and integer-zero semantics; packed bitwise tests
+check both halves with an aliased destination. Both EE LLVM Release tests pass.
+Local GT4 conversion passes SUB, PCPYLD and POR and next rejects an undecoded MULT1 instruction.
+
+
+The packed-data milestone covers equality masks at all three lane widths, both
+source aliases, integer zero, every input bit in color packing/unpacking, and all
+nine lane-pack/interleave variants. Fixtures now include a separate synthetic
+extension region so the original bounded-function boundary remains stable. Both
+EE LLVM Release tests pass. Local GT4 conversion passes PCEQB, PPAC5 and PPACH,
+then rejects an undecoded MULT1 instruction before project emission.

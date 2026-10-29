@@ -1,4 +1,5 @@
 #include <nt/vu_control.hpp>
+#include <nt/ee_vector_math.hpp>
 
 namespace nt::hardware {
 namespace {
@@ -15,28 +16,14 @@ void VuControl::set_vector(unsigned reg, runtime::Register value) {
     if (reg) vectors_[reg] = value;
 }
 void VuControl::add_subtract(unsigned destination, unsigned left, unsigned right, unsigned mask, bool subtract, unsigned broadcast) {
-    const auto original = vector(destination);
-    runtime::Register result{};
-    const auto a = vector(left), b = vector(right);
-    if (mask > 15) throw runtime::MemoryFault("VU: invalid vector lane mask");
-    if (broadcast > 4) throw runtime::MemoryFault("VU: invalid broadcast lane");
-    std::uint32_t flags = 0;
-    for (unsigned i=0;i<4;++i) {
-        const auto bit = 1U << (3-i);
-        if (!(mask & bit)) continue;
-        const auto value = runtime::add_subtract_finite(lane(a,i),lane(b,broadcast < 4 ? broadcast : i),subtract);
-        auto& half = i < 2 ? result.lo : result.hi;
-        const auto shift = (i%2)*32;
-        half = (half & ~(0xffffffffULL << shift)) | (std::uint64_t(value.bits) << shift);
-        if (!(value.bits & 0x7fffffff)) flags |= bit;
-        if (value.bits >> 31) flags |= bit << 4;
-        if (value.underflow) flags |= bit << 8;
-    }
-    // Commit together: unsupported operands never partially update lanes/flags.
-    set_vector(destination,runtime::masked_vector(original,result,mask));
-    mac_ = flags;
-    const auto current = ((flags & 15) ? 1U : 0U) | ((flags & 0xf0) ? 2U : 0U) |
-                         ((flags & 0xf00) ? 4U : 0U);
-    status_ = (status_ & 0xff0) | current | (current << 6);
+    const auto unpack=[](runtime::Register value) {
+        return numeric::Vector{lane(value,0),lane(value,1),lane(value,2),lane(value,3)};
+    };
+    const auto result=numeric::add_subtract_vector(unpack(vector(destination)),unpack(vector(left)),
+        unpack(vector(right)),mask,subtract,broadcast,status_);
+    if (!result.supported) throw runtime::MemoryFault("VU: unsupported vector arithmetic operands or controls");
+    set_vector(destination,{std::uint64_t(result.value[0])|(std::uint64_t(result.value[1])<<32),
+                            std::uint64_t(result.value[2])|(std::uint64_t(result.value[3])<<32)});
+    mac_=result.mac; status_=result.status;
 }
 }

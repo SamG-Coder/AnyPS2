@@ -41,7 +41,7 @@ int main(int argc,char** argv) {
     for (const auto word : {0x7c880000U,0x78890000U,0x7c800010U,0x78800000U,12U,0x78840000U,12U}) append(word);
     for (const auto word : {0x2403003cU,12U,0x0040e821U,0x2403007fU,12U}) append(word);
     for (const auto word : {0x2403003dU,12U,0x00408021U,0x2403003eU,12U,0x00408821U,0x2403007fU,12U}) append(word);
-    auto invalid=code; invalid[3]=nt::r5900::decode(0x100c,0xc4880000);
+    auto invalid=code; invalid[3]=nt::r5900::decode(0x100c,0x46000003);
     std::ostringstream rejected; bool failed=false;
     try { nt::ee_codegen::emit_llvm(rejected,invalid); } catch (const std::runtime_error&) { failed=true; }
     if (!failed || !rejected.str().empty()) throw std::runtime_error("Unsupported EE code emitted partial output");
@@ -62,6 +62,66 @@ int main(int argc,char** argv) {
         try { nt::ee_codegen::emit_llvm(rejected,invalid); } catch (const std::invalid_argument&) { failed=true; }
         if (!failed || !rejected.str().empty()) throw std::runtime_error("Unsupported FCR selector emitted output");
     }
+    // EI, DI, and an EI in a branch delay slot: original interrupt-gate fixture.
+    for (const auto word : {0x42000038U,0x24160007U,0x42000039U,12U,
+                            0x10000002U,0x42000038U,12U,0x24160009U,12U}) append(word);
+    for (const auto word : {0x0109502aU,0x0109582bU,0x290cffffU,0x2d0dffffU,12U}) append(word);
+    for (const auto word : {0x0109500aU,0x0109580bU,0x0109480aU,0x0108000bU,12U}) append(word);
+    // Each conditional branch has a potentially faulting delay load.
+    for (const auto branch : {0x51090002U,0x55090002U,0x19000002U,0x1d000002U,0x05000002U,0x05010002U,
+                              0x59000002U,0x5d000002U,0x05020002U,0x05030002U}) {
+        append(branch); append(0x8c8a0000); append(12); append(0x240b0009); append(12);
+    }
+    for (const auto fn : {56U,58U,59U,60U,62U,63U,20U,22U,23U,4U,6U,7U}) {
+        const bool variable=fn<32;
+        append((variable ? 8U<<21 : 0U)|(9U<<16)|(10U<<11)|(variable ? 0U : 31U<<6)|fn);
+        append(12);
+    }
+    for (const auto word : {0xe480fffcU,0xc483fffcU,12U,0xc480fffcU,12U}) append(word);
+    for (const auto fn : {48U,50U,52U,54U}) { append(0x46031000U|fn); append(12); }
+    for (const auto selector : {0U,1U,2U,3U}) {
+        append(0x45000002U|(selector<<16)); append(0x240a0007); append(12); append(0x240b0009); append(12);
+    }
+    for (const auto word : {0x4848e000U,12U,0x4849e001U,12U,0x4840e001U,12U,
+                            0x10000002U,0x4848e001U,12U,12U}) append(word);
+    for (const auto word : {0x48c8e000U,12U,0x48c8e001U,12U,0x48c0e001U,12U}) append(word);
+    for (const auto word : {0xd8810000U,0xf8810010U,0xf8800020U,0xd8800030U,12U}) append(word);
+    for (const auto word : {0x460010c6U,0x46001105U,0x46001147U,0x46001087U,12U}) append(word);
+    for (const auto word : {0x4088c800U,0x4089c801U,0x408ac803U,0x400bc800U,0x400cc801U,0x400dc803U,12U,
+                            0x4080c801U,0x4080c803U,12U,0x4088c802U,12U}) append(word);
+    for (const auto fn : {24U,25U,26U,27U}) { append((8U<<21)|(9U<<16)|(10U<<11)|fn); append(12); }
+    for (const auto word : {0x000001cdU,0x10000002U,0x000001cdU,12U,12U}) append(word);
+    for (const auto word : {0x46031102U,12U,0x46031082U,12U}) append(word);
+    for (const auto fn : {44U,40U,4U,1U}) {
+        append((18U<<26)|(31U<<21)|(2U<<16)|(1U<<11)|(3U<<6)|fn); append(12);
+    }
+    append((18U<<26)|(26U<<21)|(2U<<16)|(1U<<11)|(1U<<6)|44U); append(12);
+    append((18U<<26)|(16U<<21)|(2U<<16)|(1U<<11)|44U); append(12);
+    for (unsigned rotate=0;rotate<2;++rotate) for (unsigned mask=0;mask<16;++mask) {
+        append((18U<<26)|((16U|mask)<<21)|((rotate ? 1U : 2U)<<16)|(1U<<11)|(rotate ? 0x33dU : 0x33cU)); append(12);
+    }
+    append((18U<<26)|(31U<<21)|(2U<<16)|0x33cU); append(12);
+    append((18U<<26)|(31U<<21)|(1U<<11)|0x33cU); append(12);
+    for (const auto word : {0x68880000U,12U,0x6c880000U,12U,0x68880007U,0x6c880000U,12U,0x68800000U,12U}) append(word);
+    for (const auto word : {0xb0880000U,12U,0xb4880000U,12U,0xb0880007U,0xb4880000U,12U,0xb4800000U,12U}) append(word);
+    for (const auto selector : {12U,14U,30U}) {
+        append(0x40880000U|(selector<<11)); append(0x40090000U|(selector<<11)); append(12);
+    }
+    append(0x40806000U); append(12);
+    for (const auto destination : {9U,8U,0U}) { append((28U<<26)|(8U<<21)|(destination<<11)|4U); append(12); }
+    for (const auto word : {0x01095020U,0x01095022U,0x210affffU,0x0109502cU,0x0109502eU,0x610affffU}) { append(word); append(12); }
+    for (const auto word : {0x01090020U,12U,0x10000002U,0x01095022U,12U,12U}) append(word);
+    for (unsigned variant=0;variant<3;++variant) for (const auto destination : {10U,8U,9U,0U}) {
+        append((28U<<26)|(8U<<21)|(9U<<16)|(destination<<11)|((variant==2 ? 27U : 14U)<<6)|(variant==0 ? 9U : 41U)); append(12);
+    }
+    append((28U<<26)|(10U<<11)|(14U<<6)|9U); append(12);
+    for (const auto selector : {0U,1U,2U,3U}) {
+        append((28U<<26)|(8U<<21)|(9U<<16)|(8U<<11)|((selector>=2 ? 19U : 18U)<<6)|((selector&1) ? 41U : 9U)); append(12);
+    }
+    for (const auto selector : {10U,6U,2U}) for (const auto destination : {10U,8U,9U,0U}) {
+        append((28U<<26)|(8U<<21)|(9U<<16)|(destination<<11)|(selector<<6)|40U); append(12);
+    }
+    append((28U<<26)|(10U<<11)|(10U<<6)|40U); append(12);
     while (code.size()<512) append(0);
     constexpr std::uint32_t large_base=0x100000;
     for (unsigned index=0;index<4608;++index) {
@@ -73,6 +133,14 @@ int main(int argc,char** argv) {
     code.push_back(nt::r5900::decode(large_base+4608*4,12));
     code.push_back(nt::r5900::decode(large_base+4609*4,0x00800008));
     code.push_back(nt::r5900::decode(large_base+4610*4,0x26b50001));
+    std::uint32_t extra_pc=0x200000;
+    const auto extra=[&](std::uint32_t word) { code.push_back(nt::r5900::decode(extra_pc,word)); extra_pc+=4; };
+    for (const auto selector : {31U,30U}) for (const auto destination : {10U,9U,0U}) {
+        extra((28U<<26)|(9U<<16)|(destination<<11)|(selector<<6)|8U); extra(12);
+    }
+    for (unsigned kind=0;kind<3;++kind) for (const auto selector : {26U,22U,18U}) for (const auto destination : {10U,8U,9U,0U}) {
+        extra((28U<<26)|(8U<<21)|(9U<<16)|(destination<<11)|((selector+(kind==0 ? 1U : 0U))<<6)|(kind==2 ? 40U : 8U)); extra(12);
+    }
     std::ostringstream generated; nt::ee_codegen::emit_llvm(generated,code);
     if (generated.str().find("fence seq_cst")==std::string::npos) throw std::runtime_error("Native SYNC ordering was omitted");
     const auto text=generated.str();
@@ -108,7 +176,7 @@ int main(int argc,char** argv) {
         nt::write_file(std::string(argv[2])+".startup",elf);
         elf=original;
         word(92,0x1000); nt::write_file(std::string(argv[2])+".overlap",elf);
-        word(92,0x2000); word(0x100,0xc4880000); nt::write_file(std::string(argv[2])+".unsupported",elf);
+        word(92,0x2000); word(0x100,0x46000003); nt::write_file(std::string(argv[2])+".unsupported",elf);
     }
     return output ? 0 : 1;
 }

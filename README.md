@@ -84,7 +84,9 @@ scalar/control-flow and RAM subset, with native SetupThread, SetupHeap and EndOf
 services. Other unsupported syscall boundaries stop explicitly. Most syscall services and the converted EE/IOP connection are unfinished.
 An existing local GT4 startup prefix executes through SetupThread and SetupHeap;
 its next instruction is not compiled. The larger continuation now passes the former
-discovery-size limit and stops at unsupported EI. Visible boot and gameplay are not established.
+discovery-size limit and stops at an undecoded MULT1 instruction. Visible boot and gameplay are not established.
+CFC2/CTC2 compile to native vector-service calls; the production vector owner is
+not connected, so executing these calls currently stops explicitly.
 
 ```powershell
 .\build\Release\AnyPS2.exe recompile work\game\boot.elf work\ee-project

@@ -2,6 +2,8 @@
 #include "llvm_writer.hpp"
 #include "memory.hpp"
 #include "dispatch.hpp"
+#include "branches.hpp"
+#include "system.hpp"
 #include <nt/ee_native.hpp>
 #include <cstddef>
 #include <bit>
@@ -19,11 +21,32 @@ bool supported(Op op) {
     switch (op) {
     case Op::mfhi1: case Op::mflo1: case Op::mthi1: case Op::mtlo1:
     case Op::mfhi: case Op::mflo: case Op::mthi: case Op::mtlo:
-    case Op::sync:
-    case Op::adda_s: case Op::add_s: case Op::sub_s:
+    case Op::ei: case Op::di: case Op::sync:
+    case Op::adda_s: case Op::add_s: case Op::sub_s: case Op::mul_s:
     case Op::cfc1: case Op::ctc1:
     case Op::mfc1: case Op::mtc1:
     case Op::mfsa: case Op::mtsab: case Op::mtsah:
+    case Op::slt: case Op::sltu: case Op::slti: case Op::sltiu:
+    case Op::beql: case Op::bnel: case Op::blez: case Op::bgtz: case Op::bltz: case Op::bgez:
+    case Op::blezl: case Op::bgtzl: case Op::bltzl: case Op::bgezl:
+    case Op::dsll: case Op::dsrl: case Op::dsra: case Op::dsll32: case Op::dsrl32: case Op::dsra32:
+    case Op::dsllv: case Op::dsrlv: case Op::dsrav: case Op::sllv: case Op::srlv: case Op::srav:
+    case Op::add: case Op::sub: case Op::addi: case Op::dadd: case Op::dsub: case Op::daddi:
+    case Op::ppacb: case Op::ppach: case Op::ppacw: case Op::pextlb: case Op::pextlh: case Op::pextlw: case Op::pextub: case Op::pextuh: case Op::pextuw:
+    case Op::ppac5: case Op::pext5:
+    case Op::pceqb: case Op::pceqh: case Op::pceqw:
+    case Op::pand: case Op::por: case Op::pxor: case Op::pnor:
+    case Op::pcpyld: case Op::pcpyud: case Op::pcpyh:
+    case Op::plzcw:
+    case Op::vmove: case Op::vmr32:
+    case Op::vadd: case Op::vsub: case Op::vadd_bc: case Op::vsub_bc:
+    case Op::breakpoint:
+    case Op::mult: case Op::multu: case Op::div: case Op::divu:
+    case Op::mfc0: case Op::mtc0:
+    case Op::cfc2: case Op::ctc2:
+    case Op::mov_s: case Op::abs_s: case Op::neg_s:
+    case Op::compare_s: case Op::bc1f: case Op::bc1t: case Op::bc1fl: case Op::bc1tl:
+    case Op::movz: case Op::movn:
     case Op::padduw:
     case Op::j: case Op::jal: case Op::jr: case Op::jalr: case Op::beq: case Op::bne:
     case Op::sll: case Op::srl: case Op::sra: case Op::addiu: case Op::daddiu:
@@ -56,25 +79,36 @@ void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::s
         const auto remaining=w.value("load i64, ptr %remaining");
         const auto empty=w.value("icmp eq i64 "+remaining+", 0");
         w.out<<"  br i1 "<<empty<<", label %budget_stop, label %execute"<<suffix<<"\nexecute"<<suffix<<":\n";
+        const auto status=w.load("i32",offsetof(runtime::State,cop0_status));
+        const auto gate=w.binary("and","i32",status,"65543");
+        const auto enabled=w.value("icmp eq i32 "+gate+", 65537");
+        const auto events=w.load("i32",offsetof(ee::Memory,pending_interrupts),"%memory");
+        const auto masked=w.binary("and","i32",w.binary("and","i32",events,status),"65280");
+        const auto ready=w.value("icmp ne i32 "+masked+", 0");
+        const auto boundary=w.binary("xor","i1",is_delay,"true");
+        const auto deliver=w.binary("and","i1",w.binary("and","i1",enabled,ready),boundary);
+        w.out<<"  br i1 "<<deliver<<", label %interrupt_stop, label %body"<<suffix<<"\nbody"<<suffix<<":\n";
+        if (i.op==Op::breakpoint) { w.out<<"  ret i32 11\n"; continue; }
         if (i.op==Op::syscall) { w.out<<"  ret i32 1\n"; continue; }
+        std::string taken="true";
         if (i.branch()) {
+            taken=branch_condition(w,i);
             // Capture operands before writing the link or executing the delay slot.
             std::string target;
             if (i.op==Op::jr || i.op==Op::jalr) target=w.narrow(w.reg(i.rs));
-            else if (i.op==Op::beq || i.op==Op::bne) {
-                const auto condition=w.value(std::string(i.op==Op::beq ? "icmp eq i64 " : "icmp ne i64 ")+w.reg(i.rs)+", "+w.reg(i.rt));
-                target=w.value("select i1 "+condition+", i32 "+std::to_string(i.target())+", i32 "+std::to_string(i.pc+8));
-            } else target=std::to_string(i.target());
+            else target=w.value("select i1 "+taken+", i32 "+std::to_string(i.target())+", i32 "+std::to_string(i.pc+8));
             if (i.op==Op::jal || (i.op==Op::jalr && i.rd)) {
                 const auto reg=i.op==Op::jal ? 31U : i.rd;
                 w.store("i64",w.extend(std::to_string(i.pc+8)),offsetof(runtime::State,gpr)+reg*sizeof(runtime::Register));
             }
             w.store("i32",target,offsetof(runtime::State,pending_target));
             w.store("i32",suffix,offsetof(runtime::State,branch_pc));
-            w.store("i8","1",offsetof(runtime::State,delay_slot));
-            w.store("i32",std::to_string(i.pc+4),offsetof(runtime::State,pc));
+            w.store("i8",i.likely() ? w.value("zext i1 "+taken+" to i8") : "1",offsetof(runtime::State,delay_slot));
+            const auto successor=i.likely() ? w.value("select i1 "+taken+", i32 "+std::to_string(i.pc+4)+", i32 "+std::to_string(i.pc+8)) : std::to_string(i.pc+4);
+            w.store("i32",successor,offsetof(runtime::State,pc));
         } else {
             if (const auto access=memory_operation(i.op)) emit_memory(w,i,*access,ranges);
+            else if (i.op==Op::mfc0 || i.op==Op::mtc0) emit_system_transfer(w,i);
             else w.instruction(i);
             const auto pending=w.load("i32",offsetof(runtime::State,pending_target));
             const auto successor=w.value("select i1 "+is_delay+", i32 "+pending+", i32 "+std::to_string(i.pc+4));
@@ -86,11 +120,12 @@ void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::s
         const auto left=w.binary("sub","i64",remaining,"1");
         w.out<<"  store i64 "<<left<<", ptr %remaining\n";
         const auto sequential=n+1<instructions.size() && instructions[n+1].pc==i.pc+4 ? "%block"+std::to_string(instructions[n+1].pc) : "%unmapped";
-        if (!i.branch() && n && instructions[n-1].pc+4==i.pc && instructions[n-1].branch())
+        if (i.likely()) w.out<<"  br i1 "<<taken<<", label "<<sequential<<", label %dispatch\n";
+        else if (!i.branch() && n && instructions[n-1].pc+4==i.pc && instructions[n-1].branch())
             w.out<<"  br i1 "<<is_delay<<", label %dispatch, label "<<sequential<<"\n";
         else w.out<<"  br label "<<sequential<<"\n";
     }
-    w.out<<"budget_stop:\n  ret i32 0\nunmapped:\n  ret i32 2\ninvalid:\n  ret i32 3\n}\n";
+    w.out<<"interrupt_stop:\n  ret i32 7\nbudget_stop:\n  ret i32 0\nunmapped:\n  ret i32 2\ninvalid:\n  ret i32 3\n}\n";
 }
 
 }
@@ -110,6 +145,10 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
             diagnostic<<"EE LLVM unsupported operation: "<<r5900::name(i.op)<<" at 0x"<<std::hex<<i.pc;
             throw std::runtime_error(diagnostic.str());
         }
+        if ((i.op==Op::mfc0 || i.op==Op::mtc0) && i.rd!=25 && i.rd!=12 && i.rd!=14 && i.rd!=30)
+            throw std::invalid_argument("EE system transfer selector is not supported");
+        if (i.op==Op::cfc2 && i.rd==20)
+            throw std::invalid_argument("EE vector random-register transfer is not implemented");
         if ((i.op==Op::ctc1 || i.op==Op::cfc1) && i.rd!=31)
             throw std::invalid_argument("EE floating control transfer supports FCR31 only");
         if (i.op==Op::sync && (i.rs || i.rt || i.rd || (i.sa!=0 && i.sa!=16)))
@@ -158,6 +197,13 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
     w.out<<"  ret i1 "<<overlap<<"\n}\n";
     w.out<<"declare <4 x i32> @llvm.uadd.sat.v4i32(<4 x i32>, <4 x i32>)\n";
     w.out<<"declare i64 @nt_ee_add_finite(i32, i32, i32)\n";
+    w.out<<"declare i64 @nt_ee_vector_read(ptr, i32, i32)\n";
+    w.out<<"declare i64 @nt_ee_vector_write(ptr, i32, i32, i32)\n";
+    w.out<<"declare i64 @nt_ee_multiply_finite(i32, i32)\n";
+    w.out<<"declare i32 @nt_ee_vector_add(ptr, i32, i32, i32, i32, i32, i32)\n";
+    w.out<<"declare <2 x i32> @llvm.ctlz.v2i32(<2 x i32>, i1 immarg)\n";
+    for (const auto width : {32,64}) for (const auto operation : {"sadd","ssub"})
+        w.out<<"declare { i"<<width<<", i1 } @llvm."<<operation<<".with.overflow.i"<<width<<"(i"<<width<<", i"<<width<<")\n";
     output<<w.out.str();
 }
 }

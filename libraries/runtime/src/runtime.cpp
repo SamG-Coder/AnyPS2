@@ -36,27 +36,10 @@ void divide_scalar(State& state, unsigned destination, unsigned left, unsigned r
     state.fpr[destination]=result; state.fcr31=flags;
 }
 void multiply_scalar(State& state, unsigned destination, unsigned left, unsigned right) {
-    const auto a = state.fpr[left], b = state.fpr[right];
-    const auto ea = (a >> 23) & 255, eb = (b >> 23) & 255;
-    if (ea == 255 || eb == 255)
-        throw MemoryFault("MUL.S: extended-range operands are not implemented");
-    const auto sign = (a ^ b) & 0x80000000U;
-    std::uint32_t result = sign, flags = state.fcr31 & ~0xc000U;
-    if (ea && eb) {
-        // The exact 24-by-24-bit product fits in 48 bits. Chop the fraction
-        // explicitly so neither host rounding mode nor denormal handling leaks in.
-        const auto product = std::uint64_t((a & 0x7fffff) | 0x800000) *
-                             ((b & 0x7fffff) | 0x800000);
-        const unsigned high = (product & (1ULL << 47)) ? 47 : 46;
-        const int exponent = static_cast<int>(ea + eb) - 127 + static_cast<int>(high) - 46;
-        if (exponent >= 255)
-            throw MemoryFault("MUL.S: extended-range results are not implemented");
-        if (exponent <= 0) flags |= 0x4008U;
-        else result |= (static_cast<std::uint32_t>(exponent) << 23) |
-                       (static_cast<std::uint32_t>(product >> (high-23)) & 0x7fffff);
-    }
-    state.fpr[destination] = result;
-    state.fcr31 = flags;
+    const auto result=numeric::multiply_finite(state.fpr[left],state.fpr[right]);
+    if (!result.supported) throw MemoryFault("MUL.S: extended-range operands/results are not implemented");
+    state.fpr[destination]=result.bits;
+    state.fcr31=(state.fcr31&~0xc000U)|(result.underflow ? 0x4008U : 0U);
 }
 const char* name(Stop s) {
     switch (s) {

@@ -838,3 +838,82 @@ Native SetupHeap and EndOfHeap use the pinned public PS2SDK syscall numbers and
 heap-start/size interface. The implementation reuses AnyPS2's existing bounded
 heap-to-main-stack policy through a shared extent planner. It owns metadata only;
 no BIOS allocator or proprietary memory-management implementation is copied.
+
+
+EE LLVM EI/DI privilege conditions and EIE status-bit ownership were checked
+against the pinned public PCSX2 COP0.cpp and R5900.h contracts. The cooperative
+pending-event boundary is an original native adapter; it does not copy interrupt
+scheduler code or BIOS exception handling. Signed/unsigned comparison widths and
+sign-extended immediate contracts were checked in R5900OpcodeImpl.cpp. LLVM
+lowering and synthetic comparison/event fixtures are original implementations.
+
+
+Conditional moves and scalar shift widths/count masks were checked against the
+pinned public PCSX2 R5900OpcodeImpl.cpp contracts. Integer likely-branch nullification
+was checked in Interpreter.cpp; only the observable branch contract informs the
+original LLVM control-flow lowering. No upstream interpreter code is linked into
+converted output. Tests use original synthetic instructions and operands.
+
+
+LWC1/SWC1 raw register transfers, floating comparison condition-bit ownership,
+exponent-zero treatment and BC1 conditions were checked against the pinned public
+PCSX2 FPU.cpp interfaces. AnyPS2's native comparison support deliberately rejects
+exponent-255 operands instead of adopting the reference interpreter's clamping
+approximation. LLVM lowering reuses original checked-memory and branch helpers;
+no upstream execution implementation is copied.
+
+
+CFC2/CTC2 control selectors, synchronization flags, scalar transfer widths and
+integer-zero handling were checked in the pinned public PCSX2 VU0.cpp interface.
+AnyPS2 routes these operations to an original typed native service contract rather
+than linking a VU interpreter or copying its register/reset implementation. The
+special CFC2 random-register transfer remains outside supported conversion scope.
+
+
+LQC2/SQC2 register and VF0 transfer contracts were checked in the pinned public
+PCSX2 VU0.cpp. The current native transfer path explicitly requires 16-byte
+alignment; it does not claim the integer quadword rounding rule for VU transfers.
+MOV.S/ABS.S/NEG.S bit operations and current overflow/underflow flag clearing were
+checked in FPU.cpp. Storage and LLVM access lowering are original and reuse the
+existing bounds/protection path without linking device execution code.
+
+
+Disabled performance-control transfers and counter selector behavior follow the
+pinned public PCSX2 COP0.cpp and R5900.h contracts. AnyPS2 does not adopt cycle
+count approximations: active measurement is explicitly unsupported. Integer
+multiply/divide widths, sign extension, divide-by-zero and overflow results were
+checked in R5900OpcodeImpl.cpp. LLVM lowering and synthetic fixtures are original.
+
+
+Finite scalar multiplication and vector add/subtract reuse AnyPS2's existing
+original integer-significand calculations and documented finite-domain policy.
+This change extracts pure helpers for both native output and diagnostic callers;
+it does not copy upstream execution code or link the diagnostic runtime into
+converted executables. Extended numeric domains remain explicit unsupported cases.
+
+
+VMOVE/VMR32 selected-lane and rotation contracts were checked in the pinned public
+PCSX2 VUops.cpp. LDL/LDR aligned-word merge behavior was checked in
+R5900OpcodeImpl.cpp. Native lowering uses original LLVM vector operations and
+bounded shifts while reusing AnyPS2's storage, bounds and alias helpers.
+
+
+SDL/SDR merge direction and preserved-byte behavior were checked against the
+pinned public PCSX2 R5900OpcodeImpl.cpp. Status visibility and system metadata
+transfer widths were checked in COP0.cpp; PLZCW's two signed-word counts were
+checked in MMI.cpp. Native implementations use shared LLVM merge lowering and
+compiler intrinsics without importing upstream runtime code.
+
+
+Signed arithmetic overflow contracts were checked against the pinned public
+PCSX2 R5900OpcodeImpl.cpp; AnyPS2 reports an explicit unretired native stop rather
+than implementing a BIOS exception path. Packed-copy ordering and halfword
+replication were checked in MMI.cpp. LLVM overflow intrinsics and vector shuffles
+provide the original lowering without copying upstream instruction execution.
+
+
+Packed equality, color component bit positions, and byte/halfword/word
+packing/interleave order were checked against the pinned public PCSX2 MMI.cpp.
+MULT1 identification at the next conversion boundary was cross-checked against
+R5900OpcodeTables.cpp. New lowering uses original LLVM comparisons, masks and
+shuffles with synthetic bit/lane fixtures.
