@@ -758,3 +758,39 @@ Native reboot-mode metadata follows pinned loadcore exports.tab and
 SetRebootTimeLibraryHandlingMode's mask-6 update/error contract. Original native
 registry validation replaces firmware linked-list handling; no reboot success or
 policy application is synthesized.
+
+Non-auto-link registration follows the pinned public loadcore
+RegisterNonAutoLinkEntries, aLinkLibEntries and RegisterLibraryEntries contracts:
+mode bit 0 excludes a provider from import linking while leaving queries available.
+The native registry and synthetic lifecycle fixtures are original implementations;
+no firmware lists or upstream implementation code are copied.
+
+CpuInvokeInKmode follows pinned public intrman.h and the intrman syscall-handler
+contract for forwarding three register arguments and returning the callback result.
+The host continuation and event-delivery hold are original native implementations;
+no exception-handler assembly is copied into the product or test fixtures.
+
+Native heaplib uses the pinned public heaplib.h/export ABI and heaplib behavior
+for creation flags, block growth, allocation units, free-space accounting and
+release results. Implementation reuses AnyPS2 native allocator code and host-owned
+containers; no upstream allocator code, structures or instruction bytes are copied.
+Synthetic tests describe the supported API boundary, not proprietary heap internals.
+
+CheckThreadStack uses the pinned public threadman thbase.c/thcommon.c contracts
+for current-thread stack distance, interrupt-context zero and the 168-byte low
+stack threshold. The native ownership checks and diagnostic stop are original;
+reference stack-frame details and firmware scheduling paths are not reproduced.
+
+TerminateThread follows the pinned public threadman thbase.c lifecycle and
+error contracts. Native wait cancellation replaces intrusive console queues with
+an original explicit ownership interface; no firmware scheduling implementation
+is copied. Active-callback/current-thread restrictions are documented.
+
+Boot-callback phase, priority, GP and result handling follows the pinned public
+loadcore AddRebootNotifyHandler and startup callback loop, plus the public
+BootupCallback_t ABI. Host-owned queues, scratch allocation and compiled
+continuations are original implementations; no firmware loop or assembly is copied.
+
+Pre-connection local SIF publication follows the pinned public sifman
+sceSifGetSMFlag/sceSifSetSMFlag interface, which has no peer-readiness precondition.
+The native service retains published local state without creating a peer.

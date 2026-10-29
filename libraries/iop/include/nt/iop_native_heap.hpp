@@ -10,10 +10,10 @@ namespace nt::iop {
 // the converted program's data arena; no guest allocator code or tables execute.
 class NativeHeapServices final : public NativeServices {
 public:
-    NativeHeapServices(std::uint32_t memory_size,std::uint32_t heap_begin,std::uint32_t heap_end)
-        : memory_size_(memory_size) {
+    NativeHeapServices(std::uint32_t memory_size,std::uint32_t heap_begin,std::uint32_t heap_end,std::uint32_t alignment=256)
+        : memory_size_(memory_size), alignment_(alignment) {
         if (!heap_begin || heap_begin>heap_end || heap_end>memory_size || memory_size>0x200000 ||
-            ((memory_size|heap_begin|heap_end)&255))
+            (alignment<8 || alignment>256 || (alignment&(alignment-1)) || ((memory_size|heap_begin|heap_end)&(alignment-1))))
             throw std::invalid_argument("Native heap requires aligned, bounded arena and reserved low memory");
         blocks_.emplace(0,Block{heap_begin,State::reserved});
         if (heap_begin<heap_end) blocks_.emplace(heap_begin,Block{heap_end-heap_begin,State::free});
@@ -46,12 +46,12 @@ public:
 private:
     enum class State { free, allocated, reserved };
     struct Block { std::uint32_t size; State state; };
-    std::uint32_t memory_size_;
+    std::uint32_t memory_size_,alignment_;
     std::map<std::uint32_t,Block> blocks_;
 
     std::uint32_t allocate(std::uint32_t mode,std::uint32_t size,std::uint32_t requested) {
-        if (mode>2 || !size || size>memory_size_ || (mode==2 && (requested&255))) return 0;
-        size=(size+255)&~255U;
+        if (mode>2 || !size || size>memory_size_ || (mode==2 && (requested&(alignment_-1)))) return 0;
+        size=(size+alignment_-1)&~(alignment_-1);
         auto chosen=blocks_.end();
         std::uint32_t start=0;
         for (auto it=blocks_.begin();it!=blocks_.end();++it) {

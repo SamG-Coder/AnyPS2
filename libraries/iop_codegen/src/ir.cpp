@@ -1,5 +1,6 @@
 #include <nt/iop_ir.hpp>
 #include "constants.hpp"
+#include "jump_tables.hpp"
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -8,10 +9,10 @@ namespace nt::iop_codegen::ir {
 namespace {
 std::optional<Operation> native_operation(const elf::IopImport& import) {
     // Minor revisions share an ordinal ABI; only explicitly implemented entries bind.
-    if (import.library=="loadcore" && (import.version>>8)==1 && ((import.ordinal>=6 && import.ordinal<=9) || import.ordinal==11 || import.ordinal==12 || import.ordinal==27))
+    if (import.library=="loadcore" && (import.version>>8)==1 && ((import.ordinal>=6 && import.ordinal<=10) || import.ordinal==11 || import.ordinal==12 || import.ordinal==20 || import.ordinal==27))
         return Operation::native_import;
     if (import.library=="intrman" && (import.version>>8)==1 &&
-        ((import.ordinal>=4 && import.ordinal<=9) || import.ordinal==17 || import.ordinal==18 || import.ordinal==23))
+        ((import.ordinal>=4 && import.ordinal<=9) || import.ordinal==14 || import.ordinal==17 || import.ordinal==18 || import.ordinal==23))
         return Operation::native_import;
     if (import.library=="sifcmd" && (import.version>>8)==1 && (import.ordinal==4 || (import.ordinal>=6 && import.ordinal<=14) || import.ordinal==17 || import.ordinal==19 || import.ordinal==20 || import.ordinal==21 || import.ordinal==22 || import.ordinal==23 || import.ordinal==24 || import.ordinal==25 || import.ordinal==28 || import.ordinal==29)) return Operation::native_import;
     if (import.library=="stdio" && (import.version>>8)==1 && import.ordinal==4) return Operation::native_import;
@@ -19,7 +20,7 @@ std::optional<Operation> native_operation(const elf::IopImport& import) {
         (import.ordinal==2 || (import.ordinal>=5 && import.ordinal<=8) || (import.ordinal>=21 && import.ordinal<=27) || (import.ordinal>=29 && import.ordinal<=32)))
         return Operation::native_import;
     if (import.library=="thbase" && (import.version>>8)==1 &&
-        ((import.ordinal>=4 && import.ordinal<=9) || import.ordinal==14 || import.ordinal==20 || import.ordinal==22 || import.ordinal==41 || (import.ordinal>=33 && import.ordinal<=38) || (import.ordinal>=24 && import.ordinal<=28)))
+        ((import.ordinal>=4 && import.ordinal<=10) || import.ordinal==14 || import.ordinal==20 || import.ordinal==21 || import.ordinal==22 || import.ordinal==41 || (import.ordinal>=33 && import.ordinal<=38) || (import.ordinal>=24 && import.ordinal<=28)))
         return Operation::native_import;
     if ((import.library=="thsemap" || import.library=="thmsgbx") && (import.version>>8)==1 && ((import.ordinal>=4 && import.ordinal<=9) || import.ordinal==11 || import.ordinal==12)) return Operation::native_import;
     if (import.library=="thevent" && (import.version>>8)==1 &&
@@ -29,6 +30,7 @@ std::optional<Operation> native_operation(const elf::IopImport& import) {
         return Operation::native_import;
     if (import.library=="sysmem" && (import.version>>8)==1 && ((import.ordinal>=4 && import.ordinal<=10) || import.ordinal==14))
         return Operation::native_import;
+    if (import.library=="heaplib" && (import.version>>8)==1 && import.ordinal>=4 && import.ordinal<=8) return Operation::native_import;
     if (import.library!="sysclib" || (import.version>>8)!=1) return {};
     switch (import.ordinal) {
     case 8: case 17: case 18: case 19: case 20: case 21: case 22: case 23: case 25: case 26: case 27: case 29: case 30: case 32: case 36: case 41: return Operation::native_import;
@@ -148,7 +150,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         }
         Instruction call; call.address=module.base+import.offset;
         call.operation=*operation; call.flow=Flow::native_return;
-        call.immediate=import.ordinal|(!host ? 0x20000U : import.library=="loadcore" ? 0x10000U : import.library=="ioman" ? 0x30000U : import.library=="intrman" ? 0x40000U : import.library=="thevent" ? 0x50000U : import.library=="thbase" ? 0x60000U : import.library=="sifman" ? 0x70000U : import.library=="stdio" ? 0x80000U : import.library=="sifcmd" ? 0x90000U : import.library=="thsemap" ? 0xa0000U : import.library=="thmsgbx" ? 0xb0000U : import.library=="sysclib" ? 0xc0000U : 0U);
+        call.immediate=import.ordinal|(!host ? 0x20000U : import.library=="loadcore" ? 0x10000U : import.library=="ioman" ? 0x30000U : import.library=="intrman" ? 0x40000U : import.library=="thevent" ? 0x50000U : import.library=="thbase" ? 0x60000U : import.library=="sifman" ? 0x70000U : import.library=="stdio" ? 0x80000U : import.library=="sifcmd" ? 0x90000U : import.library=="thsemap" ? 0xa0000U : import.library=="thmsgbx" ? 0xb0000U : import.library=="sysclib" ? 0xc0000U : import.library=="heaplib" ? 0xd0000U : 0U);
         native_imports.emplace(call.address,call);
         if (!host) {
             auto bound=import; bound.offset+=module.base; bound.table_offset+=module.base;
@@ -162,6 +164,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
     for (const auto& table : elf::iop_exports(module))
         pending.insert(table.functions.begin(),table.functions.end());
     std::map<std::uint32_t,Constants> states;
+    std::set<std::uint32_t> table_transfers;
     for (const auto root : pending) states.emplace(root,Constants{});
     const auto enqueue=[&](std::uint32_t target,const Constants& state) {
         const auto [at,inserted]=states.emplace(target,state);
@@ -175,6 +178,14 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         const auto target=physical_address(address);
         if (external_callbacks && (target<module.base || target-module.base>=extent)) external_callbacks->insert(target);
         else enqueue(target,Constants{});
+    };
+    const auto discover_stack_thread=[&](const Constants& input) {
+        if (!input.stack_offsets[4]) return;
+        const auto slot=std::int64_t(*input.stack_offsets[4])+8;
+        if (slot>std::numeric_limits<std::int32_t>::max()) return;
+        const auto stored=input.stack_words.find(static_cast<std::int32_t>(slot));
+        if (stored!=input.stack_words.end() && stored->second)
+            for (const auto entry : *stored->second) if (entry) discover_callback(entry);
     };
     const auto append=[&](std::uint32_t pc) {
         if (pc%4 || pc<module.base || pc-module.base>=extent)
@@ -217,7 +228,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                 for (const auto address : *input.registers[4]) if (address) discover_callback(address);
             if (instruction.operation==Operation::native_import && instruction.immediate==0x70020 && input.registers[6])
                 for (const auto address : *input.registers[6]) if (address) discover_callback(address);
-            if (instruction.operation==Operation::native_import && instruction.immediate==0xc0012 && input.registers[4])
+            if (instruction.operation==Operation::native_import && (instruction.immediate==0xc0012 || instruction.immediate==0x4000e || instruction.immediate==0x10014) && input.registers[4])
                 for (const auto address : *input.registers[4]) if (address) discover_callback(address);
             if (instruction.operation==Operation::native_import && instruction.immediate==0x30014 && input.registers[4]) {
                 const auto initial_word=[&](std::uint32_t address)->std::optional<std::uint32_t> {
@@ -249,6 +260,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                     }
                 }
             }
+            if (instruction.operation==Operation::native_import && instruction.immediate==0x60004) discover_stack_thread(input);
             if (instruction.operation==Operation::native_import && instruction.immediate==0x60004 && input.registers[4]) {
                 for (const auto address : *input.registers[4]) {
                     const auto descriptor=physical_address(address);
@@ -277,6 +289,9 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
             // unresolved transfers before either backend emits any output.
             std::set<std::uint32_t> physical;
             if (targets) for (const auto target : *targets) physical.insert(physical_address(target));
+            else if (const auto table=initial_jump_table(module,data_modules,pc,decode)) {
+                physical=*table; table_transfers.insert(pc);
+            }
             instruction.targets.assign(physical.begin(),physical.end());
             program.instructions.at(pc).targets=instruction.targets;
         }
@@ -285,6 +300,11 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         if (delay.flow!=Flow::sequential)
             throw std::runtime_error("IOP conversion: branch in delay slot at "+hex32(pc+4));
         const auto successor=transfer(delay,after);
+        // Inspect each direct call before unrelated callers merge at the import.
+        if (instruction.flow==Flow::call || instruction.flow==Flow::direct) {
+            const auto target=native_imports.find(instruction.target);
+            if (target!=native_imports.end() && target->second.immediate==0x60004) discover_stack_thread(successor);
+        }
         if (indirect) {
             for (const auto target : instruction.targets) enqueue(target,successor);
         } else if (instruction.flow!=Flow::return_register) enqueue(instruction.target,successor);
@@ -293,7 +313,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
     }
     std::ostringstream indirect_errors;
     for (const auto& [pc,i] : program.instructions)
-        if ((i.flow==Flow::indirect || i.flow==Flow::indirect_call) && !states.at(pc).registers[i.source])
+        if ((i.flow==Flow::indirect || i.flow==Flow::indirect_call) && !states.at(pc).registers[i.source] && !table_transfers.contains(pc))
             indirect_errors<<"\n  unresolved indirect transfer at "<<hex32(pc)<<" through r"<<i.source;
     if (!indirect_errors.str().empty())
         throw std::runtime_error("IOP conversion: indirect target sets are unknown or exceed the 16-value analysis bound:"+indirect_errors.str());

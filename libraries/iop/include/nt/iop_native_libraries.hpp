@@ -60,8 +60,8 @@ public:
                     return {NativeServiceStatus::transferred,libraries_[*bindings_[index]].functions[request.selector]};
             return {};
         }
-        if (request.kind!=NativeServiceKind::loadcore || request.selector<6 || (request.selector>9 && request.selector!=11 && request.selector!=27)) return {};
-        if (request.selector==27 && !request.arguments[0]) return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-214)};
+        if (request.kind!=NativeServiceKind::loadcore || request.selector<6 || (request.selector>11 && request.selector!=27)) return {};
+        if ((request.selector==10 || request.selector==27) && !request.arguments[0]) return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-214)};
         const auto address=ram_offset(request.arguments[0],4,ram.size());
         if (!address) return {NativeServiceStatus::address_fault,0,request.arguments[0]};
         if (request.selector==11) {
@@ -91,7 +91,7 @@ public:
         }
         const auto found=std::find_if(libraries_.begin(),libraries_.end(),[&](const auto& library) { return library.address==*address; });
         const auto reply=[](std::int32_t value) { return NativeServiceReply{NativeServiceStatus::returned,static_cast<std::uint32_t>(value)}; };
-        if (found==libraries_.end()) return reply(request.selector==6 ? -214 : -213);
+        if (found==libraries_.end()) return reply((request.selector==6 || request.selector==10) ? -214 : -213);
         const auto index=static_cast<std::size_t>(found-libraries_.begin());
         if (request.selector==7) {
             if (!active_[index]) return reply(-213);
@@ -117,9 +117,22 @@ public:
             modes_[index]=mode;
             return reply(0);
         }
+        if (request.selector==10) {
+            if (active_[index]) return reply(-214);
+            if (nt_iop_native_code_word(*address+8)) return {NativeServiceStatus::code_write,0,request.arguments[0]+8};
+            modes_[index]|=1;
+            store_native_word(ram,*address+8,found->version|(std::uint32_t(modes_[index])<<16));
+            active_[index]=true;
+            return reply(0);
+        }
         for (std::size_t other=0;other<libraries_.size();++other)
             if (active_[other] && libraries_[other].name==found->name && (libraries_[other].version>>8)==(found->version>>8) &&
                 libraries_[other].version>=found->version) return reply(-212);
+        if (modes_[index]&1) {
+            if (nt_iop_native_code_word(*address+8)) return {NativeServiceStatus::code_write,0,request.arguments[0]+8};
+            modes_[index]&=static_cast<std::uint16_t>(~1U);
+            store_native_word(ram,*address+8,found->version|(std::uint32_t(modes_[index])<<16));
+        }
         active_[index]=true;
         for (std::size_t client=0;client<imports_.size();++client)
             if (enabled_[client]) bindings_[client]=select(imports_[client]);
@@ -145,7 +158,7 @@ private:
         std::optional<std::size_t> selected;
         for (std::size_t index=0;index<libraries_.size();++index) {
             const auto& library=libraries_[index];
-            if (active_[index] && library.name==import.name && (library.version>>8)==(import.version>>8) &&
+            if (active_[index] && !(modes_[index]&1) && library.name==import.name && (library.version>>8)==(import.version>>8) &&
                 import.ordinal<library.functions.size() && (!selected || library.version>libraries_[*selected].version)) selected=index;
         }
         return selected;

@@ -1,7 +1,9 @@
 #include <nt/iop_native.hpp>
 #include <nt/iop_native_heap.hpp>
+#include <nt/iop_native_heaplib.hpp>
 #include <nt/iop_native_libraries.hpp>
 #include <nt/iop_native_boot.hpp>
+#include <nt/iop_native_boot_callbacks.hpp>
 #include <nt/iop_native_disc.hpp>
 #include <nt/iop_native_drivers.hpp>
 #include <nt/iop_native_sysclib.hpp>
@@ -53,7 +55,7 @@ public:
 int main() {
     try {
         using namespace nt::iop;
-        // No guest instruction bytes are present in RAM. Only generated C++ runs.
+        // No guest instruction bytes are present in RAM. Only LLVM-compiled code runs.
         for (const auto alias : {0U,0x80000000U,0xa0000000U}) for (const auto budget : {1U,2U,7U,100U}) {
             std::vector<std::uint8_t> ram(0x10000);
             store_native_word(ram,0x2000,100);
@@ -67,6 +69,90 @@ int main() {
                   load_native_word(ram,0x2004)==106,"Compiled IOP flow, memory, alias or load-delay result differs");
         }
         std::vector<std::uint8_t> ram(0x10000);
+        {
+            NativeHeapServices backing(0x10000,0x6000,0x9000);
+            NativeHeapLibraryServices heaps(backing);
+            const auto call=[&](unsigned ordinal,std::uint32_t a=0,std::uint32_t b=0) {
+                auto cpu=initial(); cpu.pc=0x1ac0+(ordinal-4)*8; cpu.registers[4]=a; cpu.registers[5]=b;
+                check(run_native(nt_iop_generated_run,cpu,ram,1,&heaps).reason==NativeStop::budget && cpu.pc==0x5000,
+                      "Compiled heaplib import failed");
+                return cpu.registers[2];
+            };
+            const auto available=[&] { return backing.invoke({8,{},NativeServiceKind::sysmem},ram).value; };
+            const auto original=available();
+            const auto fixed=call(4,512,0),growing=call(4,512,3);
+            check(fixed==0x6000 && growing==0x8e00 && call(8,fixed)==472 && available()==original-1024,
+                  "Heap creation lost placement, backing ownership or capacity");
+            const auto first=call(6,fixed,9),second=call(6,fixed,0);
+            check(first && second && first%8==0 && second%8==0 && first!=second && call(8,fixed)==432,
+                  "Heap allocation lost eight-byte accounting or minimum allocation");
+            store_native_word(ram,first,0x12345678);
+            check(call(7,growing,first)==0xffffffff && load_native_word(ram,first)==0x12345678 &&
+                  call(7,fixed,first+8)==0xffffffff,"Heap free accepted another arena or an interior pointer");
+            check(call(7,fixed,first)==0 && call(7,fixed,first)==0xffffffff && call(7,fixed,second)==0 &&
+                  call(8,fixed)==472,"Heap free did not coalesce or rejected repeated-free detection");
+            check(call(6,fixed,600)==0,"Fixed heap grew silently");
+            const auto large=call(6,growing,600);
+            check(large && available()==original-1792 && call(8,growing)==600,"Growing heap accounting differs");
+            check(call(7,growing,large)==0 && available()==original-1024 && call(8,growing)==472,
+                  "Empty growth block was not returned to the shared allocator");
+            check(call(6,growing,0xffffffff)==0 && call(8,0)==std::uint32_t(-4),"Invalid heap request wrapped or succeeded");
+            auto truncated=initial(); truncated.pc=0x1ac8; truncated.registers[4]=fixed;
+            check(run_native(nt_iop_generated_run,truncated,std::span(ram).first(0x8000),1,&heaps).reason==NativeStop::address_fault &&
+                  !truncated.executed && available()==original-1024,"Truncated arena partially deleted a heap");
+            call(6,fixed,16); call(5,fixed); call(5,growing);
+            check(available()==original && call(7,fixed,first)==std::uint32_t(-4),"Heap deletion leaked blocks or retained a handle");
+        }
+        {
+            NativeHeapServices callback_heap(0x10000,0xd000,0xe000);
+            NativeBootCallbacks callbacks(callback_heap);
+            NativeServiceRouter services({&callbacks});
+            store_native_word(ram,0xc700,0xc800); store_native_word(ram,0xc704,0x12345678);
+            for (const auto priority : {3U,1U,0U,2U}) {
+                auto registration=initial(); registration.pc=0x1a70; registration.registers[5]=priority;
+                registration.registers[6]=0xc704; registration.registers[28]=priority*16;
+                const auto registered=run_native(nt_iop_generated_run,registration,ram,4,&services);
+                check(registered.reason==NativeStop::budget &&
+                      registration.registers[2]==1 && load_native_word(ram,0xc704)==0x12345678,
+                      "Deferred startup callback executed or wrote immediate status at registration");
+            }
+            Cpu completion; completion.registers[29]=0xf000;
+            NativeResult result{};
+            for (unsigned slice=0;slice<100 && !callbacks.complete();++slice)
+                result=callbacks.finish_startup(nt_iop_generated_run,completion,ram,1,services);
+            check(callbacks.complete() && result.reason==NativeStop::unmapped_code && completion.registers[29]==0xf000,
+                  "Startup callback sequence failed to complete across slices");
+            for (unsigned i=0;i<4;++i) check(load_native_word(ram,0xc800+i*12)==i*16 &&
+                load_native_word(ram,0xc804+i*12)==1 && load_native_word(ram,0xc808+i*12)==0x2ec3,
+                "Startup callback priority, GP, delayed flag or next record differs");
+            auto immediate=initial(); immediate.pc=0x1a70; immediate.registers[6]=0xc704; immediate.registers[28]=99;
+            check(run_native(nt_iop_generated_run,immediate,ram,64,&services).reason==NativeStop::unmapped_code &&
+                  immediate.pc==0x5000 && immediate.registers[2]==0 && load_native_word(ram,0xc704)==std::uint32_t(-7) &&
+                  load_native_word(ram,0xc830)==99 && load_native_word(ram,0xc834)==0 && load_native_word(ram,0xc838)==1 &&
+                  callback_heap.invoke({8,{},NativeServiceKind::sysmem},ram).value==0x1000,
+                  "Immediate startup callback lost result, context or scratch ownership");
+            auto invalid=initial(); invalid.pc=0x1534; invalid.registers[4]=0x4000;
+            check(run_native(nt_iop_generated_run,invalid,ram,1,&services).reason==NativeStop::unmapped_code && !invalid.executed,
+                  "Uncompiled boot callback was accepted");
+            invalid.registers[4]=0x2ec0; invalid.registers[6]=0x1000;
+            check(run_native(nt_iop_generated_run,invalid,ram,1,&services).reason==NativeStop::code_write && !invalid.executed &&
+                  callback_heap.invoke({8,{},NativeServiceKind::sysmem},ram).value==0x1000,
+                  "Invalid immediate status destination allocated or ran a callback");
+        }
+        for (unsigned i=0;i<3;++i) store_native_word(ram,0x1fb0+i*4,0x2f68+i*8);
+        for (const auto index : {0U,1U,2U,3U,0xffffffffU}) {
+            auto selected=initial(); selected.pc=0x1fc0; selected.registers[4]=index;
+            check(nt_iop_generated_run(selected,ram,64).reason==NativeStop::unmapped_code && selected.pc==0x5000 &&
+                  selected.registers[2]==(index<3 ? (index+1)*11 : 99),"Compiled switch table selected the wrong branch");
+        }
+        store_native_word(ram,0x1fb0,0x17c0); // Compiled code, but outside this switch's candidate set.
+        auto changed_switch=initial(); changed_switch.pc=0x1fc0; changed_switch.registers[4]=0;
+        check(nt_iop_generated_run(changed_switch,ram,64).reason==NativeStop::unmapped_code && changed_switch.pc==0x1fe0,
+              "Modified jump table escaped its runtime target guard");
+        store_native_word(ram,0x1fb0,0x80002f68);
+        changed_switch=initial(); changed_switch.pc=0x1fc0; changed_switch.registers[4]=0;
+        check(nt_iop_generated_run(changed_switch,ram,64).reason==NativeStop::unmapped_code && changed_switch.pc==0x5000 &&
+              changed_switch.registers[2]==11,"Aliased switch target did not reach its compiled branch");
         const NativeLibrarySpec declared{0x1214,0x100,"fixture",{0x10f0,0x1108,0x1140}};
         const NativeLibrarySpec upgraded{0x1440,0x102,"fixture",{0x1360}};
         const auto declaration=[&](const NativeLibrarySpec& library) {
@@ -178,7 +264,7 @@ int main() {
         declaration(worker);
         NativeLibraryServices linked({worker},{{0x13dc,0x13c8,"worker",0x103,0}});
         const auto control=[&](unsigned ordinal,std::uint32_t address,std::uint32_t size=0) {
-            auto cpu=initial(); cpu.pc=ordinal==6 ? 0x13b0 : ordinal==7 ? 0x13b8 : ordinal==8 ? 0x1418 : 0x1420;
+            auto cpu=initial(); cpu.pc=ordinal==6 ? 0x13b0 : ordinal==7 ? 0x13b8 : ordinal==8 ? 0x1418 : ordinal==10 ? 0x152c : 0x1420;
             cpu.registers[4]=address; cpu.registers[5]=size;
             const auto stop=run_native(nt_iop_generated_run,cpu,ram,1,&linked);
             check(stop.reason==NativeStop::budget && cpu.executed==1,"Compiled link control did not return");
@@ -205,6 +291,34 @@ int main() {
         check(client.registers[2]==16 && client.executed==4 && client.pc==0x5000,
               "Linked native transfer lost a pending argument or return destination");
         check(control(9,0x13c8,36)==0 && control(7,worker.address)==0,"Native import lifecycle did not release cleanly");
+        check(control(10,worker.address)==0 && load_native_word(ram,worker.address+8)==0x10100 &&
+              linked.resolve("worker",0x100,0)==0xa000,"Non-auto-link registration did not expose compiled exports");
+        check(control(8,0x13c8,36)==0xffffffff,"Explicit linking selected a non-auto-link provider");
+        client=initial(); client.pc=0x13dc;
+        check(run_native(nt_iop_generated_run,client,ram,1,&linked).reason==NativeStop::import_request && !client.executed,
+              "Non-auto-link registration bound an import");
+        check(control(10,worker.address)==static_cast<std::uint32_t>(-214) &&
+              control(10,0)==static_cast<std::uint32_t>(-214) && control(10,0xb800)==static_cast<std::uint32_t>(-214),
+              "Non-auto-link registration accepted an active, null or unknown declaration");
+        auto nonauto_query=initial(); nonauto_query.pc=0x1514; nonauto_query.registers[4]=worker.address;
+        check(run_native(nt_iop_generated_run,nonauto_query,ram,1,&linked).reason==NativeStop::budget &&
+              nonauto_query.registers[2]==worker.address+20,"Query hid a non-auto-link export table");
+        check(control(7,worker.address)==0 && control(6,worker.address)==0 &&
+              load_native_word(ram,worker.address+8)==0x100 && control(8,0x13c8,36)==0,
+              "Normal registration did not clear the non-auto-link flag after release");
+        client=initial(); client.pc=0x13dc; client.registers[4]=12;
+        check(run_native(nt_iop_generated_run,client,ram,10,&linked).reason==NativeStop::unmapped_code &&
+              client.registers[2]==17,"Re-enabled provider did not execute compiled code");
+        check(control(9,0x13c8,36)==0 && control(7,worker.address)==0,"Non-auto-link lifecycle leaked bindings");
+        store_native_word(ram,worker.address+20,0x4000);
+        check(control(10,worker.address)==static_cast<std::uint32_t>(-214) &&
+              !linked.resolve("worker",0x100,0) && load_native_word(ram,worker.address+8)==0x100,
+              "Malformed non-auto-link declaration partially activated or changed modes");
+        store_native_word(ram,worker.address+20,worker.functions[0]);
+        auto short_registration=initial(); short_registration.pc=0x152c; short_registration.registers[4]=worker.address;
+        check(run_native(nt_iop_generated_run,short_registration,std::span(ram).first(worker.address+24),1,&linked).reason==NativeStop::address_fault &&
+              !short_registration.executed && !linked.resolve("worker",0x100,0),
+              "Truncated non-auto-link declaration became visible");
         NativeLibraryServices transactional({worker,{0xa060,0x100,"other",{0x1360}}},
             {{0x13dc,0x13c8,"worker",0x103,0},{0x14a0,0x1480,"other",0x100,0}});
         check(transactional.invoke({6,{worker.address,0,0,0},NativeServiceKind::loadcore},ram).value==0,
@@ -226,6 +340,27 @@ int main() {
             check(stop.reason==NativeStop::budget && state.executed==1,"Compiled interrupt service did not return");
             return state.registers[2];
         };
+        check(intr_call(9)==0,"Invocation fixture could not enable delivery");
+        auto invocation=initial(); invocation.pc=0x17a0;
+        invocation.registers[5]=0xc800; invocation.registers[6]=19; invocation.registers[7]=23;
+        invocation.registers[28]=0x1234; invocation.registers[29]=0xe000;
+        const auto invocation_saved=invocation;
+        check(run_native(nt_iop_generated_run,invocation,ram,8,&interrupts).reason==NativeStop::budget &&
+              invocation.pc==0x17c0 && !interrupts.delivery_enabled(),"Native invocation did not enter its discovered callback");
+        auto competing=initial(); competing.pc=0x175c; competing.registers[4]=0x17c0;
+        check(run_native(nt_iop_generated_run,competing,ram,1,&interrupts).reason==NativeStop::import_request && !competing.executed,
+              "Concurrent invocation replaced the active continuation");
+        NativeResult invocation_stop{};
+        do { invocation_stop=run_native(nt_iop_generated_run,invocation,ram,1,&interrupts); }
+        while (invocation_stop.reason==NativeStop::budget);
+        check(invocation_stop.reason==NativeStop::unmapped_code && invocation.pc==0x5000 && invocation.registers[2]==42 &&
+              load_native_word(ram,0xc800)==42 && interrupts.delivery_enabled() &&
+              invocation.registers[28]==invocation_saved.registers[28] && invocation.registers[29]==invocation_saved.registers[29] &&
+              invocation.native_call_owner==invocation_saved.native_call_owner,"Native invocation lost arguments, result or caller state");
+        auto bad_invocation=initial(); bad_invocation.pc=0x175c; bad_invocation.registers[4]=0x4000;
+        check(run_native(nt_iop_generated_run,bad_invocation,ram,1,&interrupts).reason==NativeStop::unmapped_code &&
+              !bad_invocation.executed && interrupts.delivery_enabled(),"Unknown callback changed native delivery state");
+        check(intr_call(8)==0,"Invocation fixture could not restore disabled delivery");
         auto registration=initial(); registration.pc=0x1b00;
         check(run_native(nt_iop_generated_run,registration,ram,32,&interrupts).reason==NativeStop::unmapped_code &&
               registration.pc==0x5000 && registration.executed==11 && registration.registers[2]==0,
@@ -666,6 +801,86 @@ int main() {
                   mbx_call(7,fifo,0xc260).second==static_cast<std::uint32_t>(-100),
                   "FIFO mailbox reordered messages by priority or accepted incorrect interrupt context");
         }
+        for (const auto entry : {0x19bcU,0x1a60U}) {
+            NativeHeapServices stack_heap(0x10000,0xd000,0xe000);
+            NativeInterruptServices stack_interrupts(0xf000);
+            NativeThreadServices stack_threads(stack_interrupts,&stack_heap);
+            NativeServiceRouter stack_services({&stack_threads,&stack_interrupts});
+            store_native_word(ram,0xc400,0); store_native_word(ram,0xc404,0);
+            store_native_word(ram,0xc408,entry); store_native_word(ram,0xc40c,0x200); store_native_word(ram,0xc410,1);
+            auto create_stack=initial(); create_stack.pc=0x1944; create_stack.registers[4]=0xc400;
+            check(run_native(nt_iop_generated_run,create_stack,ram,1,&stack_services).reason==NativeStop::budget,
+                  "Stack-check worker creation failed");
+            const auto id=create_stack.registers[2];
+            auto start_stack=initial(); start_stack.pc=0x1954; start_stack.registers[4]=id;
+            check(run_native(nt_iop_generated_run,start_stack,ram,1,&stack_services).reason==NativeStop::budget,
+                  "Stack-check worker start failed");
+            const auto result=stack_threads.run(nt_iop_generated_run,ram,32,stack_services);
+            if (entry==0x19bc) check(result.reason==NativeStop::unmapped_code && stack_threads.state(id).registers[2]==0x1f0,
+                                       "Stack query did not report the owned stack's remaining bytes");
+            else check(result.reason==NativeStop::address_fault && result.address==0xde70 &&
+                       stack_threads.state(id).pc==0x19bc && stack_threads.state(id).executed==3,
+                       "Low-stack check retired or fabricated a successful result");
+            auto no_stack=initial(); no_stack.pc=0x19bc;
+            check(run_native(nt_iop_generated_run,no_stack,ram,1,&stack_services).reason==NativeStop::import_request && !no_stack.executed,
+                  "Stack query inferred ownership for an unrelated continuation");
+            no_stack.interrupt_depth=1;
+            check(run_native(nt_iop_generated_run,no_stack,ram,1,&stack_services).reason==NativeStop::budget && no_stack.registers[2]==0,
+                  "Interrupt-context stack query did not return the public zero result");
+        }
+        for (const auto kind : {NativeServiceKind::thevent,NativeServiceKind::thsemap,NativeServiceKind::thmsgbx}) {
+            NativeInterruptServices terminate_interrupts(0xf000);
+            NativeThreadServices terminate_threads(terminate_interrupts);
+            NativeEventServices event_queue(&terminate_threads);
+            NativeSemaphoreServices semaphore_queue(&terminate_threads);
+            NativeMailboxServices mailbox_queue(&terminate_threads);
+            NativeServices* queue=kind==NativeServiceKind::thevent ? static_cast<NativeServices*>(&event_queue) :
+                kind==NativeServiceKind::thsemap ? static_cast<NativeServices*>(&semaphore_queue) : static_cast<NativeServices*>(&mailbox_queue);
+            NativeServiceRouter services({&terminate_threads,queue});
+            store_native_word(ram,0xc400,kind==NativeServiceKind::thevent ? 2 : 0);
+            store_native_word(ram,0xc404,0); store_native_word(ram,0xc408,0); store_native_word(ram,0xc40c,1);
+            const auto object=queue->invoke({4,{0xc400},kind},ram).value;
+            auto waiter=initial(); waiter.registers[31]=0xfffffffc;
+            waiter.pc=kind==NativeServiceKind::thevent ? 0x1844 : kind==NativeServiceKind::thsemap ? 0x2734 : 0x27b4;
+            waiter.registers[4]=kind==NativeServiceKind::thmsgbx ? 0xc500 : object;
+            waiter.registers[5]=kind==NativeServiceKind::thmsgbx ? object : 8;
+            waiter.registers[6]=0; waiter.registers[7]=0xc500;
+            const auto cancelled=terminate_threads.admit(waiter);
+            if (kind==NativeServiceKind::thmsgbx) waiter.registers[4]=0xc504;
+            else waiter.registers[7]=0xc504;
+            const auto survivor=terminate_threads.admit(waiter);
+            check(terminate_threads.run(nt_iop_generated_run,ram,32,services).reason==NativeStop::thread_wait,
+                  "Termination fixture did not enter object waits");
+            store_native_word(ram,0xc500,0x12345678);
+            auto terminate=initial(); terminate.pc=0x19c4; terminate.registers[4]=cancelled;
+            check(run_native(nt_iop_generated_run,terminate,ram,1,&services).reason==NativeStop::budget && terminate.registers[2]==0,
+                  "Compiled termination did not detach its object wait");
+            const auto signal=kind==NativeServiceKind::thmsgbx ? 0xc600U : 8U;
+            store_native_word(ram,0xc600,0); store_native_word(ram,0xc604,0);
+            check(queue->invoke({6,{object,signal},kind},ram).status==NativeServiceStatus::returned &&
+                  terminate_threads.run(nt_iop_generated_run,ram,32,services).reason==NativeStop::unmapped_code &&
+                  terminate_threads.state(survivor).registers[2]==0 && terminate_threads.state(cancelled).executed==1 &&
+                  load_native_word(ram,0xc500)==0x12345678,"Signal resumed or wrote output for a terminated waiter");
+            terminate=initial(); terminate.pc=0x19c4; terminate.registers[4]=cancelled;
+            check(run_native(nt_iop_generated_run,terminate,ram,1,&services).reason==NativeStop::budget &&
+                  terminate.registers[2]==std::uint32_t(-413),"Repeated termination did not report dormant status");
+            check(terminate_threads.run(nt_iop_generated_run,ram,32,services).reason==NativeStop::thread_wait,
+                  "Terminated continuation remained scheduled");
+        }
+        {
+            NativeHeapServices owned(0x10000,0xd000,0xe000);
+            NativeInterruptServices interrupts(0xf000);
+            NativeThreadServices threads(interrupts,&owned);
+            auto creator=initial(); creator.pc=0x1f60; creator.registers[29]=0xc900;
+            check(run_native(nt_iop_generated_run,creator,ram,64,&threads).reason==NativeStop::unmapped_code &&
+                  creator.pc==0x5000 && creator.registers[29]==0xc900 && creator.registers[2]<0x80000000,
+                  "Stack-built thread descriptor failed to discover its compiled entry");
+            auto start=initial(); start.pc=0x1954; start.registers[4]=creator.registers[2];
+            check(run_native(nt_iop_generated_run,start,ram,1,&threads).reason==NativeStop::budget &&
+                  threads.run(nt_iop_generated_run,ram,32,threads).reason==NativeStop::unmapped_code &&
+                  threads.state(creator.registers[2]).registers[2]==73,
+                  "Stack-discovered worker did not execute native code");
+        }
         NativeHeapServices thread_heap(0x10000,0xd000,0xe000);
         NativeInterruptServices lifecycle_interrupts(0xf000);
         NativeThreadServices lifecycle(lifecycle_interrupts,&thread_heap);
@@ -686,6 +901,13 @@ int main() {
               load_native_word(ram,0xc38c)==0xa000 && load_native_word(ram,0xc390)==0xde00 &&
               load_native_word(ram,0xc394)==0x200 && load_native_word(ram,0xc39c)==1,
               "Created-thread status lost descriptor metadata or stack ownership");
+        auto prepare_termination=initial(); prepare_termination.pc=0x1954; prepare_termination.registers[4]=worker_id;
+        check(run_native(nt_iop_generated_run,prepare_termination,ram,1,&lifecycle_services).reason==NativeStop::budget,
+              "Termination fixture did not start its owned worker");
+        auto terminate_worker=initial(); terminate_worker.pc=0x19c4; terminate_worker.registers[4]=worker_id;
+        check(run_native(nt_iop_generated_run,terminate_worker,ram,1,&lifecycle_services).reason==NativeStop::budget &&
+              terminate_worker.registers[2]==0 && thread_heap.invoke({8,{},NativeServiceKind::sysmem},ram).value==0xe00,
+              "Terminating a ready worker released its reusable stack");
         auto starter=initial(); starter.pc=0x1954; starter.registers[31]=0xfffffffc;
         starter.registers[4]=worker_id; starter.registers[5]=42;
         const auto starter_id=lifecycle.admit(starter);
@@ -983,7 +1205,14 @@ int main() {
         };
         check(link_call(29).second.registers[2]==0 && link_call(5).first.reason==NativeStop::import_request,
               "Disconnected SIF control fabricated an initialized link");
+        check(link_call(23).second.registers[2]==0 && link_call(24,0x40000).second.registers[2]==0x40000 &&
+              link_call(24,0x80000).second.registers[2]==0xc0000 && link_call(23).second.registers[2]==0xc0000 &&
+              link_call(5).first.reason==NativeStop::import_request && link_call(21).first.reason==NativeStop::import_request &&
+              link_call(29).second.registers[2]==0 && !link.ready(),
+              "Local readiness publication fabricated a peer or lost flags before connection");
         link.publish_main(0x120,0x20000);
+        check(link_call(23).second.registers[2]==0xc0000,"Peer connection erased previously published local readiness");
+        link.acknowledge_sub(0xc0000);
         check(link_call(5).first.reason==NativeStop::import_request && link_call(29).second.registers[2]==0,
               "SIF initialization ignored the peer readiness handshake");
         link.publish_main(0x120,0x10000);

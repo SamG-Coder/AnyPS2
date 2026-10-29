@@ -1747,3 +1747,86 @@ compiled target checks. Active libraries retain their current bindings. Null and
 unknown tables fail, malformed declarations cannot change flags, and truncated
 memory/code destinations stop before mutation. Native reboot execution and policy
 application remain unfinished; this service implements only the metadata setter.
+
+Non-auto-link export registration (loadcore ordinal 10) validates the same compiled
+declarations as normal registration and records mode bit 0 in native metadata.
+Queries can see these exports, but neither registration nor explicit import linking
+binds clients to them. Release followed by normal registration clears that bit and
+restores ordinary linking. No guest linked list or instruction patching is used.
+
+CpuInvokeInKmode uses a validated compiled callback and a host-owned continuation.
+The public three-register argument shift and integer return are preserved. Native
+event delivery is held until return, including across budget slices; caller GP, SP
+and prior delivery state are restored. The native call keeps the caller stack
+instead of constructing an exception frame. Nested, concurrent and interrupt-context
+invocations stop explicitly. No host privilege escalation or CP0 model is involved.
+
+Native heaplib owns independent subarenas backed by NativeHeapServices. The same
+split/coalesce allocator supports the system 256-byte units and heap eight-byte
+units; no second allocator algorithm or guest linked lists are introduced. Heap
+handles are opaque arena addresses. Fixed heaps reserve their requested capacity;
+growing heaps acquire system blocks and release an extra block when its final
+allocation is freed. Delete releases all owned blocks, including live allocations.
+Native metadata accounts for public chunk and allocation overhead without exposing
+firmware bookkeeping in RAM. Raw HeapPrepare/HeapChunkSize imports and inspection
+of allocator internals remain unsupported. Creation below 60 bytes or with unknown
+flag bits stops explicitly; oversized allocations return null. Allocation addresses
+may differ from console placement within a block.
+
+CheckThreadStack reports the current converted thread stack pointer minus its
+owned stack base. It validates pointer alignment, full arena extent and a 168-byte
+minimum reserve. Low/out-of-range stacks stop with an address diagnostic without
+retiring the call; the console diagnostic/scheduler exception path is not recreated.
+The result describes guest data-stack capacity, not the host C++ stack or a
+compiler-dependent reference helper frame. Interrupt-context calls return zero;
+unknown stack ownership stops explicitly.
+
+TerminateThread moves a non-current continuation to dormant state, removes ready
+queue membership, and cancels sleeping/delayed state. Object waits retain an
+explicit NativeWaitQueue owner so events, semaphores and mailboxes can detach
+waiters without completion writes or wakeups. Stack ownership remains for restart
+or deletion. Current-thread termination and continuations inside native callbacks
+or interrupt delivery stop explicitly; iTerminateThread is not yet implemented.
+
+Indirect-call analysis propagates bounded constant sets through immediate and
+variable left/logical-right/arithmetic-right shifts. Variable counts use their
+low five bits and arithmetic fill is defined with unsigned operations. Unknown
+values and sets beyond the existing 16-value bound remain unresolved; mutable
+loads do not become constants. This also enables callback discovery when a
+service function argument is constructed using shifts.
+
+Native boot callbacks have explicit collection and completion phases. Module-entry
+registrations queue compiled functions with priority (low two bits) and GP, return
+one, and leave the optional status output untouched. The standalone host drains
+these callbacks after all module entries return, in stable priority order. Each
+receives a bounded temporary next record and delayed=1. After startup, registration
+executes the callback immediately with next=1/delayed=0, writes its integer result
+to optional status, and returns zero. Scratch ownership survives budget slices
+and is released only after validated completion. Nested registration during an
+active callback and interrupt-context registration stop explicitly. Firmware
+module-return encoding and a full reboot lifecycle remain unimplemented.
+
+SIF local status publication (GetSMFlag/SetSMFlag) is available before an EE peer
+connects. Flags persist into a later connection. Publishing does not initialize
+the link, acknowledge peer state, or permit peer-dependent operations.
+
+CreateThread discovery tracks bounded constant stores into stack-relative
+descriptors, including register aliases and delay-slot stores. It inspects direct
+call sites before different callers merge at an import. Up to 64 known stack
+words are retained; overlapping writes invalidate candidates and unknown-address
+stores clear tracked stack memory. Calls reset continuation knowledge. These are
+compilation candidates only: runtime creation still requires a compiled entry,
+and mutable loads are never promoted into indirect-call proofs.
+
+The converter recognizes bounded unsigned switch dispatch through a scaled
+index, constant upper address, word table load and register jump. It validates
+the instruction pattern and initialized table extent, then compiles up to 256
+listed destinations. These are initial-data candidates, not immutable-table
+proofs. The runtime load and per-transfer destination guard remain: changing a
+table to an unlisted destination stops, even if that code is compiled elsewhere.
+The ordinary 16-value constant-set analysis remains unchanged.
+
+After startup callbacks, the standalone probe runs ready worker continuations
+within a bounded operation budget and reports worker import failures separately
+from module-entry results. Reaching a wait state drains current ready work only;
+it does not assert that external peers or delayed services are complete.

@@ -30,6 +30,10 @@ public:
             // CheckInit records prior initialization, not current reception.
             return returned();
         }
+        // Local readiness can be published before the peer arrives. This does
+        // not establish a connection or acknowledge any peer-owned state.
+        if (request.selector==23) return returned(sub_flags_);
+        if (request.selector==24) { sub_flags_|=request.arguments[0]; return returned(sub_flags_); }
         if (!connected_) return {};
         switch (request.selector) {
         case 5:
@@ -44,8 +48,6 @@ public:
             receiving_=true; return returned();
         case 21: return returned(main_flags_);
         case 22: main_flags_&=~request.arguments[0]; return returned(main_flags_);
-        case 23: return returned(sub_flags_);
-        case 24: sub_flags_|=request.arguments[0]; return returned(sub_flags_);
         case 25: return returned(main_address_);
         case 26: return returned(sub_address_);
         case 27: sub_address_=request.arguments[0]; return returned(sub_address_);

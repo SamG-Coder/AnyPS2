@@ -1,4 +1,5 @@
 #include <nt/iop_codegen.hpp>
+#include <nt/iop_ir.hpp>
 #include "disc_fixture.hpp"
 #include <algorithm>
 #include <array>
@@ -201,6 +202,39 @@ int main(int argc,char** argv) {
         try { nt::iop_codegen::emit_llvm(excessive,growing); }
         catch (const std::runtime_error& error) { widened=std::string(error.what()).find("16-value analysis bound")!=std::string::npos; }
         if (!widened || !excessive.str().empty()) throw std::runtime_error("Growing indirect target set was silently truncated");
+        // Constant target proofs cover all shift forms and the masked shift count.
+        for (unsigned operation=0;operation<6;++operation) for (const auto amount : {0U,2U,34U}) {
+            auto shifted=module; shifted.memory.assign(0x60,0); shifted.initialized_size=0x60;
+            const bool left=operation==0 || operation==3,variable=operation>=3;
+            const unsigned shift=amount&31;
+            const std::uint32_t source=left ? (0x1040U>>shift) : (0x1040U<<shift);
+            fixture::put32(shifted.memory,0,0x3c080000U|(source>>16));
+            fixture::put32(shifted.memory,4,0x35080000U|(source&65535));
+            fixture::put32(shifted.memory,8,0x24090000U|amount);
+            const unsigned function=operation%3==0 ? 0 : operation%3==1 ? 2 : 3;
+            fixture::put32(shifted.memory,12,variable ? (9U<<21)|(8U<<16)|(8U<<11)|(function+4) :
+                                                      (8U<<16)|(8U<<11)|(shift<<6)|function);
+            fixture::put32(shifted.memory,16,0x01000008); fixture::put32(shifted.memory,0x40,0x03e00008);
+            std::ostringstream proof; nt::iop_codegen::emit_llvm(proof,shifted);
+            if (proof.str().empty()) throw std::runtime_error("Shifted constant target was not discovered");
+            // A mutable load cannot become a target proof through a shift.
+            fixture::put32(shifted.memory,0,0x8c880000); fixture::put32(shifted.memory,4,0);
+            std::ostringstream rejected_shift; bool unknown=false;
+            try { nt::iop_codegen::emit_llvm(rejected_shift,shifted); }
+            catch (const std::runtime_error& error) { unknown=std::string(error.what()).find("unresolved indirect")!=std::string::npos; }
+            if (!unknown || !rejected_shift.str().empty()) throw std::runtime_error("Shift inferred a target from mutable memory");
+        }
+        for (const bool variable : {false,true}) {
+            auto signed_shift=module; signed_shift.memory.assign(0x60,0); signed_shift.initialized_size=0x60;
+            fixture::put32(signed_shift.memory,0,0x3c088000);
+            fixture::put32(signed_shift.memory,4,0x2409003f);
+            fixture::put32(signed_shift.memory,8,variable ? 0x01284007 : 0x000847c3);
+            fixture::put32(signed_shift.memory,12,0x31081040);
+            fixture::put32(signed_shift.memory,16,0x01000008);
+            fixture::put32(signed_shift.memory,0x40,0x03e00008);
+            std::ostringstream proof; nt::iop_codegen::emit_llvm(proof,signed_shift);
+            if (proof.str().empty()) throw std::runtime_error("Arithmetic target proof lost sign extension");
+        }
         for (const unsigned count : {1024U,1025U}) {
             auto bounded=module; bounded.memory.assign(count*4,0); bounded.initialized_size=count*4;
             const auto at=(count-2)*4;
@@ -236,7 +270,7 @@ int main(int argc,char** argv) {
         std::copy_n(loader_name,8,module.memory.begin()+client_table+72);
         client_word(80,0x03e00008); client_word(84,0x24000008);
         client_word(88,0x03e00008); client_word(92,0x24000009);
-        module.memory.resize(0x534);
+        module.memory.resize(0x544);
         const auto query_word=[&](unsigned at,std::uint32_t word) {
             for (unsigned byte=0;byte<4;++byte) module.memory[0x500+at+byte]=static_cast<std::uint8_t>(word>>(byte*8));
         };
@@ -245,6 +279,8 @@ int main(int argc,char** argv) {
         query_word(20,0x03e00008); query_word(24,0x2400000b);
         query_word(28,0x03e00008); query_word(32,0x2400000c);
         query_word(36,0x03e00008); query_word(40,0x2400001b);
+        query_word(44,0x03e00008); query_word(48,0x2400000a);
+        query_word(52,0x03e00008); query_word(56,0x24000014);
         module.memory.resize(0x63c);
         const auto file_word=[&](unsigned at,std::uint32_t word) {
             for (unsigned byte=0;byte<4;++byte) module.memory[0x600+at+byte]=static_cast<std::uint8_t>(word>>(byte*8));
@@ -263,14 +299,31 @@ int main(int argc,char** argv) {
         std::copy(std::begin(irq_name),std::end(irq_name),module.memory.begin()+0x70c);
         const unsigned irq_ordinals[]{4,5,6,7,8,9,17,18,23};
         for (unsigned index=0;index<9;++index) { irq_word(0x1714+index*8,0x03e00008); irq_word(0x1718+index*8,0x24000000|irq_ordinals[index]); }
+        irq_word(0x175c,0x03e00008); irq_word(0x1760,0x2400000e);
+        // Only the native invocation argument discovers this private callback.
+        constexpr std::uint32_t shifted_callback[]{0x240405f0,0x00042080,0x24080022,0x01042004,
+            0x00042082,0x080005d7,0};
+        for (unsigned i=0;i<std::size(shifted_callback);++i) irq_word(0x17a0+i*4,shifted_callback[i]);
+        constexpr std::uint32_t invoke_callback[]{0x00a61021,0xac820000,0x03e00008,0};
+        for (unsigned i=0;i<std::size(invoke_callback);++i) irq_word(0x17c0+i*4,invoke_callback[i]);
         // Handler is discovered only through the constant registration argument.
         constexpr std::uint32_t handler[]{0x03e08021,0x0c0005d5,0,0xac820004,0x8c880000,0,0x25080001,0xac880000,
             0x24020001,0x0200f821,0x03e00008,0};
         for (unsigned index=0;index<std::size(handler);++index) irq_word(0x1a00+index*4,handler[index]);
+        // Consume stack before calling the stack guard; no system stack is fabricated.
+        irq_word(0x1a60,0x27bdfe80); irq_word(0x1a64,0x0800066f); irq_word(0x1a68,0);
+        irq_word(0x1a70,0x24042ec0); irq_word(0x1a74,0x0800054d); irq_word(0x1a78,0);
+        constexpr std::uint32_t boot_callback[]{0x3408c700,0x8d090000,0,0xad3c0000,0xad250004,
+            0x8c8a0000,0,0xad2a0008,0x2529000c,0xad090000,0x03e00008,0x2402fff9};
+        for (unsigned i=0;i<std::size(boot_callback);++i) irq_word(0x2ec0+i*4,boot_callback[i]);
         irq_word(0x1a40,0x24020000); irq_word(0x1a44,0x03e00008); irq_word(0x1a50,0x0000008d);
         constexpr std::uint32_t registration[]{0x03e08021,0x24040003,0x24050002,0x24061a00,0x3407c000,
             0x0c0005c5,0,0x0200f821,0x03e00008,0};
         for (unsigned index=0;index<std::size(registration);++index) irq_word(0x1b00+index*4,registration[index]);
+        irq_word(0x1aac,0x41e00000); irq_word(0x1ab4,0x101);
+        constexpr char heap_library_name[]="heaplib";
+        std::copy(std::begin(heap_library_name),std::end(heap_library_name),module.memory.begin()+0xab8);
+        for (unsigned i=0;i<5;++i) { irq_word(0x1ac0+i*8,0x03e00008); irq_word(0x1ac4+i*8,0x24000004+i); }
         irq_word(0x1800,0x41e00000); irq_word(0x1808,0x101);
         constexpr char event_name[]="thevent";
         std::copy(std::begin(event_name),std::end(event_name),module.memory.begin()+0x80c);
@@ -283,7 +336,7 @@ int main(int argc,char** argv) {
         irq_word(0x1900,0x41e00000); irq_word(0x1908,0x102);
         constexpr char thread_name[]="thbase";
         std::copy(std::begin(thread_name),std::end(thread_name),module.memory.begin()+0x90c);
-        const unsigned thread_ordinals[]{20,24,25,26,27,28,4,5,6,8,9,7,41,34,35,36,37,38,14,22,33};
+        const unsigned thread_ordinals[]{20,24,25,26,27,28,4,5,6,8,9,7,41,34,35,36,37,38,14,22,33,21,10};
         for (unsigned index=0;index<std::size(thread_ordinals);++index) {
             irq_word(0x1914+index*8,0x03e00008); irq_word(0x1918+index*8,0x24000000|thread_ordinals[index]);
         }
@@ -499,9 +552,30 @@ int main(int argc,char** argv) {
         fixture::put32(provider.memory,0x4c,0x200); fixture::put32(provider.memory,0x50,1);
         constexpr std::uint32_t create_from_data[]{0x03e08021,0x3c04a000,0x3484a040,0x0c000651,0,0x0200f821,0x03e00008,0};
         for (unsigned index=0;index<std::size(create_from_data);++index) irq_word(0x1f20+index*4,create_from_data[index]);
+        constexpr std::uint32_t stack_descriptor[]{0x03e08021,0x27bdffe0,0x27a40000,0xaca00000,0xaca00004,
+            0x24082f60,0xac880008,0x24080200,0xac88000c,0x24080001,0xac880010,
+            0x0c000651,0,0x27bd0020,0x0200f821,0x03e00008,0};
+        for (unsigned i=0;i<std::size(stack_descriptor);++i) irq_word(0x1f60+i*4,stack_descriptor[i]);
+        irq_word(0x2f60,0x03e00008); irq_word(0x2f64,0x24020049);
+        constexpr std::uint32_t switch_code[]{0x2c820003,0x1040000a,0,0x00041080,0x3c010000,
+            0x00220821,0x8c221fb0,0,0x00400008,0};
+        for (unsigned i=0;i<std::size(switch_code);++i) irq_word(0x1fc0+i*4,switch_code[i]);
+        irq_word(0x1ff0,0x03e00008); irq_word(0x1ff4,0x24020063);
+        for (unsigned i=0;i<3;++i) {
+            irq_word(0x1fb0+i*4,0x2f68+i*8);
+            irq_word(0x2f68+i*8,0x03e00008); irq_word(0x2f6c+i*8,0x24020000|(11*(i+1)));
+        }
         module.initialized_size=static_cast<std::uint32_t>(module.memory.size());
+        for (const auto overwrite : {0xa0800008U,0xa0a00000U}) {
+            auto invalidated=module;
+            fixture::put32(invalidated.memory,0xf7c,overwrite);
+            const std::array roots{0x1f60U};
+            const std::array modules{invalidated,provider};
+            const auto discovered=nt::iop_codegen::ir::discover_bundle(modules,roots);
+            if (discovered.instructions.contains(0x2f60)) throw std::runtime_error("Aliased stack write retained a stale callback candidate");
+        }
         std::vector<std::uint32_t> bundle_roots=entries;
-        bundle_roots.insert(bundle_roots.end(),{0x13ec,0x1418,0x1420,0x1514,0x151c,0x1524,0x1614,0x161c,0x1624,0x162c,0x171c,0x1724,0x172c,0x1734,0x173c,0x1744,0x174c,0x1754,0x1a40,0x1a50,0x1b00,0x1b40,0x1c00,0x1d00,0x1d80,0x1dc0,0x1e00,0x1e40,0x1f20,0x2140,0x2180,0x21c0,0x2314,0x2354,0x2394,0x239c,0x23a4,0x23ac,0x23b4,0x23bc,0x23c4,0x23cc,0x23d4,0x23dc,0x23e4,0x23ec,0x2f14,0x2f1c,0x2f24,0x2f2c,0x2f34,0x2f3c,0x2f44,0x2f4c,0x2ad4,0x2ae4,0x2aec,0x2cb4,0x2cbc,0x2cc4,0x2ccc,0x2cd4,0x2cdc,0x2ce4,0x2cec,0x2d64,0x2d6c,0x2e64,0x2e6c,0x2b90,0x2814,0x2824,0x282c,0x2840,0x2ba0,0x2414,0x241c,0x242c,0x2434,0x243c,0x2444,0x244c,0x2454,0x245c,0x2464,0x246c,0x2480,0x251c,0x2524,0x252c,0x2534,0x253c,0x2544,0x254c,0x2580,0x2600,0x2680,0x2714,0x271c,0x2724,0x272c,0x2734,0x273c,0x2744,0x274c,0x2794,0x279c,0x27a4,0x27ac,0x27b4,0x27bc,0x27c4,0x27cc});
+        bundle_roots.insert(bundle_roots.end(),{0x13ec,0x1418,0x1420,0x1514,0x151c,0x1524,0x152c,0x1614,0x161c,0x1624,0x162c,0x171c,0x1724,0x172c,0x1734,0x173c,0x1744,0x174c,0x1754,0x17a0,0x1ac0,0x1ac8,0x1ad0,0x1ad8,0x1ae0,0x1a60,0x1a70,0x1a40,0x1a50,0x1b00,0x1b40,0x1c00,0x1d00,0x1d80,0x1dc0,0x1e00,0x1e40,0x1f20,0x1f60,0x1fc0,0x2140,0x2180,0x21c0,0x2314,0x2354,0x2394,0x239c,0x23a4,0x23ac,0x23b4,0x23bc,0x23c4,0x23cc,0x23d4,0x23dc,0x23e4,0x23ec,0x2f14,0x2f1c,0x2f24,0x2f2c,0x2f34,0x2f3c,0x2f44,0x2f4c,0x2ad4,0x2ae4,0x2aec,0x2cb4,0x2cbc,0x2cc4,0x2ccc,0x2cd4,0x2cdc,0x2ce4,0x2cec,0x2d64,0x2d6c,0x2e64,0x2e6c,0x2b90,0x2814,0x2824,0x282c,0x2840,0x2ba0,0x2414,0x241c,0x242c,0x2434,0x243c,0x2444,0x244c,0x2454,0x245c,0x2464,0x246c,0x2480,0x251c,0x2524,0x252c,0x2534,0x253c,0x2544,0x254c,0x2580,0x2600,0x2680,0x2714,0x271c,0x2724,0x272c,0x2734,0x273c,0x2744,0x274c,0x2794,0x279c,0x27a4,0x27ac,0x27b4,0x27bc,0x27c4,0x27cc});
         for (unsigned index=0;index<std::size(thread_ordinals);++index)
             if (thread_ordinals[index]!=4 && thread_ordinals[index]!=35) bundle_roots.push_back(0x1914+index*8);
         for (unsigned index=0;index<std::size(event_ordinals);++index) bundle_roots.push_back(0x1814+index*8);

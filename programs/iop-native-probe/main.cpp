@@ -1,8 +1,10 @@
 #include <nt/iop_native_heap.hpp>
+#include <nt/iop_native_heaplib.hpp>
 #include <nt/iop_native_sysclib.hpp>
 #include <nt/iop_native_prnt.hpp>
 #include <nt/iop_native_libraries.hpp>
 #include <nt/iop_native_boot.hpp>
+#include <nt/iop_native_boot_callbacks.hpp>
 #include <nt/iop_native_disc.hpp>
 #include <nt/iop_native_drivers.hpp>
 #include <nt/iop_native_driver_files.hpp>
@@ -63,6 +65,8 @@ int main(int argc,char** argv) {
             throw std::runtime_error("Cannot read converted module data");
         const auto heap_begin=(module.base+module.memory_size+255)&~255U;
         nt::iop::NativeHeapServices heap(ram_size,heap_begin,stack_begin);
+        nt::iop::NativeHeapLibraryServices heaplib(heap);
+        nt::iop::NativeBootCallbacks boot_callbacks(heap);
         nt::iop::NativeLibraryServices libraries(nt_iop_generated_libraries(),nt_iop_generated_imports());
         nt::iop::NativeSysclibServices sysclib;
         nt::iop::NativePrntServices prnt;
@@ -88,7 +92,7 @@ int main(int argc,char** argv) {
         nt::iop::NativeSifCommandSession command_session(events,system,sif_control);
         inbound.connect(commands,command_session,sif_control,&rpc_servers);
         nt::iop::NativeStdioServices stdio([](std::string_view text) { std::cout.write(text.data(),static_cast<std::streamsize>(text.size())); return bool(std::cout); });
-        std::vector<nt::iop::NativeServices*> providers{&prnt,&sysclib,&drivers,&driver_files,&heap,&libraries,&boot,&interrupts,&events,&semaphores,&mailboxes,&threads,&system,&alarms,&sif,&sif_control,&stdio,&commands,&command_session,&rpc_servers,&rpc_data};
+        std::vector<nt::iop::NativeServices*> providers{&boot_callbacks,&heaplib,&prnt,&sysclib,&drivers,&driver_files,&heap,&libraries,&boot,&interrupts,&events,&semaphores,&mailboxes,&threads,&system,&alarms,&sif,&sif_control,&stdio,&commands,&command_session,&rpc_servers,&rpc_data};
         if (!disc_path.empty()) { disc=std::make_unique<nt::iop::NativeDiscServices>(disc_path,&descriptors); providers.push_back(disc.get()); }
         nt::iop::NativeServiceRouter services(std::move(providers));
         const auto entries=nt_iop_generated_entries();
@@ -128,6 +132,26 @@ int main(int argc,char** argv) {
             std::cerr<<"Converted IOP program stopped: module="<<index<<" reason="<<static_cast<unsigned>(result.reason)
                      <<" pc="<<std::hex<<state.pc<<" address="<<result.address
                      <<" trap_code="<<result.trap_code<<" delay_slot="<<state.delay_slot<<'\n';
+            return 3;
+        }
+        nt::iop::Cpu completion_state; completion_state.registers[29]=stack_top;
+        const auto completed=boot_callbacks.finish_startup(nt_iop_generated_run,completion_state,memory,1000000,services);
+        if (!boot_callbacks.complete()) {
+            std::cerr<<"Native startup callbacks stopped: reason="<<static_cast<unsigned>(completed.reason)
+                     <<" pc="<<std::hex<<completed.pc<<" address="<<completed.address<<" trap_code="<<completed.trap_code<<'\n';
+            return 3;
+        }
+        std::cout<<"startup_callbacks=complete executed="<<completion_state.executed<<'\n';
+        const auto workers_before=threads.executed();
+        while (true) {
+            const auto workers=threads.run(nt_iop_generated_run,memory,1000000-(threads.executed()-workers_before),services);
+            if (workers.reason==nt::iop::NativeStop::unmapped_code && workers.pc==0xfffffffc) continue;
+            if (workers.reason==nt::iop::NativeStop::thread_wait) {
+                std::cout<<"ready_workers=drained executed="<<threads.executed()-workers_before<<'\n';
+                break;
+            }
+            std::cerr<<"Native worker stopped: reason="<<static_cast<unsigned>(workers.reason)
+                     <<" pc="<<std::hex<<workers.pc<<" address="<<workers.address<<" trap_code="<<workers.trap_code<<'\n';
             return 3;
         }
         return 0;

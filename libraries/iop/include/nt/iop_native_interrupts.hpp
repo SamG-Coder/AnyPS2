@@ -19,7 +19,27 @@ public:
         lines_[irq].pending=true;
     }
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
+        if (request.kind==NativeServiceKind::native_return) {
+            if (!invocation_ || !request.context || invocation_->owner!=request.context ||
+                request.context->native_call_owner!=this) return {};
+            auto caller=invocation_->caller; caller.registers[2]=request.arguments[0];
+            enabled_=invocation_->enabled; invocation_.reset();
+            NativeServiceReply reply{NativeServiceStatus::restored}; reply.restore=caller; return reply;
+        }
         if (request.kind!=NativeServiceKind::intrman) return {};
+        if (request.selector==14) {
+            if (invocation_ || !request.context || request.interrupt_context) return {NativeServiceStatus::unavailable};
+            const auto target=ram_offset(request.arguments[0],4,0x200000);
+            if (!request.arguments[0] || !target || !nt_iop_native_instruction(*target))
+                return {NativeServiceStatus::unmapped_code,0,request.arguments[0]};
+            auto caller=*request.context;
+            if (caller.load_register) caller.registers[caller.load_register]=caller.load_value;
+            caller.load_register=0; caller.delay_slot=false; caller.pc=request.resume_pc; caller.registers[0]=0;
+            invocation_=Invocation{request.context,caller,enabled_}; enabled_=false;
+            NativeServiceReply reply{NativeServiceStatus::called,request.arguments[0]};
+            reply.call=NativeServiceCall{{request.arguments[1],request.arguments[2],request.arguments[3],request.arguments[3]},request.global_pointer,this};
+            return reply;
+        }
         const auto& a=request.arguments;
         const auto returned=[](std::int32_t value=0) { return NativeServiceReply{NativeServiceStatus::returned,static_cast<std::uint32_t>(value)}; };
         const auto output=[&](std::uint32_t pointer,std::uint32_t value) {
@@ -73,7 +93,7 @@ public:
         if (!budget) return {NativeStop::budget,cpu.pc};
         if (stack_top_>ram.size()) return {NativeStop::address_fault,cpu.pc,stack_top_};
         while (budget) {
-            if (!saved_ && enabled_ && !cpu.delay_slot) {
+            if (!saved_ && !invocation_ && enabled_ && !cpu.delay_slot) {
                 for (unsigned irq=0;irq<lines_.size();++irq) {
                     auto& line=lines_[irq];
                     if (!line.pending || !line.enabled || !line.handler) continue;
@@ -113,6 +133,8 @@ private:
         cpu.registers[29]=stack_top_; cpu.registers[31]=return_address;
         cpu.load_register=0; cpu.delay_slot=false; cpu.interrupt_depth=1;
     }
+    struct Invocation { const Cpu* owner; Cpu caller; bool enabled; };
+    std::optional<Invocation> invocation_;
     struct Handler { std::uint32_t address, argument; };
     struct Line { std::optional<Handler> handler; bool enabled=false, pending=false; std::uint32_t token=0; };
     std::array<Line,64> lines_{};

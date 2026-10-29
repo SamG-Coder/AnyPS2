@@ -9,9 +9,14 @@
 namespace nt::iop {
 // Native ownership defines queue order; public message links are mirrored data,
 // never pointers followed by the host scheduler.
-class NativeMailboxServices final : public NativeServices {
+class NativeMailboxServices final : public NativeServices, public NativeWaitQueue {
 public:
     explicit NativeMailboxServices(NativeThreadWaits* waits=nullptr) : waits_(waits) {}
+    bool cancel_wait(std::uint32_t object,std::uint32_t thread) override {
+        const auto found=boxes_.find(object);
+        if (found==boxes_.end()) return false;
+        return std::erase_if(found->second.waiters,[&](const auto& waiter) { return waiter.thread==thread; })!=0;
+    }
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
         if (request.kind!=NativeServiceKind::thmsgbx) return {};
         const auto op=request.selector;
@@ -83,7 +88,7 @@ public:
                     if (checked.status!=NativeServiceStatus::returned) return checked;
                 }
                 box.waiters.push_back({*thread,a[0]});
-                waits_->suspend_wait(*thread,id,NativeWaitKind::mailbox);
+                waits_->suspend_wait(*thread,id,NativeWaitKind::mailbox,*this);
                 return {NativeServiceStatus::yielded};
             }
             const auto checked=writable(ram,a[0],4);

@@ -8,7 +8,7 @@
 namespace nt::iop {
 // Native event objects own their state; guest handles never expose host pointers.
 // Blocking waits require an explicitly connected continuation scheduler.
-class NativeEventServices final : public NativeServices {
+class NativeEventServices final : public NativeServices, public NativeWaitQueue {
 public:
     explicit NativeEventServices(NativeThreadWaits* waits=nullptr) : waits_(waits) {}
     std::int32_t create(std::uint32_t attributes,std::uint32_t option,std::uint32_t initial) {
@@ -16,6 +16,11 @@ public:
         if (events_.size()>=4096 || next_id_>0x7fffffffU) return -400;
         events_.emplace(next_id_,Event{attributes,option,initial,initial,{}});
         return static_cast<std::int32_t>(next_id_++);
+    }
+    bool cancel_wait(std::uint32_t object,std::uint32_t thread) override {
+        const auto found=events_.find(object);
+        if (found==events_.end()) return false;
+        return std::erase_if(found->second.waiters,[&](const auto& waiter) { return waiter.thread==thread; })!=0;
     }
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
         if (request.kind!=NativeServiceKind::thevent) return {};
@@ -79,7 +84,7 @@ public:
                     if (checked.status!=NativeServiceStatus::returned) return checked;
                 }
                 event.waiters.push_back({*thread,a[1],a[2],a[3]});
-                waits_->suspend_wait(*thread,a[0],NativeWaitKind::event);
+                waits_->suspend_wait(*thread,a[0],NativeWaitKind::event,*this);
                 return {NativeServiceStatus::yielded};
             }
             if (a[3]) {

@@ -7,9 +7,14 @@
 #include <vector>
 
 namespace nt::iop {
-class NativeSemaphoreServices final : public NativeServices {
+class NativeSemaphoreServices final : public NativeServices, public NativeWaitQueue {
 public:
     explicit NativeSemaphoreServices(NativeThreadWaits* waits=nullptr) : waits_(waits) {}
+    bool cancel_wait(std::uint32_t object,std::uint32_t thread) override {
+        const auto found=semaphores_.find(object);
+        if (found==semaphores_.end()) return false;
+        return std::erase_if(found->second.waiters,[&](const auto& waiter) { return waiter==thread; })!=0;
+    }
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
         if (request.kind!=NativeServiceKind::thsemap) return {};
         const auto op=request.selector;
@@ -54,7 +59,7 @@ public:
             const auto thread=waits_ ? waits_->current_waiter() : std::nullopt;
             if (!thread) return {};
             semaphore.waiters.push_back(*thread);
-            waits_->suspend_wait(*thread,a[0],NativeWaitKind::semaphore);
+            waits_->suspend_wait(*thread,a[0],NativeWaitKind::semaphore,*this);
             return {NativeServiceStatus::yielded};
         }
         const auto offset=ram_offset(a[1],4,ram.size());

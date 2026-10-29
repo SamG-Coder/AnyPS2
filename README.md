@@ -91,11 +91,16 @@ decoder, JIT or device library. Its current scope is bounded integer/control flo
 and aligned byte, halfword and word RAM access. The `sysclib` major-version-1 `memcpy`,
 `memmove` and `memset` imports become checked native memory operations. `sysmem`
 major-version-1 allocation, release and memory-query imports use a host-owned
-allocator with reserved module/stack regions. `loadcore` registration/release
+allocator with reserved module/stack regions. Native heaplib reuses that allocator
+for fixed/growing subheaps, eight-byte allocations, frees and capacity queries.
+Guest allocator internals are not exposed. `loadcore` registration/release
 imports maintain a native registry of validated, already-compiled exports, and
-library-table queries use that registry. Reboot-handling mode updates retain
+library-table queries use that registry. Non-auto-link registration exposes
+compiled export tables to queries while excluding them from import linking. Reboot-handling mode updates retain
 validated export metadata; a native reboot lifecycle is not implemented. Boot-mode queries read explicitly supplied
 native boot records; the standalone probe starts with an empty boot context.
+Startup callbacks are queued during module entry execution and drained by priority;
+later registrations execute compiled callbacks immediately.
 Native sysclib character classification preserves fixed ASCII flags without host
 locale dependencies; undefined non-ASCII entries stop explicitly. Native prnt
 shares the bounded formatter and delivers output through compiled callbacks,
@@ -123,6 +128,8 @@ returns the driver byte count. Rename/symlink route validated same-device paths
 to compiled callbacks. GetDevType resolves compiled-driver and native ISO handles
 through their shared descriptor ownership. Mount dispatch validates arguments and
 invokes the compiled extended driver; other unsupported operations stop explicitly.
+Native CpuInvokeInKmode calls compiled functions with a saved continuation and
+held event delivery. Nested and interrupt-context invocation remain unsupported.
 Native interrupt services register compiled handlers, retain masked events, and
 save/restore continuations during cooperative callback delivery. Device event
 producers and preemptive thread scheduling are not yet connected. A cooperative

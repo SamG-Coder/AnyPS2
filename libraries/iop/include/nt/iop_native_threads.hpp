@@ -43,9 +43,9 @@ public:
         if (!current_ || threads_.at(*current_).cpu.interrupt_depth) return {};
         return current_;
     }
-    void suspend_wait(std::uint32_t id,std::uint32_t object,NativeWaitKind kind) override {
+    void suspend_wait(std::uint32_t id,std::uint32_t object,NativeWaitKind kind,NativeWaitQueue& owner) override {
         if (current_waiter()!=id) throw std::logic_error("Synchronization wait has no active continuation");
-        threads_.at(id).status=Status::waiting; threads_.at(id).wait_id=object; threads_.at(id).wait_kind=kind;
+        threads_.at(id).status=Status::waiting; threads_.at(id).wait_id=object; threads_.at(id).wait_kind=kind; threads_.at(id).wait_owner=&owner;
     }
     std::uint32_t wait_priority(std::uint32_t id) const override { return threads_.at(id).priority; }
     void resume_wait(std::uint32_t id,std::int32_t result) override {
@@ -53,16 +53,43 @@ public:
         if (thread.status!=Status::waiting) throw std::logic_error("Synchronization completion has no waiting continuation");
         ready_.push_back(id);
         thread.cpu.registers[2]=static_cast<std::uint32_t>(result);
-        thread.status=Status::ready; thread.wait_id=0;
+        thread.status=Status::ready; thread.wait_id=0; thread.wait_owner=nullptr;
     }
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
         if (request.kind!=NativeServiceKind::thbase) return {};
         const auto op=request.selector;
-        if (!((op>=4 && op<=9) || op==14 || op==20 || op==22 || op==33 || (op>=24 && op<=28))) return {};
+        if (!((op>=4 && op<=10) || op==14 || op==20 || op==21 || op==22 || op==33 || (op>=24 && op<=28))) return {};
         const auto returned=[](std::int32_t value=0) { return NativeServiceReply{NativeServiceStatus::returned,static_cast<std::uint32_t>(value)}; };
+        if (op==21) {
+            if (request.interrupt_context) return returned();
+            if (!current_ || !request.context || request.context!=&threads_.at(*current_).cpu)
+                return {NativeServiceStatus::unavailable};
+            const auto& thread=threads_.at(*current_);
+            if (!thread.stack) return {NativeServiceStatus::unavailable};
+            const auto pointer=ram_offset(request.stack_pointer,4,ram.size());
+            if (!pointer || thread.stack+thread.stack_size>ram.size() || *pointer<thread.stack ||
+                *pointer>thread.stack+thread.stack_size || *pointer-thread.stack<0xa8)
+                return {NativeServiceStatus::address_fault,0,request.stack_pointer};
+            return returned(static_cast<std::int32_t>(*pointer-thread.stack));
+        }
         const bool interrupt_call=op==26 || op==28;
         if (interrupt_call!=request.interrupt_context) return returned(-100);
         if (op==4) return create(request,ram);
+        if (op==10) {
+            const auto found=threads_.find(request.arguments[0]);
+            if (found==threads_.end()) return returned(-407);
+            auto& thread=found->second;
+            if (thread.status==Status::finished) return returned(-413);
+            // Active service callbacks own continuations that cannot be discarded.
+            if (current_==found->first || thread.cpu.native_call_owner || thread.cpu.interrupt_depth)
+                return {NativeServiceStatus::unavailable};
+            if (thread.status==Status::waiting && (!thread.wait_owner ||
+                !thread.wait_owner->cancel_wait(thread.wait_id,found->first))) return {NativeServiceStatus::unavailable};
+            std::erase(ready_,found->first);
+            thread.status=Status::finished; thread.wait_id=0; thread.wait_owner=nullptr; thread.wakeups=0;
+            thread.exit_requested=false; thread.delete_on_exit=false;
+            return returned();
+        }
         if (op==14) return change_priority(request);
         if (op==22) return refer_status(request,ram);
         if (op==33) {
@@ -153,7 +180,7 @@ public:
             if (interrupts_.delivery_enabled()) {
                 const auto now=clock_();
                 for (auto& [id,thread] : threads_) if (thread.status==Status::delayed && thread.deadline<=now) {
-                    ready_.push_back(id); thread.status=Status::ready; thread.wait_id=0;
+                    ready_.push_back(id); thread.status=Status::ready; thread.wait_id=0; thread.wait_owner=nullptr;
                 }
             }
             if (!current_ && !idle_active_ && !ready_.empty()) {
@@ -313,6 +340,7 @@ private:
         Cpu cpu;
         std::chrono::steady_clock::time_point deadline{};
         Status status=Status::ready; std::uint32_t wakeups=0;
+        NativeWaitQueue* wait_owner=nullptr;
         std::uint32_t entry=0,gp=0,stack=0,stack_size=0,attributes=0,priority=8;
         NativeWaitKind wait_kind=NativeWaitKind::event;
         std::uint32_t option=0,initial_priority=8,wait_id=0;

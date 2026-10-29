@@ -1058,3 +1058,78 @@ input-bit masking, registration with recorded modes, updates on active libraries
 unchanged resolution, clearing/release, null/unknown tables, mutated exports and
 truncated descriptors. Failed requests cannot partially update the mode word.
 Run the LLVM execution/project Release tests.
+
+The compiled non-auto-link lifecycle verifies query visibility, failed explicit
+linking, untouched unresolved imports, duplicate/null/unknown rejection, release
+and normal re-registration, and subsequent compiled execution. Mutated exports
+and truncated declarations must leave registration and modes unchanged. Run the
+related LLVM execution and standalone-project Release tests.
+
+The native invocation integration discovers a private callback from its constant
+argument, executes in bounded slices, and checks argument forwarding, memory output,
+return value, GP/SP and event-delivery restoration. Concurrent calls and unknown
+code targets cannot replace the active continuation or alter delivery state.
+Run the LLVM execution and standalone-project Release tests.
+
+The compiled heaplib lifecycle creates fixed and growing heaps, checks low/high
+system placement, eight-byte alignment, minimum allocations, accounting, data
+preservation, wrong-heap/interior/double frees, coalescing, growth and growth-block
+release. Delete with live allocations must restore all backing capacity. Invalid
+handles, huge requests and truncated-memory cleanup are covered. Run the LLVM
+execution and standalone-project Release tests, which also exercise existing
+system-allocation users after allocator reuse.
+
+The compiled stack-check milestone creates real scheduler-owned worker stacks.
+A query at worker entry reports remaining capacity; a synthetic worker consuming
+its reserve must stop at the import without retirement. Unrelated continuations
+are rejected and interrupt-context queries return zero. Run the LLVM execution
+and standalone-project Release tests.
+
+The compiled termination lifecycle detaches one of two waiters for each event,
+semaphore and mailbox service. Subsequent signalling must complete only the live
+waiter and preserve the cancelled output buffer. Repeated termination reports
+dormant status; a ready worker retains its owned stack and can restart and delete
+through the existing lifecycle test. Run LLVM execution/project Release tests.
+
+Shifted-target discovery covers all six shift forms, zero and masked counts,
+negative arithmetic shifts, and rejection of mutable loaded pointers. The compiled
+invocation fixture constructs its private callback with shifts, proving discovery
+and LLVM execution together. Run the LLVM execution/project Release tests.
+
+The compiled boot-callback lifecycle registers priorities out of order, drains in
+one-operation slices, and checks GP, order, next record, delayed flag, unchanged
+deferred status, immediate result output and released scratch capacity. Unknown
+callback targets and code status destinations must stop before callback execution.
+Run the LLVM execution/project Release tests.
+
+The native SIF integration verifies pre-connection local publication, accumulated
+flags and persistence after peer connection, while peer reads and initialization
+remain blocked. A local opt-in EESYNC experiment generated LLVM, compiled the
+Windows x64 executable and executed its module entry and startup callbacks to
+completion with an empty boot context. The entry returned zero after 159 compiled
+operations. This is isolated-module execution, not an EE handshake or game boot;
+commercial input/output artifacts remain ignored under work/.
+
+The compiled thread milestone constructs a descriptor on its runtime stack and
+starts a worker that has no export or explicit root. The worker must execute its
+LLVM code. Separate discovery checks reject stale candidates after overlapping
+byte writes and unknown-address stores. The local FILEIO experiment first compiled
+and stopped at an undiscovered worker during CreateThread. Stack discovery now
+reaches worker code and rejects two unresolved indirect calls before emitting
+output. Earlier FILEIO entry-only generation did not cover those workers. Run
+LLVM execution/project Release tests.
+
+Compiled switch-table coverage selects each case and the default (including a
+large unsigned index), preserves an aliased valid destination, and rejects a
+mutated table targeting compiled code outside that switch. The local FILEIO
+worker investigation identified this bounded compiler pattern at both previously
+unresolved transfers; no game-specific addresses enter the recognizer. Run the
+LLVM execution/project Release tests.
+
+After switch discovery, FILEIO generates and compiles with worker code included.
+The native probe now drains ready workers after entries and startup callbacks,
+so a returned module entry cannot hide an unexecuted lower-priority worker.
+A drained ready queue is not proof that waiting services or a game have booted.
+The FILEIO entry returned zero after 51 compiled operations; draining its workers
+then stopped at sifman ordinal 5 (SIF initialization) because the standalone host
+has no converted EE peer. No readiness acknowledgement was fabricated.
