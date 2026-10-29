@@ -1,5 +1,6 @@
 #include <nt/ee_services.hpp>
 #include <nt/ee_platform.hpp>
+#include <nt/ee_sif_command_peer.hpp>
 #include <nt/binary.hpp>
 #include <charconv>
 #include <iostream>
@@ -40,7 +41,9 @@ int main(int argc,char** argv) {
         ram.resize(0x2000000,0);
         nt::ee::Memory memory{ram.data(),ram.size()};
         nt::ee::NativePlatform platform; platform.attach(memory);
-        nt::runtime::State state; state.pc=ANYPS2_EE_ENTRY;
+        nt::ee::NativeSifCommandPeer command_peer(platform.sif_link,memory,nt_ee_generated_code_overlap,0x1000,&platform.sif_receive);
+        if (!command_peer.connect(platform.sif_outbound)) throw std::runtime_error("Cannot connect native command peer");
+        auto state=nt::ee::NativePlatform::initial_state(ANYPS2_EE_ENTRY);
         nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains,ANYPS2_EE_SYSCALL_TABLE);
         const auto stop=nt::ee::run(execute,state,memory,budget,services);
         std::cout<<"stop="<<static_cast<unsigned>(stop)<<" pc="<<nt::hex32(state.pc)
@@ -52,8 +55,11 @@ int main(int argc,char** argv) {
                      <<" uncompiled_handler="<<nt::hex32(static_cast<std::uint32_t>(state.gpr[5].lo));
         if (stop==nt::ee::Stop::unmapped_code && state.gpr[3].lo==0x20)
             std::cout<<" uncompiled_thread_entry="<<nt::hex32(memory.fault_address);
+        if (stop==nt::ee::Stop::unsupported_system && command_peer.last_command())
+            std::cout<<" native_peer_command="<<nt::hex32(command_peer.last_command())<<" option="<<command_peer.last_option();
         if (trace_services) {
-            std::cout<<" a0="<<nt::hex32(static_cast<std::uint32_t>(state.gpr[4].lo))
+            std::cout<<" status="<<nt::hex32(state.cop0_status)<<" pending="<<nt::hex32(memory.pending_interrupts)
+                     <<" a0="<<nt::hex32(static_cast<std::uint32_t>(state.gpr[4].lo))
                      <<" a1="<<nt::hex32(static_cast<std::uint32_t>(state.gpr[5].lo));
         }
         std::cout<<'\n';

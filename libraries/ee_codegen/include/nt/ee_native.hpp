@@ -1,5 +1,6 @@
 #pragma once
 #include <nt/ee_state.hpp>
+#include <nt/ee_address.hpp>
 #include <nt/ee_vector.hpp>
 
 namespace nt::ee {

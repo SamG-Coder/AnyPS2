@@ -18,7 +18,7 @@ public:
         const bool output=call==0x4b || call==0x6f;
         if (!extended && call!=0x4a && call!=0x4b) return Stop::syscall;
         const auto raw=static_cast<std::uint32_t>(state.gpr[4].lo);
-        const auto address=raw>=0x80000000U && raw<0xc0000000U ? raw&0x1fffffffU : raw;
+        const auto address=runtime::default_ram_address(raw);
         const auto size=extended ? static_cast<std::uint32_t>(state.gpr[5].lo) : 4U;
         const auto offset=extended ? static_cast<std::uint32_t>(state.gpr[6].lo) : 0U;
         if (offset>4 || size>4-offset) return Stop::invalid_state;

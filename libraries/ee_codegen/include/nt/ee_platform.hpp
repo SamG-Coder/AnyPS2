@@ -8,6 +8,13 @@ namespace nt::ee {
 class NativePlatform {
 public:
     explicit NativePlatform(NativeTimers::Clock clock=nullptr) : timers(clock) { timers.connect_events(); }
+    static runtime::State initial_state(std::uint32_t entry) {
+        runtime::State state; state.pc=entry;
+        // Native application context: INTC/DMA classes and global delivery are
+        // available. EIE stays clear until compiled startup explicitly enables it.
+        state.cop0_status=0xc01;
+        return state;
+    }
     NativeInterrupts interrupts;
     NativeTimers timers;
     NativeCompletions completions;

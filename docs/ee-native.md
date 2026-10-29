@@ -5,7 +5,7 @@ and compiles it ahead of time. The generated executable links native arithmetic
 and startup services; it does not link the R5900 decoder, diagnostic interpreter,
 PCSX2, or device models. GT4 visible boot and gameplay remain unestablished. The latest larger local
 startup region emits and compiles successfully; its native execution reaches
-a SifGetReg peer-readiness loop; a bounded run retired 10,000,000 operations
+an undiscovered command callback after 3,802,999 operations
 with an explicit private copied-payload plan. The run includes native semaphore
 creation, callback registration, table introspection, native timer initialization,
 cache services, application settings, thread creation, ID lookup, priority change and execution of the
@@ -15,7 +15,10 @@ modes and reset-on-compare remain unfinished. The expanded private payload entry
 plan now compiles address-space routines into native requests; no production
 mapping provider is connected. The latest run registers these routines without
 executing a mapping request, initializes the native SIF receiver, and reaches DMA
-handler registration and enablement before polling the absent native IOP peer.
+handler registration and enablement, then exchanges command-buffer initialization
+with the native bootstrap peer, receives the RPC initialization reply and enters
+its compiled SIF0 handler, resolves its uncached buffers and rearms reception.
+The next missing ahead-of-time target is a command-table callback.
 
 ## Conversion and execution boundaries
 
@@ -106,7 +109,8 @@ Nonzero MTPS register fields retain their public ignored-write behavior.
 
 The initial ABI requires a little-endian 64-bit host. Scalar byte/halfword/word/
 doubleword loads and stores use a caller-owned RAM span. Addresses wrap to 32 bits;
-KSEG0/KSEG1 aliases resolve to physical RAM. Alignment, null storage, the complete
+KSEG0/KSEG1 aliases and the native application uncached RAM windows resolve to
+physical RAM. Alignment, null storage, the complete
 access extent and the 32 MiB RAM limit are checked before access. Integer-zero
 loads still check addresses. No load-delay model is introduced.
 
@@ -568,6 +572,61 @@ the batch and raises channel 6 completion. SifDmaStat reports pending versus
 completed/unknown IDs, and submission while busy returns zero. The sink context
 must outlive the outbound owner; it cannot be replaced while a batch is active.
 
-No production IOP sink is installed yet. Submission without one stops explicitly;
-this interface does not publish peer readiness. The integrated native IOP startup
-and command session remain required for GT4 to leave its current polling loop.
+Submission without a connected sink stops explicitly; this interface itself does
+not publish peer readiness. The probe now installs the limited bootstrap command
+peer below. Integration of converted IOP modules and broader services remains
+unfinished.
+
+### Native bootstrap command peer
+
+The EE probe now connects an original native command service to its outgoing sink
+before publishing peer transport/command readiness. Its configurable peer address
+is a message port, not a firmware address. It handles command-buffer publication
+and bounded software-register updates from real submitted packets. Destination,
+header length, padded extent and writable EE command-buffer bounds are validated
+before committing command state. Completion is supplied by the outgoing batch
+owner after acceptance.
+
+This is a native replacement for bootstrap command services, not execution of an
+IOP firmware image. It accepts one control packet per batch and rejects payload-
+bearing, multi-descriptor, reboot and RPC call requests until their corresponding
+native owners exist. RPC initialization and unavailable-server bind handling are
+described below. Unknown requests remain pending and stop execution; they do
+not receive fake success or a completion. Game-supplied IOP modules still require
+ahead-of-time compilation and integration. The lower-level IOP native session is
+not yet connected to this bootstrap service.
+
+### RPC control replies and native launch context
+
+RPC initialization replies travel through the native receive endpoint, raising a
+real channel 5 completion after their bytes become visible. A stopped receiver
+applies backpressure. Failed destination validation preserves the pending request
+for retry and does not mark RPC initialized. The dispatcher handles bind queries
+with a public unavailable-server reply; it currently has no registered servers.
+The bind-reply encoder is shared with the existing native IOP RPC implementation.
+RPC calls and service-backed replies remain incomplete.
+
+The probe explicitly launches a native application context with global delivery
+and INTC/DMA class masks available, while EIE remains closed until compiled code
+executes EI. This is application startup policy, not a BIOS power-on register
+image. Low-level State defaults remain zero for callers that supply their own
+context. Tests execute EI with a real pending completion, then deliver and return
+from the compiled handler. Arbitrarily enabling delivery after a stall is not
+part of the runtime.
+
+### Shared native RAM aliases and interrupt-safe SIF services
+
+Compiled memory operations and native buffer services share the existing
+`default_ram_address` policy. Application uncached addresses in
+[0x20100000, 0x22000000) and accelerated uncached addresses in
+[0x30100000, 0x32000000) resolve to the same physical backing. The reserved first
+MiB and addresses beyond those windows remain unmapped. Bounds, alignment and
+compiled-code protection apply after resolution, while failures report the
+original application address. Cache timing and arbitrary TLB mappings are not
+introduced. This policy is now defined once and reused by diagnostic RAM and
+native service owners; LLVM emits matching range checks from the shared constants.
+
+The public negative iSifDmaStat, iSifSetDma and iSifSetDChain aliases use the same
+native implementation as their ordinary forms. Explicit registered overrides are
+still checked using the original syscall number first. Compiled receive callbacks
+can rearm the endpoint before returning, without replacing the interrupt context.

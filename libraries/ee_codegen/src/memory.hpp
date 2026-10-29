@@ -38,7 +38,7 @@ inline std::optional<MemoryOperation> memory_operation(Op op) {
     }
 }
 inline std::uint32_t physical_address(std::uint32_t address) {
-    return address>=0x80000000U && address<0xc0000000U ? address&0x1fffffffU : address;
+    return runtime::default_ram_address(address);
 }
 inline std::string code_overlap(Writer& w,const std::string& offset,const std::string& end,std::span<const CodeRange> code) {
     std::string overlap="false";
@@ -83,6 +83,13 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
     const auto alias=w.value("icmp eq i32 "+segment+", 2147483648");
     const auto masked=w.binary("and","i32",address,"536870911");
     auto physical=w.value("select i1 "+alias+", i32 "+masked+", i32 "+address);
+    const auto in_range=[&](std::uint32_t begin,std::uint32_t end) {
+        return w.binary("and","i1",w.value("icmp uge i32 "+address+", "+std::to_string(begin)),
+            w.value("icmp ult i32 "+address+", "+std::to_string(end)));
+    };
+    const auto user_alias=w.binary("or","i1",in_range(runtime::uncached_ram_begin,runtime::uncached_ram_end),
+        in_range(runtime::accelerated_ram_begin,runtime::accelerated_ram_end));
+    physical=w.value("select i1 "+user_alias+", i32 "+w.binary("and","i32",address,"268435455")+", i32 "+physical);
     const bool native_io=access.bytes==4 && access.bank==RegisterBank::integer && access.merge==Merge::none;
     if (native_io) {
         const auto device_address=w.value("icmp uge i32 "+physical+", 268435456");

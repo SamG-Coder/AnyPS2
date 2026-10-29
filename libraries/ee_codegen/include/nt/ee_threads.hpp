@@ -95,7 +95,7 @@ public:
     }
 private:
     static std::uint64_t signed_word(std::uint32_t value) { return static_cast<std::uint64_t>(static_cast<std::int64_t>(std::bit_cast<std::int32_t>(value))); }
-    static std::uint32_t physical(std::uint32_t address) { return address>=0x80000000U && address<0xc0000000U ? address&0x1fffffffU : address; }
+    static std::uint32_t physical(std::uint32_t address) { return runtime::default_ram_address(address); }
     static bool range(const Memory& memory,std::uint32_t address,std::uint32_t size,unsigned alignment) {
         const auto start=physical(address); const auto end=std::uint64_t(start)+size;
         return memory.data && !(start%alignment) && end<=memory.size && end<=0x2000000U;

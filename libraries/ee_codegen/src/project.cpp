@@ -1,5 +1,6 @@
 #include <nt/ee_codegen.hpp>
 #include <nt/analysis.hpp>
+#include <nt/ee_address.hpp>
 #include <nt/ee_syscalls.hpp>
 #include <algorithm>
 #include <sstream>
@@ -33,8 +34,7 @@ void project(const std::filesystem::path& input,const std::filesystem::path& out
     std::vector<CodePayload> payloads;
     std::vector<std::uint32_t> payload_entries;
     for (const auto& mapping:mappings) {
-        const auto destination=mapping.destination>=0x80000000U && mapping.destination<0xc0000000U ?
-            mapping.destination&0x1fffffffU : mapping.destination;
+        const auto destination=runtime::default_ram_address(mapping.destination);
         const auto finish=std::uint64_t(destination)+mapping.size;
         if (!mapping.size || mapping.source%4 || destination%4 || mapping.size%4 || finish>0x2000000U)
             throw std::runtime_error("Invalid copied payload mapping");

@@ -42,7 +42,7 @@ public:
         if ((!chain && bytes.size()!=std::uint64_t(count_)*16) || bytes.size()>0xffff0 || bytes.size()%16)
             return Stop::invalid_state;
         const auto raw=chain ? packet_destination : destination_;
-        const auto address=raw>=0x80000000U && raw<0xc0000000U ? raw&0x1fffffffU : raw;
+        const auto address=runtime::default_ram_address(raw);
         if (address%16 || std::uint64_t(address)+bytes.size()>0x2000000U ||
             std::uint64_t(address)+bytes.size()>memory.size || (!bytes.empty() && !memory.data)) {
             memory.fault_address=raw; return Stop::memory_fault;

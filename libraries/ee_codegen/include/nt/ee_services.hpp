@@ -36,7 +36,7 @@ public:
         if (state.delay_slot || state.pc>0xfffffffbU) return Stop::invalid_state;
         const auto view=handlers_.validate_view(memory);
         if (view!=Stop::budget) return view;
-        const auto number=static_cast<std::uint32_t>(state.gpr[3].lo);
+        auto number=static_cast<std::uint32_t>(state.gpr[3].lo);
         if (handlers_.registered(number)) return handlers_.enter(state,memory,number);
         if (number==0x74) {
             if (static_cast<std::uint32_t>(state.gpr[4].lo)==0x12c) {
@@ -48,6 +48,7 @@ public:
             }
             return handlers_.install(state,memory);
         }
+        number=sif_syscall_number(number);
         if (!startup_syscall(number)) return Stop::syscall;
         if (number==0x76 || number==0x77) {
             if (!memory.sif_outbound || !memory.completions) return Stop::unsupported_system;
@@ -110,7 +111,7 @@ public:
         const auto stack=runtime::initial_stack(arg(1),arg(2),memory.size);
         if (!stack) return Stop::invalid_state;
         const auto raw=arg(3);
-        const auto address=raw>=0x80000000U && raw<0xc0000000U ? raw&0x1fffffffU : raw;
+        const auto address=runtime::default_ram_address(raw);
         if (!memory.data || address%4 || std::uint64_t(address)+8>memory.size) {
             memory.fault_address=raw; return Stop::memory_fault;
         }
@@ -129,7 +130,7 @@ private:
         if (number!=0x40 && !record) return returned(state,~std::uint64_t(0));
         if (number==0x40 || number>=0x47) {
             const auto raw=static_cast<std::uint32_t>(state.gpr[number==0x40 ? 4 : 5].lo);
-            const auto address=raw>=0x80000000U && raw<0xc0000000U ? raw&0x1fffffffU : raw;
+            const auto address=runtime::default_ram_address(raw);
             if (!memory.data || address%4 || std::uint64_t(address)+24>memory.size ||
                 std::uint64_t(address)+24>0x2000000U) {
                 memory.fault_address=raw; return Stop::memory_fault;

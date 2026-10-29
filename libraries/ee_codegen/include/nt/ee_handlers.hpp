@@ -75,7 +75,7 @@ public:
     }
 private:
     static std::uint32_t physical(std::uint32_t address) {
-        return address>=0x80000000U && address<0xc0000000U ? address&0x1fffffffU : address;
+        return runtime::default_ram_address(address);
     }
     struct Frame { std::uint32_t continuation,stack,exception_level; };
     CompiledCode compiled_;

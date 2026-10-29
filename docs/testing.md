@@ -1684,3 +1684,56 @@ connection and GT4 readiness remain outstanding.
 Release compiled execution and project-generation tests passed; execution was
 rerun successfully after adding fault-address reporting. No new GT4 run is claimed
 for this transport interface alone.
+
+
+### Native bootstrap command peer milestone
+
+Compiled EE services query a genuinely connected native command sink, submit
+command-buffer and software-register packets, and observe completion after the
+peer applies them. The fixture checks the aliased receive address, software value,
+readiness/address publication and rejection of duplicate connection. A reboot
+packet is rejected without instruction retirement, completion or loss of the
+pending transfer. Release compiled execution and project-generation tests passed.
+
+The private GT4 project regenerated and compiled successfully. Native execution
+left the readiness polling loop, submitted command-buffer initialization, and
+stopped on command 0x80000002 option 1 (RPC initialization) after 3,802,917 retired
+operations. A second untraced run confirmed that command and option. RPC readiness
+was not fabricated. Visible boot and gameplay remain unestablished.
+
+
+### RPC control reply and launch-context milestone
+
+Compiled tests cover command-buffer setup, RPC initialization backpressure,
+failed reply-buffer validation with retry, reply visibility before DMA delivery,
+launch context plus compiled EI, callback entry/return, and an unavailable-server
+bind reply with preserved correlation fields. EE and IOP compiled execution tests
+passed after sharing the bind-reply encoder. Large EE fixture RAM buffers were
+moved to heap storage after a test crash; the rebuilt tests passed.
+
+The private GT4 executable was relinked and executed with the explicit native
+launch context. It consumed the RPC reply interrupt and reached its compiled SIF0
+handler, stopping at a load from 0x2104a580 after 3,802,938 operations. Address
+resolution for that access remains incomplete. No visible boot is established.
+
+
+### Native RAM alias and SIF rearm milestone
+
+Compiled loads/stores cover both application uncached windows, their first mapped
+address, reserved lower boundary, upper boundary, actual backing extent, alignment
+and compiled-code write protection. Native settings and SIF delivery use the same
+aliases. The RPC lifecycle fixture now executes negative SifSetDChain from inside
+a compiled DMA handler and verifies reception is rearmed after context restoration;
+outgoing batch tests cover negative submit/status calls.
+
+Release compiled EE execution, project generation and hardware-register tests
+passed for alias changes. After the SIF alias additions, the compiled execution
+and project tests were run again. An attempted obsolete native-execution build
+target referenced the removed C++ backend; it is not a current CMake test target
+and was replaced with the current shared-runtime hardware test target.
+
+The private GT4 project was regenerated and compiled after both changes. It
+passed the uncached reply-buffer access and interrupt-safe receive rearm, then
+stopped at an uncompiled indirect command callback after 3,802,999 operations.
+This is a discovery boundary; no runtime decoding fallback was added. Visible
+boot remains unestablished.

@@ -1,3 +1,4 @@
+#include <nt/ee_sif_command_peer.hpp>
 #include <nt/ee_services.hpp>
 #include <nt/ee_timers.hpp>
 #include <nt/ee_platform.hpp>
@@ -232,7 +233,7 @@ int main() {
                   state.gpr[0].lo==99 && state.gpr[0].hi==77);
         }
         for (const auto alias : {0U,0x80000000U,0xa0000000U}) for (unsigned low=0;low<16;++low) {
-            std::array<std::uint8_t,0x2000> ram{}; ram.fill(0xcc);
+            std::array<std::uint8_t,0x2000> ram{}; std::fill(ram.begin(),ram.end(),0xcc);
             nt::ee::Memory memory{ram.data(),ram.size()};
             nt::runtime::State state; state.pc=0x11cc; state.gpr[4].lo=alias|0x1800|low;
             state.gpr[0]={99,77}; state.gpr[8]={0x0123456789abcdefULL,0xfedcba9876543210ULL};
@@ -246,7 +247,7 @@ int main() {
                   state.gpr[4].lo==state.gpr[8].lo && state.gpr[4].hi==state.gpr[8].hi);
         }
         {
-            std::array<std::uint8_t,0x2000> ram{}; ram.fill(0xcc);
+            std::array<std::uint8_t,0x2000> ram{}; std::fill(ram.begin(),ram.end(),0xcc);
             const auto original=ram;
             nt::ee::Memory memory{ram.data(),0x1fff};
             for (const auto pc : {0x11ccU,0x11d0U,0x11d8U}) {
@@ -261,7 +262,7 @@ int main() {
         }
         {
             // One compiled-syscall lifecycle covers the native semaphore service.
-            std::array<std::uint8_t,0x10000> ram{};
+            std::vector<std::uint8_t> ram(0x10000);
             nt::ee::Memory memory{ram.data(),ram.size()};
             nt::ee::StartupServices services(nt_ee_generated_code_overlap);
             nt::runtime::State state;
@@ -333,7 +334,7 @@ int main() {
             check(access(false,0x10001810)==nt::ee::Stop::memory_fault);
         }
         {
-            std::array<std::uint8_t,0x10000> ram{};
+            std::vector<std::uint8_t> ram(0x10000);
             nt::ee::Memory memory{ram.data(),ram.size()};
             nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
             nt::runtime::State state;
@@ -375,7 +376,7 @@ int main() {
             check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unpublished_code);
         }
         {
-            std::array<std::uint8_t,0x10000> ram{}; nt::ee::Memory memory{ram.data(),ram.size()};
+            std::vector<std::uint8_t> ram(0x10000); nt::ee::Memory memory{ram.data(),ram.size()};
             nt::ee::NativeInterrupts interrupts; memory.interrupts=&interrupts;
             nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
             nt::runtime::State state;
@@ -417,7 +418,7 @@ int main() {
         }
         {
             timer_now=0; nt::ee::NativePlatform platform(timer_clock);
-            std::array<std::uint8_t,0x10000> ram{}; nt::ee::Memory memory{ram.data(),ram.size()}; platform.attach(memory);
+            std::vector<std::uint8_t> ram(0x10000); nt::ee::Memory memory{ram.data(),ram.size()}; platform.attach(memory);
             nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
             nt::runtime::State state; state.pc=0x11ec; state.gpr[3].lo=0x74;
             state.gpr[4].lo=0x12c; state.gpr[5].lo=0x350000;
@@ -458,7 +459,7 @@ int main() {
         {
             // A compiled loop with no I/O must still give native producers time.
             timer_now=0; nt::ee::NativePlatform platform(stepping_timer_clock);
-            std::array<std::uint8_t,0x10000> ram{}; nt::ee::Memory memory{ram.data(),ram.size()}; platform.attach(memory);
+            std::vector<std::uint8_t> ram(0x10000); nt::ee::Memory memory{ram.data(),ram.size()}; platform.attach(memory);
             nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
             nt::runtime::State state; state.pc=0x11ec; state.gpr[3].lo=0x10; state.gpr[4].lo=11;
             state.gpr[5].lo=0x365000; state.gpr[7].lo=1; state.gpr[28].lo=0x4000;
@@ -511,7 +512,7 @@ int main() {
             check(call(0x20,0x5000)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
         }
         for (const auto slice : {1U,64U}) {
-            std::array<std::uint8_t,0x10000> ram{};
+            std::vector<std::uint8_t> ram(0x10000);
             nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativeInterrupts interrupts;
             memory.interrupts=&interrupts;
             nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
@@ -544,7 +545,7 @@ int main() {
                   interrupts.read(0x1000f000).value==(1U<<2));
         }
         for (const auto slice : {1U,64U}) {
-            std::array<std::uint8_t,0x10000> ram{};
+            std::vector<std::uint8_t> ram(0x10000);
             nt::ee::Memory memory{ram.data(),ram.size()};
             nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains,0x6000);
             nt::runtime::State state;
@@ -590,7 +591,7 @@ int main() {
                   state.pc==0x11ec && state.executed==count && ram==saved);
         }
         for (const auto slice : {1U,64U}) {
-            std::array<std::uint8_t,0x10000> ram{}; ram.fill(0xcc);
+            std::vector<std::uint8_t> ram(0x10000); std::fill(ram.begin(),ram.end(),0xcc);
             nt::ee::Memory memory{ram.data(),ram.size()};
             nt::ee::StartupServices services(nt_ee_generated_code_overlap);
             nt::runtime::State state; state.pc=0x11e8;
@@ -608,7 +609,7 @@ int main() {
             check(nt::ee::run(nt_ee_generated_run,state,memory,8,services)==nt::ee::Stop::syscall && state.executed==4);
         }
         for (const auto args : {0x1000U,0x4001U,0xfffcU}) {
-            std::array<std::uint8_t,0x10000> ram{}; ram.fill(0xcc); const auto original=ram;
+            std::vector<std::uint8_t> ram(0x10000); std::fill(ram.begin(),ram.end(),0xcc); const auto original=ram;
             nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::StartupServices services(nt_ee_generated_code_overlap);
             nt::runtime::State state; state.pc=0x11ec; state.gpr[3].lo=0x3c;
             state.gpr[5].lo=0xffffffff; state.gpr[6].lo=0x1000; state.gpr[7].lo=args;
@@ -620,7 +621,7 @@ int main() {
                   state.executed==1 && state.gpr[2].lo==0xed60 && services.main_thread()->stack.base==0xe000);
         }
         for (const auto slice : {1U,64U}) {
-            std::array<std::uint8_t,0x10000> ram{};
+            std::vector<std::uint8_t> ram(0x10000);
             nt::ee::Memory memory{ram.data(),ram.size()};
             nt::ee::StartupServices services(nt_ee_generated_code_overlap);
             nt::runtime::State state; state.pc=0x1200; state.gpr[3].lo=0x3d;
@@ -1059,7 +1060,7 @@ int main() {
             const std::array<std::uint8_t,8> source{0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88};
             for (unsigned offset=0;offset<8;++offset) {
                 for (unsigned side=0;side<2;++side) {
-                    std::array<std::uint8_t,24> ram; ram.fill(0xcc); auto expected=ram;
+                    std::array<std::uint8_t,24> ram; std::fill(ram.begin(),ram.end(),0xcc); auto expected=ram;
                     if (!side) for (unsigned n=0;n<=offset;++n) expected[n]=source[7-offset+n];
                     else for (unsigned n=offset;n<8;++n) expected[n]=source[n-offset];
                     nt::ee::Memory memory{ram.data(),ram.size()}; nt::runtime::State state; state.pc=0x1654+side*8;
@@ -1067,7 +1068,7 @@ int main() {
                     check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall && state.executed==1 && ram==expected &&
                           state.gpr[8].lo==0x8877665544332211ULL && state.gpr[8].hi==99);
                 }
-                std::array<std::uint8_t,24> ram; ram.fill(0xcc); auto expected=ram;
+                std::array<std::uint8_t,24> ram; std::fill(ram.begin(),ram.end(),0xcc); auto expected=ram;
                 for (unsigned n=0;n<8;++n) expected[offset+n]=source[n];
                 nt::ee::Memory memory{ram.data(),ram.size()}; nt::runtime::State state; state.pc=0x1664;
                 state.gpr[4].lo=offset; state.gpr[8].lo=0x8877665544332211ULL;
@@ -1080,7 +1081,7 @@ int main() {
                 state.gpr[4].lo=0x2003;
                 check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::memory_fault && !state.executed && ram==original && memory.fault_address==0x2003);
             }
-            std::array<std::uint8_t,8> ram; ram.fill(0xcc); nt::ee::Memory memory{ram.data(),ram.size()};
+            std::array<std::uint8_t,8> ram; std::fill(ram.begin(),ram.end(),0xcc); nt::ee::Memory memory{ram.data(),ram.size()};
             nt::runtime::State state; state.pc=0x1670; state.gpr[0].lo=123; state.gpr[4].lo=5;
             check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall && state.gpr[0].lo==123);
             for (unsigned n=0;n<8;++n) check(ram[n]==(n<5 ? 0xcc : 0));
@@ -1490,10 +1491,10 @@ int main() {
             descriptors[4]=0x7ff0; descriptors[6]=32; std::memcpy(ram.data()+0x3000,descriptors.data(),32);
             check(call(0x77,0x3000,2)==nt::ee::Stop::memory_fault && memory.fault_address==0x7ff0 && !peer.accepted);
             descriptors[4]=0x5000; descriptors[6]=16; std::memcpy(ram.data()+0x3000,descriptors.data(),32);
-            check(call(0x77,0xa0003000,2)==nt::ee::Stop::budget && state.gpr[2].lo==1);
+            check(call(0xffffff89U,0xa0003000,2)==nt::ee::Stop::budget && state.gpr[2].lo==1);
             std::fill_n(ram.data()+0x4000,32,0xff); std::fill_n(ram.data()+0x3000,32,0);
             check(!platform.sif_outbound.connect({&peer,sink}));
-            check(call(0x76,1)==nt::ee::Stop::budget && state.gpr[2].lo==1 && !peer.accepted);
+            check(call(0xffffff8aU,1)==nt::ee::Stop::budget && state.gpr[2].lo==1 && !peer.accepted);
             check(call(0x77,0,1)==nt::ee::Stop::budget && state.gpr[2].lo==0);
             peer.fail=true; const auto retired=state.executed;
             check(call(0x76,1)==nt::ee::Stop::unsupported_system && state.executed==retired && platform.completions.status()==0);
@@ -1503,6 +1504,105 @@ int main() {
             for (unsigned i=0;i<32;++i) check(peer.ram[0x100+i]==0x35);
             for (unsigned i=0;i<16;++i) check(peer.ram[0x200+i]==0x76);
             check(call(0x76,999)==nt::ee::Stop::budget && peer.accepted==1);
+        }
+        {
+            std::vector<std::uint8_t> ram(0x10000);
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::ee::NativeSifCommandPeer peer(platform.sif_link,memory,nt_ee_generated_code_overlap,0x1000);
+            check(peer.connect(platform.sif_outbound) && !peer.connect(platform.sif_outbound));
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap);
+            nt::runtime::State state;
+            const auto call=[&](unsigned number,unsigned argument,unsigned count=0) {
+                state.pc=0x3a0000; state.set(3,number); state.set(4,argument); state.set(5,count);
+                return nt::ee::run(nt_ee_generated_run,state,memory,1,services);
+            };
+            check(call(0x7a,4)==nt::ee::Stop::budget && state.gpr[2].lo==0x30000);
+            check(call(0x7a,2)==nt::ee::Stop::budget && state.gpr[2].lo==0x1000);
+            const auto submit=[&](std::uint32_t command,std::uint32_t a,std::uint32_t b=0) {
+                const std::array<std::uint32_t,8> packet{24,0,command,0,a,b,0,0};
+                const std::array<std::uint32_t,4> descriptor{0x4000,0x1000,24,0x40};
+                std::memcpy(ram.data()+0x4000,packet.data(),32); std::memcpy(ram.data()+0x3000,descriptor.data(),16);
+                return call(0x77,0x3000,1);
+            };
+            check(submit(0x80000002,0xa0005000)==nt::ee::Stop::budget);
+            check(call(0x76,1)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
+            check(peer.receive_address()==0x5000 && platform.completions.status()==0x40);
+            check(submit(0x80000001,7,0x1234)==nt::ee::Stop::budget);
+            check(call(0x76,2)==nt::ee::Stop::budget && peer.software_register(7)==0x1234);
+            platform.completions.acknowledge(0x40);
+            check(submit(0x80000003,0)==nt::ee::Stop::budget); // Reboot is not silently acknowledged.
+            const auto retired=state.executed;
+            check(call(0x76,3)==nt::ee::Stop::unsupported_system && state.executed==retired);
+            check(platform.sif_outbound.status(3)==1 && platform.completions.status()==0 && peer.receive_address()==0x5000);
+        }
+        {
+            std::vector<std::uint8_t> ram(0x10000);
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::ee::NativeSifCommandPeer peer(platform.sif_link,memory,nt_ee_generated_code_overlap,0x1000,&platform.sif_receive);
+            check(peer.connect(platform.sif_outbound));
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
+            nt::runtime::State state;
+            const auto call=[&](unsigned number,unsigned a=0,unsigned b=0,unsigned c=0,unsigned d=0) {
+                state.pc=0x3a0000; state.cop0_status=0; state.set(3,number); state.set(4,a); state.set(5,b); state.set(6,c); state.set(7,d); state.set(28,0x6000);
+                return nt::ee::run(nt_ee_generated_run,state,memory,1,services);
+            };
+            const auto submit=[&](const std::array<std::uint32_t,16>& words) {
+                std::memcpy(ram.data()+0x4000,words.data(),64);
+                const std::array<std::uint32_t,4> descriptor{0x4000,0x1000,words[0],0x40};
+                std::memcpy(ram.data()+0x3000,descriptor.data(),16);
+                return call(0x77,0x3000,1);
+            };
+            check(submit({20,0,0x80000002,0,0x5000})==nt::ee::Stop::budget);
+            check(call(0x76,1)==nt::ee::Stop::budget);
+            platform.completions.acknowledge(0x40);
+            check(call(0x12,5,0x3c0000,0,1)==nt::ee::Stop::budget);
+            check(call(0x16,5)==nt::ee::Stop::budget);
+            check(submit({16,0,0x80000002,1})==nt::ee::Stop::budget);
+            check(call(0x76,2)==nt::ee::Stop::budget && state.gpr[2].lo==1 && !platform.completions.ready());
+            platform.sif_receive.write(0x1000c000,0x184);
+            const auto full_size=memory.size; memory.size=0x5001;
+            const auto retired=state.executed;
+            check(call(0x76,2)==nt::ee::Stop::memory_fault && state.executed==retired && platform.sif_outbound.status(2)==1);
+            memory.size=full_size;
+            check(call(0x76,2)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
+            check(ram[0x5000]==24 && ram[0x5014]==1 && platform.completions.ready()==0x20);
+            state=nt::ee::NativePlatform::initial_state(0x121c); state.set(29,0x9000);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.cop0_status==0x10c01 && platform.completions.ready()==0x20);
+            state.pc=0x380000;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,5,services)==nt::ee::Stop::budget && !platform.interrupts.active());
+            std::uint32_t log=0; std::memcpy(&log,ram.data()+0x6000,4); check(log==5 && state.pc==0x380000 && platform.sif_receive.accepting());
+            check(submit({36,0,0x80000009,0,0,123,0,0x7000,0xdeadbeef})==nt::ee::Stop::budget);
+            check(call(0x76,3)==nt::ee::Stop::budget);
+            std::array<std::uint32_t,16> response{}; std::memcpy(response.data(),ram.data()+0x5000,64);
+            check(response[0]==64 && response[2]==0x80000008 && response[5]==123 && response[7]==0x7000 && response[8]==0x80000009 && !response[9] && !response[10]);
+        }
+        {
+            std::vector<std::uint8_t> ram(0x300000);
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::runtime::State state;
+            const auto access=[&](std::uint32_t address,bool write) {
+                state={}; state.pc=write ? 0x360000 : 0x360008; state.set(4,address); state.set(8,0x89abcdef);
+                return nt_ee_generated_run(&state,&memory,1);
+            };
+            for (const auto base:{0x20000000U,0x30000000U}) {
+                check(access(base+0x180000,true)==nt::ee::Stop::budget);
+                check(access(0x180000,false)==nt::ee::Stop::budget && state.gpr[8].lo==0xffffffff89abcdefULL);
+                check(access(base+0x180000,false)==nt::ee::Stop::budget && state.gpr[8].lo==0xffffffff89abcdefULL);
+                check(access(base+0x100000,false)==nt::ee::Stop::budget); // First mapped byte.
+                check(access(base+0xffffc,false)==nt::ee::Stop::memory_fault && memory.fault_address==base+0xffffc);
+                check(access(base+0x2000000,false)==nt::ee::Stop::memory_fault);
+                check(access(base+0x300000,false)==nt::ee::Stop::memory_fault); // Actual backing is shorter.
+                check(access(base+0x200000,true)==nt::ee::Stop::code_write && !state.executed);
+                check(access(base+0x180001,false)==nt::ee::Stop::memory_fault && !state.executed);
+                nt::ee::StartupServices services(nt_ee_generated_code_overlap);
+                state={}; state.pc=0x3a0000; state.set(3,0x4b); state.set(4,base+0x180000);
+                check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::budget);
+                std::uint32_t config=0; std::memcpy(&config,ram.data()+0x180000,4); check(config==0x12010);
+                platform.sif_receive.write(0x1000c000,0x184);
+                std::array<std::uint8_t,16> packet{}; packet.fill(0x7a);
+                check(platform.sif_receive.deliver(memory,nt_ee_generated_code_overlap,platform.completions,base+0x180000,packet)==nt::ee::Stop::budget);
+                check(ram[0x180000]==0x7a && platform.sif_receive.read(0x1000c010).value==0x180010);
+            }
         }
         run_ee_batch_tests();
         return 0;

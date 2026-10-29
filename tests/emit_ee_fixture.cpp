@@ -246,6 +246,9 @@ int main(int argc,char** argv) {
         code.push_back(nt::r5900::decode(0x3b0100+index*4,word)); ++index;
     }
     code.push_back(nt::r5900::decode(0x3b0110,12));
+    for (unsigned index=0;const auto word:{0xaf840000U,0x2403ff88U,12U,0x03e00008U,0U}) {
+        code.push_back(nt::r5900::decode(0x3c0000+index*4,word)); ++index;
+    }
     const std::array payloads{payload};
     std::ostringstream generated; nt::ee_codegen::emit_llvm(generated,code,{},payloads);
     if (generated.str().find("fence seq_cst")==std::string::npos) throw std::runtime_error("Native SYNC ordering was omitted");

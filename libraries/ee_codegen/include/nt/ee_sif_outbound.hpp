@@ -57,7 +57,7 @@ public:
         return Stop::budget;
     }
 private:
-    static std::uint32_t physical(std::uint32_t value) { return value>=0x80000000U && value<0xc0000000U ? value&0x1fffffffU : value; }
+    static std::uint32_t physical(std::uint32_t value) { return runtime::default_ram_address(value); }
     static bool range(const Memory& memory,std::uint32_t address,std::uint64_t size) {
         return memory.data && std::uint64_t(address)+size<=memory.size && std::uint64_t(address)+size<=0x2000000U;
     }

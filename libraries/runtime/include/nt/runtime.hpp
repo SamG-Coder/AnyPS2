@@ -1,5 +1,6 @@
 #pragma once
 #include <nt/ee_state.hpp>
+#include <nt/ee_address.hpp>
 #include <nt/ee_float.hpp>
 #include <array>
 #include <nt/word_merge.hpp>
@@ -48,7 +49,6 @@ inline void add_subtract_scalar(State& state, unsigned destination, unsigned lef
 }
 void divide_scalar(State& state, unsigned destination, unsigned left, unsigned right);
 // Translate only the BIOS-free default RAM aliases; callers enforce RAM bounds.
-std::uint32_t default_ram_address(std::uint32_t address);
 struct SifTransfer { std::uint32_t source, destination, bytes, attributes; };
 // The generated code uses this boundary; a future PCSX2 adapter owns MMIO and timing.
 class Bus {

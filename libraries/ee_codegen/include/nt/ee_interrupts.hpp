@@ -29,7 +29,7 @@ public:
     }
     Stop install(unsigned line,std::uint32_t raw,CompiledCode compiled) {
         if (line>=handlers_.size() || interrupted_) return Stop::unsupported_system;
-        const auto address=raw>=0x80000000U && raw<0xc0000000U ? raw&0x1fffffffU : raw;
+        const auto address=runtime::default_ram_address(raw);
         if (raw && (!address || address%4 || address>=0x2000000U)) return Stop::invalid_state;
         if (raw && (!compiled || !compiled(address))) return Stop::unmapped_code;
         handlers_[line]=address; enabled_|=1U<<line;
@@ -51,7 +51,7 @@ public:
                 return {Stop::budget,static_cast<std::uint64_t>(std::count_if(records_.begin(),records_.end(),[&](const auto& r) { return r.line==line && r.dma==dma; }))};
             }
             const auto raw=static_cast<std::uint32_t>(state.gpr[5].lo);
-            const auto address=raw>=0x80000000U && raw<0xc0000000U ? raw&0x1fffffffU : raw;
+            const auto address=runtime::default_ram_address(raw);
             if (!address || address%4 || address>=0x2000000U) return {Stop::invalid_state};
             if (!compiled || !compiled(address)) return {Stop::unmapped_code};
             const auto next=static_cast<std::uint32_t>(state.gpr[6].lo);

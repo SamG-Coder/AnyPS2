@@ -10,7 +10,11 @@ constexpr bool thread_syscall(std::uint32_t number) {
 }
 constexpr bool settings_syscall(std::uint32_t number) { return number==0x4a || number==0x4b || number==0x6e || number==0x6f; }
 constexpr bool sif_control_syscall(std::uint32_t number) { return number==0x6b || number==0x78 || number==0x79 || number==0x7a; }
+constexpr std::uint32_t sif_syscall_number(std::uint32_t number) {
+    return number==0xffffff8aU || number==0xffffff89U || number==0xffffff88U ? 0U-number : number;
+}
 constexpr bool startup_syscall(std::uint32_t number) {
+    number=sif_syscall_number(number);
     return number==0x76 || number==0x77 || sif_control_syscall(number) || settings_syscall(number) || thread_syscall(number) || intc_syscall(number) || cache_syscall(number) || number==0x74 || number==0x3c || number==0x3d || number==0x3e || (number>=0x40 && number<=0x48);
 }
 }

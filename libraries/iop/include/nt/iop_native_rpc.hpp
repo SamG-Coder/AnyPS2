@@ -1,5 +1,6 @@
 #pragma once
 #include <nt/iop_native_services.hpp>
+#include <nt/sif_rpc_reply.hpp>
 #include <nt/iop_native_code.hpp>
 #include <nt/iop_native_sif_endpoint.hpp>
 #include <algorithm>
@@ -32,13 +33,7 @@ public:
             }
             if (server) break;
         }
-        std::array<std::uint8_t,64> prepared{};
-        store_native_word(prepared,0,64); store_native_word(prepared,8,0x80000008);
-        store_native_word(prepared,20,load_native_word(packet,20));
-        store_native_word(prepared,28,load_native_word(packet,28));
-        store_native_word(prepared,32,0x80000009);
-        store_native_word(prepared,36,server); store_native_word(prepared,40,buffer);
-        reply=prepared;
+        reply=nt::sif::bind_reply(load_native_word(packet,20),load_native_word(packet,28),server,buffer);
         return {NativeServiceStatus::returned};
     }
     NativeServiceReply send_bind_reply(std::span<const std::uint8_t> reply) {

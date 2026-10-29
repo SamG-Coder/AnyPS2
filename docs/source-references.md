@@ -1058,3 +1058,23 @@ Outgoing SIF batching follows the existing AnyPS2 public descriptor validation,
 padding and transfer-status contracts. The snapshot owner and atomic native sink
 interface are original; they do not reuse the diagnostic FIFO or DMA-step engine.
 Tests use original data arrays and a native in-memory sink.
+
+
+The native bootstrap command peer implements public SIF command-buffer and software-
+register messages. Interfaces were checked against pinned PS2SDK `ee/kernel/src/sifcmd.c`
+and the existing AnyPS2 native IOP command session. The parser, message-port owner
+and connection to the EE batch sink are original C++; no firmware image, retail
+startup code or proprietary initialization data is supplied.
+
+
+RPC initialization replies follow the existing public SIF command protocol.
+The bind-reply encoder was factored from original AnyPS2 native IOP RPC code and
+is shared by both native paths. No server availability is invented. Initial
+interrupt-class enablement is an explicit native application launch policy rather
+than a recovered firmware register image.
+
+
+Native application aliases reuse AnyPS2's existing `default_ram_address` policy;
+public pointer conventions were checked against pinned PS2SDK `kernel.h`
+UNCACHED_SEG and UCAB_SEG. Interrupt-safe SIF aliases follow pinned `syscallnr.h`.
+No dynamic TLB model or firmware mapping table was imported.
