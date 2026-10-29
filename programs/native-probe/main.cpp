@@ -15,13 +15,17 @@ int main(int argc, char** argv) {
     try {
         bool raw = false;
         std::filesystem::path capture;
+        std::filesystem::path disc;
         for (int index = 3; index < argc; ++index) {
             const std::string_view option(argv[index]);
             if (option == "--raw") raw = true;
             else if (option.starts_with("--capture=")) {
                 capture = std::string(option.substr(10));
                 if (capture.empty()) throw std::runtime_error("Capture path is empty");
-            } else throw std::runtime_error("Usage: ps2-native [boot.elf] [budget] [--raw] [--capture=NEW_DIRECTORY]");
+            } else if (option.starts_with("--disc=")) {
+                disc = std::string(option.substr(7));
+                if (disc.empty()) throw std::runtime_error("Disc path is empty");
+            } else throw std::runtime_error("Usage: ps2-native [boot.elf] [budget] [--raw] [--capture=NEW_DIRECTORY] [--disc=IMAGE.iso]");
         }
         if (!capture.empty() && std::filesystem::exists(capture)) throw std::runtime_error("Capture directory already exists");
         std::uint64_t budget = 1000000;
@@ -37,6 +41,7 @@ int main(int argc, char** argv) {
         if (nt::fingerprint(bytes) != nt_generated_identity()) throw std::runtime_error("ELF does not match generated code");
         const auto elf = nt::elf::parse(bytes);
         nt::hardware::SystemBus bus;
+        if (!disc.empty()) bus.sif().mount_disc(disc);
         for (const auto& segment : elf.segments)
             bus.install(segment.address, nt::ByteView(bytes).subspan(segment.offset, segment.file_size), segment.memory_size);
         nt::runtime::State state;
@@ -63,6 +68,12 @@ int main(int argc, char** argv) {
                   << " pending_cpu=" << nt::hex32(bus.interrupt_lines())
                   << " dma_status=" << nt::hex32(static_cast<std::uint32_t>(bus.load(0x1000e010,4)))
                   << " iop_packets=" << bus.sif().iop_received_packets() << '\n';
+        if (bus.sif().rpc_bind_requests())
+            std::cout << "rpc_bind_requests=" << bus.sif().rpc_bind_requests()
+                      << " last_rpc_bind_server=" << nt::hex32(bus.sif().last_rpc_bind_server()) << '\n';
+        const auto fileio = bus.sif().fileio_statistics();
+        if (!disc.empty()) std::cout << "fileio_requests=" << fileio.requests << " fileio_opens=" << fileio.opens
+                                    << " fileio_bytes_read=" << fileio.bytes_read << " fileio_last_method=" << fileio.last_method << '\n';
         if (result.reason == nt::runtime::Stop::memory_fault)
             std::cout << "access=" << (fault_write ? "write" : "read") << " address=" << nt::hex32(fault_address) << " bytes=" << fault_size << '\n';
         for (unsigned i = 0; i < 32; ++i)

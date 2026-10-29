@@ -5,6 +5,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace nt::runtime {
@@ -39,6 +40,9 @@ public:
     virtual void store_quad(std::uint32_t address, Register value) = 0;
     virtual void synchronize_cache(unsigned operation) = 0;
     virtual void advance_cycles(std::uint64_t cycles) = 0;
+    virtual void set_gs_crt(std::uint32_t, std::uint32_t, std::uint32_t) {
+        throw MemoryFault("GS CRT services unavailable on this bus");
+    }
     virtual bool interrupt_pending() const = 0;
     virtual std::uint32_t interrupt_lines() const { return interrupt_pending() ? 0x400U : 0U; }
     virtual void initialize_sif() { throw MemoryFault("SIF services unavailable on this bus"); }
@@ -61,10 +65,52 @@ public:
 private:
     std::span<std::uint8_t> range(std::uint32_t address, unsigned size);
     std::vector<std::uint8_t> ram_;
+    std::array<std::uint8_t,16 * 1024> scratchpad_{};
 };
 inline std::uint64_t sx32(std::uint32_t v) { return static_cast<std::uint64_t>(static_cast<std::int64_t>(std::bit_cast<std::int32_t>(v))); }
 inline std::int64_t signed64(std::uint64_t v) { return std::bit_cast<std::int64_t>(v); }
 Register padduw(Register a, Register b);
+template<unsigned Bits>
+inline Register packed_equal(Register a, Register b) {
+    static_assert(Bits == 8 || Bits == 16 || Bits == 32);
+    constexpr auto mask = (std::uint64_t(1) << Bits) - 1;
+    const auto half = [](std::uint64_t x, std::uint64_t y) {
+        std::uint64_t result = 0;
+        for (unsigned shift=0;shift<64;shift+=Bits)
+            if (((x>>shift)&mask)==((y>>shift)&mask)) result |= mask<<shift;
+        return result;
+    };
+    return {half(a.lo,b.lo),half(a.hi,b.hi)};
+}
+template<bool Expand>
+inline Register packed_color5(Register value) {
+    const auto word = [](std::uint32_t input) {
+        std::uint32_t output = ((input >> (Expand ? 15 : 31)) & 1U) << (Expand ? 31 : 15);
+        for (unsigned channel=0;channel<3;++channel) {
+            const auto packed = channel*5, expanded = channel*8+3;
+            output |= ((input >> (Expand ? packed : expanded)) & 31U) << (Expand ? expanded : packed);
+        }
+        return output;
+    };
+    const auto half = [&](std::uint64_t input) {
+        return std::uint64_t(word(static_cast<std::uint32_t>(input))) | (std::uint64_t(word(static_cast<std::uint32_t>(input>>32)))<<32);
+    };
+    return {half(value.lo),half(value.hi)};
+}
+template<unsigned Bits>
+inline Register pack_even_lanes(Register a, Register b) {
+    static_assert(Bits == 8 || Bits == 16 || Bits == 32);
+    const auto pack = [](Register value) {
+        std::uint64_t result = 0;
+        for (unsigned i=0;i<64/Bits;++i) {
+            const auto source_bit = i*Bits*2;
+            const auto half = source_bit < 64 ? value.lo : value.hi;
+            result |= ((half >> (source_bit%64)) & ((std::uint64_t(1)<<Bits)-1)) << (i*Bits);
+        }
+        return result;
+    };
+    return {pack(b),pack(a)};
+}
 inline void divide_words(State& state, std::uint32_t numerator, std::uint32_t denominator, bool is_signed) {
     if (!denominator) {
         state.lo = is_signed && (numerator & 0x80000000U) ? 1 : ~std::uint64_t(0);
@@ -80,12 +126,25 @@ inline void divide_words(State& state, std::uint32_t numerator, std::uint32_t de
         state.hi = sx32(numerator % denominator);
     }
 }
-inline std::uint64_t merge_double_load(std::uint64_t original, std::uint64_t memory,
-                                       unsigned offset, bool left) {
-    const auto shift = (left ? 7 - offset : offset) * 8;
+template<class Word>
+inline Word merge_load(Word original, Word memory, unsigned offset, bool left) {
+    static_assert(std::is_unsigned_v<Word> && (sizeof(Word) == 4 || sizeof(Word) == 8));
+    constexpr auto bits = sizeof(Word) * 8;
+    const auto shift = (left ? sizeof(Word) - 1 - offset : offset) * 8;
     if (!shift) return memory;
-    if (left) return (original & ((std::uint64_t(1) << shift) - 1)) | (memory << shift);
-    return (original & (~std::uint64_t(0) << (64 - shift))) | (memory >> shift);
+    if (left) return (original & ((Word(1) << shift) - 1)) | (memory << shift);
+    return (original & (Word(~Word(0)) << (bits - shift))) | (memory >> shift);
+}
+inline std::uint64_t merge_double_load(std::uint64_t original, std::uint64_t memory, unsigned offset, bool left) {
+    return merge_load(original,memory,offset,left);
+}
+inline std::uint64_t merge_word_load(std::uint64_t original, std::uint32_t memory, unsigned offset, bool left) {
+    const auto value = merge_load(static_cast<std::uint32_t>(original),memory,offset,left);
+    // EE LWR with a partial word preserves bits 32..63; LWL always sign extends.
+    return left || !offset ? sx32(value) : (original & 0xffffffff00000000ULL) | value;
+}
+inline std::uint32_t merge_word_store(std::uint32_t memory, std::uint32_t value, unsigned offset, bool left) {
+    return merge_load(memory,value,3-offset,!left);
 }
 inline std::uint64_t plzcw(std::uint64_t value) {
     const auto count = [](std::uint32_t word) {

@@ -29,6 +29,12 @@ std::uint32_t default_ram_address(std::uint32_t address) {
 }
 std::span<std::uint8_t> RamBus::range(std::uint32_t address, unsigned size) {
     address = default_ram_address(address);
+    if (address >= 0x70000000U && address < 0x70004000U) {
+        const auto offset = address - 0x70000000U;
+        if (!size || size > 8 || (size & (size-1)) || address % size || size > scratchpad_.size()-offset)
+            throw MemoryFault("Address is not aligned scratchpad RAM");
+        return std::span(scratchpad_).subspan(offset,size);
+    }
     if (!size || size > 8 || (size & (size - 1)) || address % size ||
         address > ram_.size() || size > ram_.size() - address)
         throw MemoryFault("Address is not aligned diagnostic RAM");

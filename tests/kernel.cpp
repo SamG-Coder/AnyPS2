@@ -80,6 +80,13 @@ int main() {
         rejected = false;
         try { kernel.service(s,memory); } catch (const MemoryFault&) { rejected = true; }
         check(rejected, "Unaligned OSD configuration write accepted");
+        s.set(3,0x6f); s.set(4,0x6001); s.set(5,1); s.set(6,1);
+        check(kernel.service(s,memory) && memory.load(0x6001,1)==0,"Default OSD2 byte read failed");
+        memory.store(0x6001,1,0x30); s.set(3,0x6e);
+        check(kernel.service(s,memory),"OSD2 update failed");
+        memory.store(0x6001,1,0); s.set(3,0x6f);
+        check(kernel.service(s,memory) && memory.load(0x6001,1)==0x30,"OSD2 round trip failed");
+        s.set(6,4); check(!kernel.service(s,memory),"Unknown OSD2 extent accepted");
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

@@ -43,6 +43,7 @@ private:
     std::uint64_t next_ready_order_ = 0;
     // Volatile user configuration: OSD2, English, 4:3, stereo, UTC.
     std::uint32_t osd_config_ = (1U << 13) | (1U << 16) | (1U << 4);
+    std::array<std::uint8_t,4> osd_config2_{0,0,0,1};
     std::array<std::uint32_t,3> sif_system_registers_{};
     bool service_sif(std::uint32_t call, runtime::State& state, runtime::Bus& memory);
     bool service_threads(std::uint32_t call, runtime::State& state, runtime::Bus& memory);

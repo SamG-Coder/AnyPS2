@@ -38,8 +38,38 @@ references. No BIOS image or BIOS disassembly was used for this implementation.
   independent C++ interrupt dispatcher and shared RAM address translation.
   PS2SDK's public `UNCACHED_SEG`/`UCAB_SEG` macros and `ExitHandler` interface
   were also consulted. No BIOS instructions are generated for the HLE return gate.
+  The same public reference's INTC dispatcher informed controller priority,
+  ascending INTC line order, acknowledgement and callback ABI. Its SetSyscall
+  timer-3 alias uses zero argument and GP. INTC reuses the C++ DMAC context/return
+  mechanism; no proprietary interrupt-vector code is embedded.
+  PS2SDK `iop/fs/fileio/src/fileio.c` and Play! `Source/iop/Iop_FileIo.h`
+  identify RPC server 0x80000001 as file I/O. The public `fileio-common.h` and
+  `sifrpc-common.h` layouts, plus Play! `Iop_FileIo.cpp` and
+  `Iop_FileIoHandler1000.cpp`, informed the independent legacy read-only service:
+  method IDs, version negotiation, arguments, results, and completion correlation.
+  The implementation reuses AnyPS2's ISO reader and contains no proprietary module.
+  The public `Config2Param` structure and Get/SetOsdConfigParam2 declarations
+  define the four volatile settings bytes supported by the HLE kernel.
+  PCSX2's LWL/LWR/SWL/SWR semantics informed the shared word/doubleword merge
+  helpers, including the EE's partial-LWR upper-word preservation rule.
+  Public MMI lane definitions informed packed equality, even-lane packing, and
+  five-bit color packing/expansion. Synthetic vectors validate both 64-bit halves
+  and aliased operands without including game instructions.
+  The public EE scratchpad mapping supplies an independent 16 KiB RAM region;
+  HLE SIF submissions read it through the same bus rather than a game-specific copy.
   This is compatibility evidence, not proof of all hardware/kernel edge cases.
   Its attribution/license is retained in [Play-license.txt](third-party/Play-license.txt).
+
+PCSX2 `pcsx2/GS.h` and `pcsx2/GS.cpp` at the pinned revision above were
+consulted for privileged register addresses, CSR acknowledgement/reset, empty
+FIFO status, revision/ID defaults, and IMR writable/fixed bits. AnyPS2's separate
+C++ register model implements these interfaces without firmware or renderer code.
+PS2SDK's public kernel declarations/syscall numbers and Play!'s GsGetIMR and
+GsPutIMR services informed the HLE forwarding to the same MMIO register model.
+Play!'s `GSHandler::SetCrt` supplies the public mode/SMODE2 relationship.
+PCSX2 `Counters.cpp` supplies interlaced NTSC/PAL field rates, blanking lengths,
+delayed GS field events and separate INTC blanking edges. The independent integer
+scanout model is diagnostic timing, not a copy of BIOS CRT programming tables.
 
 The local reference checkouts under `third_party` are ignored. Game images,
 extracted executables, generated guest code, and runtime traces stay under the

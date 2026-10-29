@@ -24,9 +24,10 @@ allocations, not addresses copied from a retail BIOS.
   at most 32 descriptors, validate completely before queuing, and report pending
   until the IOP receiver has consumed their data. A busy transmitter returns zero.
 - Command initialization, receive-address changes, and 32 software registers.
-  RPC initialization returns a SET_SREG reply over SIF0. The RPC server registry
-  is currently empty; bind requests receive correlated null-server responses.
-  RPC calls, reset commands, and unknown commands stop explicitly.
+  RPC initialization returns a SET_SREG reply over SIF0. A mounted disc enables
+  the read-only FILEIO server; other binds receive correlated null-server responses.
+  Unsupported RPC calls, reset commands, and unknown commands stop explicitly.
+  See [file-I/O service](fileio.md) for supported calls and queued DMA replies.
 
 SIF initialization publishes transport/command readiness only after installing
 the corresponding HLE endpoint. It does not assert complete IOP boot or invent
@@ -58,7 +59,14 @@ context while retaining the global instruction count. Callback execution can
 pause and resume at an instruction budget boundary. Thread scheduling is deferred
 until callback completion.
 
-INTC delivery, nested interrupts, and modification of an active callback chain
+INTC uses the same context and return path. Enabled INTC lines dispatch in
+ascending order, while DMAC takes priority when both CPU interrupt lines are
+enabled and pending. INTC acknowledgement preserves masked sources and the mask
+register. AddIntcHandler callbacks receive their line, argument and saved GP;
+the SetSyscall timer-3 alias receives zero argument/GP. Callback entry sets EXL
+and clears IE; return restores the interrupted status.
+
+Nested interrupts and modification of an active callback chain
 remain unsupported. Pending channels without registered handlers remain pending.
 Callback stacks currently require aligned physical RAM addresses. Default
 uncached user RAM mappings cover 0x20100000–0x21ffffff and
@@ -79,4 +87,7 @@ tests cover coherent data-cache operations and semaphore context switching. One
 DMA integration regression covers SIF0 payload delivery, generated guest callbacks,
 budget suspension, chain termination, context restoration, and an outbound reply
 through uncached RAM. Tests target major behavior changes and milestones.
+The timer integration scenario covers regular and alias registrations, masking,
+delay-slot deferral, budget resumption, concurrent DMAC/INTC priority, preserved
+CPU context, and leaving unregistered interrupts pending.
 No commercial instruction or packet payload is included in these tests.

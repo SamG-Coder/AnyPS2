@@ -1,6 +1,7 @@
 #pragma once
 #include <nt/runtime.hpp>
 #include <nt/sif.hpp>
+#include <nt/gs.hpp>
 
 namespace nt::hardware {
 // Incremental hardware boundary. Unknown registers and unsupported active modes
@@ -13,6 +14,9 @@ public:
     void store_quad(std::uint32_t address, runtime::Register value) override;
     void synchronize_cache(unsigned operation) override { ram_.synchronize_cache(operation); }
     void advance_cycles(std::uint64_t cycles) override;
+    void set_gs_crt(std::uint32_t interlace, std::uint32_t mode, std::uint32_t frame) override {
+        gs_.set_crt(interlace,mode,frame);
+    }
     bool interrupt_pending() const override { return interrupt_lines() != 0; }
     std::uint32_t interrupt_lines() const override {
         return ((interrupt_status_ & interrupt_mask_) ? 0x400U : 0U) |
@@ -34,6 +38,7 @@ private:
     std::uint32_t dma_status_ = 0;
     std::uint32_t dma_control_ = 0, dma_enable_ = 0x1201;
     Sif sif_;
+    Gs gs_;
     std::uint64_t cycles_ = 0;
     runtime::RamBus ram_;
     static std::uint32_t physical(std::uint32_t address);

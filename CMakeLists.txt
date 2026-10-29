@@ -20,9 +20,12 @@ target_include_directories(nt_analysis PUBLIC libraries/analysis/include)
 target_link_libraries(nt_analysis PUBLIC nt_elf nt_r5900)
 add_library(nt_runtime libraries/runtime/src/runtime.cpp)
 target_include_directories(nt_runtime PUBLIC libraries/runtime/include)
-add_library(nt_hardware libraries/hardware/src/system_bus.cpp libraries/hardware/src/sif.cpp libraries/hardware/src/sif_commands.cpp libraries/hardware/src/sif_jobs.cpp)
+add_library(nt_fileio libraries/fileio/src/fileio.cpp)
+target_include_directories(nt_fileio PUBLIC libraries/fileio/include)
+target_link_libraries(nt_fileio PUBLIC nt_disc nt_runtime)
+add_library(nt_hardware libraries/hardware/src/system_bus.cpp libraries/hardware/src/gs.cpp libraries/hardware/src/sif.cpp libraries/hardware/src/sif_commands.cpp libraries/hardware/src/sif_jobs.cpp libraries/hardware/src/sif_rpc.cpp)
 target_include_directories(nt_hardware PUBLIC libraries/hardware/include)
-target_link_libraries(nt_hardware PUBLIC nt_runtime)
+target_link_libraries(nt_hardware PUBLIC nt_runtime nt_fileio)
 add_library(nt_kernel libraries/kernel/src/kernel.cpp libraries/kernel/src/runner.cpp libraries/kernel/src/interrupts.cpp libraries/kernel/src/interrupt_dispatch.cpp libraries/kernel/src/threads.cpp libraries/kernel/src/sif.cpp)
 target_include_directories(nt_kernel PUBLIC libraries/kernel/include)
 target_link_libraries(nt_kernel PUBLIC nt_runtime)
@@ -75,6 +78,9 @@ if(BUILD_TESTING)
     add_executable(sif-tests tests/sif.cpp)
     target_link_libraries(sif-tests PRIVATE nt_hardware nt_kernel)
     add_test(NAME sif-transport COMMAND sif-tests)
+    add_executable(fileio-tests tests/fileio.cpp)
+    target_link_libraries(fileio-tests PRIVATE nt_hardware)
+    add_test(NAME disc-fileio-rpc COMMAND fileio-tests)
     add_test(NAME repository-content COMMAND "${CMAKE_COMMAND}"
         "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}"
         "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/repository-policy"
@@ -85,19 +91,23 @@ if(BUILD_TESTING)
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/repository_policy_tests.cmake")
     set(ANYPS2_TEST_PROBE "" CACHE FILEPATH "Optional local generated startup executable")
     set(ANYPS2_TEST_IMAGE "" CACHE FILEPATH "Optional matching local boot ELF")
+    set(ANYPS2_TEST_DISC "" CACHE FILEPATH "Optional read-only disc image for local FILEIO")
     set(ANYPS2_EXPECTED_STOP "" CACHE STRING "Expected startup diagnostic regex")
     set(ANYPS2_TEST_BUDGET "1000000" CACHE STRING "Instruction limit for local startup regression")
+    set(ANYPS2_EXPECTED_EXIT "3" CACHE STRING "Local test exit: 3 diagnostic stop, 4 explicit budget boundary")
     if(ANYPS2_TEST_PROBE)
         add_test(NAME local-startup COMMAND "${CMAKE_COMMAND}"
             "-DPROBE=${ANYPS2_TEST_PROBE}" "-DIMAGE=${ANYPS2_TEST_IMAGE}"
+            "-DDISC=${ANYPS2_TEST_DISC}"
             "-DEXPECTED=${ANYPS2_EXPECTED_STOP}"
             "-DBUDGET=${ANYPS2_TEST_BUDGET}"
+            "-DEXPECTED_EXIT=${ANYPS2_EXPECTED_EXIT}"
             "-DLOG=${CMAKE_CURRENT_BINARY_DIR}/local-startup.txt"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/local_startup.cmake")
         set_tests_properties(local-startup PROPERTIES LABELS "local;integration" TIMEOUT 70)
     endif()
 endif()
-foreach(target nt_binary nt_disc nt_elf nt_r5900 nt_analysis nt_runtime nt_hardware nt_kernel nt_codegen nt_process ps2-import ps2-inspect ps2-recompile ps2-build AnyPS2)
+foreach(target nt_binary nt_disc nt_elf nt_r5900 nt_analysis nt_runtime nt_fileio nt_hardware nt_kernel nt_codegen nt_process ps2-import ps2-inspect ps2-recompile ps2-build AnyPS2)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /permissive-)
     else()

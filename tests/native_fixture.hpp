@@ -71,6 +71,19 @@ inline std::map<std::uint32_t, std::uint32_t> words() {
     w[0x9010] = imm(9,0,2,0); w[0x9014] = special(8,31,0,0); w[0x9018] = imm(43,5,16,8);
     w[0x9100] = imm(9,0,2,0xffff); w[0x9104] = special(8,31,0,0); w[0x9108] = imm(43,5,2,12);
     w[0x9200] = 0; w[0x9204] = 0x4c000000;
+    w[0x9300] = imm(43,0,4,0x800); w[0x9304] = imm(43,0,28,0x804);
+    w[0x9308] = imm(43,0,5,0x808); w[0x930c] = special(8,31,0,0); w[0x9310] = imm(9,0,2,0);
+    w[0x9400] = special(20,1,2,2); w[0x9404] = special(22,1,2,3); w[0x9408] = special(23,1,2,4);
+    w[0x9500] = imm(34,1,2,0); w[0x9510] = imm(38,1,2,0);
+    w[0x9520] = imm(42,1,2,0); w[0x9530] = imm(46,1,2,0);
+    w[0x9540] = imm(34,1,2,3); w[0x9544] = imm(38,1,2,0);
+    w[0x9600] = special(32,1,2,3); w[0x9610] = special(34,1,2,3); w[0x9620] = imm(8,1,3,1);
+    w[0x9700] = (28U<<26)|special(40,1,2,1,10);
+    w[0x9710] = (28U<<26)|special(40,1,2,1,6);
+    w[0x9720] = (28U<<26)|special(40,1,2,1,2);
+    w[0x9800] = (28U<<26)|special(8,0,1,1,31); w[0x9804] = (28U<<26)|special(8,0,1,2,30);
+    w[0x9900] = (28U<<26)|special(8,1,2,2,27); w[0x9910] = (28U<<26)|special(8,1,2,2,23); w[0x9920] = (28U<<26)|special(8,1,2,2,19);
+    w[0x9a00] = special(44,1,2,3); w[0x9a10] = special(46,1,2,3); w[0x9a20] = imm(24,1,3,1);
     // Compile every supported opcode shape as part of the same generated file.
     std::uint32_t pc = 0x20000; // Keep opcode-shape fixtures outside the HLE syscall table.
     for (unsigned op = 0; op < 64; ++op) {

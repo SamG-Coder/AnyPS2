@@ -142,6 +142,8 @@ void command_service() {
           bus.load(0x5010,4) == 7 && bus.load(0x5014,4) == 0x9000 && bus.load(0x5018,4) == 9 &&
           bus.load(0x501c,4) == 0xa000 && bus.load(0x5020,4) == 0x80000009 && bus.load(0x5024,4) == 0,
           "Unregistered RPC server did not receive a correlated null bind response");
+    check(bus.sif().rpc_bind_requests() == 1 && bus.sif().last_rpc_bind_server() == 0x12345678,
+          "RPC bind diagnostic lost the requested server");
     rejects([&] { send(0x80000002,20,0x6000,0,2); });
     check(bus.sif().ee_command_address() == 0x5000,"Unsupported init option mutated state");
 }

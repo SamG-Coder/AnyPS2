@@ -19,6 +19,20 @@ void operation(std::ostream& o, const r5900::Instruction& i) {
     const auto shift = std::to_string(i.sa);
     const auto address = "static_cast<std::uint32_t>(" + rs + " + " + imm + ")";
     switch (i.op) {
+    case Op::dadd: case Op::dsub: case Op::daddi: {
+        const auto right = i.op == Op::daddi ? imm : rt;
+        o << "const std::uint64_t a = " << rs << ", b = " << right << ";\n"
+          << "const auto value = a " << (i.op == Op::dsub ? "-" : "+") << " b;\n"
+          << "if ((" << (i.op == Op::dsub ? "(a ^ b) & (a ^ value)" : "(a ^ value) & (b ^ value)")
+          << ") >> 63) return Result{Stop::unsupported,s.pc,word,\"Signed doubleword overflow exception is not implemented\"};\n";
+        set(i.op == Op::daddi ? i.rt : i.rd,"value"); break;
+    }
+    case Op::add: case Op::sub: case Op::addi:
+        o << "const auto value = std::int64_t(std::bit_cast<std::int32_t>(std::uint32_t(" << rs << "))) "
+          << (i.op == Op::sub ? "- " : "+ ")
+          << (i.op == Op::addi ? std::to_string(i.immediate) + "LL" : "std::int64_t(std::bit_cast<std::int32_t>(std::uint32_t(" + rt + ")))") << ";\n"
+          << "if (value < -2147483648LL || value > 2147483647LL) return Result{Stop::unsupported,s.pc,word,\"Signed word overflow exception is not implemented\"};\n";
+        set(i.op == Op::addi ? i.rt : i.rd,"sx32(std::uint32_t(value))"); break;
     case Op::cache: o << "bus.synchronize_cache(" << (i.rt == 0x1a ? 2 : 0) << ");\n"; break;
     case Op::div: case Op::divu:
         o << "divide_words(s,std::uint32_t(" << rs << "),std::uint32_t(" << rt << "),"
@@ -39,6 +53,15 @@ void operation(std::ostream& o, const r5900::Instruction& i) {
         o << "const auto address = " << address << ";\n";
         set(i.rt,"merge_double_load(" + rt + ", bus.load(address & ~7U,8), address & 7U, " +
             (i.op == Op::ldl ? "true" : "false") + ")"); break;
+    case Op::lwl: case Op::lwr:
+        o << "const auto address = " << address << ";\n";
+        set(i.rt,"merge_word_load(" + rt + ", std::uint32_t(bus.load(address & ~3U,4)), address & 3U, " +
+            (i.op == Op::lwl ? "true" : "false") + ")"); break;
+    case Op::swl: case Op::swr:
+        o << "const auto address = " << address << ";\n"
+          << "const auto old = std::uint32_t(bus.load(address & ~3U,4));\n"
+          << "bus.store(address & ~3U,4,merge_word_store(old,std::uint32_t(" << rt << "),address & 3U,"
+          << (i.op == Op::swl ? "true" : "false") << "));\n"; break;
     case Op::plzcw: set(i.rd,"plzcw(" + rs + ")"); break;
     case Op::ei: case Op::di:
         o << "if ((s.cop0_status & 0x20006U) || !(s.cop0_status & 0x18U)) s.cop0_status "
@@ -80,6 +103,9 @@ void operation(std::ostream& o, const r5900::Instruction& i) {
     case Op::slti: set(i.rt, "signed64(" + rs + ") < " + std::to_string(i.immediate)); break;
     case Op::sltiu: set(i.rt, rs + " < " + imm); break;
     case Op::dsll: case Op::dsll32: set(i.rd, rt + " << " + std::to_string(i.sa + (i.op == Op::dsll32 ? 32 : 0))); break;
+    case Op::dsllv: set(i.rd, rt + " << (" + rs + " & 63)"); break;
+    case Op::dsrlv: set(i.rd, rt + " >> (" + rs + " & 63)"); break;
+    case Op::dsrav: set(i.rd, "std::uint64_t(signed64(" + rt + ") >> (" + rs + " & 63))"); break;
     case Op::dsrl: case Op::dsrl32: set(i.rd, rt + " >> " + std::to_string(i.sa + (i.op == Op::dsrl32 ? 32 : 0))); break;
     case Op::dsra: case Op::dsra32: set(i.rd, "std::uint64_t(signed64(" + rt + ") >> " + std::to_string(i.sa + (i.op == Op::dsra32 ? 32 : 0)) + ")"); break;
     case Op::movz: case Op::movn:
@@ -136,6 +162,15 @@ void operation(std::ostream& o, const r5900::Instruction& i) {
     case Op::lq: o << "s.set128(" << i.rt << ", bus.load_quad(" << address << "));\n"; break;
     case Op::sq: o << "bus.store_quad(" << address << ", s.gpr[" << i.rt << "]);\n"; break;
     case Op::padduw: o << "s.set128(" << i.rd << ", padduw(s.gpr[" << i.rs << "], s.gpr[" << i.rt << "]));\n"; break;
+    case Op::pceqb: case Op::pceqh: case Op::pceqw:
+        o << "s.set128(" << i.rd << ", packed_equal<" << (i.op == Op::pceqb ? 8 : i.op == Op::pceqh ? 16 : 32)
+          << ">(s.gpr[" << i.rs << "], s.gpr[" << i.rt << "]));\n"; break;
+    case Op::ppac5: case Op::pext5:
+        o << "s.set128(" << i.rd << ", packed_color5<" << (i.op == Op::pext5 ? "true" : "false")
+          << ">(s.gpr[" << i.rt << "]));\n"; break;
+    case Op::ppacb: case Op::ppach: case Op::ppacw:
+        o << "s.set128(" << i.rd << ", pack_even_lanes<" << (i.op == Op::ppacb ? 8 : i.op == Op::ppach ? 16 : 32)
+          << ">(s.gpr[" << i.rs << "], s.gpr[" << i.rt << "]));\n"; break;
     case Op::pand: case Op::por: case Op::pxor: case Op::pnor: {
         const auto a = "s.gpr[" + std::to_string(i.rs) + "]", b = "s.gpr[" + std::to_string(i.rt) + "]";
         const auto symbol = i.op == Op::pand ? " & " : i.op == Op::pxor ? " ^ " : " | ";

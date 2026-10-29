@@ -135,10 +135,11 @@ void Sif::send_step(runtime::RamBus& ee) {
     }
     c.address += 16; --c.count;
 }
-void Sif::iop_step() {
+void Sif::iop_step(runtime::RamBus& ee) {
+    reply_step();
     if (transmit_.active && to_ee_.size() <= fifo_words - 4) {
         if (!transmit_.tagged) {
-            to_ee_.push_back(0x70000000U | transmit_.count);
+            to_ee_.push_back((transmit_.end ? 0x70000000U : 0x10000000U) | transmit_.count);
             to_ee_.push_back(transmit_.destination); to_ee_.push_back(0); to_ee_.push_back(0);
             transmit_.tagged = true;
         } else if (transmit_.count) {
@@ -162,12 +163,12 @@ void Sif::iop_step() {
         pop(to_iop_,4); iop_destination_ += 16; iop_remaining_ -= 4;
     }
     if (!iop_remaining_) {
-        if (commands_ready_ && iop_packet_address_ == registers_[1]) dispatch_command();
+        if (commands_ready_ && iop_packet_address_ == registers_[1]) dispatch_command(ee);
         iop_packet_ = false; ++received_packets_;
     }
 }
 void Sif::step(runtime::RamBus& ee, bool enabled) {
-    iop_step();
+    iop_step(ee);
     if (enabled) { receive_step(ee); send_step(ee); job_step(ee); }
 }
 std::uint32_t Sif::take_completions() { const auto result = completion_; completion_ = 0; return result; }

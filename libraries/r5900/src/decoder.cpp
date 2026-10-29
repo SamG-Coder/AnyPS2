@@ -12,10 +12,13 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
         F(0,sll); F(2,srl); F(3,sra); F(4,sllv); F(6,srlv); F(7,srav);
         F(8,jr); F(9,jalr); F(10,movz); F(11,movn); F(12,syscall); F(13,breakpoint);
         F(15,sync); F(16,mfhi); F(17,mthi); F(18,mflo); F(19,mtlo);
+        F(20,dsllv); F(22,dsrlv); F(23,dsrav);
         F(24,mult); F(25,multu); F(26,div); F(27,divu);
         F(33,addu); F(35,subu); F(36,bit_and); F(37,bit_or); F(38,bit_xor); F(39,bit_nor);
+        F(32,add); F(34,sub);
         F(40,mfsa); F(41,mtsa);
         F(42,slt); F(43,sltu); F(45,daddu); F(47,dsubu);
+        F(44,dadd); F(46,dsub);
         F(56,dsll); F(58,dsrl); F(59,dsra); F(60,dsll32); F(62,dsrl32); F(63,dsra32);
         }
     } else if (opcode == 1) {
@@ -33,12 +36,20 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
         if (i.rs == 16 && fn == 24) i.op = Op::adda_s;
     } else if (opcode == 28) {
         if (fn == 4 && i.rt == 0 && i.sa == 0) i.op = Op::plzcw;
+        if (fn == 8 && i.sa == 30) i.op = Op::pext5;
+        if (fn == 8 && i.sa == 31) i.op = Op::ppac5;
+        if (fn == 8 && i.sa == 19) i.op = Op::ppacw;
+        if (fn == 8 && i.sa == 23) i.op = Op::ppach;
+        if (fn == 8 && i.sa == 27) i.op = Op::ppacb;
         switch (fn) { F(16,mfhi1); F(17,mthi1); F(18,mflo1); F(19,mtlo1); }
         if (fn == 9 && i.sa == 18) i.op = Op::pand;
         if (fn == 9 && i.sa == 19) i.op = Op::pxor;
         if (fn == 41 && i.sa == 18) i.op = Op::por;
         if (fn == 41 && i.sa == 19) i.op = Op::pnor;
         if (fn == 40 && i.sa == 16) i.op = Op::padduw;
+        if (fn == 40 && i.sa == 2) i.op = Op::pceqw;
+        if (fn == 40 && i.sa == 6) i.op = Op::pceqh;
+        if (fn == 40 && i.sa == 10) i.op = Op::pceqb;
         if (fn == 41 && i.sa == 27) i.op = Op::pcpyh;
         if (fn == 9 && i.sa == 14) i.op = Op::pcpyld;
         if (fn == 41 && i.sa == 14) i.op = Op::pcpyud;
@@ -48,8 +59,11 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
         switch (opcode) {
         F(2,j); F(3,jal); F(4,beq); F(5,bne); F(6,blez); F(7,bgtz);
         F(9,addiu); F(10,slti); F(11,sltiu); F(12,andi); F(13,ori); F(14,xori); F(15,lui);
+        F(8,addi);
+        F(24,daddi);
         F(20,beql); F(21,bnel); F(22,blezl); F(23,bgtzl); F(25,daddiu);
         F(26,ldl); F(27,ldr);
+        F(34,lwl); F(38,lwr); F(42,swl); F(46,swr);
         F(30,lq); F(31,sq); F(32,lb); F(33,lh); F(35,lw); F(36,lbu); F(37,lhu); F(39,lwu);
         F(40,sb); F(41,sh); F(43,sw); F(55,ld); F(63,sd);
         F(44,sdl); F(45,sdr);
@@ -75,7 +89,7 @@ std::string_view name(Op op) {
     N(syscall); N(breakpoint); N(sync); N(mfhi); N(mthi); N(mflo); N(mtlo);
     N(mult); N(multu); N(div); N(divu);
     N(addu); N(subu); N(bit_and); N(bit_or); N(bit_xor); N(bit_nor); N(slt); N(sltu); N(daddu); N(dsubu);
-    N(dsll); N(dsrl); N(dsra); N(dsll32); N(dsrl32); N(dsra32);
+    N(dsll); N(dsrl); N(dsra); N(dsll32); N(dsrl32); N(dsra32); N(dsllv); N(dsrlv); N(dsrav);
     N(j); N(jal); N(beq); N(bne); N(blez); N(bgtz); N(bltz); N(bgez);
     N(beql); N(bnel); N(blezl); N(bgtzl); N(bltzl); N(bgezl);
     N(addiu); N(daddiu); N(slti); N(sltiu); N(andi); N(ori); N(xori); N(lui);
@@ -86,7 +100,11 @@ std::string_view name(Op op) {
     N(mfc1); N(mtc1); N(cfc1); N(ctc1); N(adda_s);
     N(pcpyh); N(pcpyld); N(pcpyud); N(ei); N(di); N(mfc0); N(mtc0);
     N(eret); N(plzcw); N(cache);
-    N(sdl); N(sdr);
+    N(sdl); N(sdr); N(lwl); N(lwr); N(swl); N(swr); N(add); N(sub); N(addi);
+    N(pceqb); N(pceqh); N(pceqw);
+    N(ppac5); N(pext5);
+    N(ppacb); N(ppach); N(ppacw);
+    N(dadd); N(dsub); N(daddi);
     }
 #undef N
     return "unsupported";

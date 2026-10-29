@@ -19,7 +19,11 @@ function(check_content relative physical)
     endif()
     file(READ "${physical}" bytes HEX)
     # A NUL is not allowed in these text sources. Match byte pairs, not nibbles.
-    if(bytes MATCHES "^(..)*00" OR bytes MATCHES "^(7f454c46|4d5a|504b0304)")
+    # Avoid a recursively repeated regex over an entire file: it can exhaust
+    # CMake's regex stack on perfectly ordinary larger C++ translation units.
+    string(REGEX MATCHALL ".." byte_pairs "${bytes}")
+    list(FIND byte_pairs "00" nul_index)
+    if(NOT nul_index EQUAL -1 OR bytes MATCHES "^(7f454c46|4d5a|504b0304)")
         message(FATAL_ERROR "Repository policy: binary content: ${relative}")
     endif()
     file(READ "${physical}" prefix LIMIT 1024)

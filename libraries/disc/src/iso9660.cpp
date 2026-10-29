@@ -56,6 +56,11 @@ Bytes Iso9660::read(const Entry& entry, std::uint64_t limit) {
     if (entry.size > limit) throw std::runtime_error("Disc file exceeds read limit");
     return read_at(std::uint64_t(entry.sector) * sector_size, entry.size);
 }
+Bytes Iso9660::read_range(const Entry& entry, std::uint32_t offset, std::uint32_t count) {
+    if (offset > entry.size || count > entry.size - offset)
+        throw std::runtime_error("Disc read exceeds file bounds");
+    return read_at(std::uint64_t(entry.sector) * sector_size + offset,count);
+}
 std::vector<Entry> Iso9660::entries(const Entry& directory) {
     if (!directory.directory) throw std::runtime_error("Expected a directory");
     const auto data = read(directory, 16 * 1024 * 1024);
@@ -75,17 +80,18 @@ std::vector<Entry> Iso9660::entries(const Entry& directory) {
 Entry Iso9660::find(std::string path) {
     std::replace(path.begin(), path.end(), '\\', '/');
     while (!path.empty() && path.front() == '/') path.erase(path.begin());
-    if (path.empty() || path.back() == '/') throw std::runtime_error("Invalid ISO path");
+    if (path.empty() || path.back() == '/') throw PathError("Invalid ISO path");
     std::istringstream parts(path);
     std::string part;
     auto current = root_;
     while (std::getline(parts, part, '/')) {
-        if (part.empty() || part == "." || part == "..") throw std::runtime_error("Invalid ISO path");
+        if (part.empty() || part == "." || part == ".." || !current.directory) throw PathError("Invalid ISO path");
         auto children = entries(current);
         std::vector<Entry> matches;
         for (const auto& child : children)
             if (normalize(child.name) == normalize(part)) matches.push_back(child);
-        if (matches.size() != 1) throw std::runtime_error("ISO path missing or ambiguous: " + path);
+        if (matches.empty()) throw PathError("ISO path missing: " + path);
+        if (matches.size() != 1) throw std::runtime_error("Ambiguous ISO path: " + path);
         current = matches.front();
     }
     return current;

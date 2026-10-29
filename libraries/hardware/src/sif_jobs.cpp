@@ -12,7 +12,8 @@ std::uint32_t Sif::submit(std::span<const runtime::SifTransfer> transfers) {
         if (transfer.bytes > 0xffff0 || transfer.source % 16 || transfer.destination % 4 || (transfer.attributes & ~0x44U))
             throw runtime::MemoryFault("SIF DMA: unsupported descriptor");
         transfer.bytes = (transfer.bytes + 15) & ~15U;
-        if (physical > 32 * 1024 * 1024 || transfer.bytes > 32 * 1024 * 1024 - physical ||
+        const auto source_limit = physical >= 0x70000000U && physical < 0x70004000U ? 0x70004000U : 0x02000000U;
+        if (physical > source_limit || transfer.bytes > source_limit - physical ||
             transfer.destination > iop_ram_.size() || transfer.bytes > iop_ram_.size() - transfer.destination)
             throw runtime::MemoryFault("SIF DMA: descriptor exceeds RAM");
         validated.push_back(transfer);

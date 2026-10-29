@@ -8,7 +8,7 @@ void Sif::initialize_commands() {
     commands_ready_ = true;
     registers_[3] |= 0x30000; // SIF transport and command service initialized.
 }
-void Sif::dispatch_command() {
+void Sif::dispatch_command(runtime::RamBus& ee) {
     const auto read = [&](unsigned offset) {
         if (offset + 4 > iop_packet_bytes_) throw runtime::MemoryFault("SIF command: truncated packet");
         std::uint32_t value = 0;
@@ -21,6 +21,7 @@ void Sif::dispatch_command() {
         throw runtime::MemoryFault("SIF command: invalid packet size");
     const auto command = read(8), option = read(12);
     const auto reply = [&](std::span<const std::uint32_t> words) {
+        if (!replies_.empty()) throw runtime::MemoryFault("SIF RPC: reply queue busy");
         if (!ee_command_address_) throw runtime::MemoryFault("SIF RPC: EE receive address is unset");
         const auto bytes = (words.size() * 4 + 15) & ~std::size_t(15);
         std::vector<std::uint8_t> packet(bytes);
@@ -30,8 +31,7 @@ void Sif::dispatch_command() {
         iop_send(0x1100,ee_command_address_,static_cast<std::uint32_t>(bytes / 16));
     };
     if (command == 0x80000002U && option == 1) {
-        // Minimal RPC dispatcher has an empty server registry. Initialization
-        // acknowledges that dispatcher; it does not claim any game service exists.
+        // Acknowledge the dispatcher; services bind only when their backing exists.
         const std::array<std::uint32_t,6> response{24,0,0x80000001U,0,0,1};
         reply(response);
         rpc_ready_ = true;
@@ -39,11 +39,18 @@ void Sif::dispatch_command() {
     }
     if (command == 0x80000009U) {
         if (!rpc_ready_ || length < 36) throw runtime::MemoryFault("SIF RPC: invalid bind request");
-        // No services are registered yet. A null server is the protocol's
-        // unsuccessful bind response, never a fabricated successful binding.
+        const bool available = fileio_ && read(32) == 0x80000001U;
         const std::array<std::uint32_t,12> response{48,0,0x80000008U,0,
-            read(16),read(20),read(24),read(28),0x80000009U,0,0,0};
+            read(16),read(20),read(24),read(28),0x80000009U,
+            available ? fileio_server : 0,available ? fileio_buffer : 0,0};
         reply(response);
+        last_rpc_bind_server_ = read(32);
+        ++rpc_bind_requests_;
+        return;
+    }
+    if (command == 0x8000000aU) {
+        if (!rpc_ready_ || length < 56) throw runtime::MemoryFault("SIF RPC: invalid call request");
+        dispatch_rpc(ee,std::span(iop_ram_).subspan(iop_packet_address_,length));
         return;
     }
     if (command == 0x80000000U || command == 0x80000002U) {

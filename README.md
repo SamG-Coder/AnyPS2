@@ -54,6 +54,9 @@ The result is `work/game-native/build/Release/ps2-native.exe`. Generation writes
 `generated.cpp`, `analysis.txt`, a matching `boot.elf`, and a CMake project.
 Indirect targets and copied code can require additional observed entry points and
 a local memory capture. These artifacts must never be committed.
+For disc-backed file I/O, pass `--disc=IMAGE.iso` to the generated probe after its
+ELF and instruction-budget arguments. Local CTest integration accepts the same
+image through `ANYPS2_TEST_DISC`; see [file-I/O service](docs/fileio.md).
 
 ## Components
 
@@ -68,6 +71,7 @@ a local memory capture. These artifacts must never be committed.
 | `nt_r5900`, `nt_analysis`, `nt_codegen` | Decode, discover, and generate code |
 | `nt_runtime`, `nt_hardware` | Guest state, RAM, and partial device models |
 | `nt_kernel` | BIOS-free startup services and guest-installed syscall handlers |
+| `nt_fileio` | Read-only disc file handles and legacy FILEIO RPC operations |
 | `nt_process` | Shared process execution |
 
 ## Current limits
@@ -85,16 +89,22 @@ SetSyscall is no
 longer the initial blocker. Unknown behavior stops explicitly.
 
 Graphics, audio, IOP/VU instruction execution, complete DMA and disc services,
-RPC service implementations, idle waits, timer-driven preemption, and INTC
-handler delivery remain unfinished. The timer model charges
+Remaining RPC services, idle waits, and timer-driven thread preemption
+remain unfinished. The timer model charges
 one modeled EE cycle per retired instruction; it is a diagnostic approximation.
 Full floating-point arithmetic and general self-modifying code are unsupported.
 
-SIF payload movement, completion, and registered DMAC handler delivery/return are
+SIF payload movement, completion, and registered DMAC/INTC handler delivery/return are
 implemented, including preservation of the interrupted CPU context. Default
 uncached user RAM aliases share memory with DMA. The IOP endpoint is a small
 C++ service implementation, not a complete IOP emulator. DMA completion does not
 imply a successful RPC operation. See [SIF implementation](docs/sif.md).
+The local GT4 test passes timer interrupt delivery and now binds to a mounted
+file-I/O service. With the disc mounted it passes GS CSR initialization and
+GsPutIMR and SetGsCrt, then stops at VIF0 register initialization. The GS component
+supports privileged register storage, CSR reset/acknowledgement, IMR masks, and
+diagnostic interlaced NTSC/PAL scanout events. GIF processing and rendering remain
+unfinished. No visible game boot is verified.
 
 The generator uses bounded dispatch functions and instruction guards. Efficient
 basic blocks and measured performance are goals; producing a native executable

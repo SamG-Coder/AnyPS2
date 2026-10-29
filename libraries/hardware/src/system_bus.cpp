@@ -7,6 +7,9 @@ std::uint32_t SystemBus::physical(std::uint32_t a) {
 std::uint64_t SystemBus::load(std::uint32_t a, unsigned size) {
     last_address = a; last_size = size; last_write = false;
     const auto p = physical(a);
+    if (Gs::maps(p)) return gs_.read(p,size);
+    if (p >= 0x10003800 && p < 0x10004000)
+        throw runtime::MemoryFault("VIF: register interface is not implemented");
     if (Sif::maps(p)) {
         if (size != 4) throw runtime::MemoryFault("SIF: unsupported register access width");
         return sif_.read(p);
@@ -33,6 +36,13 @@ std::uint64_t SystemBus::load(std::uint32_t a, unsigned size) {
 void SystemBus::store(std::uint32_t a, unsigned size, std::uint64_t value) {
     last_address = a; last_size = size; last_write = true;
     const auto p = physical(a);
+    if (Gs::maps(p)) {
+        gs_.write(p,size,value);
+        interrupt_status_ |= gs_.take_interrupts();
+        return;
+    }
+    if (p >= 0x10003800 && p < 0x10004000)
+        throw runtime::MemoryFault("VIF: register interface is not implemented");
     if (Sif::maps(p)) {
         if (size != 4) throw runtime::MemoryFault("SIF: unsupported register access width");
         sif_.write(p,static_cast<std::uint32_t>(value)); return;
@@ -70,13 +80,17 @@ void SystemBus::store(std::uint32_t a, unsigned size, std::uint64_t value) {
 }
 runtime::Register SystemBus::load_quad(std::uint32_t address) {
     last_address = address; last_size = 16; last_write = false;
+    if (Gs::maps(physical(address))) throw runtime::MemoryFault("GS: quadword register accesses are not implemented");
     return ram_.load_quad(address);
 }
 void SystemBus::store_quad(std::uint32_t address, runtime::Register value) {
     last_address = address; last_size = 16; last_write = true;
+    if (Gs::maps(physical(address))) throw runtime::MemoryFault("GS: quadword register accesses are not implemented");
     ram_.store_quad(address,value);
 }
 void SystemBus::advance_cycles(std::uint64_t cycles) {
+    gs_.advance_cycles(cycles);
+    interrupt_status_ |= gs_.take_interrupts();
     // One bounded transport step per diagnostic EE cycle. This is not bus timing.
     for (std::uint64_t step = 0; step < cycles; ++step)
         sif_.step(ram_,(dma_control_ & 1) && !(dma_enable_ & 0x10000));

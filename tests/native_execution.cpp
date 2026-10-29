@@ -79,7 +79,161 @@ void dma_interrupt_mask() {
     state = at(0x1000); state.cop0_status = 0x10803;
     check(nt_generated_run(state,bus,1).reason == Stop::budget,"DMA interrupted exception level");
 }
+void timer_interrupt_delivery() {
+    nt::hardware::SystemBus bus;
+    nt::kernel::Kernel kernel;
+    for (const auto& [pc,word] : fixture::words()) bus.store(pc,4,word);
+    State registration;
+    registration.set(3,0x10); registration.set(4,9); registration.set(5,0x9000);
+    registration.set(6,0); registration.set(7,0x100600); registration.set(28,0x12345678);
+    check(kernel.service(registration,bus),"Timer handler registration failed");
+    registration.set(3,0x74); registration.set(4,0x12c); registration.set(5,0x9300);
+    check(kernel.service(registration,bus),"Timer-3 alias registration failed");
+    // Two real timer overflows; timer zero stays masked while timer three is enabled.
+    for (auto base : {0x10000000U,0x10001800U}) {
+        bus.store(base,4,0xffff); bus.store(base+0x10,4,0x280);
+    }
+    bus.advance_cycles(2);
+    auto state = at(0x9200); kernel.initialize_cpu(state); state.set(29,0x1fff000);
+    state.cop0_status &= ~0x400U;
+    check(!kernel.enter_interrupt(state,bus),"INTC ignored CPU mask");
+    state.cop0_status |= 0x400U; state.delay_slot = true;
+    check(!kernel.enter_interrupt(state,bus),"INTC interrupted a delay slot");
+    state.delay_slot = false;
+    auto result = nt::kernel::run(nt_generated_run,state,bus,kernel,100);
+    check(result.stop.reason == Stop::unsupported && kernel.completed_interrupts() == 1 &&
+          bus.load(0x800,4) == 12 && bus.load(0x804,4) == 0 && bus.load(0x808,4) == 0,
+          "Timer-3 alias callback ABI or return failed");
+    check(bus.load(0x1000f000,4) == (1U<<9) && bus.load(0x1000f010,4) == (1U<<12),
+          "INTC acknowledgement erased a masked source or changed masks");
+    bus.store(0x1000f010,4,1U<<9);
+    result = nt::kernel::run(nt_generated_run,state,bus,kernel,2);
+    check(result.stop.reason == Stop::budget && kernel.interrupt_active() && (state.cop0_status & 3) == 2,
+          "INTC callback suspension or exception-level status failed");
+    result = nt::kernel::run(nt_generated_run,state,bus,kernel,100);
+    check(result.stop.reason == Stop::unsupported && state.pc == 0x9204 && kernel.completed_interrupts() == 2 &&
+          bus.load(0x100600,4) == 9 && bus.load(0x100604,4) == 0x12345678 && bus.load(0x100608,4) == 99 &&
+          state.gpr[29].lo == 0x1fff000 && state.fpr[3] == 0 && state.cop0_status == 0x10c01,
+          "INTC chain execution or context restoration failed");
+    registration.set(3,0x12); registration.set(4,5); registration.set(5,0x9000);
+    registration.set(6,0); registration.set(7,0x100700);
+    check(kernel.service(registration,bus),"Concurrent DMA registration failed");
+    bus.store(0x1000e000,4,1); bus.store(0x1000e010,4,1U<<21);
+    bus.store(0x1000c000,4,0x100); // Empty normal SIF0 transfer completes immediately.
+    for (auto base : {0x10000000U,0x10001800U}) bus.store(base,4,0xffff);
+    bus.advance_cycles(2);
+    check(kernel.enter_interrupt(state,bus) && state.gpr[4].lo == 5 && bus.interrupt_lines() == 0x400,
+          "DMAC did not take priority over pending INTC sources");
+    result = nt::kernel::run(nt_generated_run,state,bus,kernel,100);
+    check(result.stop.reason == Stop::unsupported && kernel.completed_interrupts() == 4 && !bus.interrupt_pending(),
+          "Concurrent controller dispatch did not complete and resume");
+    nt::kernel::Kernel unregistered;
+    bus.store(0x10000000,4,0xffff); bus.advance_cycles(2);
+    check(!unregistered.enter_interrupt(state,bus) && (bus.load(0x1000f000,4) & (1U<<9)),
+          "Unknown INTC handler silently consumed an interrupt");
+}
+void scanout_interrupt_delivery(unsigned line) {
+    nt::hardware::SystemBus bus;
+    nt::kernel::Kernel kernel;
+    for (const auto& [pc,word] : fixture::words()) bus.store(pc,4,word);
+    State registration;
+    registration.set(3,0x10); registration.set(4,line); registration.set(5,0x9000);
+    registration.set(6,0); registration.set(7,0x100600); registration.set(28,0x12345678);
+    check(kernel.service(registration,bus),"VBlank handler registration failed");
+    registration.set(3,2); registration.set(4,1); registration.set(5,3); registration.set(6,0);
+    check(kernel.service(registration,bus),"PAL CRT setup failed");
+    bus.store(0x1000f010,4,1U << line);
+    if (line == 0) bus.store(0x12001010,8,0x7700);
+    bus.advance_cycles(line == 0 ? 5492442 : line == 2 ? 5435818 : 5898240);
+    auto state = at(0x9200); kernel.initialize_cpu(state); state.set(29,0x1fff000);
+    const auto result = nt::kernel::run(nt_generated_run,state,bus,kernel,100);
+    check(result.stop.reason == Stop::unsupported && kernel.completed_interrupts() == 1 &&
+          bus.load(0x100600,4) == line && bus.load(0x100604,4) == 0x12345678 &&
+          state.gpr[29].lo == 0x1fff000 && !bus.interrupt_pending(),
+          "Scanout interrupt did not execute generated guest handler and restore context");
+}
 void test(RamBus& bus) {
+    for (auto pc : {0x9a00U,0x9a10U,0x9a20U}) {
+        auto state=at(pc); state.set(1,pc==0x9a10 ? 0x8000000000000000ULL : 0x7fffffffffffffffULL);
+        state.set(2,1); state.gpr[3]={17,23};
+        check(nt_generated_run(state,bus,1).reason==Stop::unsupported && state.pc==pc && state.executed==0 && state.gpr[3].lo==17,
+              "Signed doubleword overflow changed guest state");
+        state.set(1,pc==0x9a10 ? 0 : 0x8000000000000000ULL);
+        check(nt_generated_run(state,bus,1).reason==Stop::budget && state.gpr[3].hi==23 &&
+              state.gpr[3].lo==(pc==0x9a10 ? ~0ULL : 0x8000000000000001ULL),"Signed doubleword result failed");
+    }
+    for (auto pc : {0x9900U,0x9910U,0x9920U}) {
+        auto state=at(pc); state.gpr[1]={0x0706050403020100ULL,0x0f0e0d0c0b0a0908ULL};
+        state.gpr[2]={~state.gpr[1].lo,~state.gpr[1].hi};
+        nt_generated_run(state,bus,1);
+        const auto expected=pc==0x9900 ? 0x0e0c0a0806040200ULL : pc==0x9910 ? 0x0d0c090805040100ULL : 0x0b0a090803020100ULL;
+        check(state.gpr[2].lo==~expected && state.gpr[2].hi==expected,"Packed even-lane selection or aliased operands failed");
+    }
+    auto packed = at(0x9800); packed.gpr[1]={0x00000000ffffffffULL,0x80000000000000f8ULL};
+    nt_generated_run(packed,bus,2);
+    check(packed.gpr[1].lo==0xffff && packed.gpr[1].hi==0x000080000000001fULL &&
+          packed.gpr[2].lo==0x80f8f8f8 && packed.gpr[2].hi==0x80000000000000f8ULL,
+          "Packed five-bit conversion lost lane placement or alpha");
+    for (auto pc : {0x9700U,0x9710U,0x9720U}) {
+        auto state=at(pc); state.gpr[1]={0,~0ULL}; state.gpr[2]={0x100,0xfffffffffffffffeULL};
+        nt_generated_run(state,bus,1);
+        check(state.gpr[1].lo==(pc==0x9700 ? 0xffffffffffff00ffULL : pc==0x9710 ? 0xffffffffffff0000ULL : 0xffffffff00000000ULL) &&
+              state.gpr[1].hi==(pc==0x9700 ? 0xffffffffffffff00ULL : pc==0x9710 ? 0xffffffffffff0000ULL : 0xffffffff00000000ULL),
+              "Packed equality lane width, high half or operand aliasing failed");
+    }
+    for (auto pc : {0x9600U,0x9610U,0x9620U}) {
+        auto state=at(pc); state.set(1,0x7fffffff); state.set(2,pc==0x9610 ? ~0ULL : 1);
+        state.gpr[3]={17,23};
+        const auto stop=nt_generated_run(state,bus,1);
+        check(stop.reason==Stop::unsupported && !stop.detail.empty() && state.pc==pc && state.executed==0 && state.gpr[3].lo==17,
+              "Signed arithmetic overflow did not preserve the fault boundary");
+        state.set(1,pc==0x9610 ? 0x80000001 : 0x80000000); state.set(2,1);
+        check(nt_generated_run(state,bus,1).reason==Stop::budget && state.gpr[3].hi==23 &&
+              state.gpr[3].lo==sx32(pc==0x9610 ? 0x80000000 : 0x80000001),"Signed arithmetic result failed");
+    }
+    for (unsigned offset=0;offset<4;++offset) {
+        constexpr std::uint64_t original=0x12345678aabbccddULL;
+        for (bool left : {false,true}) {
+            auto state=at(left ? 0x9500 : 0x9510); state.set(1,0xa000+offset); state.gpr[2]={original,0xfeed};
+            bus.store(0xa000,4,0x80706050);
+            std::uint32_t expected=static_cast<std::uint32_t>(original);
+            for(unsigned i=0;i<4;++i) {
+                if (left && i<=offset) {
+                    const auto shift=(3-offset+i)*8;
+                    expected=(expected & ~(255U<<shift)) | (static_cast<std::uint32_t>(bus.load(0xa000+i,1))<<shift);
+                } else if (!left && i>=offset) {
+                    const auto shift=(i-offset)*8;
+                    expected=(expected & ~(255U<<shift)) | (static_cast<std::uint32_t>(bus.load(0xa000+i,1))<<shift);
+                }
+            }
+            nt_generated_run(state,bus,1);
+            check(state.gpr[2].lo==(left || !offset ? sx32(expected) : (original&0xffffffff00000000ULL)|expected) && state.gpr[2].hi==0xfeed,
+                  "Unaligned word load byte selection or upper bits failed");
+            state=at(left ? 0x9520 : 0x9530); state.set(1,0xa000+offset); state.set(2,original);
+            nt_generated_run(state,bus,1);
+            for(unsigned i=0;i<4;++i) {
+                const auto value=left && i<=offset ? (original>>((3-offset+i)*8))&255 :
+                    !left && i>=offset ? (original>>((i-offset)*8))&255 : (0x80706050U>>(i*8))&255;
+                check(bus.load(0xa000+i,1)==value,"Unaligned word store changed the wrong byte");
+            }
+        }
+        for(unsigned i=0;i<8;++i) bus.store(0xa000+i,1,0x80+i);
+        auto state=at(0x9540); state.set(1,0xa000+offset);
+        nt_generated_run(state,bus,2);
+        std::uint32_t expected=0;
+        for(unsigned i=0;i<4;++i) expected|=(0x80+offset+i)<<(8*i);
+        check(state.gpr[2].lo==sx32(expected),"Unaligned word pair across a boundary failed");
+    }
+    // Variable-width timer arithmetic: masked counts, aliased operands and upper lanes.
+    for (const auto shift : {0U,31U,32U,63U,64U,127U}) {
+        auto state = at(0x9400); state.set(1,shift); state.gpr[2] = {0x8000000000000001ULL,0x1234};
+        check(nt_generated_run(state,bus,3).reason == Stop::budget,"Variable doubleword shifts failed");
+        const auto count = shift & 63;
+        const auto left = 0x8000000000000001ULL << count;
+        const auto arithmetic = (left >> count) | ((left >> 63) && count ? (~0ULL << (64-count)) : 0);
+        check(state.gpr[2].lo == left && state.gpr[2].hi == 0x1234 &&
+              state.gpr[3].lo == (left >> count) && state.gpr[4].lo == arithmetic,"Doubleword shift width or signed result failed");
+    }
     auto s = at(0x1000); s.gpr[1].lo = 0x7fffffff; s.gpr[2].hi = 0x123456789abcdef0;
     check(nt_generated_run(s,bus,1).reason == Stop::budget, "ADDIU execution failed");
     check(s.gpr[2].lo == 0xffffffff80000000ULL && s.gpr[2].hi == 0x123456789abcdef0, "32-bit wrap or upper-lane preservation failed");
@@ -405,6 +559,8 @@ int main() {
         leading_sign_bits(bus);
         dma_interrupt_mask();
         sif_interrupt_delivery();
+        timer_interrupt_delivery();
+        for (const auto line : {0U,2U,3U}) scanout_interrupt_delivery(line);
         semaphore_switches(bus);
         std::cout << "Compiled native instruction, memory, control-flow and stop-boundary tests passed\n";
         return 0;

@@ -15,6 +15,15 @@ bool Kernel::service(runtime::State& state, runtime::Bus& memory) {
     const auto raw_call = static_cast<std::uint32_t>(state.gpr[3].lo);
     const auto call = (raw_call & 0x80000000U) ? 0U - raw_call : raw_call;
     switch (call) {
+    case 0x02: // SetGsCrt: host device configuration, no BIOS register table.
+        memory.set_gs_crt(arg(0),arg(1),arg(2));
+        return true;
+    case 0x70: // GsGetIMR, including the interrupt-safe negative alias.
+        state.set(2,memory.load(0x12001010,8));
+        return true;
+    case 0x71: // GsPutIMR uses the same device semantics as direct MMIO.
+        memory.store(0x12001010,8,state.gpr[4].lo);
+        return true;
     case 0x76: case 0x77: case 0x78: case 0x79: case 0x7a:
         return service_sif(call,state,memory);
     case 0x4a: // SetOsdConfigParam: in-memory configuration, no firmware/NVRAM.
@@ -23,6 +32,17 @@ bool Kernel::service(runtime::State& state, runtime::Bus& memory) {
     case 0x4b: // GetOsdConfigParam
         memory.store(arg(0),4,osd_config_);
         return true;
+    case 0x6e: case 0x6f: { // Volatile public Config2Param bytes; no firmware/NVRAM.
+        const auto pointer = arg(0), size = arg(1), offset = arg(2);
+        if (offset > osd_config2_.size() || size > osd_config2_.size()-offset) return false;
+        const auto physical = runtime::default_ram_address(pointer);
+        require(physical <= ram_size && size <= ram_size-physical,"OSD2: buffer exceeds RAM");
+        for (unsigned i=0;i<size;++i) {
+            if (call == 0x6e) osd_config2_[offset+i] = static_cast<std::uint8_t>(memory.load(pointer+i,1));
+            else memory.store(pointer+i,1,osd_config2_[offset+i]);
+        }
+        return true;
+    }
     case 0x20: case 0x21: case 0x22: case 0x23: case 0x29:
     case 0x2f: case 0x30: case 0x31:
         return service_threads(call,state,memory);
@@ -43,8 +63,9 @@ bool Kernel::service(runtime::State& state, runtime::Bus& memory) {
             memory.load(physical,4);
         }
         if (number == 0x12c) {
+            if (interrupt_active()) return false;
             // Publicly used kernel table alias for INTC timer-3 (line 12).
-            // Store the handler; active timer/interrupt execution is a separate device contract.
+            // The alias callback uses zero argument/GP, separate from AddIntcHandler.
             const auto mask = memory.load(0x1000f010,4);
             if (!(mask & (1U << 12))) memory.store(0x1000f010,4,1U << 12);
             interrupt_handlers_[12] = physical;

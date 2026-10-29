@@ -17,6 +17,8 @@ generated instructions, kernel behavior, hardware registers, process arguments,
 repository content, and rejection fixtures for the repository policy. They need
 no commercial game or BIOS. A generated native fixture is compiled by the normal
 build so tests execute the generator's output.
+The disc-file-I/O milestone uses a synthetic ISO and exercises the actual SIF
+request/reply path. No commercial image is needed for that test.
 
 The content policy checks current source candidates and actual Git index blobs.
 Ignored local artifacts are not candidates, but force-added artifacts are checked.
@@ -44,13 +46,21 @@ ctest --test-dir build -C Release -R local-startup --output-on-failure
 Replace the example paths and address with your local output and verified
 expected boundary. The default instruction budget is one million; configure
 `ANYPS2_TEST_BUDGET` for longer bounded runs. The test requires
-diagnostic exit code 3, checks the supplied regular expression, and stores output
+diagnostic exit code 3 by default, checks the supplied regular expression, and stores output
 in ignored `build/local-startup.txt`. It fails on setup errors, budget exhaustion,
 timeouts, crashes, or a changed boundary. Disable it with
 `cmake -S . -B build -DANYPS2_TEST_PROBE=`. Never commit local captures or logs.
 
 Probe exit codes are 1 for setup/runtime errors, 3 for diagnostic stops, and 4
 for budget exhaustion. A passing startup regression is not proof of game boot.
+Set `ANYPS2_TEST_DISC` to the user's ISO to enable the read-only FILEIO server.
+It is passed as a separate `--disc=...` argument, including paths with spaces.
+Leave it empty for tests of the unmounted endpoint.
+For an intentional bounded-execution regression, explicitly configure
+`ANYPS2_EXPECTED_EXIT=4` and an expected expression covering the budget stop and
+relevant progress counters. This records a repeatable running/waiting boundary;
+it does not treat budget exhaustion as successful boot. Other exit codes are
+rejected. Restore `ANYPS2_EXPECTED_EXIT=3` for diagnostic-stop regressions.
 
 ## Discovering additional code
 
@@ -67,19 +77,38 @@ Construct a small original synthetic program reproducing the relevant behavior.
 
 ## Latest local GT4 boundary
 
-The BIOS-free startup test reached 33,759,232 retired instructions and 103 serviced
-kernel calls, stopping with a pending INTC interrupt at PC 0x0102410c.
-The regression uses a 40-million-instruction upper bound. Six DMAC interrupt
-dispatches completed and returned to the interrupted guest, and seven IOP command
-packets were consumed. RPC initialization and null-server bind replies passed
-through the guest SIF0 and command callbacks. The recorded CPU pending line is
-0x400 and D_STAT is 0x00200040; no DMAC callback remains active.
+With the user's ISO mounted, the BIOS-free startup test passes CSR initialization
+and GsPutIMR, completes SetGsCrt for interlaced NTSC output, then stops at the
+unsupported VIF0 FBRST register write (address 0x10003810). It retires 5,968,896
+instructions and services 108 kernel calls. No scanout edge is reached by this
+short interval after mode setup; scanout behavior is verified by synthetic tests.
+Three interrupt dispatches completed and five IOP packets were consumed.
+
+The guest binds to FILEIO on its first attempt and completes its version query.
+It then passes additional startup functions, unaligned word operations, packed
+string operations, OSD2 byte reads and scratchpad accesses. At the VIF stop it has
+issued one FILEIO request (version), zero successful opens, and zero bytes read.
+Actual file reads are verified by the synthetic disc/RPC integration test;
+the game has not yet exercised them. Fewer instructions than the previous
+300-million-instruction wait reflect removal of the FILEIO bind retry loop.
+The local regression again expects diagnostic exit 3, with a ten-million-step
+budget and checks for the VIF stop, instruction count and FILEIO counters.
+
+The existing hardware-register integration suite covers GS reset and identity,
+display register lane writes and aliases, IMR access through MMIO and HLE,
+empty-FIFO flush/acknowledgement, and rejection of unsupported transfers and
+accesses without changing device state. Scanout coverage extends this milestone
+with NTSC blanking edges, delayed GS field events, masking/unmasking, acknowledgement,
+alternating fields, PAL phase preservation across fragmented advancement, invalid
+mode rejection and reset cancellation. Before configuration no video events occur.
+The generated-code suite delivers GS, VBlank-start and VBlank-end interrupts to
+registered synthetic guest handlers and checks return/context restoration.
 
 Synthetic generated-code tests separately verify thread switching and restarting,
 full register preservation, priority changes, equal-priority ordering, and
 syscalls in delay slots. Arithmetic tests cover signed division overflow and
 zero divisors, unsigned result sign extension, PLZCW lanes, and every byte offset
-for LDL/LDR/SDL/SDR. SIF tests cover payload movement, tag chains, buffering,
+for word and doubleword partial loads/stores. SIF tests cover payload movement, tag chains, buffering,
 handshakes, and malformed inputs. There is no verified visible game boot.
-INTC handler delivery, actual RPC services, and full IOP execution remain
+Accurate scanout timing, VIF/GIF rendering, remaining RPC services, and full IOP execution remain
 unfinished; no game-specific patch is used to skip them.
