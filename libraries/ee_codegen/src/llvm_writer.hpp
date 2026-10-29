@@ -57,32 +57,6 @@ struct Writer {
         unsigned destination=i.rd;
         std::string result;
         switch (i.op) {
-        case Op::mult: case Op::multu: case Op::div: case Op::divu: {
-            const bool signed_operation=i.op==Op::mult || i.op==Op::div;
-            const bool multiply=i.op==Op::mult || i.op==Op::multu;
-            const auto operand=[&](unsigned r) {
-                const auto low=narrow(reg(r));
-                return signed_operation ? extend(low) : value("zext i32 "+low+" to i64");
-            };
-            const auto a=operand(i.rs),b=operand(i.rt);
-            std::string quotient,remainder;
-            if (multiply) {
-                quotient=binary("mul","i64",a,b);
-                remainder=binary("lshr","i64",quotient,"32");
-            } else {
-                const auto zero=value("icmp eq i64 "+b+", 0");
-                const auto denominator=value("select i1 "+zero+", i64 1, i64 "+b);
-                const auto divided=binary(signed_operation ? "sdiv" : "udiv","i64",a,denominator);
-                const auto modulus=binary(signed_operation ? "srem" : "urem","i64",a,denominator);
-                const auto fallback=signed_operation ? value("select i1 "+value("icmp slt i64 "+a+", 0")+", i64 1, i64 -1") : "-1";
-                quotient=value("select i1 "+zero+", i64 "+fallback+", i64 "+divided);
-                remainder=value("select i1 "+zero+", i64 "+a+", i64 "+modulus);
-            }
-            const auto lo=extend(narrow(quotient)),hi=extend(narrow(remainder));
-            store("i64",lo,offsetof(runtime::State,lo)); store("i64",hi,offsetof(runtime::State,hi));
-            if (multiply && i.rd) store("i64",lo,offsetof(runtime::State,gpr)+i.rd*sizeof(runtime::Register));
-            return;
-        }
         case Op::mthi: case Op::mtlo: case Op::mthi1: case Op::mtlo1:
             store("i64",reg(i.rs),accumulator_offset(i.op));
             return;
@@ -101,86 +75,22 @@ struct Writer {
                   offsetof(runtime::State,cop0_status));
             return;
         }
+        case Op::mtsa:
+            store("i64",value("zext i32 "+narrow(reg(i.rs))+" to i64"),offsetof(runtime::State,sa));
+            return;
+        case Op::qmfc2: case Op::qmtc2: {
+            const auto vectors=vector_storage(std::to_string(i.pc));
+            if (i.op==Op::qmfc2 && i.rt)
+                store("<4 x i32>",vu_reg(vectors,i.rd),offsetof(runtime::State,gpr)+i.rt*sizeof(runtime::Register));
+            if (i.op==Op::qmtc2 && i.rd)
+                store("<4 x i32>",vector_reg(i.rt),offsetof(ee::VectorStorage,values)+(i.rd-1)*sizeof(std::array<std::uint32_t,4>),vectors);
+            return;
+        }
+        case Op::pref:
+            // A non-faulting locality hint: the native optimizer owns placement.
+            return;
         case Op::sync:
             out<<"  fence seq_cst\n"; return;
-        case Op::adda_s: case Op::add_s: case Op::sub_s: case Op::mul_s: {
-            const auto left=load("i32",offsetof(runtime::State,fpr)+i.rd*sizeof(std::uint32_t));
-            const auto right=load("i32",offsetof(runtime::State,fpr)+i.rt*sizeof(std::uint32_t));
-            const auto sum=value(i.op==Op::mul_s ? "call i64 @nt_ee_multiply_finite(i32 "+left+", i32 "+right+")" : "call i64 @nt_ee_add_finite(i32 "+left+", i32 "+right+", i32 "+(i.op==Op::sub_s ? "1" : "0")+")");
-            const auto unsupported=value("icmp uge i64 "+sum+", 8589934592");
-            const auto suffix=std::to_string(i.pc);
-            out<<"  br i1 "<<unsupported<<", label %numeric_stop"<<suffix<<", label %numeric_result"<<suffix
-               <<"\nnumeric_stop"<<suffix<<":\n  ret i32 6\nnumeric_result"<<suffix<<":\n";
-            const auto underflow=value("icmp uge i64 "+sum+", 4294967296");
-            const auto flags=load("i32",offsetof(runtime::State,fcr31));
-            const auto cleared=binary("and","i32",flags,"4294918143");
-            const auto added=value("select i1 "+underflow+", i32 16392, i32 0");
-            store("i32",narrow(sum),i.op==Op::adda_s ? offsetof(runtime::State,accumulator) :
-                  offsetof(runtime::State,fpr)+i.sa*sizeof(std::uint32_t));
-            store("i32",binary("or","i32",cleared,added),offsetof(runtime::State,fcr31));
-            return;
-        }
-        case Op::mov_s: case Op::abs_s: case Op::neg_s: {
-            auto bits=load("i32",offsetof(runtime::State,fpr)+i.rd*sizeof(std::uint32_t));
-            if (i.op==Op::abs_s) bits=binary("and","i32",bits,"2147483647");
-            if (i.op==Op::neg_s) bits=binary("xor","i32",bits,"2147483648");
-            store("i32",bits,offsetof(runtime::State,fpr)+i.sa*sizeof(std::uint32_t));
-            if (i.op!=Op::mov_s) {
-                const auto flags=load("i32",offsetof(runtime::State,fcr31));
-                store("i32",binary("and","i32",flags,"4294918143"),offsetof(runtime::State,fcr31));
-            }
-            return;
-        }
-        case Op::compare_s: {
-            const auto predicate=i.word&15U;
-            std::string condition="false";
-            if (predicate) {
-                const auto left=load("i32",offsetof(runtime::State,fpr)+i.rd*sizeof(std::uint32_t));
-                const auto right=load("i32",offsetof(runtime::State,fpr)+i.rt*sizeof(std::uint32_t));
-                const auto le=binary("and","i32",left,"2139095040");
-                const auto re=binary("and","i32",right,"2139095040");
-                const auto invalid=binary("or","i1",value("icmp eq i32 "+le+", 2139095040"),value("icmp eq i32 "+re+", 2139095040"));
-                const auto suffix=std::to_string(i.pc);
-                out<<"  br i1 "<<invalid<<", label %compare_stop"<<suffix<<", label %compare_values"<<suffix
-                   <<"\ncompare_stop"<<suffix<<":\n  ret i32 6\ncompare_values"<<suffix<<":\n";
-                const auto normalized=[&](const std::string& bits,const std::string& exponent) {
-                    const auto zero=value("icmp eq i32 "+exponent+", 0");
-                    const auto finite=value("select i1 "+zero+", i32 0, i32 "+bits);
-                    return value("bitcast i32 "+finite+" to float");
-                };
-                const auto a=normalized(left,le),b=normalized(right,re);
-                condition=value(std::string("fcmp ")+(predicate==2 ? "oeq" : predicate==4 ? "olt" : "ole")+" float "+a+", "+b);
-            }
-            const auto flags=load("i32",offsetof(runtime::State,fcr31));
-            const auto kept=binary("and","i32",flags,"4286578687");
-            const auto changed=value("select i1 "+condition+", i32 8388608, i32 0");
-            store("i32",binary("or","i32",kept,changed),offsetof(runtime::State,fcr31)); return;
-        }
-        case Op::vmove: case Op::vmr32: {
-            const auto vectors=vector_storage(std::to_string(i.pc));
-            auto source=vu_reg(vectors,i.rd);
-            if (i.op==Op::vmr32) source=value("shufflevector <4 x i32> "+source+", <4 x i32> poison, <4 x i32> <i32 1, i32 2, i32 3, i32 0>");
-            std::string mask="<";
-            for (unsigned lane=0;lane<4;++lane) {
-                if (lane) mask+=", ";
-                mask+=std::string("i1 ")+((i.rs&(8U>>lane)) ? "true" : "false");
-            }
-            mask+=">";
-            const auto merged=value("select <4 x i1> "+mask+", <4 x i32> "+source+", <4 x i32> "+vu_reg(vectors,i.rt));
-            if (i.rt) store("<4 x i32>",merged,offsetof(ee::VectorStorage,values)+(i.rt-1)*sizeof(std::array<std::uint32_t,4>),vectors);
-            return;
-        }
-        case Op::vadd: case Op::vsub: case Op::vadd_bc: case Op::vsub_bc: {
-            const auto subtract=i.op==Op::vsub || i.op==Op::vsub_bc;
-            const auto broadcast=i.op==Op::vadd_bc || i.op==Op::vsub_bc ? i.word&3U : 4U;
-            const auto outcome=value("call i32 @nt_ee_vector_add(ptr %memory, i32 "+std::to_string(i.sa)+", i32 "+std::to_string(i.rd)+
-                ", i32 "+std::to_string(i.rt)+", i32 "+std::to_string(i.rs&15)+", i32 "+(subtract ? "1" : "0")+", i32 "+std::to_string(broadcast)+")");
-            const auto ready=value("icmp eq i32 "+outcome+", 0");
-            const auto suffix=std::to_string(i.pc);
-            out<<"  br i1 "<<ready<<", label %vector_math_ready"<<suffix<<", label %vector_math_stop"<<suffix
-               <<"\nvector_math_stop"<<suffix<<":\n  ret i32 "<<outcome<<"\nvector_math_ready"<<suffix<<":\n";
-            return;
-        }
         case Op::cfc2: case Op::ctc2: {
             const bool write=i.op==Op::ctc2;
             const auto arguments="ptr %memory, i32 "+std::to_string(i.rd)+", i32 "+std::to_string(i.word&1U);

@@ -917,3 +917,144 @@ packing/interleave order were checked against the pinned public PCSX2 MMI.cpp.
 MULT1 identification at the next conversion boundary was cross-checked against
 R5900OpcodeTables.cpp. New lowering uses original LLVM comparisons, masks and
 shuffles with synthetic bit/lane fixtures.
+
+
+## EE operation-family expansion
+
+The pinned public PCSX2 R5900OpcodeTables.cpp and R5900OpcodeImpl.cpp supply
+secondary multiply/divide, scalar multiply-accumulate, trap, branch-link, MTSA,
+PREF and unaligned-word contracts. MMI.cpp supplies packed arithmetic, saturation,
+permutations, accumulator packing, word products and halfword-product layouts.
+PHMSBH's complemented odd products are preserved; unusual PMADDW/PMSUBW behavior
+is left unsupported. No upstream execution implementation is copied.
+
+COP0.cpp supplies ERET's ERL/ErrorEPC and EXL/EPC selection. Cache.cpp identifies
+the supported data-cache hit operations; native coherent RAM lowers their ordering
+to fences without a console cache model. VU0.cpp supplies full-width interlocked
+QMFC2/QMTC2 behavior. VUops.cpp supplies macro multiplication, raw min/max,
+absolute-value, fixed-point conversion and lane/flag ownership contracts.
+
+FPU.cpp and x86/iFPU.cpp supply conversion, min/max, division and square-root flag
+and rounding contracts. AnyPS2 reuses its original pure integer conversions and
+division, and adds an original integer square-root calculation with explicit
+rounding. Generated LLVM uses compiler arithmetic/intrinsics and independently
+expressed lane maps. Fixtures contain only original synthetic programs; all
+commercial input and derived output remain ignored.
+
+
+Native memory initialization additionally uses the pinned PCSX2 `R5900.h` CP0
+selector names and `Cache.cpp` operation classifications: DXLTG, DXWBIN, IXIN and
+BFH. The native flat/coherent-memory replacement is AnyPS2's explicit contract,
+not copied cache machinery. Its empty tags and rejected reservations are documented
+in `ee-native.md`; synthetic fixtures contain no extracted commercial instructions.
+
+
+Native EE semaphore service numbers and the six-word public structure follow the
+pinned PS2SDK `ee/kernel/include/syscallnr.h` and `kernel.h`. The original native
+owner uses bounded C++ storage, matching the existing project's established
+nonblocking service behavior without linking its diagnostic kernel. Contended
+scheduling and overflow return semantics are explicitly not supplied.
+
+
+Native SetSyscall uses the pinned public PS2SDK syscall number and signature.
+AnyPS2's original diagnostic kernel supplies the existing project contract for the
+16-byte handler frame and EXL restoration. The new native implementation owns a
+bounded table and frames separately and accepts only generated LLVM membership;
+it does not import firmware tables or link the diagnostic interpreter.
+
+
+Callback discovery is original bounded analysis of decoded instructions and ELF
+segments. It uses public syscall wrapper conventions and the existing decoder;
+no commercial addresses, table contents, instruction sequences or title-specific
+rules are stored in the converter or fixtures.
+
+
+Native registration metadata is original AnyPS2 service data. The public PS2SDK
+`getkernel.c` confirms that software may inspect syscall-handler pointers; its
+firmware-instruction address extraction is not implemented or copied. AnyPS2
+reserves its own ELF-disjoint extent and publishes only registered compiled
+callbacks, with explicit rejection of unsupported table modification.
+
+
+Native timer addresses and configuration fields follow pinned PS2SDK
+`common/include/ee_regs.h` and `ee/kernel/include/timer.h`. In particular,
+0x10001810 is Timer 3 MODE, not a VIF register; earlier documentation has been
+corrected. The monotonic host-clock implementation is original and does not link
+the diagnostic SystemBus timer model.
+
+
+Native cache services use pinned PS2SDK `kernel.h` FlushCache mode constants and
+void signatures, plus `syscallnr.h` FlushCache/iFlushCache numbers. They share the
+existing native coherent-memory contract, expressed as a host fence without
+reconstructing console caches or installing RAM instructions.
+
+
+Copied-payload mapping, destination discovery and exact-byte publication guards
+are original AnyPS2 conversion mechanisms. Tests use original synthetic programs
+and ELF fixtures. Commercial mapping files, expected-byte constants, LLVM and
+compiled artifacts are private derived output under ignored `work/` only.
+
+
+Native interrupt delivery follows the existing AnyPS2 interrupt-dispatch contract
+for INTC line order, the Timer 3 alias, EXL/EPC entry and full interrupted-context
+restoration. Public INTC address/bit definitions come from pinned PS2SDK
+`ee_regs.h`. The native owner is independent of the diagnostic device scheduler;
+no firmware handlers or register initialization tables are supplied.
+
+
+Public native INTC services use pinned PS2SDK `syscallnr.h` and `kernel.h` entry
+numbers and callback signatures, and the existing project's insertion, handle,
+removal-count and negative-return chain contracts. Records and snapshots are
+original bounded native C++ data structures, independent of the diagnostic kernel.
+
+
+Native timer event latching and write-one-to-clear status follow the pinned
+PCSX2 `Counters.cpp` public reference behavior and PS2SDK timer mode definitions.
+AnyPS2 computes threshold crossings arithmetically from its monotonic host clock,
+with original fractional-tick accounting and cooperative producer polling. It
+does not adopt console cycle scheduling or a per-tick emulator loop.
+
+
+Native EE thread lifecycle uses the pinned public PS2SDK `ee/kernel/include/kernel.h`
+thread descriptor/status layouts and `syscallnr.h` ordinals, together with the
+existing AnyPS2 startup stack reservation and thread-service contracts. The bounded
+native record owner, cooperative continuation switching and descriptor candidate
+analysis are original implementation. Tests use original synthetic instructions
+and descriptors; no game descriptors or code are included in the repository.
+
+
+Native application preferences use the pinned public PS2SDK `osd_config.h`
+ConfigParam/Config2Param layouts and `kernel.h`/`syscallnr.h` void service contracts.
+The application-owned settings container and validation are original AnyPS2 code.
+Defaults are project policy, not recovered console configuration or firmware data.
+
+
+Address-space instruction identities and CP0 parameter names were checked against
+the pinned public PCSX2 COP0 implementation. The native request interface and LLVM
+lowering are original code; they do not import its TLB implementation. No production
+mapping provider is supplied by this milestone.
+
+
+The transfer-completion status compatibility view uses pinned PS2SDK `ee_regs.h`
+addresses and the existing AnyPS2 status acknowledge/mask-toggle contract. Its
+producer-owned pending events and interrupt publication are original native code;
+no DMA engine, firmware initialization state or transfer timings were copied.
+
+
+The native EE SIF receive endpoint uses the existing AnyPS2 SIF service/control
+contracts and public PS2SDK register and syscall identities. Direct whole-packet
+copying follows the project's native IOP endpoint architecture; no diagnostic
+FIFO, DMA stepping engine, BIOS initialization table or game-specific behavior
+was copied. Peer readiness requires explicit native peer publication.
+
+
+Native DMA handler services use pinned PS2SDK syscall identities, including
+negative iEnableDmac/iDisableDmac, and the existing AnyPS2 ordered interrupt-record
+contract. They reuse the original native INTC context/chain implementation with
+separate registration domains and explicit native completion ownership.
+
+
+Outgoing SIF batching follows the existing AnyPS2 public descriptor validation,
+padding and transfer-status contracts. The snapshot owner and atomic native sink
+interface are original; they do not reuse the diagnostic FIFO or DMA-step engine.
+Tests use original data arrays and a native in-memory sink.

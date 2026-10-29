@@ -1,5 +1,6 @@
 #pragma once
 #include <nt/ee_state.hpp>
+#include <nt/ee_float.hpp>
 #include <array>
 #include <nt/word_merge.hpp>
 #include <bit>
@@ -31,27 +32,9 @@ inline void compare_scalar(State& state, unsigned left, unsigned right, unsigned
     const bool result = ((condition & 2) && a == b) || ((condition & 4) && a < b);
     state.fcr31 = (state.fcr31 & ~0x800000U) | (result ? 0x800000U : 0);
 }
-inline std::uint32_t integer_to_scalar(std::uint32_t bits) {
-    const auto sign = bits & 0x80000000U;
-    const auto magnitude = sign ? 0U-bits : bits;
-    if (!magnitude) return 0;
-    const unsigned high = 31U-static_cast<unsigned>(std::countl_zero(magnitude));
-    const auto fraction = high > 23 ? magnitude >> (high-23) : magnitude << (23-high);
-    return sign | ((high+127)<<23) | (fraction & 0x7fffff);
-}
-inline std::uint32_t scalar_to_integer(std::uint32_t bits) {
-    const auto exponent=(bits>>23)&255;
-    const bool negative=(bits>>31)!=0;
-    if (exponent<127) return 0;
-    if (exponent>=158) return negative ? 0x80000000U : 0x7fffffffU;
-    const auto significand=(bits&0x7fffff)|0x800000;
-    const auto magnitude=exponent>=150 ? significand << (exponent-150) : significand >> (150-exponent);
-    return negative ? 0U-magnitude : magnitude;
-}
-inline std::uint32_t min_max_scalar(std::uint32_t a, std::uint32_t b, bool maximum) {
-    const auto key=[](std::uint32_t value) { return (value>>31) ? ~value : value|0x80000000U; };
-    return (maximum ? key(a)>key(b) : key(a)<key(b)) ? a : b;
-}
+using numeric::integer_to_scalar;
+using numeric::scalar_to_integer;
+using numeric::min_max_scalar;
 struct Result { Stop reason; std::uint32_t pc, word; std::string detail{}; };
 const char* name(Stop stop);
 class MemoryFault : public std::runtime_error { public: using std::runtime_error::runtime_error; };

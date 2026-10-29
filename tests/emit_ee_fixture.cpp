@@ -1,5 +1,6 @@
 #include <nt/ee_codegen.hpp>
 #include "disc_fixture.hpp"
+#include "ee_batch_fixture.hpp"
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -41,14 +42,25 @@ int main(int argc,char** argv) {
     for (const auto word : {0x7c880000U,0x78890000U,0x7c800010U,0x78800000U,12U,0x78840000U,12U}) append(word);
     for (const auto word : {0x2403003cU,12U,0x0040e821U,0x2403007fU,12U}) append(word);
     for (const auto word : {0x2403003dU,12U,0x00408021U,0x2403003eU,12U,0x00408821U,0x2403007fU,12U}) append(word);
-    auto invalid=code; invalid[3]=nt::r5900::decode(0x100c,0x46000003);
+    auto invalid=code; invalid[3]=nt::r5900::decode(0x100c,0x4c000000);
     std::ostringstream rejected; bool failed=false;
     try { nt::ee_codegen::emit_llvm(rejected,invalid); } catch (const std::runtime_error&) { failed=true; }
     if (!failed || !rejected.str().empty()) throw std::runtime_error("Unsupported EE code emitted partial output");
+    invalid=code;
+    invalid[0]=nt::r5900::decode(0x1000,0x4c000000);
+    invalid[1]=nt::r5900::decode(0x1004,0x4c000001);
+    invalid[2]=nt::r5900::decode(0x1008,0x74000000);
+    std::string inventory;
+    try { nt::ee_codegen::emit_llvm(rejected,invalid); }
+    catch (const std::runtime_error& error) { inventory=error.what(); }
+    if (inventory.find("families (2)")==std::string::npos ||
+        inventory.find("primary=19): 2 occurrence(s)")==std::string::npos ||
+        inventory.find("primary=29): 1 occurrence(s)")==std::string::npos || !rejected.str().empty())
+        throw std::runtime_error("Unsupported-family inventory was incomplete");
     invalid=code; invalid[2].rs=31; failed=false;
     try { nt::ee_codegen::emit_llvm(rejected,invalid); } catch (const std::invalid_argument&) { failed=true; }
     if (!failed || !rejected.str().empty()) throw std::runtime_error("Inconsistent decoded EE code accepted");
-    for (const auto word : {0x08000400U,0x0000000cU}) {
+    for (const auto word : {0x08000400U,0x0000000cU,0x42000018U}) {
         invalid=code; invalid[4]=nt::r5900::decode(invalid[4].pc,0x08000400);
         invalid[5]=nt::r5900::decode(invalid[5].pc,word); failed=false;
         try { nt::ee_codegen::emit_llvm(rejected,invalid); } catch (const std::invalid_argument&) { failed=true; }
@@ -141,7 +153,101 @@ int main(int argc,char** argv) {
     for (unsigned kind=0;kind<3;++kind) for (const auto selector : {26U,22U,18U}) for (const auto destination : {10U,8U,9U,0U}) {
         extra((28U<<26)|(8U<<21)|(9U<<16)|(destination<<11)|((selector+(kind==0 ? 1U : 0U))<<6)|(kind==2 ? 40U : 8U)); extra(12);
     }
-    std::ostringstream generated; nt::ee_codegen::emit_llvm(generated,code);
+    for (const auto fn : {24U,25U,26U,27U}) { extra((28U<<26)|(8U<<21)|(9U<<16)|(10U<<11)|fn); extra(12); }
+    for (const auto word : {0x88880000U,12U,0x98880000U,12U,0xa8880000U,12U,0xb8880000U,12U,
+                            0x88880003U,0x98880000U,12U,0xa8880003U,0xb8880000U,12U}) extra(word);
+    for (const auto word : {0x88800000U,0x98800000U,0xa8800000U,0xb8800000U}) { extra(word); extra(12); }
+    for (std::size_t index=0;index<ee_batch::packed.size();++index) {
+        const auto fixture=ee_batch::packed[index];
+        for (unsigned variant=0;variant<4;++variant) {
+            const auto pc=ee_batch::packed_pc(index,variant);
+            const auto word=(fixture.word&~(31U<<11))|(ee_batch::destinations[variant]<<11);
+            const auto decoded=nt::r5900::decode(pc,word);
+            if (nt::r5900::name(decoded.op)!=fixture.name) throw std::runtime_error("Packed fixture decoded incorrectly: "+std::string(fixture.name));
+            code.push_back(decoded); code.push_back(nt::r5900::decode(pc+4,12));
+        }
+    }
+    for (std::size_t index=0;index<ee_batch::scalar.size();++index) {
+        const auto pc=ee_batch::scalar_base+static_cast<std::uint32_t>(index)*8;
+        code.push_back(nt::r5900::decode(pc,ee_batch::scalar[index].word));
+        code.push_back(nt::r5900::decode(pc+4,12));
+    }
+    for (std::size_t index=0;index<ee_batch::vector.size();++index) {
+        const auto fixture=ee_batch::vector[index];
+        const bool transfer=fixture.name.starts_with("qm");
+        const bool binary=fixture.name.starts_with("vmul") || fixture.name.starts_with("vmax") || fixture.name.starts_with("vmini");
+        for (unsigned mask=0;mask<4;++mask) for (unsigned variant=0;variant<4;++variant) {
+            auto word=fixture.word;
+            if (transfer) {
+                if (fixture.name.starts_with("qmfc")) {
+                    word=(word&~((31U<<11)|(31U<<16)))|
+                         ((mask&1 ? 0U : 2U)<<11)|(std::array{8U,2U,3U,0U}[variant]<<16);
+                } else {
+                    word=(word&~((31U<<11)|(31U<<16)))|
+                         (std::array{2U,8U,3U,0U}[variant]<<11)|((mask&1 ? 0U : 8U)<<16);
+                }
+            } else if (fixture.name!="vnop") {
+                word=(word&~(15U<<21))|(std::array{15U,10U,5U,0U}[mask]<<21);
+                const auto shift=binary ? 6 : 16;
+                word=(word&~(31U<<shift))|(std::array{4U,2U,3U,0U}[variant]<<shift);
+            }
+            const auto pc=ee_batch::vector_pc(index,mask,variant);
+            code.push_back(nt::r5900::decode(pc,word)); code.push_back(nt::r5900::decode(pc+4,12));
+        }
+    }
+    for (unsigned operation=0;operation<4;++operation) {
+        const auto pc=ee_batch::branch_base+operation*32;
+        // Both paths capture the link in a delay slot; likely-false skips it.
+        for (const auto [offset,word] : std::array<std::pair<unsigned,std::uint32_t>,5>{{
+            {0,(1U<<26)|(8U<<21)|((16U+operation)<<16)|3U},
+            {4,0x03e0502dU},{8,12U},{12,0U},{16,12U}}})
+            code.push_back(nt::r5900::decode(pc+offset,word));
+    }
+    for (unsigned form=0;form<2;++form) for (unsigned operation=0;operation<6;++operation) {
+        const auto pc=ee_batch::trap_base+(form*6+operation)*8;
+        const auto word=form ? (1U<<26)|(8U<<21)|(ee_batch::trap_immediates[operation]<<16)|0xffffU :
+                               (8U<<21)|(9U<<16)|ee_batch::trap_functions[operation];
+        code.push_back(nt::r5900::decode(pc,word)); code.push_back(nt::r5900::decode(pc+4,12));
+    }
+    code.push_back(nt::r5900::decode(ee_batch::prefetch_pc,(51U<<26)|(8U<<21)|0xffffU));
+    code.push_back(nt::r5900::decode(ee_batch::prefetch_pc+4,12));
+    for (const auto [offset,word] : std::array<std::pair<unsigned,std::uint32_t>,4>{{
+        {0,0x10000002U},{4,(8U<<21)|(9U<<16)|52U},{8,12U},{12,12U}}})
+        code.push_back(nt::r5900::decode(ee_batch::trap_delay_pc+offset,word));
+    for (const auto [offset,word] : std::array<std::pair<unsigned,std::uint32_t>,7>{{
+        {0,0x24820007U},{4,0x03e00008U},{8,0U},
+        {16,0x24030061U},{20,12U},{24,0x03e00008U},{28,0U}}})
+        code.push_back(nt::r5900::decode(0x350000+offset,word));
+    for (const auto [offset,word] : std::array<std::pair<unsigned,std::uint32_t>,4>{{
+        {0,0xac880000U},{4,12U},{8,0x8c880000U},{12,12U}}})
+        code.push_back(nt::r5900::decode(0x360000+offset,word));
+    for (const auto [offset,word] : std::array<std::pair<unsigned,std::uint32_t>,7>{{
+        {0,0x8f880000U},{4,0x00084100U},{8,0x01054021U},{12,0xaf880000U},
+        {16,0x00a0102dU},{20,0x03e00008U},{24,0U}}})
+        code.push_back(nt::r5900::decode(0x365000+offset,word));
+    nt::ee_codegen::CodePayload payload{0x370000,{}};
+    for (const auto word : {0x24020007U,0x03e00008U,0U}) {
+        code.push_back(nt::r5900::decode(payload.address+static_cast<std::uint32_t>(payload.bytes.size()),word));
+        for (unsigned byte=0;byte<4;++byte) payload.bytes.push_back(static_cast<std::uint8_t>(word>>(byte*8)));
+    }
+    code.push_back(nt::r5900::decode(0x380000,0x080e0000U));
+    code.push_back(nt::r5900::decode(0x380004,0U));
+    code.push_back(nt::r5900::decode(0x390000,0xaf840000U));
+    code.push_back(nt::r5900::decode(0x390004,0x24030023U));
+    code.push_back(nt::r5900::decode(0x390008,12U));
+    code.push_back(nt::r5900::decode(0x3a0000,12));
+    for (unsigned index=0;const auto reg:{0U,2U,3U,5U,10U}) {
+        code.push_back(nt::r5900::decode(0x3b0000+index*8,0x40880000U|(reg<<11)));
+        code.push_back(nt::r5900::decode(0x3b0004+index*8,0x40090000U|(reg<<11)));
+        ++index;
+    }
+    code.push_back(nt::r5900::decode(0x3b0028,12));
+    for (unsigned index=0;const auto word:{0x42000001U,0x42000002U,0x42000006U,0x42000008U}) {
+        code.push_back(nt::r5900::decode(0x3b0100+index*4,word)); ++index;
+    }
+    code.push_back(nt::r5900::decode(0x3b0110,12));
+    const std::array payloads{payload};
+    std::ostringstream generated; nt::ee_codegen::emit_llvm(generated,code,{},payloads);
     if (generated.str().find("fence seq_cst")==std::string::npos) throw std::runtime_error("Native SYNC ordering was omitted");
     const auto text=generated.str();
     unsigned functions=0;
@@ -176,7 +282,7 @@ int main(int argc,char** argv) {
         nt::write_file(std::string(argv[2])+".startup",elf);
         elf=original;
         word(92,0x1000); nt::write_file(std::string(argv[2])+".overlap",elf);
-        word(92,0x2000); word(0x100,0x46000003); nt::write_file(std::string(argv[2])+".unsupported",elf);
+        word(92,0x2000); word(0x100,0x4c000000); nt::write_file(std::string(argv[2])+".unsupported",elf);
     }
     return output ? 0 : 1;
 }

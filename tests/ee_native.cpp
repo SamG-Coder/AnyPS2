@@ -1,4 +1,6 @@
 #include <nt/ee_services.hpp>
+#include <nt/ee_timers.hpp>
+#include <nt/ee_platform.hpp>
 #include <iostream>
 #include <stdexcept>
 #include <array>
@@ -15,6 +17,11 @@ extern "C" bool nt_ee_generated_code_overlap(std::uint32_t,std::uint32_t);
 void check(bool ok,std::source_location location=std::source_location::current()) {
     if (!ok) throw std::runtime_error("EE LLVM execution mismatch at line "+std::to_string(location.line()));
 }
+extern "C" bool nt_ee_generated_contains(std::uint32_t);
+static std::uint64_t timer_now=0;
+static std::uint64_t timer_clock() { return timer_now; }
+static std::uint64_t stepping_timer_clock() { timer_now+=1000; return timer_now; }
+void run_ee_batch_tests();
 int main() {
     try {
         for (const auto slice : {1U,2U,64U}) {
@@ -251,6 +258,336 @@ int main() {
             memory.size=ram.size();
             nt::runtime::State state; state.pc=0x11cc; state.gpr[4].lo=0x8000100f;
             check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::code_write && !state.executed && ram==original);
+        }
+        {
+            // One compiled-syscall lifecycle covers the native semaphore service.
+            std::array<std::uint8_t,0x10000> ram{};
+            nt::ee::Memory memory{ram.data(),ram.size()};
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap);
+            nt::runtime::State state;
+            const auto call=[&](unsigned number,unsigned a,unsigned b=0) {
+                state.pc=0x11ec; state.gpr[3].lo=number; state.gpr[4].lo=a; state.gpr[5].lo=b;
+                return nt::ee::run(nt_ee_generated_run,state,memory,1,services);
+            };
+            std::array<std::uint32_t,6> fields{99,2,1,99,0,123};
+            std::memcpy(ram.data()+0x4000,fields.data(),24);
+            check(call(0x40,0xa0004000)==nt::ee::Stop::budget && state.gpr[2].lo==1);
+            const auto original=ram;
+            check(call(0x44,1)==nt::ee::Stop::budget && state.gpr[2].lo==1);
+            const auto retired=state.executed;
+            check(call(0x44,1)==nt::ee::Stop::syscall && state.executed==retired && state.pc==0x11ec);
+            check(call(0x45,1)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
+            check(call(0x42,1)==nt::ee::Stop::budget && state.gpr[2].lo==1);
+            check(call(0x43,1)==nt::ee::Stop::budget);
+            check(call(0x42,1)==nt::ee::Stop::syscall && ram==original);
+            check(call(0x47,1,0x1000)==nt::ee::Stop::code_write && ram==original);
+            check(call(0x48,1,0xfffffff0)==nt::ee::Stop::memory_fault && ram==original);
+            check(call(0x47,1,0x4000)==nt::ee::Stop::budget);
+            std::memcpy(fields.data(),ram.data()+0x4000,24);
+            check(fields==std::array<std::uint32_t,6>{2,2,1,0,0,123});
+            check(call(0x46,1)==nt::ee::Stop::budget);
+            check(call(0x41,1)==nt::ee::Stop::budget);
+            check(call(0x45,1)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
+            check(call(0x40,0x4001)==nt::ee::Stop::memory_fault);
+            fields[1]=0; std::memcpy(ram.data()+0x4000,fields.data(),24);
+            check(call(0x40,0x4000)==nt::ee::Stop::invalid_state);
+            fields[1]=2; std::memcpy(ram.data()+0x4000,fields.data(),24);
+            for (unsigned id=1;id<=256;++id)
+                check(call(0x40,0x4000)==nt::ee::Stop::budget && state.gpr[2].lo==id);
+            check(call(0x40,0x4000)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
+            check(call(0x41,128)==nt::ee::Stop::budget);
+            check(call(0x40,0x4000)==nt::ee::Stop::budget && state.gpr[2].lo==128);
+            nt::ee::StartupServices independent(nt_ee_generated_code_overlap);
+            state.pc=0x11ec; state.gpr[3].lo=0x45; state.gpr[4].lo=1;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,1,independent)==nt::ee::Stop::budget &&
+                  state.gpr[2].lo==~std::uint64_t(0));
+        }
+        {
+            nt::ee::NativeTimers timers(timer_clock);
+            nt::ee::Memory memory; memory.io=timers.interface();
+            // Run ordinary compiled LW/SW instructions through the native adapter.
+            nt::runtime::State state;
+            const auto access=[&](bool write,unsigned address,unsigned value=0) {
+                state.pc=write ? 0x360000 : 0x360008;
+                state.gpr[4].lo=address; state.gpr[8].lo=value;
+                return nt_ee_generated_run(&state,&memory,1);
+            };
+            timer_now=0;
+            check(access(false,0x10001810)==nt::ee::Stop::budget && state.gpr[8].lo==0);
+            check(access(true,0xb0001800,65530)==nt::ee::Stop::budget);
+            check(access(true,0x10001810,0x82)==nt::ee::Stop::budget);
+            timer_now=1000000000;
+            check(access(false,0x10001800)==nt::ee::Stop::budget && state.gpr[8].lo==51706);
+            check(access(true,0x10001810,0)==nt::ee::Stop::budget);
+            timer_now+=1000000000;
+            check(access(false,0x10001800)==nt::ee::Stop::budget && state.gpr[8].lo==51706);
+            const auto count=state.executed;
+            check(access(true,0x10001810,0x183)==nt::ee::Stop::unsupported_system && state.executed==count);
+            check(access(false,0x10001810)==nt::ee::Stop::budget && state.gpr[8].lo==0);
+            check(access(true,0x10001820,0x12345678)==nt::ee::Stop::budget);
+            check(access(false,0x10001820)==nt::ee::Stop::budget && state.gpr[8].lo==0x5678);
+            check(access(false,0x10001830)==nt::ee::Stop::memory_fault);
+            check(access(false,0x10001811)==nt::ee::Stop::memory_fault);
+            check(access(false,0x10003800)==nt::ee::Stop::memory_fault);
+            memory.io={};
+            check(access(false,0x10001810)==nt::ee::Stop::memory_fault);
+        }
+        {
+            std::array<std::uint8_t,0x10000> ram{};
+            nt::ee::Memory memory{ram.data(),ram.size()};
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
+            nt::runtime::State state;
+            for (const auto number:{0x64U,0xffffff98U}) for (unsigned mode=0;mode<5;++mode) {
+                state={}; state.pc=0x11ec; state.gpr[3].lo=number; state.gpr[4].lo=mode;
+                state.gpr[2]={0xabcdef0123456789ULL,0x1234};
+                const auto before=ram;
+                const auto stop=nt::ee::run(nt_ee_generated_run,state,memory,1,services);
+                check(stop==(mode<4 ? nt::ee::Stop::budget : nt::ee::Stop::unsupported_system));
+                check(state.executed==(mode<4 ? 1U : 0U) && state.pc==(mode<4 ? 0x11f0U : 0x11ecU));
+                check(state.gpr[2].lo==0xabcdef0123456789ULL && state.gpr[2].hi==0x1234 && ram==before);
+            }
+            // A flush never turns RAM into executable code or a registration target.
+            state={}; state.pc=0x11ec; state.gpr[3].lo=0x64;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::budget);
+            state.pc=0x4000;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,8,services)==nt::ee::Stop::unmapped_code);
+            state.pc=0x11ec; state.gpr[3].lo=0x74; state.gpr[4].lo=0x61; state.gpr[5].lo=0x4000;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::unmapped_code);
+        }
+        {
+            std::vector<std::uint8_t> ram(0x370100);
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::runtime::State state;
+            state.pc=0x370000; state.gpr[31].lo=0x360004;
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::unpublished_code && state.executed==0);
+            const std::array<std::uint32_t,3> words{0x24020007U,0x03e00008U,0U};
+            std::memcpy(ram.data()+0x370000,words.data(),4);
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::unpublished_code && state.gpr[2].lo==0);
+            std::memcpy(ram.data()+0x370000,words.data(),12);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.gpr[2].lo==7);
+            ram[0x370008]=1;
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::unpublished_code && state.executed==1 && state.pc==0x370004);
+            ram[0x370008]=0;
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall && state.executed==3 && state.pc==0x360004);
+            // Initialization copies use ordinary compiled stores, not a hidden loader.
+            state.pc=0x360000; state.gpr[4].lo=0x370000; state.gpr[8].lo=words[0];
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+            state.pc=0x370000; memory.size=0x370008;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unpublished_code);
+        }
+        {
+            std::array<std::uint8_t,0x10000> ram{}; nt::ee::Memory memory{ram.data(),ram.size()};
+            nt::ee::NativeInterrupts interrupts; memory.interrupts=&interrupts;
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
+            nt::runtime::State state;
+            const auto service=[&](unsigned number,unsigned line,unsigned a=0,unsigned b=0,unsigned c=0) {
+                state={}; state.pc=0x11ec; state.gpr[3].lo=number; state.gpr[4].lo=line;
+                state.gpr[5].lo=a; state.gpr[6].lo=b; state.gpr[7].lo=c; state.gpr[28].lo=0x4000;
+                return nt::ee::run(nt_ee_generated_run,state,memory,1,services);
+            };
+            check(service(0x10,11,0x80365000,0xffffffff,1)==nt::ee::Stop::budget && state.gpr[2].lo==1);
+            check(service(0x10,11,0x365000,0xffffffff,2)==nt::ee::Stop::budget && state.gpr[2].lo==2);
+            check(service(0x10,11,0x365000,2,3)==nt::ee::Stop::budget && state.gpr[2].lo==3);
+            check(service(0x14,11)==nt::ee::Stop::budget && state.gpr[2].lo==1);
+            check(service(0xffffffe6U,11)==nt::ee::Stop::budget && state.gpr[2].lo==0);
+            const auto deliver=[&](unsigned slice) {
+                std::fill(ram.begin()+0x4000,ram.begin()+0x4004,0);
+                state={}; state.pc=0x360004; state.cop0_status=0x10401; state.gpr[29].lo=0x8000;
+                interrupts.raise(11);
+                auto result=nt::ee::Stop::budget;
+                for (unsigned tries=0;tries<64 && result==nt::ee::Stop::budget;++tries)
+                    result=nt::ee::run(nt_ee_generated_run,state,memory,slice,services);
+                check(result==nt::ee::Stop::syscall && state.pc==0x360004 && state.gpr[29].lo==0x8000);
+                std::uint32_t log=0; std::memcpy(&log,ram.data()+0x4000,4); return log;
+            };
+            check(deliver(1)==0x132 && state.executed==21);
+            check(service(0x11,11,3)==nt::ee::Stop::budget && state.gpr[2].lo==2);
+            check(deliver(64)==0x12 && state.executed==14);
+            check(service(0x10,11,0x365000,0,0xffffffff)==nt::ee::Stop::budget && state.gpr[2].lo==3);
+            check(deliver(1)==0xffffffff && state.executed==7);
+            check(service(0xffffffe5U,11)==nt::ee::Stop::budget && state.gpr[2].lo==1);
+            check(service(0x15,11)==nt::ee::Stop::budget && state.gpr[2].lo==0);
+            check(service(0x11,10,1)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
+            check(service(0x10,11,0x365000,999)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
+            check(service(0x10,16,0x365000)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
+            check(service(0x10,11,0x365001)==nt::ee::Stop::invalid_state && !state.executed);
+            check(service(0x10,11,0x4000)==nt::ee::Stop::unmapped_code && !state.executed);
+            for (unsigned id=4;id<=64;++id)
+                check(service(0x10,11,0x365000,0xffffffff,0)==nt::ee::Stop::budget && state.gpr[2].lo==id);
+            check(service(0x10,11,0x365000)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
+        }
+        {
+            timer_now=0; nt::ee::NativePlatform platform(timer_clock);
+            std::array<std::uint8_t,0x10000> ram{}; nt::ee::Memory memory{ram.data(),ram.size()}; platform.attach(memory);
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
+            nt::runtime::State state; state.pc=0x11ec; state.gpr[3].lo=0x74;
+            state.gpr[4].lo=0x12c; state.gpr[5].lo=0x350000;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::budget);
+            const auto io=memory.io;
+            check(io.write32(io.context,0x10001800,65535)==nt::ee::Stop::budget);
+            check(io.write32(io.context,0x10001810,0xa82)==nt::ee::Stop::budget);
+            timer_now=1000; io.poll(io.context);
+            check(platform.interrupts.read(0x1000f000).value==0);
+            timer_now=2000; io.poll(io.context);
+            check(platform.interrupts.read(0x1000f000).value==(1U<<12));
+            check((io.read32(io.context,0x10001810).value&0x800)!=0);
+            state={}; state.pc=0x360004; state.cop0_status=0x10401; state.gpr[29].lo=0x8000;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,32,services)==nt::ee::Stop::syscall && state.executed==3);
+            timer_now+=1000000000; io.poll(io.context);
+            check(platform.interrupts.read(0x1000f000).value==0); // Latched flag suppresses another event.
+            check(io.write32(io.context,0x10001810,0xa82)==nt::ee::Stop::budget);
+            check((io.read32(io.context,0x10001810).value&0x800)==0);
+            timer_now+=1000000000; io.poll(io.context);
+            check(platform.interrupts.read(0x1000f000).value==(1U<<12));
+            platform.interrupts.write(0x1000f000,1U<<12);
+            check(io.write32(io.context,0x10001810,0x800)==nt::ee::Stop::budget); // Stop and clear.
+            check(io.write32(io.context,0x10001800,0)==nt::ee::Stop::budget);
+            check(io.write32(io.context,0x10001820,2)==nt::ee::Stop::budget);
+            check(io.write32(io.context,0x10001810,0x582)==nt::ee::Stop::budget);
+            const auto start=timer_now;
+            timer_now=start+3000; io.poll(io.context);
+            check(platform.interrupts.read(0x1000f000).value==0);
+            timer_now=start+4000; io.poll(io.context);
+            check(platform.interrupts.read(0x1000f000).value==(1U<<12));
+            check((io.read32(io.context,0x10001810).value&0xc00)==0x400);
+            const auto mode=io.read32(io.context,0x10001810).value;
+            check(io.write32(io.context,0x10001810,0x1c2)==nt::ee::Stop::unsupported_system);
+            check(io.read32(io.context,0x10001810).value==mode);
+            timer_now=start; io.poll(io.context); // A backwards test clock cannot invent elapsed ticks.
+            check(io.read32(io.context,0x10001800).value==2);
+        }
+        {
+            // A compiled loop with no I/O must still give native producers time.
+            timer_now=0; nt::ee::NativePlatform platform(stepping_timer_clock);
+            std::array<std::uint8_t,0x10000> ram{}; nt::ee::Memory memory{ram.data(),ram.size()}; platform.attach(memory);
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
+            nt::runtime::State state; state.pc=0x11ec; state.gpr[3].lo=0x10; state.gpr[4].lo=11;
+            state.gpr[5].lo=0x365000; state.gpr[7].lo=1; state.gpr[28].lo=0x4000;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::budget);
+            platform.interrupts.write(0x1000f010,1U<<11);
+            const auto io=memory.io;
+            check(io.write32(io.context,0x10001000,65535)==nt::ee::Stop::budget);
+            check(io.write32(io.context,0x10001010,0xa82)==nt::ee::Stop::budget);
+            state={}; state.pc=0x380000; state.cop0_status=0x10401; state.gpr[29].lo=0x8000;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,8192,services)==nt::ee::Stop::budget && state.executed==8192);
+            std::uint32_t log=0; std::memcpy(&log,ram.data()+0x4000,4);
+            check(log==1 && state.gpr[29].lo==0x8000);
+        }
+        {
+            std::vector<std::uint8_t> ram(0x400000); nt::ee::Memory memory{ram.data(),ram.size()};
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
+            nt::runtime::State state; state.pc=0x11ec; state.gpr[3].lo=0x3c;
+            state.gpr[4].lo=0x6000; state.gpr[5].lo=0x20000; state.gpr[6].lo=0x1000;
+            state.gpr[7].lo=0x4000; state.gpr[8].lo=0x390008;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::budget);
+            const auto call=[&](unsigned number,unsigned a=0,unsigned b=0) {
+                state.pc=0x11ec; state.gpr[3].lo=number; state.gpr[4].lo=a; state.gpr[5].lo=b;
+                return nt::ee::run(nt_ee_generated_run,state,memory,1,services);
+            };
+            std::array<std::uint32_t,9> descriptor{0,0x390000,0x24000,0x1000,0x6000,10,0,0,7};
+            std::memcpy(ram.data()+0x5000,descriptor.data(),36);
+            check(call(0x20,0xa0005000)==nt::ee::Stop::budget && state.gpr[2].lo==2);
+            check(call(0x2f)==nt::ee::Stop::budget && state.gpr[2].lo==1);
+            check(call(0x30,2,0x5100)==nt::ee::Stop::budget && state.gpr[2].lo==0x10);
+            std::array<std::uint32_t,12> status{}; std::memcpy(status.data(),ram.data()+0x5100,48);
+            check(status[1]==0x390000 && status[2]==0x24000 && status[5]==10 && status[8]==7);
+            check(call(0x22,2,0x12345678)==nt::ee::Stop::budget && state.gpr[2].lo==2 && state.pc==0x11f0);
+            check(call(0x21,2)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
+            state.gpr[16].lo=0xabcdef; state.cop0_status=0x400; state.cop0_epc=0x1234;
+            check(call(0x29,0,20)==nt::ee::Stop::budget && state.pc==0x390000);
+            check(state.gpr[4].lo==0x12345678 && state.gpr[28].lo==0x6000 && state.gpr[29].lo==0x24d60);
+            const auto retired=state.executed;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,3,services)==nt::ee::Stop::budget &&
+                  state.executed==retired+3 && state.pc==0x11f0 && state.gpr[16].lo==0xabcdef &&
+                  state.cop0_status==0x400 && state.cop0_epc==0x1234);
+            std::uint32_t result=0; std::memcpy(&result,ram.data()+0x6000,4); check(result==0x12345678);
+            check(call(0x21,2)==nt::ee::Stop::budget && state.gpr[2].lo==2);
+            check(call(0x20,0x5000)==nt::ee::Stop::budget && state.gpr[2].lo==2);
+            const auto before=ram;
+            check(call(0x30,2,0x1000)==nt::ee::Stop::code_write && ram==before);
+            check(call(0x20,0x5001)==nt::ee::Stop::memory_fault);
+            descriptor[1]=0x4000; std::memcpy(ram.data()+0x5000,descriptor.data(),36);
+            check(call(0x20,0x5000)==nt::ee::Stop::unmapped_code);
+            descriptor[1]=0x390000; descriptor[5]=128; std::memcpy(ram.data()+0x5000,descriptor.data(),36);
+            check(call(0x20,0x5000)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
+        }
+        for (const auto slice : {1U,64U}) {
+            std::array<std::uint8_t,0x10000> ram{};
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativeInterrupts interrupts;
+            memory.interrupts=&interrupts;
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
+            nt::runtime::State state; state.pc=0x11ec; state.gpr[3].lo=0x74;
+            state.gpr[4].lo=0x12c; state.gpr[5].lo=0x80350000;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::budget);
+            check(interrupts.read(0x1000f010).value==(1U<<12));
+            state={}; state.pc=0x360004; state.gpr[29].lo=0x8000;
+            state.cop0_status=0x10401; state.cop0_epc=0x1234;
+            state.gpr[2]={41,42}; state.gpr[4].lo=23; state.gpr[31].lo=0x12345678;
+            state.fpr[2]=123; state.hi=987; const auto before=state;
+            interrupts.raise(12);
+            auto stop=nt::ee::Stop::budget;
+            for (unsigned n=0;n<16 && stop==nt::ee::Stop::budget;++n)
+                stop=nt::ee::run(nt_ee_generated_run,state,memory,slice,services);
+            check(stop==nt::ee::Stop::syscall && state.pc==before.pc && state.executed==3);
+            check(state.gpr[2].lo==41 && state.gpr[2].hi==42 && state.gpr[4].lo==23 &&
+                  state.gpr[29].lo==0x8000 && state.gpr[31].lo==0x12345678 && state.fpr[2]==123 && state.hi==987 &&
+                  state.cop0_status==before.cop0_status && state.cop0_epc==before.cop0_epc);
+            check(interrupts.read(0x1000f000).value==0 && !(memory.pending_interrupts&0x400));
+            interrupts.raise(12); interrupts.write(0x1000f010,1U<<12);
+            check(nt::ee::run(nt_ee_generated_run,state,memory,4,services)==nt::ee::Stop::syscall && state.executed==3);
+            check(interrupts.read(0x1000f000).value==(1U<<12));
+            interrupts.write(0x1000f010,1U<<12); state.gpr[29].lo=0x1100;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,4,services)==nt::ee::Stop::code_write);
+            check(interrupts.read(0x1000f000).value==(1U<<12) && state.executed==3);
+            interrupts.write(0x1000f000,1U<<12);
+            interrupts.raise(2); interrupts.write(0x1000f010,1U<<2); state.gpr[29].lo=0x8000;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,4,services)==nt::ee::Stop::interrupt_pending &&
+                  interrupts.read(0x1000f000).value==(1U<<2));
+        }
+        for (const auto slice : {1U,64U}) {
+            std::array<std::uint8_t,0x10000> ram{};
+            nt::ee::Memory memory{ram.data(),ram.size()};
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains,0x6000);
+            nt::runtime::State state;
+            const auto install=[&](unsigned number,unsigned address) {
+                state.pc=0x11ec; state.gpr[3].lo=0x74; state.gpr[4].lo=number; state.gpr[5].lo=address;
+                return nt::ee::run(nt_ee_generated_run,state,memory,1,services);
+            };
+            check(install(0x60,0xa0350010)==nt::ee::Stop::budget);
+            check(install(0x61,0x350000)==nt::ee::Stop::budget);
+            std::uint32_t published=0;
+            std::memcpy(&published,ram.data()+0x6000+0x60*4,4);
+            check(published==0xa0350010);
+            std::memcpy(&published,ram.data()+0x6000+0x61*4,4);
+            check(published==0x350000);
+            check(install(0x61,0x35000c)==nt::ee::Stop::unmapped_code);
+            check(install(0x61,0x350001)==nt::ee::Stop::invalid_state);
+            check(install(0x12c,0x350000)==nt::ee::Stop::unsupported_system);
+            state.pc=0x11ec; state.gpr[3].lo=0x60; state.gpr[4].lo=5;
+            state.gpr[29].lo=0x8000; state.gpr[31].lo=0x12345678; state.cop0_status=0;
+            const auto before=state.executed;
+            auto result=nt::ee::Stop::budget;
+            for (unsigned tries=0;tries<32 && result==nt::ee::Stop::budget;++tries) {
+                // Stop on the restored continuation, before unrelated fixture code.
+                if (state.pc==0x11f0) break;
+                result=nt::ee::run(nt_ee_generated_run,state,memory,slice==1 ? 1 : 8,services);
+            }
+            check(result==nt::ee::Stop::budget && state.pc==0x11f0 && state.executed==before+8);
+            check(state.gpr[2].lo==12 && state.gpr[29].lo==0x8000 &&
+                  state.gpr[31].lo==0x12345678 && state.cop0_status==0);
+            check(install(0x61,0)==nt::ee::Stop::budget);
+            std::uint32_t cleared=1; std::memcpy(&cleared,ram.data()+0x6000+0x61*4,4);
+            check(cleared==0);
+            ram[0x6000]=1;
+            const auto unchanged=state.executed;
+            check(install(0x61,0x350000)==nt::ee::Stop::unsupported_system && state.executed==unchanged);
+            ram[0x6000]=0;
+            state.pc=0x11ec; state.gpr[3].lo=0x61;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::syscall);
+            check(install(0x61,0x350000)==nt::ee::Stop::budget);
+            state.pc=0x11ec; state.gpr[3].lo=0x61; state.gpr[29].lo=0x1010;
+            const auto saved=ram; const auto count=state.executed;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::code_write &&
+                  state.pc==0x11ec && state.executed==count && ram==saved);
         }
         for (const auto slice : {1U,64U}) {
             std::array<std::uint8_t,0x10000> ram{}; ram.fill(0xcc);
@@ -596,7 +933,7 @@ int main() {
             check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::unsupported_system &&
                   !state.executed && state.gpr[11].lo==123);
         }
-        for (unsigned variant=0;variant<4;++variant) {
+        for (const bool secondary : {false,true}) for (unsigned variant=0;variant<4;++variant) {
             for (const auto a : {0U,1U,7U,0x80000000U,0x80000001U,0xffffffffU}) {
                 for (const auto b : {0U,1U,3U,0x80000000U,0xffffffffU}) {
                     const auto signed_word=[](std::uint32_t v)->std::int64_t { return v&0x80000000U ? std::int64_t(v)-0x100000000LL : v; };
@@ -608,11 +945,11 @@ int main() {
                     } else if (variant==2) { lo=b ? x/y : x<0 ? 1 : -1; hi=b ? x%y : x; }
                     else { lo=b ? a/b : 0xffffffffU; hi=b ? a%b : a; }
                     lo=std::uint64_t(signed_word(std::uint32_t(lo))); hi=std::uint64_t(signed_word(std::uint32_t(hi)));
-                    nt::runtime::State state; state.pc=0x14ac+variant*8;
+                    nt::runtime::State state; state.pc=(secondary ? 0x200150 : 0x14ac)+variant*8;
                     state.gpr[8].lo=0x1234567800000000ULL|a; state.gpr[9].lo=0xfedcba9800000000ULL|b;
-                    state.gpr[10]={77,88}; state.hi1=111; state.lo1=222;
-                    check(run(&state,8)==nt::ee::Stop::syscall && state.executed==1 && state.lo==lo && state.hi==hi &&
-                          state.gpr[10].lo==(variant<2 ? lo : 77) && state.gpr[10].hi==88 && state.hi1==111 && state.lo1==222);
+                    state.gpr[10]={77,88}; state.hi=state.hi1=111; state.lo=state.lo1=222;
+                    check(run(&state,8)==nt::ee::Stop::syscall && state.executed==1 && (secondary ? state.lo1 : state.lo)==lo && (secondary ? state.hi1 : state.hi)==hi &&
+                          state.gpr[10].lo==(variant<2 ? lo : 77) && state.gpr[10].hi==88 && (secondary ? state.hi : state.hi1)==111 && (secondary ? state.lo : state.lo1)==222);
                 }
             }
         }
@@ -888,6 +1225,286 @@ int main() {
                     check((((byte<8 ? state.gpr[destination].lo : state.gpr[destination].hi)>>((byte%8)*8))&255)==expected[byte]);
             }
         }
+        for (unsigned operation=0;operation<4;++operation) for (unsigned offset=0;offset<4;++offset) {
+            std::array<std::uint8_t,12> ram{0x81,0x92,0xa3,0xb4,0xc5,0xd6,0xe7,0xf8,9,10,11,12}; const auto original=ram;
+            std::array<std::uint8_t,4> reg{0x11,0x22,0x33,0xc4}; auto expected_ram=ram; auto expected_reg=reg;
+            const bool store=operation>=2,right=operation%2!=0;
+            if (!right) for (unsigned n=0;n<=offset;++n) {
+                if (store) expected_ram[n]=reg[3-offset+n]; else expected_reg[3-offset+n]=ram[n];
+            } else for (unsigned n=offset;n<4;++n) {
+                if (store) expected_ram[n]=reg[n-offset]; else expected_reg[n-offset]=ram[n];
+            }
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::runtime::State state; state.pc=0x200170+operation*8;
+            state.gpr[4].lo=0x80000000+offset; state.gpr[8]={0x12345678c4332211ULL,99};
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall && state.executed==1 && state.gpr[8].hi==99);
+            if (store) check(ram==expected_ram && state.gpr[8].lo==0x12345678c4332211ULL);
+            else {
+                for (unsigned n=0;n<4;++n) check(((state.gpr[8].lo>>(n*8))&255)==expected_reg[n]);
+                check((state.gpr[8].lo>>32)==(right && offset ? 0x12345678U : expected_reg[3]&128 ? 0xffffffffU : 0U) && ram==original);
+            }
+        }
+        for (unsigned offset=0;offset<4;++offset) {
+            std::array<std::uint8_t,12> ram{0x81,0x92,0xa3,0xb4,0xc5,0xd6,0xe7,0xf8,9,10,11,12};
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::runtime::State state; state.pc=0x200190; state.gpr[4].lo=offset;
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall && state.executed==2 && (state.gpr[8].lo>>32)==0xffffffffU);
+            for (unsigned n=0;n<4;++n) check(((state.gpr[8].lo>>(n*8))&255)==ram[offset+n]);
+            state={}; state.pc=0x20019c; state.gpr[4].lo=offset; state.gpr[8].lo=0x44332211;
+            auto expected=ram; for (unsigned n=0;n<4;++n) expected[offset+n]=std::uint8_t(0x11*(n+1));
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall && state.executed==2 && ram==expected);
+        }
+        for (unsigned operation=0;operation<4;++operation) {
+            std::array<std::uint8_t,4> ram{0x11,0x22,0x33,0x44}; const auto original=ram;
+            nt::ee::Memory memory{ram.data(),3}; nt::runtime::State state;
+            state.pc=0x2001a8+operation*8; state.gpr[0]={77,88}; state.gpr[4].lo=0xa0000002;
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::memory_fault &&
+                  state.executed==0 && memory.fault_address==0xa0000002 && ram==original && state.gpr[0].lo==77);
+            memory.size=4;
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall && state.executed==1 &&
+                  state.gpr[0].lo==77 && state.gpr[0].hi==88);
+            if (operation<2) check(ram==original);
+            else {
+                for (unsigned n=0;n<4;++n) check(ram[n]==((operation==2 ? n<=2 : n>=2) ? 0 : original[n]));
+                std::vector<std::uint8_t> protected_ram(0x1010,0x55);
+                memory={protected_ram.data(),protected_ram.size()};
+                state.pc=0x2001a8+operation*8; state.executed=0; state.gpr[4].lo=0x80001003;
+                check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::code_write &&
+                      state.executed==0 && memory.fault_address==0x80001003);
+                for (const auto byte:protected_ram) check(byte==0x55);
+            }
+        }
+        {
+            std::vector<std::uint8_t> ram(0x4000,0xcc);
+            nt::ee::Memory memory{ram.data(),ram.size()};
+            nt::runtime::State state;
+            nt::ee::StartupServices settings(nt_ee_generated_code_overlap,nt_ee_generated_contains,0,{0x12345678,{1,2,3,4}});
+            const auto call=[&](unsigned number,unsigned pointer,unsigned size=0,unsigned offset=0) {
+                state.pc=0x3a0000; state.set(3,number); state.set(4,pointer); state.set(5,size); state.set(6,offset);
+                return nt::ee::run(nt_ee_generated_run,state,memory,1,settings);
+            };
+            state.set(2,0xdeadbeef);
+            check(call(0x4b,0xa0002000)==nt::ee::Stop::budget && state.executed==1 && state.gpr[2].lo==0xdeadbeef);
+            std::uint32_t word=0; std::memcpy(&word,ram.data()+0x2000,4); check(word==0x12345678);
+            word=0xfedcba98; std::memcpy(ram.data()+0x2000,&word,4);
+            check(call(0x4a,0x2000)==nt::ee::Stop::budget);
+            check(call(0x4b,0x2004)==nt::ee::Stop::budget);
+            std::memcpy(&word,ram.data()+0x2004,4); check(word==0xfedcba98);
+            check(call(0x6f,0x2009,2,1)==nt::ee::Stop::budget && ram[0x2009]==2 && ram[0x200a]==3);
+            ram[0x2009]=9; ram[0x200a]=8;
+            check(call(0x6e,0x2009,2,1)==nt::ee::Stop::budget);
+            check(call(0x6f,0x2010,4)==nt::ee::Stop::budget && ram[0x2010]==1 && ram[0x2011]==9 && ram[0x2012]==8 && ram[0x2013]==4);
+            const auto before=state.executed; const auto saved=ram;
+            check(call(0x6f,0x2010,2,3)==nt::ee::Stop::invalid_state && state.executed==before && ram==saved);
+            check(call(0x4b,0x1000)==nt::ee::Stop::code_write && ram==saved);
+            check(call(0x4b,0x2001)==nt::ee::Stop::memory_fault && ram==saved);
+            check(call(0x6e,0x3fff,2)==nt::ee::Stop::memory_fault);
+            check(call(0x6f,0x2010,4)==nt::ee::Stop::budget && ram==saved);
+            check(call(0x6f,0xffffffff,0,4)==nt::ee::Stop::budget);
+            nt::ee::StartupServices independent(nt_ee_generated_code_overlap);
+            state.pc=0x3a0000; state.set(3,0x4b); state.set(4,0x2020);
+            check(nt::ee::run(nt_ee_generated_run,state,memory,1,independent)==nt::ee::Stop::budget);
+            std::memcpy(&word,ram.data()+0x2020,4); check(word==0x12010);
+        }
+        {
+            // Contract fixture only: no claim that this recorder implements mappings.
+            struct Recorder { unsigned operation=99,parameter=99,value=0,calls=0; bool fail=false; } recorder;
+            nt::ee::Memory memory; nt::runtime::State state;
+            const auto request=+[](void* raw,nt::ee::AddressSpaceOperation operation,std::uint32_t parameter,std::uint32_t value) {
+                auto& record=*static_cast<Recorder*>(raw);
+                record.operation=static_cast<unsigned>(operation); record.parameter=parameter; record.value=value; ++record.calls;
+                return nt::ee::IoRead{record.fail ? nt::ee::Stop::unsupported_system : nt::ee::Stop::budget,0x80000001U};
+            };
+            for (unsigned index=0;const auto reg:{0U,2U,3U,5U,10U}) {
+                state={}; state.pc=0x3b0000+index*8; state.set(8,0x1122334455667788ULL);
+                const auto pc=state.pc;
+                memory.address_space={};
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system && state.pc==pc && !state.executed);
+                memory.address_space={&recorder,request}; recorder.fail=false;
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.pc==pc+4 && state.executed==1);
+                check(recorder.operation==1 && recorder.parameter==reg && recorder.value==0x55667788);
+                state.gpr[9]={0x1234,0x5678}; recorder.fail=true;
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system && state.pc==pc+4 && state.gpr[9].lo==0x1234 && state.executed==1);
+                recorder.fail=false;
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.executed==2);
+                check(recorder.operation==0 && recorder.parameter==reg && state.gpr[9].lo==0xffffffff80000001ULL && state.gpr[9].hi==0x5678);
+                ++index;
+            }
+            for (unsigned index=0;index<4;++index) {
+                state={}; state.pc=0x3b0100+index*4; const auto pc=state.pc;
+                memory.address_space={};
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system && state.pc==pc && !state.executed);
+                memory.address_space={&recorder,request};
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.executed==1 && recorder.operation==index+2);
+            }
+        }
+        {
+            nt::ee::NativePlatform platform;
+            nt::ee::Memory memory; platform.attach(memory);
+            nt::runtime::State state;
+            const auto access=[&](bool write,std::uint32_t value=0) {
+                state={}; state.pc=write ? 0x360000 : 0x360008;
+                state.set(4,0xb000e010); state.set(8,value);
+                return nt_ee_generated_run(&state,&memory,1);
+            };
+            memory.pending_interrupts=0x100;
+            check(access(false)==nt::ee::Stop::budget && state.gpr[8].lo==0);
+            check(platform.completions.complete(5) && platform.completions.complete(7));
+            check(!platform.completions.complete(10) && !platform.completions.complete(32));
+            check(access(false)==nt::ee::Stop::budget && state.gpr[8].lo==0xa0 && memory.pending_interrupts==0x100);
+            check(access(true,1U<<21)==nt::ee::Stop::budget && memory.pending_interrupts==0x900);
+            // Mask changes neither manufacture nor discard completion events.
+            check(access(true,1U<<21)==nt::ee::Stop::budget && memory.pending_interrupts==0x100);
+            check(access(true,1U<<23)==nt::ee::Stop::budget && memory.pending_interrupts==0x900);
+            check(access(true,1U<<7)==nt::ee::Stop::budget && memory.pending_interrupts==0x100);
+            check(access(false)==nt::ee::Stop::budget && state.gpr[8].lo==0x00800020);
+            check(access(true,1U<<21)==nt::ee::Stop::budget && memory.pending_interrupts==0x900);
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
+            state={}; state.pc=0x360004; state.cop0_status=0x10801;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,10,services)==nt::ee::Stop::interrupt_pending && !state.executed);
+            check(platform.completions.status()==0x00a00020); // No handler: event stays pending.
+            check(access(true,0x00a00020)==nt::ee::Stop::budget && platform.completions.status()==0 && memory.pending_interrupts==0x100);
+            check(access(true,0x80000000)==nt::ee::Stop::budget);
+            check(access(false)==nt::ee::Stop::budget && state.gpr[8].lo==0xffffffff80000000ULL && memory.pending_interrupts==0x100);
+            nt::ee::NativePlatform independent; check(independent.completions.status()==0);
+        }
+        {
+            std::array<std::uint8_t,0x5000> ram{};
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::runtime::State state;
+            const auto write=[&](std::uint32_t address,std::uint32_t value) {
+                state={}; state.pc=0x360000; state.set(4,address); state.set(8,value);
+                return nt_ee_generated_run(&state,&memory,1);
+            };
+            std::array<std::uint8_t,16> packet{}; packet.fill(0x5a);
+            const auto deliver=[&](std::uint32_t address,bool terminal=true,bool irq=false) {
+                return platform.sif_receive.deliver(memory,nt_ee_generated_code_overlap,platform.completions,address,packet,terminal,irq);
+            };
+            check(write(0x1000c000,0x104)==nt::ee::Stop::budget && platform.sif_receive.accepting());
+            check(platform.completions.status()==0);
+            const auto saved=ram;
+            check(deliver(0x1000)==nt::ee::Stop::code_write && ram==saved && platform.sif_receive.accepting());
+            check(deliver(0x5000)==nt::ee::Stop::memory_fault && ram==saved);
+            check(write(0x1000c010,0x2000)==nt::ee::Stop::unsupported_system);
+            check(deliver(0xa0002000,false)==nt::ee::Stop::budget && platform.sif_receive.accepting() && platform.completions.status()==0);
+            for (unsigned i=0;i<16;++i) check(ram[0x2000+i]==0x5a);
+            check(platform.sif_receive.read(0x1000c010).value==0x2010);
+            check(deliver(0x2010)==nt::ee::Stop::budget && !platform.sif_receive.accepting() && platform.completions.status()==0x20);
+            check(deliver(0x2020)==nt::ee::Stop::unsupported_system);
+            platform.completions.acknowledge(0x20);
+            check(write(0x1000c010,0x3000)==nt::ee::Stop::budget);
+            check(write(0x1000c020,1)==nt::ee::Stop::budget);
+            check(write(0x1000c000,0x100)==nt::ee::Stop::budget);
+            check(deliver(0x4000)==nt::ee::Stop::budget && ram[0x3000]==0x5a && ram[0x4000]==0);
+            check(write(0x1000c000,0x144)==nt::ee::Stop::unsupported_system);
+            check(write(0x1000c000,0x184)==nt::ee::Stop::budget);
+            check(deliver(0x4000,false,true)==nt::ee::Stop::budget && !platform.sif_receive.accepting());
+            check(write(0x1000c000,0x104)==nt::ee::Stop::budget);
+            check(write(0x1000c000,0)==nt::ee::Stop::budget && !platform.sif_receive.accepting());
+            check(deliver(0x4020)==nt::ee::Stop::unsupported_system && ram[0x4020]==0);
+        }
+        {
+            nt::ee::Memory memory; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap);
+            nt::runtime::State state; state.set(2,42);
+            const auto call=[&](unsigned number,unsigned id=0,unsigned value=0) {
+                state.pc=0x3a0000; state.set(3,number); state.set(4,id); state.set(5,value);
+                return nt::ee::run(nt_ee_generated_run,state,memory,1,services);
+            };
+            check(call(0x78)==nt::ee::Stop::budget && state.gpr[2].lo==42 && platform.sif_receive.accepting());
+            check(platform.sif_link.main_flags()==0x10000 && platform.completions.status()==0);
+            const auto retired=state.executed;
+            check(call(0x78)==nt::ee::Stop::unsupported_system && state.executed==retired);
+            check(call(0x7a,4)==nt::ee::Stop::budget && state.gpr[2].lo==0);
+            check(call(0x79,1,0x2000)==nt::ee::Stop::budget && platform.sif_link.main_address()==0x2000);
+            check(call(0x79,2,0x3000)==nt::ee::Stop::unsupported_system);
+            platform.sif_link.publish_peer(0x4000,0x30000);
+            check(call(0x7a,2)==nt::ee::Stop::budget && state.gpr[2].lo==0x4000);
+            check(call(0x79,4,0x10000)==nt::ee::Stop::budget);
+            check(call(0x7a,4)==nt::ee::Stop::budget && state.gpr[2].lo==0x20000);
+            check(call(0x79,0x80000002,0x80000001)==nt::ee::Stop::budget);
+            check(call(0x7a,0x80000002)==nt::ee::Stop::budget && state.gpr[2].lo==0xffffffff80000001ULL);
+            check(call(0x6b)==nt::ee::Stop::budget && !platform.sif_receive.accepting());
+            check(call(0x78)==nt::ee::Stop::budget && platform.sif_receive.accepting());
+        }
+        {
+            std::vector<std::uint8_t> ram(0x10000);
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
+            nt::runtime::State state;
+            const auto call=[&](unsigned number,unsigned line,unsigned arg=0,unsigned next=0,unsigned callback_arg=0) {
+                state.pc=0x3a0000; state.cop0_status=0; state.set(3,number); state.set(4,line); state.set(5,arg);
+                state.set(6,next); state.set(7,callback_arg); state.set(28,0x4000);
+                return nt::ee::run(nt_ee_generated_run,state,memory,1,services);
+            };
+            check(call(0x12,5,0x365000,0,1)==nt::ee::Stop::budget && state.gpr[2].lo==1);
+            check(call(0x10,5,0x365000,0,2)==nt::ee::Stop::budget && state.gpr[2].lo==1); // Separate handle domains.
+            check(call(0x16,5)==nt::ee::Stop::budget && state.gpr[2].lo==1);
+            check(call(0xffffffe4U,5)==nt::ee::Stop::budget && state.gpr[2].lo==0);
+            check(call(0x14,5)==nt::ee::Stop::budget);
+            platform.sif_receive.write(0x1000c000,0x184);
+            std::array<std::uint8_t,16> packet{}; packet.fill(0x69);
+            check(platform.sif_receive.deliver(memory,nt_ee_generated_code_overlap,platform.completions,0x5000,packet)==nt::ee::Stop::budget);
+            platform.interrupts.raise(5); platform.interrupts.publish(memory);
+            state={}; state.pc=0x380000; state.cop0_status=0x10c01; state.set(29,0x1200); state.set(16,0xabcd);
+            check(nt::ee::run(nt_ee_generated_run,state,memory,2,services)==nt::ee::Stop::code_write && platform.completions.ready()==0x20);
+            state.set(29,0x8000);
+            check(nt::ee::run(nt_ee_generated_run,state,memory,2,services)==nt::ee::Stop::budget && platform.interrupts.active());
+            check(platform.completions.ready()==0 && platform.interrupts.read(0x1000f000).value==0x20);
+            check(nt::ee::run(nt_ee_generated_run,state,memory,5,services)==nt::ee::Stop::budget && !platform.interrupts.active());
+            std::uint32_t log=0; std::memcpy(&log,ram.data()+0x4000,4);
+            check(log==1 && ram[0x5000]==0x69 && state.pc==0x380000 && state.gpr[16].lo==0xabcd && state.gpr[29].lo==0x8000 && state.executed==7);
+            check(nt::ee::run(nt_ee_generated_run,state,memory,7,services)==nt::ee::Stop::budget);
+            std::memcpy(&log,ram.data()+0x4000,4); check(log==0x12 && state.executed==14 && state.pc==0x380000);
+            check(call(0x13,5,1)==nt::ee::Stop::budget && state.gpr[2].lo==0);
+            check(call(0x11,5,1)==nt::ee::Stop::budget && state.gpr[2].lo==0);
+            check(call(0xffffffe3U,5)==nt::ee::Stop::budget && state.gpr[2].lo==1);
+            check(call(0x16,10)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
+        }
+        {
+            struct Peer {
+                std::vector<std::uint8_t> ram=std::vector<std::uint8_t>(0x1000);
+                bool ready=false,fail=false;
+                unsigned accepted=0;
+            } peer;
+            std::vector<std::uint8_t> ram(0x8000);
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap);
+            nt::runtime::State state;
+            const auto call=[&](unsigned number,unsigned pointer,unsigned count=0) {
+                state.pc=0x3a0000; state.set(3,number); state.set(4,pointer); state.set(5,count);
+                return nt::ee::run(nt_ee_generated_run,state,memory,1,services);
+            };
+            const auto sink=+[](void* context,std::span<const nt::ee::NativeSifPacket> packets) {
+                auto& peer=*static_cast<Peer*>(context);
+                if (peer.fail) return nt::ee::IoRead{nt::ee::Stop::unsupported_system};
+                if (!peer.ready) return nt::ee::IoRead{nt::ee::Stop::budget,0};
+                for (const auto& packet:packets)
+                    if (std::uint64_t(packet.destination)+packet.bytes.size()>peer.ram.size()) return nt::ee::IoRead{nt::ee::Stop::memory_fault};
+                for (const auto& packet:packets) std::copy(packet.bytes.begin(),packet.bytes.end(),peer.ram.begin()+packet.destination);
+                ++peer.accepted; return nt::ee::IoRead{nt::ee::Stop::budget,1};
+            };
+            std::array<std::uint32_t,8> descriptors{0xa0004000,0x100,17,0x40,0x5000,0x200,16,4};
+            std::memcpy(ram.data()+0x3000,descriptors.data(),32);
+            std::fill_n(ram.data()+0x4000,32,0x35); std::fill_n(ram.data()+0x5000,16,0x76);
+            check(call(0x77,0x3000,2)==nt::ee::Stop::unsupported_system && !state.executed);
+            check(platform.sif_outbound.connect({&peer,sink}));
+            descriptors[4]=0x7ff0; descriptors[6]=32; std::memcpy(ram.data()+0x3000,descriptors.data(),32);
+            check(call(0x77,0x3000,2)==nt::ee::Stop::memory_fault && memory.fault_address==0x7ff0 && !peer.accepted);
+            descriptors[4]=0x5000; descriptors[6]=16; std::memcpy(ram.data()+0x3000,descriptors.data(),32);
+            check(call(0x77,0xa0003000,2)==nt::ee::Stop::budget && state.gpr[2].lo==1);
+            std::fill_n(ram.data()+0x4000,32,0xff); std::fill_n(ram.data()+0x3000,32,0);
+            check(!platform.sif_outbound.connect({&peer,sink}));
+            check(call(0x76,1)==nt::ee::Stop::budget && state.gpr[2].lo==1 && !peer.accepted);
+            check(call(0x77,0,1)==nt::ee::Stop::budget && state.gpr[2].lo==0);
+            peer.fail=true; const auto retired=state.executed;
+            check(call(0x76,1)==nt::ee::Stop::unsupported_system && state.executed==retired && platform.completions.status()==0);
+            peer.fail=false; peer.ready=true;
+            check(call(0x76,1)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
+            check(peer.accepted==1 && platform.completions.status()==0x40);
+            for (unsigned i=0;i<32;++i) check(peer.ram[0x100+i]==0x35);
+            for (unsigned i=0;i<16;++i) check(peer.ram[0x200+i]==0x76);
+            check(call(0x76,999)==nt::ee::Stop::budget && peer.accepted==1);
+        }
+        run_ee_batch_tests();
         return 0;
     } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

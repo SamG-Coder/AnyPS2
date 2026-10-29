@@ -1,8 +1,14 @@
 #include <nt/ee_codegen.hpp>
 #include "llvm_writer.hpp"
 #include "memory.hpp"
+#include "packed.hpp"
+#include "vector.hpp"
+#include "floating.hpp"
+#include "integer_multiply.hpp"
+#include "packed_multiply.hpp"
 #include "dispatch.hpp"
 #include "branches.hpp"
+#include "traps.hpp"
 #include "system.hpp"
 #include <nt/ee_native.hpp>
 #include <cstddef>
@@ -12,17 +18,22 @@
 #include <sstream>
 #include <stdexcept>
 #include <type_traits>
+#include <map>
 
 namespace nt::ee_codegen {
 namespace {
 using r5900::Op;
 bool supported(Op op) {
-    if (memory_operation(op)) return true;
+    if (address_space_operation(op) || memory_operation(op) || packed_operation(op) || integer_multiply(op) ||
+        packed_accumulator_transfer(op) || vector_operation(op) || trap_predicate(op) ||
+        floating_operation(op) || halfword_product(op)) return true;
     switch (op) {
+    case Op::bltzal: case Op::bgezal: case Op::bltzall: case Op::bgezall:
+    case Op::mtsa: case Op::qmfc2: case Op::qmtc2:
+    case Op::pref: case Op::eret:
     case Op::mfhi1: case Op::mflo1: case Op::mthi1: case Op::mtlo1:
     case Op::mfhi: case Op::mflo: case Op::mthi: case Op::mtlo:
     case Op::ei: case Op::di: case Op::sync:
-    case Op::adda_s: case Op::add_s: case Op::sub_s: case Op::mul_s:
     case Op::cfc1: case Op::ctc1:
     case Op::mfc1: case Op::mtc1:
     case Op::mfsa: case Op::mtsab: case Op::mtsah:
@@ -38,14 +49,10 @@ bool supported(Op op) {
     case Op::pand: case Op::por: case Op::pxor: case Op::pnor:
     case Op::pcpyld: case Op::pcpyud: case Op::pcpyh:
     case Op::plzcw:
-    case Op::vmove: case Op::vmr32:
-    case Op::vadd: case Op::vsub: case Op::vadd_bc: case Op::vsub_bc:
     case Op::breakpoint:
-    case Op::mult: case Op::multu: case Op::div: case Op::divu:
     case Op::mfc0: case Op::mtc0:
     case Op::cfc2: case Op::ctc2:
-    case Op::mov_s: case Op::abs_s: case Op::neg_s:
-    case Op::compare_s: case Op::bc1f: case Op::bc1t: case Op::bc1fl: case Op::bc1tl:
+    case Op::bc1f: case Op::bc1t: case Op::bc1fl: case Op::bc1tl:
     case Op::movz: case Op::movn:
     case Op::padduw:
     case Op::j: case Op::jal: case Op::jr: case Op::jalr: case Op::beq: case Op::bne:
@@ -57,7 +64,7 @@ bool supported(Op op) {
     }
 }
 
-void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> ranges,std::size_t index) {
+void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> ranges,std::size_t index,std::span<const CodePayload> payloads) {
     w.out<<"define internal i32 @nt_ee_part_"<<index<<"(ptr %state, ptr %memory, i64 %budget) noinline {\nentry:\n"
          <<"  %remaining = alloca i64\n  store i64 %budget, ptr %remaining\n  br label %dispatch\ndispatch:\n";
     const auto pc=w.load("i32",offsetof(runtime::State,pc));
@@ -88,6 +95,24 @@ void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::s
         const auto boundary=w.binary("xor","i1",is_delay,"true");
         const auto deliver=w.binary("and","i1",w.binary("and","i1",enabled,ready),boundary);
         w.out<<"  br i1 "<<deliver<<", label %interrupt_stop, label %body"<<suffix<<"\nbody"<<suffix<<":\n";
+        for (std::size_t payload_index=0;payload_index<payloads.size();++payload_index) {
+            const auto& payload=payloads[payload_index];
+            if (physical_address(i.pc)<payload.address || std::uint64_t(physical_address(i.pc))>=std::uint64_t(payload.address)+payload.bytes.size()) continue;
+            const auto data=w.load("ptr",offsetof(ee::Memory,data),"%memory");
+            const auto size=w.load("i64",offsetof(ee::Memory,size),"%memory");
+            const auto absent=w.value("icmp eq ptr "+data+", null");
+            const auto short_memory=w.value("icmp ult i64 "+size+", "+std::to_string(std::uint64_t(payload.address)+payload.bytes.size()));
+            const auto invalid_payload=w.binary("or","i1",absent,short_memory);
+            w.out<<"  br i1 "<<invalid_payload<<", label %payload_stop"<<suffix<<", label %payload_compare"<<suffix
+                 <<"\npayload_compare"<<suffix<<":\n";
+            const auto pointer=w.pointer(payload.address,data);
+            const auto equal=w.value("call i32 @memcmp(ptr "+pointer+", ptr @nt_payload_"+std::to_string(payload_index)+", i64 "+std::to_string(payload.bytes.size())+")");
+            const auto matches=w.value("icmp eq i32 "+equal+", 0");
+            w.out<<"  br i1 "<<matches<<", label %payload_ready"<<suffix<<", label %payload_stop"<<suffix
+                 <<"\npayload_stop"<<suffix<<":\n";
+            w.store("i32",std::to_string(payload.address),offsetof(ee::Memory,fault_address),"%memory");
+            w.out<<"  ret i32 14\npayload_ready"<<suffix<<":\n";
+        }
         if (i.op==Op::breakpoint) { w.out<<"  ret i32 11\n"; continue; }
         if (i.op==Op::syscall) { w.out<<"  ret i32 1\n"; continue; }
         std::string taken="true";
@@ -97,8 +122,9 @@ void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::s
             std::string target;
             if (i.op==Op::jr || i.op==Op::jalr) target=w.narrow(w.reg(i.rs));
             else target=w.value("select i1 "+taken+", i32 "+std::to_string(i.target())+", i32 "+std::to_string(i.pc+8));
-            if (i.op==Op::jal || (i.op==Op::jalr && i.rd)) {
-                const auto reg=i.op==Op::jal ? 31U : i.rd;
+            const bool conditional_link=i.op==Op::bltzal || i.op==Op::bgezal || i.op==Op::bltzall || i.op==Op::bgezall;
+            if (conditional_link || i.op==Op::jal || (i.op==Op::jalr && i.rd)) {
+                const auto reg=conditional_link || i.op==Op::jal ? 31U : i.rd;
                 w.store("i64",w.extend(std::to_string(i.pc+8)),offsetof(runtime::State,gpr)+reg*sizeof(runtime::Register));
             }
             w.store("i32",target,offsetof(runtime::State,pending_target));
@@ -106,9 +132,25 @@ void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::s
             w.store("i8",i.likely() ? w.value("zext i1 "+taken+" to i8") : "1",offsetof(runtime::State,delay_slot));
             const auto successor=i.likely() ? w.value("select i1 "+taken+", i32 "+std::to_string(i.pc+4)+", i32 "+std::to_string(i.pc+8)) : std::to_string(i.pc+4);
             w.store("i32",successor,offsetof(runtime::State,pc));
+        } else if (i.op==Op::eret) {
+            const auto error=w.value("icmp ne i32 "+w.binary("and","i32",status,"4")+", 0");
+            const auto epc=w.load("i32",offsetof(runtime::State,cop0_epc));
+            const auto error_epc=w.load("i32",offsetof(runtime::State,cop0_error_epc));
+            w.store("i32",w.value("select i1 "+error+", i32 "+error_epc+", i32 "+epc),offsetof(runtime::State,pc));
+            const auto mask=w.value("select i1 "+error+", i32 4294967291, i32 4294967293");
+            w.store("i32",w.binary("and","i32",status,mask),offsetof(runtime::State,cop0_status));
+            w.store("i8","0",offsetof(runtime::State,delay_slot));
         } else {
             if (const auto access=memory_operation(i.op)) emit_memory(w,i,*access,ranges);
+            else if (address_space_operation(i.op)) emit_address_space(w,i);
             else if (i.op==Op::mfc0 || i.op==Op::mtc0) emit_system_transfer(w,i);
+            else if (const auto packed=packed_operation(i.op)) emit_packed(w,i,*packed);
+            else if (const auto multiply=integer_multiply(i.op)) emit_integer_multiply(w,i,*multiply);
+            else if (packed_accumulator_transfer(i.op)) emit_packed_accumulator_transfer(w,i);
+            else if (vector_operation(i.op)) emit_vector(w,i);
+            else if (const auto predicate=trap_predicate(i.op)) emit_trap(w,i,predicate);
+            else if (floating_operation(i.op)) emit_floating(w,i);
+            else if (halfword_product(i.op)) emit_halfword_product(w,i);
             else w.instruction(i);
             const auto pending=w.load("i32",offsetof(runtime::State,pending_target));
             const auto successor=w.value("select i1 "+is_delay+", i32 "+pending+", i32 "+std::to_string(i.pc+4));
@@ -120,7 +162,8 @@ void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::s
         const auto left=w.binary("sub","i64",remaining,"1");
         w.out<<"  store i64 "<<left<<", ptr %remaining\n";
         const auto sequential=n+1<instructions.size() && instructions[n+1].pc==i.pc+4 ? "%block"+std::to_string(instructions[n+1].pc) : "%unmapped";
-        if (i.likely()) w.out<<"  br i1 "<<taken<<", label "<<sequential<<", label %dispatch\n";
+        if (i.op==Op::eret) w.out<<"  br label %dispatch\n";
+        else if (i.likely()) w.out<<"  br i1 "<<taken<<", label "<<sequential<<", label %dispatch\n";
         else if (!i.branch() && n && instructions[n-1].pc+4==i.pc && instructions[n-1].branch())
             w.out<<"  br i1 "<<is_delay<<", label %dispatch, label "<<sequential<<"\n";
         else w.out<<"  br label "<<sequential<<"\n";
@@ -129,11 +172,24 @@ void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::s
 }
 
 }
-void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> protected_code) {
+void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> protected_code,std::span<const CodePayload> payloads) {
     static_assert(std::is_standard_layout_v<runtime::State> && std::is_standard_layout_v<ee::Memory>);
     static_assert(sizeof(void*)==8 && std::endian::native==std::endian::little,
                   "EE LLVM currently requires a little-endian 64-bit host ABI");
     if (instructions.empty() || instructions.size()>program_instruction_limit) throw std::invalid_argument("EE program exceeds the bounded instruction limit or is empty");
+    for (std::size_t n=0;n<payloads.size();++n) {
+        const auto& payload=payloads[n];
+        const auto end=std::uint64_t(payload.address)+payload.bytes.size();
+        if (payload.address%4 || payload.bytes.empty() || payload.bytes.size()%4 || end>0x2000000U)
+            throw std::invalid_argument("Invalid copied-code payload extent");
+        for (std::size_t earlier=0;earlier<n;++earlier)
+            if (payload.address<std::uint64_t(payloads[earlier].address)+payloads[earlier].bytes.size() && payloads[earlier].address<end)
+                throw std::invalid_argument("Copied-code payload extents overlap");
+        for (const auto& range:protected_code)
+            if (payload.address<std::uint64_t(range.address)+range.size && range.address<end)
+                throw std::invalid_argument("Copied-code payload overlaps protected ELF code");
+    }
+    std::map<std::string,std::pair<std::uint32_t,std::size_t>> missing;
     for (std::size_t n=0;n<instructions.size();++n) {
         const auto& i=instructions[n];
         const auto decoded=r5900::decode(i.pc,i.word);
@@ -141,11 +197,20 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
             i.op!=decoded.op || i.rs!=decoded.rs || i.rt!=decoded.rt || i.rd!=decoded.rd || i.sa!=decoded.sa || i.immediate!=decoded.immediate)
             throw std::invalid_argument("EE region contains inconsistent decoded instructions");
         if (!supported(i.op)) {
-            std::ostringstream diagnostic;
-            diagnostic<<"EE LLVM unsupported operation: "<<r5900::name(i.op)<<" at 0x"<<std::hex<<i.pc;
-            throw std::runtime_error(diagnostic.str());
+            std::ostringstream family;
+            family<<r5900::name(i.op);
+            if (i.op==Op::unsupported) {
+                const auto primary=i.word>>26;
+                family<<" (primary="<<primary;
+                if (primary==0 || primary==28 || primary==17 || primary==18) family<<", function="<<(i.word&63);
+                if (primary==28) family<<", subgroup="<<i.sa;
+                if (primary==16 || primary==17 || primary==18) family<<", format="<<i.rs;
+                family<<")";
+            }
+            const auto entry=missing.try_emplace(family.str(),std::pair{i.pc,std::size_t(0)}).first;
+            ++entry->second.second;
         }
-        if ((i.op==Op::mfc0 || i.op==Op::mtc0) && i.rd!=25 && i.rd!=12 && i.rd!=14 && i.rd!=30)
+        if ((i.op==Op::mfc0 || i.op==Op::mtc0) && i.rd!=0 && i.rd!=2 && i.rd!=3 && i.rd!=5 && i.rd!=10 && i.rd!=25 && i.rd!=12 && i.rd!=14 && i.rd!=30 && i.rd!=6 && !(i.rd==28 && i.op==Op::mfc0))
             throw std::invalid_argument("EE system transfer selector is not supported");
         if (i.op==Op::cfc2 && i.rd==20)
             throw std::invalid_argument("EE vector random-register transfer is not implemented");
@@ -153,8 +218,15 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
             throw std::invalid_argument("EE floating control transfer supports FCR31 only");
         if (i.op==Op::sync && (i.rs || i.rt || i.rd || (i.sa!=0 && i.sa!=16)))
             throw std::invalid_argument("Unsupported EE SYNC encoding");
-        if (i.branch() && (n+1==instructions.size() || instructions[n+1].pc!=i.pc+4 || instructions[n+1].branch() || instructions[n+1].op==Op::syscall))
+        if (i.branch() && (n+1==instructions.size() || instructions[n+1].pc!=i.pc+4 || instructions[n+1].branch() || instructions[n+1].op==Op::syscall || instructions[n+1].op==Op::eret))
             throw std::invalid_argument("EE branch requires a supported scalar delay slot");
+    }
+    if (!missing.empty()) {
+        std::ostringstream diagnostic;
+        diagnostic<<"EE LLVM unsupported operation families ("<<missing.size()<<"):\n";
+        for (const auto& [family,locations]:missing)
+            diagnostic<<"  "<<family<<": "<<locations.second<<" occurrence(s), first at 0x"<<std::hex<<locations.first<<std::dec<<'\n';
+        throw std::runtime_error(diagnostic.str());
     }
     std::vector<CodeRange> ranges(protected_code.begin(),protected_code.end());
     for (const auto& range:ranges)
@@ -162,6 +234,16 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
             throw std::invalid_argument("Invalid EE executable protection extent");
     for (const auto& i:instructions) {
         const auto address=physical_address(i.pc);
+        const auto payload=std::find_if(payloads.begin(),payloads.end(),[&](const auto& p) {
+            return address>=p.address && std::uint64_t(address)<std::uint64_t(p.address)+p.bytes.size();
+        });
+        if (payload!=payloads.end()) {
+            const auto offset=address-payload->address;
+            const auto word=std::uint32_t(payload->bytes[offset]) | (std::uint32_t(payload->bytes[offset+1])<<8) |
+                (std::uint32_t(payload->bytes[offset+2])<<16) | (std::uint32_t(payload->bytes[offset+3])<<24);
+            if (word!=i.word) throw std::invalid_argument("Compiled payload instruction differs from expected bytes");
+            continue;
+        }
         if (!ranges.empty() && std::uint64_t(ranges.back().address)+ranges.back().size==address)
             ranges.back().size+=4;
         else ranges.push_back({address,4});
@@ -187,19 +269,41 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
         parts.push_back(instructions.subspan(first,count)); first+=count;
     }
     Writer w;
-    for (std::size_t index=0;index<parts.size();++index) emit_part(w,parts[index],ranges,index);
+    if (!payloads.empty()) w.out<<"declare i32 @memcmp(ptr, ptr, i64)\n";
+    for (std::size_t n=0;n<payloads.size();++n) {
+        w.out<<"@nt_payload_"<<n<<" = private constant ["<<payloads[n].bytes.size()<<" x i8] [";
+        for (std::size_t b=0;b<payloads[n].bytes.size();++b)
+            w.out<<(b ? ", " : "")<<"i8 "<<static_cast<unsigned>(payloads[n].bytes[b]);
+        w.out<<"]\n";
+    }
+    for (std::size_t index=0;index<parts.size();++index) emit_part(w,parts[index],ranges,index,payloads);
     emit_dispatcher(w,parts);
+    w.out<<"define i1 @nt_ee_generated_contains(i32 %address) {\nentry:\n  switch i32 %address, label %missing [\n";
+    for (const auto& i:instructions) w.out<<"    i32 "<<i.pc<<", label %present\n";
+    w.out<<"  ]\npresent:\n  ret i1 true\nmissing:\n  ret i1 false\n}\n";
+
     w.out<<"define i1 @nt_ee_generated_code_overlap(i32 %address, i32 %bytes) {\nentry:\n";
     const auto address=w.value("zext i32 %address to i64");
     const auto bytes=w.value("zext i32 %bytes to i64");
     const auto end=w.binary("add","i64",address,bytes);
     const auto overlap=code_overlap(w,address,end,ranges);
     w.out<<"  ret i1 "<<overlap<<"\n}\n";
-    w.out<<"declare <4 x i32> @llvm.uadd.sat.v4i32(<4 x i32>, <4 x i32>)\n";
+    w.out<<"declare i64 @nt_ee_address_space(ptr, i32, i32, i32)\n";
+    w.out<<"declare i64 @nt_ee_io_read32(ptr, i32)\ndeclare i32 @nt_ee_io_write32(ptr, i32, i32)\n";
+    declare_packed_intrinsics(w.out);
+    w.out<<"declare i64 @nt_ee_square_root_finite(i32)\n";
+    w.out<<"declare i32 @nt_ee_vector_multiply(ptr, i32, i32, i32, i32, i32)\n"
+         <<"declare i32 @nt_ee_integer_to_scaled_scalar(i32, i32)\n"
+         <<"declare i32 @nt_ee_scaled_scalar_to_integer(i32, i32)\n";
     w.out<<"declare i64 @nt_ee_add_finite(i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_vector_read(ptr, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_vector_write(ptr, i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_multiply_finite(i32, i32)\n";
+    w.out<<"declare i64 @nt_ee_divide_finite(i32, i32)\n"
+         <<"declare i32 @nt_ee_integer_to_scalar(i32)\n"
+         <<"declare i32 @nt_ee_scalar_to_integer(i32)\n"
+         <<"declare i32 @nt_ee_min_max_scalar(i32, i32, i32)\n";
+
     w.out<<"declare i32 @nt_ee_vector_add(ptr, i32, i32, i32, i32, i32, i32)\n";
     w.out<<"declare <2 x i32> @llvm.ctlz.v2i32(<2 x i32>, i1 immarg)\n";
     for (const auto width : {32,64}) for (const auto operation : {"sadd","ssub"})

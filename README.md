@@ -83,8 +83,29 @@ now emits LLVM IR, initialized data and a CMake project. It supports the documen
 scalar/control-flow and RAM subset, with native SetupThread, SetupHeap and EndOfHeap
 services. Other unsupported syscall boundaries stop explicitly. Most syscall services and the converted EE/IOP connection are unfinished.
 An existing local GT4 startup prefix executes through SetupThread and SetupHeap;
-its next instruction is not compiled. The larger continuation now passes the former
-discovery-size limit and stops at an undecoded MULT1 instruction. Visible boot and gameplay are not established.
+its next instruction is not compiled in that older artifact. The converter now includes
+broader scalar, packed-integer, floating-point and VU macro-operation families.
+See [EE native conversion](docs/ee-native.md) for supported semantics and remaining
+boundaries. The latest larger local startup region now emits LLVM, compiles to a
+native executable, and runs through semaphore creation, callback registration and
+compiled handler execution. A guest-readable view of native registrations lets startup find those handlers.
+With a private copied-payload mapping, the latest bounded run executes the
+ahead-of-time compiled payload and registers its syscall handlers, then stops at
+a peer-readiness polling loop; a bounded run retired 10,000,000 operations, past
+Timer 2 interrupt configuration, thread creation, priority change, native
+application settings, further copied-handler registrations and native SIF receiver
+initialization. Whole-packet receive delivery is tested, but a production IOP peer
+is not yet connected. DMA completion delivery now shares the native interrupt
+dispatcher and is verified with a compiled packet-to-handler test. Address-translation
+routines compile to native requests, but no production mapping provider is connected. Native
+thread lifecycle and cooperative priority switching are implemented, with worker
+execution and return covered by compiled synthetic tests. Timer 3 alias
+registration, public INTC handler chains and native delivery of externally raised
+events are implemented. Native polling timers are
+connected to compare/overflow events; gated timing and reset-on-compare remain
+unsupported. Callback discovery supports simple
+wrappers and initialized tables; more dynamic cases remain incomplete.
+Visible boot and gameplay are not established.
 CFC2/CTC2 compile to native vector-service calls; the production vector owner is
 not connected, so executing these calls currently stops explicitly.
 
@@ -95,7 +116,8 @@ not connected, so executing these calls currently stops explicitly.
 ```
 
 The last command reports a diagnostic stop, not a successful game boot. Unsupported
-reachable instructions reject conversion before creating output. Existing output
+reachable instructions reject conversion before creating output. Missing operation families
+are grouped with counts and their first locations to support batch implementation. Existing output
 directories are never overwritten. Keep all commercial input and generated output
 under ignored `work/`.
 

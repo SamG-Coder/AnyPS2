@@ -77,7 +77,11 @@ instruction, ELF, and ISO fixtures. Compile and execute generated native code in
 Cover malformed inputs, delay slots, state transitions, unsupported paths, and
 regressions relevant to each change. Run only tests related to the changed
 behavior and its affected integration paths, rather than the full suite by
-default. Run CTest in Release.
+default. Run CTest in Release. Implement related operation families as a batch
+before running their combined milestone tests. Do not repeat integration tests
+after each small opcode addition. Build during development when useful, then run
+the affected tests after the coherent batch; rerun only for fixes or new concerns.
+Honor any testing delay requested by the user.
 
 Commercial-game integration tests must be opt-in, take paths from configuration,
 and keep inputs and outputs ignored. Distinguish startup progress, visible boot,

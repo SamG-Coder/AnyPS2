@@ -15,4 +15,4 @@ preserving observable game behaviour. Keep generated commercial content ignored.
 
 Retain IR and reproducible build configuration locally. Verify the compiled
 executable and its dependencies; source emission or compilation alone is not game
-compatibility or measured performance. Run only relevant milestone tests.
+compatibility or measured performance. Run only relevant milestone tests after cohesive operation-family batches, not after each opcode.

@@ -15,8 +15,8 @@ inline std::string branch_condition(Writer& w,const r5900::Instruction& i) {
     case Op::bne: case Op::bnel: predicate="ne"; compare_registers=true; break;
     case Op::blez: case Op::blezl: predicate="sle"; break;
     case Op::bgtz: case Op::bgtzl: predicate="sgt"; break;
-    case Op::bltz: case Op::bltzl: predicate="slt"; break;
-    case Op::bgez: case Op::bgezl: predicate="sge"; break;
+    case Op::bltzal: case Op::bltzall: case Op::bltz: case Op::bltzl: predicate="slt"; break;
+    case Op::bgezal: case Op::bgezall: case Op::bgez: case Op::bgezl: predicate="sge"; break;
     default: return "true";
     }
     return w.value(std::string("icmp ")+predicate+" i64 "+w.reg(i.rs)+", "+

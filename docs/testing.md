@@ -1351,3 +1351,336 @@ nine lane-pack/interleave variants. Fixtures now include a separate synthetic
 extension region so the original bounded-function boundary remains stable. Both
 EE LLVM Release tests pass. Local GT4 conversion passes PCEQB, PPAC5 and PPACH,
 then rejects an undecoded MULT1 instruction before project emission.
+
+
+## EE operation-family batch
+
+`ee-llvm-execution` includes the compiled synthetic regions in
+`ee_batch_fixture.hpp` and the combined checks in `ee_batch.cpp`. The batch covers
+packed wrapping/saturating arithmetic, comparisons, permutations, shifts, funnel
+shifts, accumulator layout, scalar/packed products, floating conversion/division/
+square-root, native exception returns, conditional links, traps, coherent-RAM
+ordering, vector transfers and masked macro arithmetic/conversions. Boundary
+inputs, source/destination aliases, register zero, flags, native ownership stops,
+budgets and host rounding modes are checked together.
+
+`analysis` covers discovery of both conditional-link continuations. The generator
+fixture checks grouped missing-operation diagnostics and rejects ERET in a delay
+slot before emitting output. `ee-llvm-project` retains independent generation,
+compilation, execution and dependency checks. Shared numeric/vector changes also
+affect `hardware-registers`; run that affected regression when changing the common
+arithmetic. The combined Release run passed all five affected checks:
+`ee-llvm-execution`, `ee-llvm-project`, `analysis`, `hardware-registers`, and
+`repository-content`. Tests were deferred until after the requested 30-minute
+implementation window; no integration run was repeated for individual additions.
+
+The larger local GT4 conversion now passes the earlier MULT1 and unaligned-word
+boundaries. Its grouped report identifies a CP0 Wired write and an indexed
+cache-tag load (DXLTG), so it rejects conversion before creating a new project.
+This is conversion progress, not compilation of that larger region, visible boot,
+or gameplay.
+
+
+## Native memory initialization milestone
+
+The compiled EE batch now covers zero Wired reservations (including truncation of
+upper source bits), rejection of nonzero reservations without retirement, Wired
+and TagLo reads preserving upper GPR lanes, and indexed cache operations with no
+RAM backing and an out-of-range index operand. The affected Release tests
+`ee-llvm-execution` and `ee-llvm-project` both pass after this batch.
+
+A new ignored local GT4 startup project successfully emitted LLVM and compiled
+with Clang into a native executable. With a one-million-operation budget, it
+retired 33,261 operations before stopping at unhandled syscall 64. This supersedes
+the earlier Wired/DXLTG conversion boundary; it is not a visible game boot.
+
+
+## Native semaphore milestone
+
+The compiled-syscall lifecycle verifies creation through a RAM alias, count
+acquisition/signaling, empty poll, nonretiring contended wait and overflow,
+transactional protected/invalid status writes, returned status, deletion, table
+exhaustion, handle reuse, invalid creation, and isolation between service owners.
+The affected Release `ee-llvm-execution` and `ee-llvm-project` tests pass.
+
+A fresh ignored GT4 startup project emits and compiles successfully. Its native
+executable passes CreateSema and reaches SetSyscall (116) after 33,296 retired
+operations with a one-million-operation budget. This supersedes the CreateSema
+boundary above; visible boot is still unestablished.
+
+
+## Compiled syscall-handler milestone
+
+The native LLVM execution fixture registers original synthetic handlers, calls a
+nested handler, and verifies eight retired operations and restored RA/SP/EXL with
+both single-operation and combined budgets. It also covers aliases, exact compiled
+membership (including a hole in a code extent), invalid alignment, unsupported
+table aliases, removal and protected stack writes. The affected Release execution
+and generated-project tests pass.
+
+A freshly generated and compiled GT4 startup project still stops after 33,296
+operations. The stop is now a rejected registration of syscall 131 because its
+handler is not in the discovered instruction set, rather than an unimplemented
+SetSyscall service. Callback discovery remains necessary; visible boot is unproven.
+
+
+## Callback discovery milestone
+
+Synthetic analysis covers table-loaded and pre-call callback arguments, delay-slot
+loads, executable target validation, aliases, registered syscall numbers, wrong
+wrapper numbers and unknown inputs. The affected Release `analysis` and
+`ee-llvm-project` tests pass. The converter feeds callback roots and registered
+syscall continuations back into bounded discovery before LLVM generation.
+
+A fresh local GT4 project emits and compiles, registers the previously missing
+handler and executes beyond its return. One-million and ten-million-operation
+runs reach their budgets. A 100-million-operation run stops at 43,287,122 with a
+read at 0x02000000, outside the 32 MiB RAM backing. This is a real memory boundary,
+not a boot result or proof of correct handler behavior. No runtime instruction
+decoder or compiler is added. The cause of the out-of-bounds read is unresolved.
+
+
+## Native registration metadata milestone
+
+The prior out-of-range scan came from a compiled handler searching kernel-address
+RAM for its callback pointers, while native registrations existed only in host
+storage. Project generation now reserves an ELF-disjoint metadata extent and
+publishes actual registrations there. Handler lifecycle tests verify alias
+publication, clearing on removal, and nonretiring rejection of altered metadata.
+The affected Release execution and generated-project tests pass.
+
+A freshly generated and compiled GT4 project completes both pointer searches and
+stops after 198,305 operations at a read from 0x10001810 in the Timer 3 register range.
+The prior 43-million-operation RAM overrun is no longer reached. The next native
+vector-service boundary remains unsupported; no visible boot is established.
+
+
+## Native polling timer milestone
+
+Corrected the previous address classification: 0x10001810 is Timer 3 MODE.
+Compiled LW/SW tests now exercise the native I/O boundary and timer owner with an
+injected monotonic clock: start/stop, prescaling, wraparound, aliased addresses,
+target masking, unsupported modes without retirement, unknown/misaligned accesses,
+and missing providers. The affected Release `ee-llvm-execution` and
+`ee-llvm-project` tests pass.
+
+A freshly emitted and compiled GT4 project passes timer initialization and reaches
+unhandled FlushCache (syscall 100) after 202,147 operations. Registered-handler
+memory-copy calls precede it; copied content and executable-publication intent
+still require analysis. No visible boot is established.
+
+
+## Native cache-service milestone
+
+Compiled syscall tests exercise all four modes through FlushCache and iFlushCache,
+verify single retirement and preservation of the void-return register, and reject
+invalid modes without mutation. They also verify that a completed flush neither
+allows execution at an uncompiled RAM address nor permits its registration as a
+handler. The affected Release execution and generated-project tests pass.
+
+A freshly emitted and compiled GT4 project completes data and instruction-cache
+flush calls. At 202,160 operations it attempts to register syscall 91 at the target
+of an earlier copied payload. The target is not compiled, so registration stops
+without mutation. Ahead-of-time payload discovery, relocation and publication
+validation remain required. No copied instructions execute through a fallback.
+
+
+## Ahead-of-time copied payload milestone
+
+Synthetic compiled execution verifies absent and partial payload rejection,
+execution after exact initialization, mutation detection across a budget pause,
+retry after restoration, ordinary compiled initialization stores, and truncated
+RAM backing. Project tests verify valid mapped compilation and reject non-file-
+backed sources, overlapping destinations, malformed extents and invalid entry
+offsets before output creation. Analysis tests cover materialized return-pointer
+candidates. The affected Release execution, project and analysis tests pass.
+
+Local commercial plans remain ignored. The first mapped GT4 payload compiled and
+executed through syscall 91; its argument-dependent handler table then required
+additional explicit entry offsets in the same private plan. Publication checking
+uses whole-payload comparisons before each instruction and is not a performance
+claim or support for arbitrary self-modifying code.
+
+
+With all identified table entries supplied together, the local payload project
+emits, compiles and executes through its syscall registrations. It stops at
+202,348 operations on SetSyscall entry 0x12c, the existing project's Timer 3
+interrupt-handler alias contract. Native interrupt ownership and delivery remain
+unfinished. This result does not establish visible game boot.
+
+
+## Native interrupt delivery milestone
+
+Compiled synthetic handlers verify Timer 3 alias registration, full interrupted
+context restoration, preserved retirement count, single-operation budget pauses,
+masked events remaining pending, protected-stack rejection without acknowledgement,
+and unhandled lines retaining their event. The affected Release execution and
+generated-project tests pass. No timer interrupt is synthesized by this milestone;
+tests explicitly raise native events.
+
+The fresh local GT4 project emits, compiles and passes the Timer 3 alias and a
+subsequent syscall-handler registration. It stops after 205,628 operations at
+AddIntcHandler (syscall 16), requesting line 11. Public registration chains and
+ordering remain the next native owner work. Visible boot is unestablished.
+
+
+## Public INTC chain milestone
+
+Compiled callback lifecycle tests verify head/tail/before-ID ordering, argument/GP
+use, removal, ID reuse, table exhaustion, negative-return short circuiting,
+single-operation budget pauses, idempotent enable/disable and invalid registration
+inputs. The affected Release execution and generated-project tests pass.
+
+The new local GT4 project emits, compiles and passes AddIntcHandler for line 11.
+It stops after 205,718 operations on Timer 2 MODE at 0x10001010, writing 0x0f82
+through a kernel RAM alias. Native compare/overflow event production is needed;
+the polling timer owner rejects those modes without mutation. No visible boot is
+established.
+
+
+## Native timer-event milestone
+
+Fake-clock execution tests now cover fractional-tick accumulation, exact
+compare/overflow crossings, sticky status, write-one-to-clear rearming, repeat
+suppression after INTC acknowledgement, stopped clocks, invalid modes and
+backwards-clock handling. A compiled loop without I/O is interrupted through the
+runner's bounded producer polls, executes a compiled callback, restores its
+context and consumes exactly the requested operation budget. The affected Release
+execution and generated-project tests pass.
+
+The newly generated and compiled local GT4 project passes Timer 2 interrupt-mode
+configuration and EnableIntc, then stops at CreateThread (syscall 32) after 205,828
+operations. Timer event delivery is proven by the synthetic execution fixture;
+this short GT4 run does not establish that its timer callback fired or that the
+game booted. Native thread lifecycle and scheduling remain unfinished.
+
+
+### LLVM native thread lifecycle and entry discovery
+
+The compiled execution milestone creates and starts a worker, checks status and
+invalid deletion, lowers the main thread priority, executes the worker's memory
+write and ExitThread, then verifies restoration of the main register context and
+shared CPU control state. It also checks exact retired-operation accounting,
+dormant ID reuse, protected status output, malformed descriptors and uncompiled
+entries. Analysis fixtures cover initialized descriptors, aliased entries, local
+stack stores, stack-pointer moves, stores after argument setup, dynamic values,
+nonexecutable/unaligned targets and wrong syscall wrappers.
+
+Release `ee-llvm-execution`, `ee-llvm-project` and `analysis` passed for the combined
+milestone. The additional descriptor-pattern correction passed `analysis` again.
+
+The private GT4 project was regenerated and compiled with the existing explicit
+copied-payload plan. Native execution passed CreateThread, GetThreadId and
+ChangeThreadPriority, then stopped at GetOsdConfigParam (syscall 75) after 205,894
+retired operations. This proves additional startup progress, not visible boot or
+GT4 worker execution. All commercial inputs and generated artifacts remain
+ignored local files.
+
+
+### LLVM application settings milestone
+
+Compiled syscall execution covers both primary and extended settings reads/writes,
+constructor-supplied values, partial byte updates, instance isolation, default
+values, void return-register preservation and exact retirement. Invalid alignment,
+truncated buffers, out-of-range slices and protected output must leave state
+unchanged; an empty extended slice performs no memory access. Release
+`ee-llvm-execution` and `ee-llvm-project` passed together.
+
+The private GT4 run passed its primary settings reads/writes and reached another
+copied handler registration after 207,620 operations. A separate ignored mapping
+plan was extended with the copy's source, destination and extent; no commercial
+addresses or instruction data were added to implementation or synthetic tests.
+
+The mapped payload project emitted LLVM, compiled and executed its first handler;
+it stopped at another uncompiled entry registration after 207,652 operations.
+Adding further private entry candidates exposed unsupported CP0 writes during
+conversion. Inspection identifies address-translation registers and TLB operations
+in that region. The expanded conversion fails before producing an executable;
+no successful TLB behavior or visible boot is claimed.
+
+
+### Compiled address-space request boundary
+
+An original compiled fixture covers the five translation parameter selectors and
+four mapping operations as a family. It verifies low-word write arguments,
+sign-extended read results with upper lanes preserved, no retirement or destination
+mutation on failure, retry at the same PC, and absent-provider stops. The recorder
+is a test of the native request interface, not an address-translation implementation.
+Release `ee-llvm-project` passed; after adding explicit fixture continuation
+boundaries, `ee-llvm-execution` passed. The expanded private payload plan now emits
+LLVM successfully.
+
+The expanded GT4 project generated, compiled and ran through further copied-handler
+registrations to 3,802,421 retired operations. It stopped on the unhandled DMA
+controller status read at 0x1000e010. No address-space request was executed on this
+run, so it establishes neither mapping-provider behavior nor visible game boot.
+The generated target still links only LLVM output and native service/support
+sources; it has no runtime decoder, interpreter or JIT fallback.
+
+
+### Native transfer completion milestone
+
+Compiled loads/stores exercise the DMA status view through an aliased address.
+Coverage includes explicit multi-channel completion, invalid producer channels,
+mask toggles, selective acknowledgement, unrelated interrupt-class preservation,
+sign-extended status reads and independent owners. An enabled event stops compiled
+execution with no retirement when a DMA handler is unavailable, retaining the
+pending completion. The execution test passed. The existing private LLVM project
+was relinked against the native completion owner and progressed to the SIF0
+channel-control access at 0x1000c000 after 3,802,426 operations. Visible boot remains
+unestablished.
+
+
+### Native SIF receive and coordination milestone
+
+Compiled I/O configures reception; synthetic native packets verify complete copies,
+normal versus chain destinations, nonterminal delivery, tag-interrupt termination,
+completion publication and explicit stop. Protected/out-of-range destinations,
+active extent edits, duplicate delivery and unsupported modes must fail without
+partial updates. Compiled syscalls cover initialize/reinitialize rejection,
+stop/rearm, void return preservation, local readiness, absent peer readiness,
+explicit peer publication, flag acknowledgement and sign-extended software slots.
+
+Release `ee-llvm-execution` and `ee-llvm-project` passed together. The private GT4
+project was regenerated, compiled and run; it passed SifSetDChain and stopped at
+AddDmacHandler (syscall 18) for SIF0/channel 5 after 3,802,442 retired operations.
+This establishes receiver initialization, not a connected peer, a GT4 packet
+delivery, visible boot or gameplay. Synthetic packets prove receive behavior.
+
+
+### Native packet-to-DMA-handler milestone
+
+Compiled syscall registration installs DMA and INTC callbacks with independent
+handle IDs. A synthetic native packet completes SIF0 reception; simultaneous INTC
+readiness verifies DMA priority and preservation of the other domain. A protected
+stack blocks delivery without acknowledging completion. A budget pause inside the
+compiled callback resumes, restores PC/registers/stack, and preserves exact retired
+counts before the pending INTC callback runs. Removal, idempotent enable, negative
+aliases and invalid channel IDs are covered in the same lifecycle.
+
+The new test initially crashed with a large local RAM fixture; moving that fixture
+to heap storage resolved the failure. The affected compiled execution test then
+passed. The project-generation test also passed.
+
+The private GT4 project was regenerated and compiled. A traced run passed DMA
+registration/enablement and repeatedly called SifGetReg for peer readiness; it was
+stopped to avoid redundant trace growth. A separate untraced run consumed exactly
+10,000,000 operations and ended on budget in that polling loop with zero peer flags.
+This is an unmet native-peer dependency, not visible boot or evidence of GT4 DMA
+callback execution. The synthetic integration test proves callback delivery.
+
+
+### Native outgoing SIF batch milestone
+
+Compiled SifSetDma/SifDmaStat calls exercise an explicit native sink. A malformed
+second descriptor must not publish the first. A valid padded two-transfer batch
+retains its submitted bytes despite subsequent descriptor/source mutations. The
+sink applies all transfers together after backpressure, and a retryable failure
+preserves the snapshot without instruction retirement or completion. Acceptance
+raises channel 6 exactly once; status and busy submission behavior are checked.
+Missing sinks are rejected and peer readiness is never fabricated. Production IOP
+connection and GT4 readiness remain outstanding.
+
+Release compiled execution and project-generation tests passed; execution was
+rerun successfully after adding fault-address reporting. No new GT4 run is claimed
+for this transport interface alone.

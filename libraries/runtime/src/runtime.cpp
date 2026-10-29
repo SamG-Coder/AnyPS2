@@ -11,29 +11,10 @@ FiniteFloatResult add_subtract_finite(std::uint32_t a,std::uint32_t b,bool subtr
 }
 
 void divide_scalar(State& state, unsigned destination, unsigned left, unsigned right) {
-    const auto a=state.fpr[left], b=state.fpr[right];
-    const auto ea=(a>>23)&255, eb=(b>>23)&255;
-    if (ea==255 || eb==255) throw MemoryFault("DIV.S: extended-range operands are not implemented");
-    const auto sign=(a^b)&0x80000000U;
-    auto result=sign, flags=state.fcr31 & ~0x30000U;
-    if (!eb) {
-        result |= 0x7f7fffff;
-        flags |= ea ? 0x10020 : 0x20040;
-    } else if (ea) {
-        const auto numerator=(a&0x7fffff)|0x800000, denominator=(b&0x7fffff)|0x800000;
-        const bool normalize=numerator<denominator;
-        int exponent=static_cast<int>(ea)-static_cast<int>(eb)+127-(normalize ? 1 : 0);
-        const auto scaled=std::uint64_t(numerator) << (normalize ? 24 : 23);
-        auto quotient=scaled/denominator;
-        const auto remainder=scaled%denominator;
-        // Division uses nearest-even independently of the ordinary chop mode.
-        if (remainder*2>denominator || (remainder*2==denominator && (quotient&1))) ++quotient;
-        if (quotient==0x1000000) { quotient>>=1; ++exponent; }
-        if (exponent>=255) throw MemoryFault("DIV.S: extended-range results are not implemented");
-        if (exponent>0) result |= (static_cast<std::uint32_t>(exponent)<<23) |
-                                 (static_cast<std::uint32_t>(quotient)&0x7fffff);
-    }
-    state.fpr[destination]=result; state.fcr31=flags;
+    const auto result=numeric::divide_finite(state.fpr[left],state.fpr[right]);
+    if (!result.supported) throw MemoryFault("DIV.S: extended-range operands/results are not implemented");
+    state.fpr[destination]=result.bits;
+    state.fcr31=(state.fcr31&~0x30000U)|result.flags;
 }
 void multiply_scalar(State& state, unsigned destination, unsigned left, unsigned right) {
     const auto result=numeric::multiply_finite(state.fpr[left],state.fpr[right]);
