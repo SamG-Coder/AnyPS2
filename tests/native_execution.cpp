@@ -13,6 +13,60 @@ void check(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
 State at(std::uint32_t pc) { State s; s.pc = pc; return s; }
+void sif_interrupt_delivery() {
+    nt::hardware::SystemBus bus;
+    nt::kernel::Kernel kernel;
+    for (const auto& [pc,word] : fixture::words()) bus.store(pc,4,word);
+    State registration;
+    unsigned registered = 0;
+    for (const auto address : {0x9000U,0x9100U,0x9000U}) {
+        registration.gpr[3].lo = 0x12; registration.gpr[4].lo = 5;
+        registration.gpr[5].lo = address; registration.gpr[6].lo = 0xffffffff;
+        registration.gpr[7].lo = registered++ == 2 ? 0x20100700 : 0x20100600;
+        registration.gpr[28].lo = 0x12345678;
+        check(kernel.service(registration,bus),"DMA handler registration failed");
+    }
+    // Give the final handler a different argument so a negative predecessor must skip it.
+    // Each handler writes its channel, GP and a delay-slot marker into guest RAM.
+    auto state = at(0x9200);
+    kernel.initialize_cpu(state);
+    for (unsigned i = 1; i < 32; ++i) state.gpr[i] = {i * 17ULL,i * 31ULL};
+    state.gpr[29].lo = 0x1fff000;
+    state.fpr[3] = 0x3f800000; state.hi = 123; state.lo = 456;
+    const auto original = state;
+    std::vector<std::uint8_t> payload(32,0x5a);
+    bus.sif().iop_install(0x1000,payload); bus.sif().iop_send(0x1000,0x104000,2);
+    bus.store(0x1000e000,4,1); bus.store(0x1000e010,4,1U << 21);
+    bus.store(0x1000c000,4,0x104); bus.advance_cycles(20);
+    check(bus.interrupt_lines() == 0x800,"SIF0 did not raise DMA completion");
+    auto result = nt::kernel::run(nt_generated_run,state,bus,kernel,2);
+    check(result.stop.reason == Stop::budget && kernel.interrupt_active() && (state.cop0_status & 2),
+          "Interrupt entry did not survive budget suspension");
+    check(bus.load(0x1000e010,4) == (1U << 21),"Interrupt acknowledgement changed mask or retained completion");
+    result = nt::kernel::run(nt_generated_run,state,bus,kernel,100);
+    check(result.stop.reason == Stop::unsupported && state.pc == 0x9204 && !kernel.interrupt_active() && kernel.completed_interrupts() == 1,
+          "DMA callback did not return to interrupted mainline");
+    check(state.executed == 11 && bus.load(0x100600,4) == 5 && bus.load(0x30100604,4) == 0x12345678 &&
+          bus.load(0x100608,4) == 99 && bus.load(0x10060c,4) == 0xffffffff && bus.load(0x100700,4) == 0,
+          "DMA callback ordering, arguments, negative return or delay slot failed");
+    for (unsigned i = 0; i < 32; ++i)
+        check(state.gpr[i].lo == original.gpr[i].lo && state.gpr[i].hi == original.gpr[i].hi,
+              "Interrupt lost a 128-bit guest register");
+    check(state.fpr == original.fpr && state.hi == original.hi && state.lo == original.lo &&
+          state.cop0_status == original.cop0_status && state.cop0_epc == original.cop0_epc,
+          "Interrupt lost floating-point, multiply or exception context");
+    check(bus.load(0x20104000,8) == 0x5a5a5a5a5a5a5a5aULL,"SIF0 payload lost through uncached RAM mapping");
+    const std::array<SifTransfer,1> reply{{{0x30104000,0x1800,32,0x44}}};
+    const auto job = bus.submit_sif(reply);
+    bus.advance_cycles(40);
+    check(job && bus.sif_status(job) == -1 && bus.sif().iop_memory()[0x1800] == 0x5a,
+          "SIF reply from uncached guest RAM failed");
+    for (auto address : {0x200ffffcU,0x22000000U,0x300ffffcU,0x32000000U}) {
+        bool rejected = false;
+        try { bus.load(address,4); } catch (const MemoryFault&) { rejected = true; }
+        check(rejected,"Default RAM aliases admitted an unmapped address");
+    }
+}
 void dma_interrupt_mask() {
     nt::hardware::SystemBus bus;
     bus.store(0x1000,4,fixture::words().at(0x1000));
@@ -350,6 +404,7 @@ int main() {
         unaligned_doublewords(bus);
         leading_sign_bits(bus);
         dma_interrupt_mask();
+        sif_interrupt_delivery();
         semaphore_switches(bus);
         std::cout << "Compiled native instruction, memory, control-flow and stop-boundary tests passed\n";
         return 0;

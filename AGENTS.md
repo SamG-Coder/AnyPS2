@@ -30,7 +30,9 @@ to advance a trace. Do not require, embed, or reconstruct a proprietary BIOS.
 
 ## Tests are acceptance gates
 
-Use automated tests for validation. A build, manual trace, or larger instruction
+Use automated tests for major behavior changes and integration milestones, not
+every small edit or helper. Prefer end-to-end subsystem regressions over tests
+that mirror implementation details. A build, manual trace, or larger instruction
 count does not establish correctness or a game boot. Commit only original synthetic
 instruction, ELF, and ISO fixtures. Compile and execute generated C++ in tests.
 Cover malformed inputs, delay slots, state transitions, unsupported paths, and

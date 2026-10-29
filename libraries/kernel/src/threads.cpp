@@ -51,7 +51,7 @@ bool Kernel::service_threads(std::uint32_t call, runtime::State& state, runtime:
     auto& thread = found->second;
     if (call == 0x22) {
         if (thread.status != 0x10) return fail();
-        if (!frames_.empty()) return false; // No switch across a guest kernel continuation.
+        if (!frames_.empty() || interrupt_active()) return false; // No switch across a guest kernel continuation.
         runtime::State context;
         context.pc = thread.entry & 0x1fffffffU;
         context.set(4,argument(1));
@@ -68,13 +68,13 @@ bool Kernel::service_threads(std::uint32_t call, runtime::State& state, runtime:
     if (call == 0x29) {
         const auto priority = argument(1);
         if (priority >= 128) return fail();
-        if (!frames_.empty()) return false;
+        if (!frames_.empty() || interrupt_active()) return false;
         state.set(2,thread.priority);
         thread.priority = priority;
         return true;
     }
     if (call == 0x23) {
-        if (!frames_.empty()) return false;
+        if (!frames_.empty() || interrupt_active()) return false;
         // With no runnable successor, stop rather than invent an idle thread.
         if (std::none_of(threads_.begin(),threads_.end(),[](const auto& pair) { return pair.second.status == 2; }))
             return false;
@@ -104,7 +104,7 @@ bool Kernel::service_threads(std::uint32_t call, runtime::State& state, runtime:
 }
 
 void Kernel::schedule(runtime::State& state) {
-    if (!current_thread_ || !frames_.empty()) return;
+    if (!current_thread_ || !frames_.empty() || interrupt_active()) return;
     auto& current = threads_.at(current_thread_);
     auto selected = threads_.end();
     for (auto it = threads_.begin(); it != threads_.end(); ++it) {

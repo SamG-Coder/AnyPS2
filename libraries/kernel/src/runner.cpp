@@ -7,6 +7,8 @@ RunResult run(runtime::Entry entry, runtime::State& state, runtime::Bus& memory,
     while (budget) {
         try {
             kernel.return_from_handler(state,memory);
+            kernel.return_from_interrupt(state);
+            kernel.enter_interrupt(state,memory);
         } catch (const runtime::MemoryFault& error) {
             return {{runtime::Stop::memory_fault,state.pc,0,error.what()},calls};
         }
@@ -15,6 +17,15 @@ RunResult run(runtime::Entry entry, runtime::State& state, runtime::Bus& memory,
         const auto used = state.executed - before;
         if (used > budget) throw std::runtime_error("Generated code exceeded its instruction budget");
         budget -= used;
+        if (stop.reason == runtime::Stop::unmapped_code && state.pc == Kernel::interrupt_return_gate && kernel.interrupt_active()) {
+            try { kernel.return_from_interrupt(state); }
+            catch (const runtime::MemoryFault& error) { return {{runtime::Stop::memory_fault,state.pc,0,error.what()},calls}; }
+            continue;
+        }
+        if (stop.reason == runtime::Stop::interrupt_pending && budget) {
+            try { if (kernel.enter_interrupt(state,memory)) continue; }
+            catch (const runtime::MemoryFault& error) { return {{runtime::Stop::memory_fault,state.pc,0,error.what()},calls}; }
+        }
         if (stop.reason == runtime::Stop::unmapped_code && state.pc == Kernel::return_gate && kernel.handler_depth()) {
             try { kernel.return_from_handler(state,memory); }
             catch (const runtime::MemoryFault& error) { return {{runtime::Stop::memory_fault,state.pc,0,error.what()},calls}; }

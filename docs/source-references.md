@@ -33,6 +33,11 @@ references. No BIOS image or BIOS disassembly was used for this implementation.
   timer-3 registration alias informed the HLE implementation. Thread creation,
   dormant/ready states, priority-zero support, startup register conventions,
   deletion, and status return behavior also informed the thread services.
+  DMAC callback argument/GP conventions, channel and chain ordering, negative
+  callback return handling, and default uncached user RAM ranges informed the
+  independent C++ interrupt dispatcher and shared RAM address translation.
+  PS2SDK's public `UNCACHED_SEG`/`UCAB_SEG` macros and `ExitHandler` interface
+  were also consulted. No BIOS instructions are generated for the HLE return gate.
   This is compatibility evidence, not proof of all hardware/kernel edge cases.
   Its attribution/license is retained in [Play-license.txt](third-party/Play-license.txt).
 

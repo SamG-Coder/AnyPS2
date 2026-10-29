@@ -2,6 +2,10 @@
 
 ## Default tests
 
+Add tests for major behavior changes and integration milestones. Extend an
+existing subsystem regression when practical; small edits and helpers do not
+need separate tests that duplicate their implementation.
+
 ```powershell
 cmake -S . -B build -A x64
 cmake --build build --config Release --parallel 8
@@ -63,13 +67,13 @@ Construct a small original synthetic program reproducing the relevant behavior.
 
 ## Latest local GT4 boundary
 
-The BIOS-free startup test reached 3,803,081 retired instructions and 71 serviced
-kernel calls, stopping with a pending DMAC interrupt at PC 0x0102251c.
-The test used a 30-million-instruction upper bound. This passed the former
-SIF0 DMA-register boundary and processed two IOP command packets. The IOP endpoint
-returned the RPC-initialization software-register reply over SIF0. The recorded
-CPU pending line is 0x800 and D_STAT is 0x00200060: SIF0 completion is enabled and
-awaiting delivery to the registered guest handler.
+The BIOS-free startup test reached 33,759,232 retired instructions and 103 serviced
+kernel calls, stopping with a pending INTC interrupt at PC 0x0102410c.
+The regression uses a 40-million-instruction upper bound. Six DMAC interrupt
+dispatches completed and returned to the interrupted guest, and seven IOP command
+packets were consumed. RPC initialization and null-server bind replies passed
+through the guest SIF0 and command callbacks. The recorded CPU pending line is
+0x400 and D_STAT is 0x00200040; no DMAC callback remains active.
 
 Synthetic generated-code tests separately verify thread switching and restarting,
 full register preservation, priority changes, equal-priority ordering, and
@@ -77,5 +81,5 @@ syscalls in delay slots. Arithmetic tests cover signed division overflow and
 zero divisors, unsigned result sign extension, PLZCW lanes, and every byte offset
 for LDL/LDR/SDL/SDR. SIF tests cover payload movement, tag chains, buffering,
 handshakes, and malformed inputs. There is no verified visible game boot.
-Interrupt handler delivery, actual RPC services, and full IOP execution remain
+INTC handler delivery, actual RPC services, and full IOP execution remain
 unfinished; no game-specific patch is used to skip them.

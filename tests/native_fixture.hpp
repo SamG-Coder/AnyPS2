@@ -65,6 +65,12 @@ inline std::map<std::uint32_t, std::uint32_t> words() {
         {0x850c,imm(9,0,16,88)}, {0x8510,imm(9,0,3,0x23)}, {0x8514,12},
         {0x8600,12}, {0x8604,imm(9,0,3,0x42)}, {0x8608,imm(9,0,4,1)}, {0x860c,12}, {0x8610,0x4c000000}
     };
+    // Synthetic DMA callbacks and interrupted mainline for the delivery milestone.
+    w[0x9000] = imm(43,5,4,0); w[0x9004] = imm(43,5,28,4);
+    w[0x9008] = imm(9,0,16,99); w[0x900c] = (17U<<26)|(4U<<21)|(16U<<16)|(3U<<11);
+    w[0x9010] = imm(9,0,2,0); w[0x9014] = special(8,31,0,0); w[0x9018] = imm(43,5,16,8);
+    w[0x9100] = imm(9,0,2,0xffff); w[0x9104] = special(8,31,0,0); w[0x9108] = imm(43,5,2,12);
+    w[0x9200] = 0; w[0x9204] = 0x4c000000;
     // Compile every supported opcode shape as part of the same generated file.
     std::uint32_t pc = 0x20000; // Keep opcode-shape fixtures outside the HLE syscall table.
     for (unsigned op = 0; op < 64; ++op) {

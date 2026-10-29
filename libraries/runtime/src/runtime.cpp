@@ -18,9 +18,17 @@ void RamBus::synchronize_cache(unsigned operation) {
     // RAM is coherent. Generated instruction guards check every fetch against
     // current bytes, so a flush cannot expose stale translated instructions.
 }
-std::span<std::uint8_t> RamBus::range(std::uint32_t address, unsigned size) {
-    // KSEG0/KSEG1 are unmapped aliases. MMIO and TLB-mapped segments still fault.
+std::uint32_t default_ram_address(std::uint32_t address) {
+    // BIOS-free default RAM mappings: uncached and uncached accelerated user
+    // aliases above the reserved first MiB. Cache timing is not modeled.
+    if ((address >= 0x20100000U && address < 0x22000000U) ||
+        (address >= 0x30100000U && address < 0x32000000U)) address &= 0x0fffffffU;
+    // KSEG0/KSEG1 are unmapped aliases. Other TLB mappings still fault.
     if (address >= 0x80000000U && address < 0xc0000000U) address &= 0x1fffffffU;
+    return address;
+}
+std::span<std::uint8_t> RamBus::range(std::uint32_t address, unsigned size) {
+    address = default_ram_address(address);
     if (!size || size > 8 || (size & (size - 1)) || address % size ||
         address > ram_.size() || size > ram_.size() - address)
         throw MemoryFault("Address is not aligned diagnostic RAM");

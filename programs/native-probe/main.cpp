@@ -58,10 +58,11 @@ int main(int argc, char** argv) {
                   << " stack=" << nt::hex32(kernel.main_thread().stack_base)
                   << " heap_end=" << nt::hex32(kernel.main_thread().heap_end) << '\n';
         if (state.delay_slot) std::cout << "branch_pc=" << nt::hex32(state.branch_pc) << '\n';
-        if (result.reason == nt::runtime::Stop::interrupt_pending)
-            std::cout << "pending_cpu=" << nt::hex32(bus.interrupt_lines())
-                      << " dma_status=" << nt::hex32(static_cast<std::uint32_t>(bus.load(0x1000e010,4)))
-                      << " iop_packets=" << bus.sif().iop_received_packets() << '\n';
+        std::cout << "completed_interrupts=" << kernel.completed_interrupts()
+                  << " interrupt_active=" << kernel.interrupt_active()
+                  << " pending_cpu=" << nt::hex32(bus.interrupt_lines())
+                  << " dma_status=" << nt::hex32(static_cast<std::uint32_t>(bus.load(0x1000e010,4)))
+                  << " iop_packets=" << bus.sif().iop_received_packets() << '\n';
         if (result.reason == nt::runtime::Stop::memory_fault)
             std::cout << "access=" << (fault_write ? "write" : "read") << " address=" << nt::hex32(fault_address) << " bytes=" << fault_size << '\n';
         for (unsigned i = 0; i < 32; ++i)

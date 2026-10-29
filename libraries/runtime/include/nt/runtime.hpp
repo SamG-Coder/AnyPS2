@@ -26,6 +26,8 @@ enum class Stop { budget, syscall, breakpoint, unsupported, unmapped_code, code_
 struct Result { Stop reason; std::uint32_t pc, word; std::string detail{}; };
 const char* name(Stop stop);
 class MemoryFault : public std::runtime_error { public: using std::runtime_error::runtime_error; };
+// Translate only the BIOS-free default RAM aliases; callers enforce RAM bounds.
+std::uint32_t default_ram_address(std::uint32_t address);
 struct SifTransfer { std::uint32_t source, destination, bytes, attributes; };
 // The generated code uses this boundary; a future PCSX2 adapter owns MMIO and timing.
 class Bus {

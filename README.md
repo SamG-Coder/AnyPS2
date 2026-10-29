@@ -85,12 +85,14 @@ SetSyscall is no
 longer the initial blocker. Unknown behavior stops explicitly.
 
 Graphics, audio, IOP/VU instruction execution, complete DMA and disc services,
-RPC service implementations, idle waits, timer-driven preemption, and interrupt
+RPC service implementations, idle waits, timer-driven preemption, and INTC
 handler delivery remain unfinished. The timer model charges
 one modeled EE cycle per retired instruction; it is a diagnostic approximation.
 Full floating-point arithmetic and general self-modifying code are unsupported.
 
-SIF payload movement and completion are implemented; the IOP endpoint is a small
+SIF payload movement, completion, and registered DMAC handler delivery/return are
+implemented, including preservation of the interrupted CPU context. Default
+uncached user RAM aliases share memory with DMA. The IOP endpoint is a small
 C++ service implementation, not a complete IOP emulator. DMA completion does not
 imply a successful RPC operation. See [SIF implementation](docs/sif.md).
 

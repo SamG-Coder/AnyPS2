@@ -9,6 +9,7 @@ bool Kernel::service_interrupts(std::uint32_t call, runtime::State& state, runti
     if (line >= (dma ? 10U : 16U)) { state.set(2,~std::uint64_t(0)); return true; }
     auto& records = dma ? dmac_records_ : intc_records_;
     if (call == 0x10 || call == 0x12) {
+        if (interrupt_active()) return false; // Mutation of an active handler chain is not implemented.
         const auto address = argument(1), next = argument(2);
         const auto physical = address & 0x1fffffffU;
         if (!(address == physical || (address >= 0x80000000U && address < 0xc0000000U)) ||
@@ -29,6 +30,7 @@ bool Kernel::service_interrupts(std::uint32_t call, runtime::State& state, runti
         return true;
     }
     if (call == 0x11 || call == 0x13) {
+        if (interrupt_active()) return false;
         const auto id = argument(1);
         const auto found = std::find_if(records.begin(),records.end(),[&](const auto& r) { return r.id == id && r.line == line; });
         if (found == records.end()) { state.set(2,~std::uint64_t(0)); return true; }

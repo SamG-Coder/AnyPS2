@@ -49,7 +49,23 @@ command processing can still fail and preserves its diagnostic reason.
 
 The BIOS-free CPU handoff enables IE/EIE and the INTC/DMAC mask bits. Generated
 code recognizes pending interrupts outside delay slots and exception level.
-Delivery to registered guest handlers remains unfinished. FIFO semaphore waits
+The HLE kernel delivers enabled DMAC completions to registered guest callbacks,
+passing the channel, argument, and registration-time GP. It acknowledges selected
+completion flags without toggling masks, visits higher channels first, and follows
+the registered chain order. A negative callback result skips the remaining
+callbacks on that channel. An HLE return gate restores the full interrupted CPU
+context while retaining the global instruction count. Callback execution can
+pause and resume at an instruction budget boundary. Thread scheduling is deferred
+until callback completion.
+
+INTC delivery, nested interrupts, and modification of an active callback chain
+remain unsupported. Pending channels without registered handlers remain pending.
+Callback stacks currently require aligned physical RAM addresses. Default
+uncached user RAM mappings cover 0x20100000–0x21ffffff and
+0x30100000–0x31ffffff; this is a BIOS-free default mapping, not a general TLB.
+RAM accesses and HLE SIF source descriptors share the same address translation.
+
+FIFO semaphore waits
 can now switch to another ready thread and wake on a signal; waits requiring an
 idle scheduler, non-FIFO policies, and deleting a semaphore with waiters stop.
 
@@ -59,5 +75,8 @@ Synthetic tests cover both DMA directions, every supported source tag kind,
 tag-transfer assembly, queue backpressure, enable/suspend, memory bounds,
 completion acknowledgement, CPU interrupt masks, command handshakes, null RPC
 binding, malformed messages, and HLE batch validation/status. Generated-code
-tests cover coherent data-cache operations and semaphore context switching.
+tests cover coherent data-cache operations and semaphore context switching. One
+DMA integration regression covers SIF0 payload delivery, generated guest callbacks,
+budget suspension, chain termination, context restoration, and an outbound reply
+through uncached RAM. Tests target major behavior changes and milestones.
 No commercial instruction or packet payload is included in these tests.

@@ -7,9 +7,7 @@ std::uint32_t Sif::submit(std::span<const runtime::SifTransfer> transfers) {
         throw runtime::MemoryFault("SIF DMA: invalid batch or receiver busy");
     std::vector<runtime::SifTransfer> validated;
     for (auto transfer : transfers) {
-        const auto physical = transfer.source & 0x1fffffffU;
-        if (!(transfer.source == physical || (transfer.source >= 0x80000000U && transfer.source < 0xc0000000U)))
-            throw runtime::MemoryFault("SIF DMA: unsupported source mapping");
+        const auto physical = runtime::default_ram_address(transfer.source);
         transfer.source = physical;
         if (transfer.bytes > 0xffff0 || transfer.source % 16 || transfer.destination % 4 || (transfer.attributes & ~0x44U))
             throw runtime::MemoryFault("SIF DMA: unsupported descriptor");
