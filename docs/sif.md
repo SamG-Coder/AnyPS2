@@ -69,8 +69,8 @@ and clears IE; return restores the interrupted status.
 Nested interrupts and modification of an active callback chain
 remain unsupported. Pending channels without registered handlers remain pending.
 Callback stacks currently require aligned physical RAM addresses. Default
-uncached user RAM mappings cover 0x20100000–0x21ffffff and
-0x30100000–0x31ffffff; this is a BIOS-free default mapping, not a general TLB.
+uncached user RAM mappings cover 0x20100000Ã¢â‚¬â€œ0x21ffffff and
+0x30100000Ã¢â‚¬â€œ0x31ffffff; this is a BIOS-free default mapping, not a general TLB.
 RAM accesses and HLE SIF source descriptors share the same address translation.
 
 FIFO semaphore waits
@@ -78,6 +78,50 @@ can now switch to another ready thread and wake on a signal; waits requiring an
 idle scheduler, non-FIFO policies, and deleting a semaphore with waiters stop.
 
 ## Verification
+
+SifStopDma clears the EE SIF0 start bit without changing the other direction,
+queued IOP data, remaining count or completion flags. Restarting an untouched
+paused channel retains the destination tag's end state; explicit channel register
+setup starts a new transfer. The transport milestone pauses a partial payload,
+verifies SIF1 still transfers, and resumes SIF0 through its genuine completion.
+IOP reset command 0x80000003 supports mode zero with an empty argument or the
+default `rom0:UDNL` service request. It waits for the incoming DMA job to finish,
+requires SIF0 stopped, clears queued replies and volatile IOP/service state,
+closes FILEIO handles and resets CD/DVD initialization. The mounted ISO and
+cumulative diagnostics survive. Command readiness and BOOTEND return after a
+bounded diagnostic startup phase; this is not firmware timing. The integration
+test reinitializes RPC, verifies stale handles fail, and reads the mounted disc
+again. Requests using `rom0:UDNL` with a disc path read the replacement archive
+from the existing mounted ISO, with a 16 MiB limit. The reusable ROMDIR parser
+validates the directory, aligned file extents, unique names, termination and
+extended-information records. It accepts disc module archives with an empty
+RESET entry; it does not parse or execute firmware ROMs. A private reboot context
+loads the archive's SYSMEM module and runs its public RAM-size entry interface
+with a bounded diagnostic instruction budget. Its RAM and execution state are
+retained for subsequent bootstrap work. After the memory entry returns, its
+export table supplies the guest allocator used to reserve the module-manager
+region. The manager is relocated, bound to the initialized memory service, and
+installed only after validation. Linked module records and the public boot
+parameters point to a guest-allocated archive and terminated module list. The
+manager entry then executes with that handoff in bounded slices alongside EE
+execution. The reset packet completes transport before those slices begin.
+EE-owned SBUS registers survive the IOP reset; IOP readiness and prior HLE
+services are cleared. EE SIF driver initialization publishes its own transport
+flag independently of IOP readiness. Budget yields preserve CPU state and let
+the peer run. Unsupported accesses and returned entries stop with a retained
+failure; service-readiness handling is still unfinished. None of these states
+sets BOOTEND or claims that service reset has completed. HLE initialization
+cannot replace the running disc context. Guest SIF1 destination-chain DMA now
+consumes the shared FIFO into that context's RAM; it does not dispatch packets
+through the obsolete HLE service buffer.
+
+The mounted-disc endpoint also binds CD/DVD initialization server 0x80000592.
+Method zero accepts the four-byte INIT, INoD or EXIT mode and returns a sixteen-byte
+reply through the existing SIF0 completion path. INIT/INoD establish service state
+against the already validated ISO; EXIT clears it. Version/debug fields are zero.
+This does not implement sector reads, drive commands or an IOP firmware module.
+The disc RPC milestone verifies bind, init/reinit/exit, response layout and
+completion correlation alongside the existing FILEIO operations.
 
 Synthetic tests cover both DMA directions, every supported source tag kind,
 tag-transfer assembly, queue backpressure, enable/suspend, memory bounds,

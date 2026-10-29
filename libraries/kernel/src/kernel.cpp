@@ -24,7 +24,7 @@ bool Kernel::service(runtime::State& state, runtime::Bus& memory) {
     case 0x71: // GsPutIMR uses the same device semantics as direct MMIO.
         memory.store(0x12001010,8,state.gpr[4].lo);
         return true;
-    case 0x76: case 0x77: case 0x78: case 0x79: case 0x7a:
+    case 0x6b: case 0x76: case 0x77: case 0x78: case 0x79: case 0x7a:
         return service_sif(call,state,memory);
     case 0x4a: // SetOsdConfigParam: in-memory configuration, no firmware/NVRAM.
         osd_config_ = static_cast<std::uint32_t>(memory.load(arg(0),4));
@@ -45,6 +45,7 @@ bool Kernel::service(runtime::State& state, runtime::Bus& memory) {
     }
     case 0x20: case 0x21: case 0x22: case 0x23: case 0x29:
     case 0x2f: case 0x30: case 0x31:
+    case 0x32: case 0x33: case 0x34: case 0x35: case 0x36:
         return service_threads(call,state,memory);
     case 0x10: case 0x11: case 0x12: case 0x13:
     case 0x14: case 0x15: case 0x16: case 0x17:

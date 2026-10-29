@@ -85,6 +85,64 @@ inline std::map<std::uint32_t, std::uint32_t> words() {
     w[0x9900] = (28U<<26)|special(8,1,2,2,27); w[0x9910] = (28U<<26)|special(8,1,2,2,23); w[0x9920] = (28U<<26)|special(8,1,2,2,19);
     w[0x9a00] = special(44,1,2,3); w[0x9a10] = special(46,1,2,3); w[0x9a20] = imm(24,1,3,1);
     // Compile every supported opcode shape as part of the same generated file.
+    for (unsigned operation=0;operation<2;++operation)
+        for (unsigned broadcast=0;broadcast<5;++broadcast)
+            for (unsigned mask=0;mask<16;++mask) {
+                const auto base=0xa000+((operation*5+broadcast)*16+mask)*16;
+                const auto fn=broadcast<4 ? broadcast+operation*4 : 40+operation*4;
+                w[base]=(18U<<26)|((16U|mask)<<21)|(2U<<16)|(1U<<11)|(2U<<6)|fn;
+            }
+    for (unsigned mask=0;mask<16;++mask) {
+        const auto base=0x9d00+mask*32;
+        w[base] = (18U<<26)|(5U<<21)|(1U<<16)|(1U<<11)|1;
+        w[base+4] = (18U<<26)|(5U<<21)|(2U<<16)|(2U<<11);
+        w[base+8] = (18U<<26)|((16U|mask)<<21)|(2U<<16)|(1U<<11)|(2U<<6)|44;
+        w[base+12] = (18U<<26)|(1U<<21)|(3U<<16)|(2U<<11)|1;
+    }
+    w[0x9f00] = (18U<<26)|(5U<<21)|(1U<<16);
+    w[0x9f04] = (18U<<26)|(31U<<21)|44; // VSUB.xyzw vf0,vf0,vf0.
+    w[0x9f08] = (18U<<26)|(1U<<21)|(3U<<16);
+    w[0x9f20] = imm(54,1,4,0); w[0x9f24] = imm(62,2,4,0);
+    w[0x9f30] = (18U<<26)|(26U<<21)|(5U<<16)|(4U<<11)|0x33c;
+    w[0x9f34] = (18U<<26)|(31U<<21)|(5U<<16)|(5U<<11)|0x33d;
+    for (unsigned reg=0;reg<16;++reg) {
+        w[0xab00+reg*16]=(18U<<26)|(6U<<21)|(1U<<16)|(reg<<11)|1;
+        w[0xab04+reg*16]=(18U<<26)|(2U<<21)|(2U<<16)|(reg<<11);
+    }
+    w[0x9c00] = imm(49,1,0,-4); w[0x9c04] = imm(57,1,0,4);
+    w[0x9c10] = imm(4,0,0,2); w[0x9c14] = imm(57,1,31,0); w[0x9c1c] = 0;
+    w[0xac00]=(17U<<26)|(16U<<21)|(3U<<11)|(4U<<6)|6;
+    w[0xac04]=(17U<<26)|(16U<<21)|(4U<<11)|(4U<<6)|5;
+    w[0xac08]=(17U<<26)|(16U<<21)|(4U<<11)|(5U<<6)|7;
+    w[0xae00]=imm(4,0,0,2);
+    w[0xae04]=(17U<<26)|(16U<<21)|(2U<<16)|(1U<<11)|(1U<<6)|2;
+    w[0xae0c]=0;
+    w[0xaf00]=imm(4,0,0,3); w[0xaf04]=12;
+    w[0xaf10]=imm(9,16,16,1); w[0xaf14]=0x4c000000;
+    w[0xaf40]=imm(9,0,3,0xffcc); w[0xaf44]=imm(9,0,4,1); w[0xaf48]=12;
+    w[0xaf4c]=special(8,31,0,0); w[0xaf50]=0;
+    w[0xb500]=imm(4,0,0,2);
+    w[0xb504]=(17U<<26)|(20U<<21)|(1U<<11)|(1U<<6)|32;
+    w[0xb50c]=0;
+    w[0xb520]=(17U<<26)|(16U<<21)|(2U<<16)|(1U<<11)|(2U<<6)|3;
+    w[0xb540]=(17U<<26)|(16U<<21)|(2U<<16)|(1U<<11)|(2U<<6);
+    w[0xb550]=(17U<<26)|(16U<<21)|(2U<<16)|(1U<<11)|(2U<<6)|1;
+    w[0xb560]=(17U<<26)|(16U<<21)|(1U<<11)|(1U<<6)|36;
+    w[0xb580]=(17U<<26)|(16U<<21)|(2U<<16)|(1U<<11)|(1U<<6)|40;
+    w[0xb584]=(17U<<26)|(16U<<21)|(2U<<16)|(1U<<11)|(2U<<6)|41;
+    for (unsigned upper=0;upper<2;++upper)
+        for (unsigned kind=0;kind<3;++kind)
+            w[0xb600+upper*64+kind*16]=(28U<<26)|special(upper ? 40 : 8,1,2,2,26-kind*4);
+    for (unsigned selector=0;selector<64;++selector) {
+        w[0xb000+selector*16]=(16U<<26)|(4U<<21)|(1U<<16)|(25U<<11)|selector;
+        w[0xb004+selector*16]=(16U<<26)|(2U<<16)|(25U<<11)|selector;
+    }
+    for (unsigned kind=0;kind<4;++kind) {
+        const auto base=0xad00+kind*32;
+        w[base]=(17U<<26)|(16U<<21)|(2U<<16)|(1U<<11)|(48+kind*2);
+        w[base+4]=(17U<<26)|(8U<<21)|(kind<<16)|2;
+        w[base+8]=imm(9,4,4,1); w[base+12]=imm(9,5,5,1); w[base+16]=0;
+    }
     w[0x9b00] = (18U<<26)|(6U<<21)|(1U<<16)|(28U<<11)|1;
     w[0x9b04] = (18U<<26)|(2U<<21)|(2U<<16)|(28U<<11);
     w[0x9b10] = (18U<<26)|(2U<<21)|(3U<<16)|(29U<<11)|1;

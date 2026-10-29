@@ -66,8 +66,14 @@ void operation(std::ostream& o, const r5900::Instruction& i) {
     case Op::ei: case Op::di:
         o << "if ((s.cop0_status & 0x20006U) || !(s.cop0_status & 0x18U)) s.cop0_status "
           << (i.op == Op::ei ? "|= 0x10000U;\n" : "&= ~0x10000U;\n"); break;
-    case Op::mfc0: set(i.rt,i.rd == 12 ? "sx32(s.cop0_status & 0xf0c79c1fU)" : i.rd == 14 ? "sx32(s.cop0_epc)" : "sx32(s.cop0_error_epc)"); break;
-    case Op::mtc0: o << (i.rd == 12 ? "s.cop0_status" : i.rd == 14 ? "s.cop0_epc" : "s.cop0_error_epc") << " = std::uint32_t(" << rt << ");\n"; break;
+    case Op::mfc0:
+        if (i.rd == 25) set(i.rt,"sx32(bus.read_performance(" + std::to_string(i.word & 63) + "))");
+        else set(i.rt,i.rd == 12 ? "sx32(s.cop0_status & 0xf0c79c1fU)" : i.rd == 14 ? "sx32(s.cop0_epc)" : "sx32(s.cop0_error_epc)");
+        break;
+    case Op::mtc0:
+        if (i.rd == 25) o << "bus.write_performance(" << (i.word & 63) << ",std::uint32_t(" << rt << "));\n";
+        else o << (i.rd == 12 ? "s.cop0_status" : i.rd == 14 ? "s.cop0_epc" : "s.cop0_error_epc") << " = std::uint32_t(" << rt << ");\n";
+        break;
     case Op::eret:
         o << "if (was_delay) return Result{Stop::branch_in_delay,s.pc,word};\n"
              "if (s.cop0_status & 4) { next = s.cop0_error_epc; s.cop0_status &= ~4U; }\n"
@@ -159,11 +165,58 @@ void operation(std::ostream& o, const r5900::Instruction& i) {
         else set(i.rt, "value");
         break;
     }
+    case Op::qmfc2:
+        o << "s.set128(" << i.rt << ",bus.read_cop2_vector(" << i.rd << "));\n"; break;
+    case Op::qmtc2:
+        o << "bus.write_cop2_vector(" << i.rd << ",s.gpr[" << i.rt << "]);\n"; break;
+    case Op::lqc2:
+        o << "bus.write_cop2_vector(" << i.rt << ",bus.load_quad(" << address << "));\n"; break;
+    case Op::sqc2:
+        o << "bus.store_quad(" << address << ",bus.read_cop2_vector(" << i.rt << "));\n"; break;
+    case Op::vsub: case Op::vadd: case Op::vsub_bc: case Op::vadd_bc:
+        o << "bus.add_subtract_cop2_vectors(" << i.sa << "," << i.rd << "," << i.rt << "," << (i.rs & 15)
+          << "," << ((i.op == Op::vsub || i.op == Op::vsub_bc) ? "true" : "false") << ","
+          << ((i.op == Op::vadd_bc || i.op == Op::vsub_bc) ? (i.word & 3) : 4) << ");\n"; break;
+    case Op::vmove: case Op::vmr32:
+        o << "bus.write_cop2_vector(" << i.rt << ",masked_vector(bus.read_cop2_vector(" << i.rt
+          << ")," << (i.op == Op::vmr32 ? "rotate_vector(" : "") << "bus.read_cop2_vector(" << i.rd
+          << ")" << (i.op == Op::vmr32 ? ")" : "") << "," << (i.rs & 15) << "));\n"; break;
+    case Op::lwc1:
+        o << "s.fpr[" << i.rt << "] = std::uint32_t(bus.load(" << address << ",4));\n"; break;
+    case Op::mov_s: case Op::abs_s: case Op::neg_s:
+        o << "s.fpr[" << i.sa << "] = s.fpr[" << i.rd << "]"
+          << (i.op == Op::abs_s ? " & 0x7fffffffU" : i.op == Op::neg_s ? " ^ 0x80000000U" : "") << ";\n";
+        if (i.op != Op::mov_s) o << "s.fcr31 &= ~0xc000U;\n";
+        break;
+    case Op::compare_s:
+        o << "compare_scalar(s," << i.rd << "," << i.rt << "," << (i.word & 6) << ");\n"; break;
+    case Op::max_s: case Op::min_s:
+        o << "s.fpr[" << i.sa << "] = min_max_scalar(s.fpr[" << i.rd << "],s.fpr[" << i.rt << "],"
+          << (i.op==Op::max_s ? "true" : "false") << "); s.fcr31 &= ~0xc000U;\n"; break;
+    case Op::cvt_s_w:
+        o << "s.fpr[" << i.sa << "] = integer_to_scalar(s.fpr[" << i.rd << "]);\n"; break;
+    case Op::cvt_w_s:
+        o << "s.fpr[" << i.sa << "] = scalar_to_integer(s.fpr[" << i.rd << "]);\n"; break;
+    case Op::mul_s:
+        o << "multiply_scalar(s," << i.sa << "," << i.rd << "," << i.rt << ");\n"; break;
+    case Op::div_s:
+        o << "divide_scalar(s," << i.sa << "," << i.rd << "," << i.rt << ");\n"; break;
+    case Op::add_s: case Op::sub_s:
+        o << "add_subtract_scalar(s," << i.sa << "," << i.rd << "," << i.rt << "," << (i.op==Op::sub_s ? "true" : "false") << ");\n"; break;
+    case Op::bc1f: case Op::bc1t: case Op::bc1fl: case Op::bc1tl:
+        branch(std::string("(s.fcr31 & 0x800000U) ") + ((i.op == Op::bc1t || i.op == Op::bc1tl) ? "!= 0" : "== 0"),hex32(i.target())+"U"); break;
+    case Op::swc1:
+        o << "bus.store(" << address << ",4,s.fpr[" << i.rt << "]);\n"; break;
     case Op::sb: case Op::sh: case Op::sw: case Op::sd:
         o << "bus.store(" << address << ", " << (i.op == Op::sb ? 1 : i.op == Op::sh ? 2 : i.op == Op::sw ? 4 : 8) << ", " << rt << ");\n"; break;
     case Op::lq: o << "s.set128(" << i.rt << ", bus.load_quad(" << address << "));\n"; break;
     case Op::sq: o << "bus.store_quad(" << address << ", s.gpr[" << i.rt << "]);\n"; break;
     case Op::padduw: o << "s.set128(" << i.rd << ", padduw(s.gpr[" << i.rs << "], s.gpr[" << i.rt << "]));\n"; break;
+    case Op::pextlb: case Op::pextlh: case Op::pextlw: case Op::pextub: case Op::pextuh: case Op::pextuw:
+        o << "s.set128(" << i.rd << ",interleave_lanes<"
+          << (i.op==Op::pextlb || i.op==Op::pextub ? 8 : i.op==Op::pextlh || i.op==Op::pextuh ? 16 : 32)
+          << "," << (i.op==Op::pextub || i.op==Op::pextuh || i.op==Op::pextuw ? "true" : "false")
+          << ">(s.gpr[" << i.rs << "],s.gpr[" << i.rt << "]));\n"; break;
     case Op::pceqb: case Op::pceqh: case Op::pceqw:
         o << "s.set128(" << i.rd << ", packed_equal<" << (i.op == Op::pceqb ? 8 : i.op == Op::pceqh ? 16 : 32)
           << ">(s.gpr[" << i.rs << "], s.gpr[" << i.rt << "]));\n"; break;
@@ -218,6 +271,7 @@ void emit(std::ostream& o, const analysis::Program& p) {
          "if (was_delay) flow.next = s.pending_target;\n"
          "if (flow.new_delay) { s.pending_target = flow.after; s.branch_pc = s.pc; }\n"
          "s.delay_slot = flow.new_delay; s.pc = flow.next; ++s.executed;\n"
+         "bus.advance_performance(s.cop0_status,1);\n"
          "bus.advance_cycles(1); // Diagnostic issue clock: not cycle-accurate EE scheduling.\n"
          "if (!s.delay_slot && (s.cop0_status & 0x10007U) == 0x10001U && (s.cop0_status & bus.interrupt_lines())) return {Stop::interrupt_pending,s.pc,0};\n}\n"
          "} catch (const MemoryFault& error) { return {Stop::memory_fault, s.pc, flow.word, error.what()}; }\n"

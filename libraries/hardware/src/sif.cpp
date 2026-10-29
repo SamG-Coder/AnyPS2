@@ -51,7 +51,7 @@ void Sif::write(std::uint32_t a, std::uint32_t value) {
         case 0x1000f230: registers_[3] &= ~value; return;
         case 0x1000f240:
             require(!(value & 0xc0000),"SIF: IOP interrupt/reset is not implemented");
-            control_ = value & 0x100; return;
+            control_ = (control_ & ~0x100U) | (value & 0x100); return;
         default: throw runtime::MemoryFault("SIF: unknown register");
         }
     }
@@ -66,16 +66,20 @@ void Sif::write(std::uint32_t a, std::uint32_t value) {
             require(!(value & 0x32),"SIF: interleave/stack DMA mode is unsupported");
             require((value & 1) == (inbound ? 0U : 1U),"SIF: invalid DMA direction");
             require(!inbound || !(value & 0x40),"SIF0: tag transfer enable is unsupported");
-            c.end = (value & 0xc) == 0;
+            require(!c.paused || (value & 0xc) == (c.control & 0xc),"SIF: changing mode with a paused DMA payload");
+            if (!c.paused) c.end = (value & 0xc) == 0;
+            c.paused = false;
+        } else if (c.control & start) {
+            c.paused = true;
         }
         c.control = value;
         return;
     }
     require(!(c.control & start),"SIF: modifying an active DMA channel is unsupported");
     switch (offset) {
-    case 0x10: c.address = value; return;
-    case 0x20: c.count = value & 65535; return;
-    case 0x30: if (!inbound) { c.tag = value; return; } break;
+    case 0x10: c.address = value; c.paused = false; return;
+    case 0x20: c.count = value & 65535; c.paused = false; return;
+    case 0x30: if (!inbound) { c.tag = value; c.paused = false; return; } break;
     }
     throw runtime::MemoryFault("SIF: unknown DMA register");
 }
@@ -136,6 +140,16 @@ void Sif::send_step(runtime::RamBus& ee) {
     c.address += 16; --c.count;
 }
 void Sif::iop_step(runtime::RamBus& ee) {
+    if (reboot_running_) {
+        if (!reboot_failure_.empty()) throw runtime::MemoryFault(reboot_failure_);
+        try {
+            if (reboot_->receive_sif1(to_iop_)) ++received_packets_;
+        } catch (const std::exception& error) {
+            reboot_failure_="SIF reset: "+std::string(error.what());
+            throw runtime::MemoryFault(reboot_failure_);
+        }
+        return;
+    }
     reply_step();
     if (transmit_.active && to_ee_.size() <= fifo_words - 4) {
         if (!transmit_.tagged) {
@@ -170,6 +184,7 @@ void Sif::iop_step(runtime::RamBus& ee) {
 void Sif::step(runtime::RamBus& ee, bool enabled) {
     iop_step(ee);
     if (enabled) { receive_step(ee); send_step(ee); job_step(ee); }
+    reset_step();
 }
 std::uint32_t Sif::take_completions() { const auto result = completion_; completion_ = 0; return result; }
 void Sif::iop_write_register(unsigned index, std::uint32_t value) {
@@ -181,6 +196,27 @@ void Sif::iop_write_register(unsigned index, std::uint32_t value) {
 }
 std::uint32_t Sif::iop_read_register(unsigned index) const {
     require(index < 4,"SIF: invalid IOP register"); return registers_[index];
+}
+std::optional<std::uint32_t> Sif::read_sbus(std::uint32_t offset) const {
+    if (offset<=0x30 && !(offset&15)) return iop_read_register(offset/16);
+    if (offset==0x40) return control_|0xf0000002U;
+    if (offset==0x60) return 0;
+    return {};
+}
+bool Sif::write_sbus(std::uint32_t offset,std::uint32_t value) {
+    if (offset>=0x10 && offset<=0x30 && !(offset&15)) {
+        iop_write_register(offset/16,value);
+        return true;
+    }
+    if (offset==0x40) {
+        if (value&~0xf0U) return false;
+        const auto bits=value&0xf0;
+        if (value&0xa0) control_=(control_&~0xf000U)|0x2000;
+        control_=(control_&bits) ? control_&~bits : control_|bits;
+        return true;
+    }
+    if (offset==0x60) return true; // This register reads zero after any write.
+    return false;
 }
 void Sif::iop_install(std::uint32_t address, std::span<const std::uint8_t> bytes) {
     require(address <= iop_ram_.size() && bytes.size() <= iop_ram_.size() - address,"SIF: IOP input exceeds RAM");

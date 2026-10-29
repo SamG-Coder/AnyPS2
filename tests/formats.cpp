@@ -1,4 +1,8 @@
 #include "disc_fixture.hpp"
+#include "reboot_fixture.hpp"
+#include <nt/reboot_image.hpp>
+#include <nt/iop_module.hpp>
+#include <nt/iop_libraries.hpp>
 #include <nt/elf.hpp>
 #include <nt/iso9660.hpp>
 #include <chrono>
@@ -42,6 +46,179 @@ void test_elf() {
     bad = good; put32(bad, 28, 0xfffffff0);
     rejects([&] { nt::elf::parse(bad); });
 }
+void test_reboot_image() {
+    const auto image=fixture::reboot_image();
+    const auto files=nt::disc::parse_reboot_image(image);
+    check(files.size()==4 && files[3].name=="EXAMPLE" && files[3].offset==96 &&
+          files[3].size==19 && files[3].info_offset==80 && files[3].info_size==4,
+          "Reboot image extents or metadata differ");
+    for (std::size_t length=0;length<image.size();++length)
+        rejects([&] { nt::disc::parse_reboot_image(nt::ByteView(image).first(length)); });
+    for (const auto offset : {12U,28U,44U,60U}) {
+        auto bad=image; put32(bad,offset,0xffffffff);
+        rejects([&] { nt::disc::parse_reboot_image(bad); });
+    }
+    for (const auto offset : {5U,58U,64U,74U,82U}) {
+        auto bad=image; bad[offset]=1;
+        rejects([&] { nt::disc::parse_reboot_image(bad); });
+    }
+    auto duplicate=image; std::copy_n(image.begin(),10,duplicate.begin()+48);
+    rejects([&] { nt::disc::parse_reboot_image(duplicate); });
+}
+nt::Bytes make_irx() {
+    auto file=make_elf();
+    file.resize(352,0);
+    file[16]=0x80; file[17]=0xff;
+    put32(file,24,0); put32(file,32,84);
+    file[46]=40; file[48]=2;
+    put32(file,60,0); put32(file,68,32); put32(file,72,64); put32(file,80,16);
+    // A null section followed by a version-one REL table.
+    put32(file,128,9); put32(file,140,288); put32(file,144,32); put32(file,160,8);
+    put32(file,256,0x20); put32(file,260,0x08000008);
+    put32(file,264,0x3c080001); put32(file,268,0x2508fff0);
+    for (unsigned i=0;i<4;++i) {
+        put32(file,288+i*8,i*4);
+        // IRX uses the image base rather than ELF symbol values.
+        put32(file,292+i*8,0x100 | (i==0 ? 2 : i==1 ? 4 : i==2 ? 5 : 6));
+    }
+    return file;
+}
+void test_iop_module() {
+    const auto file=make_irx();
+    for (const auto base : {0x10000U,0x18000U,0x1fff0U}) {
+        const auto module=nt::elf::load_iop_module(file,base);
+        const auto relocated=base+0xfff0;
+        check(module.base==base && module.entry==base && module.memory.size()==64,
+              "IRX allocation or entry differs");
+        check(nt::le32(module.memory,0)==base+0x20 && nt::le32(module.memory,4)==0x08000008+(base>>2) &&
+              nt::le32(module.memory,8)==(0x3c080000|((relocated+0x8000)>>16)) &&
+              nt::le32(module.memory,12)==(0x25080000|(relocated&0xffff)),
+              "IRX word, jump or signed HI16/LO16 carry relocation differs");
+        check(std::all_of(module.memory.begin()+32,module.memory.end(),[](auto c) { return c==0; }),
+              "IRX BSS was not zero initialized");
+    }
+    check(file==make_irx(),"IRX loading modified caller input");
+    for (std::size_t length=0;length<320;++length)
+        rejects([&] { nt::elf::load_iop_module(nt::ByteView(file).first(length),0x10000); });
+    for (const auto base : {1U,0x200000U,0x1ffff0U})
+        rejects([&] { nt::elf::load_iop_module(file,base); });
+    for (const auto offset : {24U,60U,68U,72U,140U,144U,160U,288U}) {
+        auto bad=file; put32(bad,offset,0xffffffff);
+        rejects([&] { nt::elf::load_iop_module(bad,0x10000); });
+    }
+    for (const auto kind : {1U,3U,7U,255U}) {
+        auto bad=file; put32(bad,292,kind);
+        rejects([&] { nt::elf::load_iop_module(bad,0x10000); });
+    }
+    auto bad=file; put32(bad,316,0); // Unmatched high half.
+    rejects([&] { nt::elf::load_iop_module(bad,0x10000); });
+    bad=file; put32(bad,308,0); // Unmatched low half.
+    rejects([&] { nt::elf::load_iop_module(bad,0x10000); });
+    bad=file; bad[16]=0x81;
+    rejects([&] { nt::elf::load_iop_module(bad,0x10000); });
+
+    auto described=file; described.resize(448,0);
+    std::copy_n(file.begin()+52,32,described.begin()+384);
+    put32(described,28,352); described[44]=2;
+    put32(described,352,0x70000080); put32(described,356,416); put32(described,368,32);
+    put32(described,424,0x7ff0); put32(described,428,16);
+    put32(described,432,16); put32(described,436,32);
+    described[440]=2; described[441]=1;
+    const std::string name="test"; std::copy(name.begin(),name.end(),described.begin()+442);
+    const auto module=nt::elf::load_iop_module(described,0x10000);
+    check(module.info && module.info->name==name && module.info->version==0x102 &&
+          module.info->global_pointer==0x17ff0 && module.info->text_size==16 &&
+          module.info->data_size==16 && module.info->bss_size==32,"IRX module metadata differs");
+    for (const auto offset : {368U,424U,428U,432U,436U}) {
+        bad=described; put32(bad,offset,0xffffffff);
+        rejects([&] { nt::elf::load_iop_module(bad,0x10000); });
+    }
+    bad=described; std::fill(bad.begin()+442,bad.end(),'x');
+    rejects([&] { nt::elf::load_iop_module(bad,0x10000); });
+}
+void test_iop_imports() {
+    auto file=make_irx(); file.resize(640,0);
+    std::copy_n(file.begin()+256,32,file.begin()+512);
+    put32(file,56,512); put32(file,68,128); put32(file,72,160);
+    const auto table=[&](unsigned at,const std::string& name,unsigned ordinal) {
+        put32(file,at,0x41e00000); file[at+8]=2; file[at+9]=1;
+        std::copy(name.begin(),name.end(),file.begin()+at+12);
+        put32(file,at+20,0x03e00008); put32(file,at+24,0x24000000|ordinal);
+    };
+    table(544,"example1",4); table(592,"second",7);
+    const auto original=nt::elf::load_iop_module(file,0x10000);
+    const auto imports=nt::elf::iop_imports(original);
+    check(imports.size()==2 && imports[0].library=="example1" && imports[0].version==0x102 &&
+          imports[0].ordinal==4 && imports[0].offset==52 && imports[1].library=="second" && imports[1].ordinal==7,
+          "IRX import discovery or ordinals differ");
+    auto linked=original;
+    nt::elf::bind_iop_imports(linked,[](const nt::elf::IopImport& import) -> std::optional<std::uint32_t> {
+        return import.library=="example1" ? 0x20000 : 0x30000;
+    });
+    check(nt::le32(linked.memory,52)==0x08008000 && nt::le32(linked.memory,100)==0x0800c000 &&
+          nt::le32(linked.memory,56)==0x24000004 && nt::le32(linked.memory,104)==0x24000007,
+          "IRX binding changed delay slots or jump targets");
+    for (const auto target : {0U,3U,0x200000U}) {
+        auto failed=original;
+        rejects([&] { nt::elf::bind_iop_imports(failed,[&](const auto& import) -> std::optional<std::uint32_t> {
+            return import.library=="example1" ? 0x20000 : target;
+        }); });
+        check(failed.memory==original.memory,"Failed import binding partially patched module");
+    }
+    auto missing=original;
+    rejects([&] { nt::elf::bind_iop_imports(missing,[](const auto& import) -> std::optional<std::uint32_t> {
+        if (import.library=="example1") return 0x20000;
+        return {};
+    }); });
+    check(missing.memory==original.memory,"Unresolved import partially patched module");
+    for (const auto offset : {36U,40U,52U,56U,60U,108U}) {
+        auto bad=original; put32(bad.memory,offset,0xffffffff);
+        rejects([&] { nt::elf::iop_imports(bad); });
+    }
+    auto truncated=original; truncated.initialized_size=104;
+    rejects([&] { nt::elf::iop_imports(truncated); });
+
+    // Load providers through the real relocator, explicitly register their
+    // exports, then bind the loaded consumer without a synthetic resolver.
+    const auto provider=[&](const std::string& name,unsigned base) {
+        auto image=file;
+        std::fill(image.begin()+544,image.end(),0);
+        put32(image,544,0x41c00000); image[552]=2; image[553]=1;
+        std::copy(name.begin(),name.end(),image.begin()+556);
+        for (unsigned i=0;i<8;++i) {
+            put32(image,564+i*4,16);
+            put32(image,320+i*8,52+i*4); put32(image,324+i*8,2);
+        }
+        put32(image,144,96);
+        return nt::elf::load_iop_module(image,base);
+    };
+    const auto first=provider("example1",0x20000), second=provider("second",0x30000);
+    nt::iop::Libraries libraries;
+    check(!libraries.resolve(imports[0]),"Unregistered exports became visible");
+    libraries.register_exports(first,first.base+32);
+    auto pending=original;
+    rejects([&] { libraries.bind(pending); });
+    check(pending.memory==original.memory && libraries.size()==1,"Missing provider partially bound consumer");
+    rejects([&] { libraries.register_exports(first,first.base+32); });
+    check(libraries.size()==1,"Duplicate registration changed registry");
+    for (const auto offset : {32U,36U,40U,52U,84U}) {
+        auto bad=second; put32(bad.memory,offset,0xffffffff);
+        rejects([&] { libraries.register_exports(bad,bad.base+32); });
+        check(libraries.size()==1,"Invalid export table changed registry");
+    }
+    auto no_terminator=second; no_terminator.initialized_size=84;
+    rejects([&] { libraries.register_exports(no_terminator,no_terminator.base+32); });
+    libraries.register_exports(second,second.base+32);
+    libraries.bind(pending);
+    check(nt::le32(pending.memory,52)==0x08008004 && nt::le32(pending.memory,100)==0x0800c004 &&
+          nt::le32(pending.memory,56)==0x24000004,"Registered guest exports did not bind correctly");
+    auto incompatible=imports[0]; incompatible.version=0x103;
+    check(!libraries.resolve(incompatible),"Unsupported ABI version matched");
+    incompatible=imports[0]; incompatible.ordinal=8;
+    check(!libraries.resolve(incompatible),"Out-of-range export ordinal matched");
+    libraries.reset();
+    check(libraries.size()==0 && !libraries.resolve(imports[0]),"Reset retained exported functions");
+}
 void test_disc(const std::filesystem::path& path) {
     nt::Bytes iso(24 * 2048, 0);
     const auto pvd = 16 * 2048;
@@ -79,9 +256,12 @@ int main() {
         ("anyps2-format-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".iso");
     try {
         test_elf();
+        test_reboot_image();
+        test_iop_module();
+        test_iop_imports();
         test_disc(path);
         std::filesystem::remove(path);
-        std::cout << "ELF and ISO positive/negative cases passed\n";
+        std::cout << "ELF, ISO and reboot archive positive/negative cases passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::error_code ignored;

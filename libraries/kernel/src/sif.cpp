@@ -2,6 +2,13 @@
 
 namespace nt::kernel {
 bool Kernel::service_sif(std::uint32_t call, runtime::State& state, runtime::Bus& memory) {
+    if (call == 0x6b) {
+        // No arguments and no result: stop only the EE SIF0 receiver. Queued
+        // IOP data and the independent SIF1 transmitter remain intact.
+        const auto control=memory.load(0x1000c000,4);
+        memory.store(0x1000c000,4,control & ~0x100U);
+        return true;
+    }
     if (call == 0x76) {
         state.set(2,runtime::sx32(static_cast<std::uint32_t>(memory.sif_status(static_cast<std::uint32_t>(state.gpr[4].lo)))));
         return true;
@@ -32,6 +39,7 @@ bool Kernel::service_sif(std::uint32_t call, runtime::State& state, runtime::Bus
         memory.store(0x1000c020,4,0);
         memory.store(0x1000e000,4,dma_control | 1);
         memory.store(0x1000c000,4,0x184); // Destination chain, tag IRQ termination.
+        memory.store(0x1000f220,4,0x10000); // EE SIF transport is initialized.
         return true;
     }
     const auto id = static_cast<std::uint32_t>(state.gpr[4].lo);

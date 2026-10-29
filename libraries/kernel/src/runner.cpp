@@ -8,7 +8,16 @@ RunResult run(runtime::Entry entry, runtime::State& state, runtime::Bus& memory,
         try {
             kernel.return_from_handler(state,memory);
             kernel.return_from_interrupt(state);
+            kernel.schedule(state);
             kernel.enter_interrupt(state,memory);
+            if (kernel.waiting()) {
+                // Spend diagnostic time waiting for devices without executing
+                // a sleeping thread or inventing retired guest instructions.
+                memory.advance_performance(state.cop0_status,1);
+                memory.advance_cycles(1);
+                --budget;
+                continue;
+            }
         } catch (const runtime::MemoryFault& error) {
             return {{runtime::Stop::memory_fault,state.pc,0,error.what()},calls};
         }
@@ -35,6 +44,7 @@ RunResult run(runtime::Entry entry, runtime::State& state, runtime::Bus& memory,
         try {
             if (kernel.enter_handler(state,memory)) {
                 ++calls; ++state.executed; --budget;
+                memory.advance_performance(state.cop0_status,1);
                 memory.advance_cycles(1);
                 continue;
             }
@@ -44,7 +54,7 @@ RunResult run(runtime::Entry entry, runtime::State& state, runtime::Bus& memory,
         }
         ++calls;
         ++state.executed;
-        try { memory.advance_cycles(1); }
+        try { memory.advance_performance(state.cop0_status,1); memory.advance_cycles(1); }
         catch (const runtime::MemoryFault& error) { return {{runtime::Stop::memory_fault,state.pc,stop.word,error.what()},calls}; }
         --budget;
         state.pc = state.delay_slot ? state.pending_target : state.pc + 4;

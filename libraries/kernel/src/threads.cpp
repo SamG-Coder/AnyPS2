@@ -19,6 +19,15 @@ bool Kernel::service_threads(std::uint32_t call, runtime::State& state, runtime:
     const auto fail = [&] { state.set(2,~std::uint64_t(0)); return true; };
     if (!current_thread_) return false;
     if (call == 0x2f) { state.set(2,current_thread_); return true; }
+    if (call == 0x32) {
+        if (!frames_.empty() || interrupt_active()) return false;
+        auto& current = threads_.at(current_thread_);
+        if (current.status != 1) return false;
+        state.set(2,current_thread_);
+        if (current.wakeups) --current.wakeups;
+        else { current.status = 4; current.sleeping = true; }
+        return true;
+    }
     if (call == 0x20) {
         const auto pointer = argument(0);
         validate_range(pointer,36,4);
@@ -42,13 +51,31 @@ bool Kernel::service_threads(std::uint32_t call, runtime::State& state, runtime:
         return true;
     }
     auto id = argument(0);
-    if (call == 0x23 || (!id && (call == 0x29 || call == 0x30 || call == 0x31))) id = current_thread_;
+    if (call == 0x23 || (!id && (call == 0x29 || call == 0x30 || call == 0x31 || call == 0x35 || call == 0x36))) id = current_thread_;
     const auto found = threads_.find(id);
     if (found == threads_.end()) {
         if ((call == 0x30 || call == 0x31) && id < 256) { state.set(2,0); return true; }
         return fail();
     }
     auto& thread = found->second;
+    if (call == 0x33 || call == 0x34) {
+        if (thread.status == 0x10 || (id == current_thread_ && !interrupt_active())) return fail();
+        if (thread.sleeping) {
+            thread.sleeping = false;
+            thread.status = id == current_thread_ ? 1 : 2;
+            thread.ready_order = next_ready_order_++;
+        } else {
+            if (thread.wakeups == 0x7fffffffU) return fail();
+            ++thread.wakeups;
+        }
+        state.set(2,id);
+        return true;
+    }
+    if (call == 0x35 || call == 0x36) {
+        if (thread.status == 0x10) return fail();
+        state.set(2,thread.wakeups); thread.wakeups = 0;
+        return true;
+    }
     if (call == 0x22) {
         if (thread.status != 0x10) return fail();
         if (!frames_.empty() || interrupt_active()) return false; // No switch across a guest kernel continuation.
@@ -61,6 +88,7 @@ bool Kernel::service_threads(std::uint32_t call, runtime::State& state, runtime:
         thread.context = context;
         thread.priority = thread.initial_priority;
         thread.status = 2;
+        thread.wakeups = 0; thread.sleeping = false; thread.wait_semaphore = 0;
         thread.ready_order = next_ready_order_++;
         state.set(2,id);
         return true;
@@ -93,7 +121,7 @@ bool Kernel::service_threads(std::uint32_t call, runtime::State& state, runtime:
             validate_range(pointer,48,4);
             const std::array<std::uint32_t,12> words{thread.status,thread.entry,thread.stack,
                 thread.size,thread.gp,thread.initial_priority,thread.priority,thread.attributes,
-                thread.option,thread.wait_semaphore ? 2U : 0U,thread.wait_semaphore,0};
+                thread.option,thread.sleeping ? 1U : thread.wait_semaphore ? 2U : 0U,thread.wait_semaphore,thread.wakeups};
             for (unsigned i = 0; i < words.size(); ++i) memory.load(pointer + i * 4,4);
             for (unsigned i = 0; i < words.size(); ++i) memory.store(pointer + i * 4,4,words[i]);
         }

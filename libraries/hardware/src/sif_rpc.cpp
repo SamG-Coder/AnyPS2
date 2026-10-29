@@ -9,18 +9,32 @@ void Sif::mount_disc(const std::filesystem::path& image) {
 void Sif::dispatch_rpc(runtime::RamBus& ee, std::span<const std::uint8_t> packet) {
     const auto read = [&](unsigned offset) { return le32(packet,offset); };
     const auto method = read(32), send_size = read(36), destination = read(40), result_size = read(44);
-    if (!fileio_ || read(52) != fileio_server) throw runtime::MemoryFault("SIF RPC: unregistered server");
-    if (send_size > 4096 || (result_size != 4 && result_size != 8) || read(48) != 1)
-        throw runtime::MemoryFault("SIF RPC: unsupported FILEIO call sizes or response mode");
+    const bool cdvd = read(52) == cdvd_server;
+    if (!fileio_ || (!cdvd && read(52) != fileio_server)) throw runtime::MemoryFault("SIF RPC: unregistered server");
+    if (send_size > 4096 || read(48) != 1 ||
+        (cdvd ? (send_size != 4 || result_size != 16 || method != 0) : (result_size != 4 && result_size != 8)))
+        throw runtime::MemoryFault("SIF RPC: unsupported call sizes, method or response mode");
     const auto physical = runtime::default_ram_address(destination);
     if (physical > 0x2000000 || result_size > 0x2000000-physical)
         throw runtime::MemoryFault("SIF RPC: result exceeds EE RAM");
     if (transmit_.active || !replies_.empty()) throw runtime::MemoryFault("SIF RPC: reply queue busy");
-    auto reply = fileio_->call(method,std::span(iop_ram_).subspan(fileio_buffer,send_size),result_size);
+    fileio::Reply reply;
+    bool initialized = cdvd_initialized_;
+    if (cdvd) {
+        const auto mode=le32(iop_ram_,cdvd_buffer);
+        if (mode != 0 && mode != 1 && mode != 5)
+            throw runtime::MemoryFault("CDVD: unsupported initialization mode " + std::to_string(mode));
+        initialized = mode != 5;
+        // The mounted ISO has already been opened and validated. This HLE
+        // endpoint has no hardware spin-up or pending command to drain.
+        // Version/debug words are zero: no proprietary module version is claimed.
+        reply.result=Bytes(16,0); reply.result[0]=1;
+    } else reply = fileio_->call(method,std::span(iop_ram_).subspan(fileio_buffer,send_size),result_size);
     reply.writes.push_back({destination,std::move(reply.result)});
     const std::array<std::uint32_t,12> response{48,0,0x80000008U,0,
         read(16),read(20),read(24),read(28),0x8000000aU,0,0,0};
     queue_rpc_reply(ee,std::move(reply.writes),response);
+    cdvd_initialized_=initialized;
 }
 void Sif::queue_rpc_reply(runtime::RamBus& ee, std::vector<fileio::Write> writes, std::span<const std::uint32_t> response) {
     if (!ee_command_address_) throw runtime::MemoryFault("SIF RPC: missing EE command address");

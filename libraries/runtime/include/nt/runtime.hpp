@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <nt/word_merge.hpp>
 #include <bit>
 #include <cstdint>
 #include <span>
@@ -10,6 +11,14 @@
 
 namespace nt::runtime {
 struct Register { std::uint64_t lo = 0, hi = 0; };
+inline Register masked_vector(Register original, Register value, unsigned mask) {
+    const auto low = ((mask & 8) ? 0xffffffffULL : 0ULL) | ((mask & 4) ? 0xffffffff00000000ULL : 0ULL);
+    const auto high = ((mask & 2) ? 0xffffffffULL : 0ULL) | ((mask & 1) ? 0xffffffff00000000ULL : 0ULL);
+    return {(original.lo & ~low) | (value.lo & low),(original.hi & ~high) | (value.hi & high)};
+}
+inline Register rotate_vector(Register value) {
+    return {(value.lo >> 32) | (value.hi << 32),(value.hi >> 32) | (value.lo << 32)};
+}
 struct State {
     std::array<Register, 32> gpr{};
     std::array<std::uint32_t, 32> fpr{};
@@ -24,9 +33,50 @@ struct State {
     void set128(unsigned reg, Register value) { if (reg) gpr[reg] = value; }
 };
 enum class Stop { budget, syscall, breakpoint, unsupported, unmapped_code, code_changed, memory_fault, branch_in_delay, interrupt_pending };
+inline void compare_scalar(State& state, unsigned left, unsigned right, unsigned condition) {
+    const auto ordered = [](std::uint32_t bits) {
+        const auto exponent = bits & 0x7f800000U;
+        if (!exponent) bits = 0; // Signed zero and denormals compare equally.
+        else if (exponent == 0x7f800000U) bits = (bits & 0x80000000U) | 0x7f7fffff;
+        return (bits >> 31) ? ~bits : bits | 0x80000000U;
+    };
+    const auto a = ordered(state.fpr[left]), b = ordered(state.fpr[right]);
+    const bool result = ((condition & 2) && a == b) || ((condition & 4) && a < b);
+    state.fcr31 = (state.fcr31 & ~0x800000U) | (result ? 0x800000U : 0);
+}
+inline std::uint32_t integer_to_scalar(std::uint32_t bits) {
+    const auto sign = bits & 0x80000000U;
+    const auto magnitude = sign ? 0U-bits : bits;
+    if (!magnitude) return 0;
+    const unsigned high = 31U-static_cast<unsigned>(std::countl_zero(magnitude));
+    const auto fraction = high > 23 ? magnitude >> (high-23) : magnitude << (23-high);
+    return sign | ((high+127)<<23) | (fraction & 0x7fffff);
+}
+inline std::uint32_t scalar_to_integer(std::uint32_t bits) {
+    const auto exponent=(bits>>23)&255;
+    const bool negative=(bits>>31)!=0;
+    if (exponent<127) return 0;
+    if (exponent>=158) return negative ? 0x80000000U : 0x7fffffffU;
+    const auto significand=(bits&0x7fffff)|0x800000;
+    const auto magnitude=exponent>=150 ? significand << (exponent-150) : significand >> (150-exponent);
+    return negative ? 0U-magnitude : magnitude;
+}
+inline std::uint32_t min_max_scalar(std::uint32_t a, std::uint32_t b, bool maximum) {
+    const auto key=[](std::uint32_t value) { return (value>>31) ? ~value : value|0x80000000U; };
+    return (maximum ? key(a)>key(b) : key(a)<key(b)) ? a : b;
+}
 struct Result { Stop reason; std::uint32_t pc, word; std::string detail{}; };
 const char* name(Stop stop);
 class MemoryFault : public std::runtime_error { public: using std::runtime_error::runtime_error; };
+void multiply_scalar(State& state, unsigned destination, unsigned left, unsigned right);
+struct FiniteFloatResult { std::uint32_t bits; bool underflow = false; };
+FiniteFloatResult add_subtract_finite(std::uint32_t left, std::uint32_t right, bool subtract);
+inline void add_subtract_scalar(State& state, unsigned destination, unsigned left, unsigned right, bool subtract) {
+    const auto result=add_subtract_finite(state.fpr[left],state.fpr[right],subtract);
+    state.fpr[destination]=result.bits;
+    state.fcr31=(state.fcr31 & ~0xc000U) | (result.underflow ? 0x4008U : 0);
+}
+void divide_scalar(State& state, unsigned destination, unsigned left, unsigned right);
 // Translate only the BIOS-free default RAM aliases; callers enforce RAM bounds.
 std::uint32_t default_ram_address(std::uint32_t address);
 struct SifTransfer { std::uint32_t source, destination, bytes, attributes; };
@@ -34,12 +84,51 @@ struct SifTransfer { std::uint32_t source, destination, bytes, attributes; };
 class Bus {
 public:
     virtual ~Bus() = default;
+    std::uint32_t read_performance(unsigned selector) const {
+        return performance_[(selector & 1) ? 1 + ((selector >> 1) & 1) : 0];
+    }
+    void write_performance(unsigned selector, std::uint32_t value) {
+        if (!(selector & 1)) {
+            if (selector & 62) return; // MTPS writes only selector zero.
+            if (value & 0x80000000U) {
+                for (unsigned shift : {5U,15U}) {
+                    const auto event = (value >> shift) & 31;
+                    if (event != 0 && event != 1 && event != 6 && event < 16)
+                        throw MemoryFault("CP0: performance event is not implemented");
+                }
+            }
+        }
+        performance_[(selector & 1) ? 1 + ((selector >> 1) & 1) : 0] = value;
+    }
+    void advance_performance(std::uint32_t status, std::uint64_t cycles) {
+        const auto control = performance_[0];
+        if (!(control & 0x80000000U) || (status & 4)) return;
+        auto next = performance_;
+        for (unsigned counter=0;counter<2;++counter) {
+            const auto shift = counter*10;
+            const auto permission = (1U << (((status>>3)&3)+2+shift)) |
+                                    ((status & 2) ? 1U << (1+shift) : 0);
+            // Only diagnostic cycles produce events. Cache misses remain zero
+            // in the runtime's coherent-memory model; disabled modes stay idle.
+            if ((control & permission) && ((control >> (5+shift)) & 31) == 1) {
+                if (cycles >= 0x80000000ULL || next[counter+1] >= 0x80000000ULL-cycles)
+                    throw MemoryFault("CP0: performance overflow exceptions are not implemented");
+                next[counter+1] += static_cast<std::uint32_t>(cycles);
+            }
+        }
+        performance_ = next;
+    }
     virtual std::uint64_t load(std::uint32_t address, unsigned size) = 0;
     virtual void store(std::uint32_t address, unsigned size, std::uint64_t value) = 0;
     virtual Register load_quad(std::uint32_t address) = 0;
     virtual void store_quad(std::uint32_t address, Register value) = 0;
     virtual void synchronize_cache(unsigned operation) = 0;
     virtual void advance_cycles(std::uint64_t cycles) = 0;
+    virtual Register read_cop2_vector(unsigned) { throw MemoryFault("VU vectors unavailable on this bus"); }
+    virtual void write_cop2_vector(unsigned, Register) { throw MemoryFault("VU vectors unavailable on this bus"); }
+    virtual void add_subtract_cop2_vectors(unsigned, unsigned, unsigned, unsigned, bool, unsigned) {
+        throw MemoryFault("VU arithmetic unavailable on this bus");
+    }
     virtual std::uint32_t read_cop2_control(unsigned) { throw MemoryFault("VU control unavailable on this bus"); }
     virtual void write_cop2_control(unsigned, std::uint32_t) { throw MemoryFault("VU control unavailable on this bus"); }
     virtual void set_gs_crt(std::uint32_t, std::uint32_t, std::uint32_t) {
@@ -50,6 +139,9 @@ public:
     virtual void initialize_sif() { throw MemoryFault("SIF services unavailable on this bus"); }
     virtual std::uint32_t submit_sif(std::span<const SifTransfer>) { throw MemoryFault("SIF DMA unavailable on this bus"); }
     virtual std::int32_t sif_status(std::uint32_t) const { throw MemoryFault("SIF DMA unavailable on this bus"); }
+private:
+    // CPU-global device state survives thread and interrupt context restores.
+    std::array<std::uint32_t,3> performance_{};
 };
 // Diagnostic memory, not a PS2 hardware emulator. No BIOS or devices are faked.
 class RamBus final : public Bus {
@@ -72,6 +164,19 @@ private:
 inline std::uint64_t sx32(std::uint32_t v) { return static_cast<std::uint64_t>(static_cast<std::int64_t>(std::bit_cast<std::int32_t>(v))); }
 inline std::int64_t signed64(std::uint64_t v) { return std::bit_cast<std::int64_t>(v); }
 Register padduw(Register a, Register b);
+template<unsigned Bits, bool Upper>
+inline Register interleave_lanes(Register a, Register b) {
+    static_assert(Bits==8 || Bits==16 || Bits==32);
+    const auto x=Upper ? a.hi : a.lo, y=Upper ? b.hi : b.lo;
+    constexpr auto mask=(std::uint64_t(1)<<Bits)-1;
+    Register result;
+    for (unsigned lane=0;lane<64/Bits;++lane) {
+        const auto pair=((y>>(lane*Bits))&mask) | (((x>>(lane*Bits))&mask)<<Bits);
+        auto& half=lane*Bits*2<64 ? result.lo : result.hi;
+        half |= pair << ((lane*Bits*2)%64);
+    }
+    return result;
+}
 template<unsigned Bits>
 inline Register packed_equal(Register a, Register b) {
     static_assert(Bits == 8 || Bits == 16 || Bits == 32);
@@ -128,15 +233,7 @@ inline void divide_words(State& state, std::uint32_t numerator, std::uint32_t de
         state.hi = sx32(numerator % denominator);
     }
 }
-template<class Word>
-inline Word merge_load(Word original, Word memory, unsigned offset, bool left) {
-    static_assert(std::is_unsigned_v<Word> && (sizeof(Word) == 4 || sizeof(Word) == 8));
-    constexpr auto bits = sizeof(Word) * 8;
-    const auto shift = (left ? sizeof(Word) - 1 - offset : offset) * 8;
-    if (!shift) return memory;
-    if (left) return (original & ((Word(1) << shift) - 1)) | (memory << shift);
-    return (original & (Word(~Word(0)) << (bits - shift))) | (memory >> shift);
-}
+using nt::merge_load;
 inline std::uint64_t merge_double_load(std::uint64_t original, std::uint64_t memory, unsigned offset, bool left) {
     return merge_load(original,memory,offset,left);
 }

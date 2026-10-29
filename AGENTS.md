@@ -36,7 +36,9 @@ that mirror implementation details. A build, manual trace, or larger instruction
 count does not establish correctness or a game boot. Commit only original synthetic
 instruction, ELF, and ISO fixtures. Compile and execute generated C++ in tests.
 Cover malformed inputs, delay slots, state transitions, unsupported paths, and
-regressions relevant to each change. Run CTest in Release.
+regressions relevant to each change. Run only tests related to the changed
+behavior and its affected integration paths, rather than the full suite by
+default. Run CTest in Release.
 
 Commercial-game integration tests must be opt-in, take paths from configuration,
 and keep inputs and outputs ignored. Distinguish startup progress, visible boot,

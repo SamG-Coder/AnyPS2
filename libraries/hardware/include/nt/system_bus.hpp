@@ -2,6 +2,8 @@
 #include <nt/runtime.hpp>
 #include <nt/sif.hpp>
 #include <nt/gs.hpp>
+#include <nt/gif.hpp>
+#include <nt/graphics_dma.hpp>
 #include <nt/vif.hpp>
 #include <nt/vu_control.hpp>
 
@@ -16,6 +18,11 @@ public:
     void store_quad(std::uint32_t address, runtime::Register value) override;
     void synchronize_cache(unsigned operation) override { ram_.synchronize_cache(operation); }
     void advance_cycles(std::uint64_t cycles) override;
+    runtime::Register read_cop2_vector(unsigned reg) override { return vu_.vector(reg); }
+    void write_cop2_vector(unsigned reg, runtime::Register value) override { vu_.set_vector(reg,value); }
+    void add_subtract_cop2_vectors(unsigned destination, unsigned left, unsigned right, unsigned mask, bool subtract, unsigned broadcast) override {
+        vu_.add_subtract(destination,left,right,mask,subtract,broadcast);
+    }
     std::uint32_t read_cop2_control(unsigned reg) override { return vu_.read(reg); }
     void write_cop2_control(unsigned reg, std::uint32_t value) override { vu_.write(reg,value); }
     void set_gs_crt(std::uint32_t interlace, std::uint32_t mode, std::uint32_t frame) override {
@@ -41,8 +48,11 @@ private:
     std::uint32_t interrupt_status_ = 0, interrupt_mask_ = 0;
     std::uint32_t dma_status_ = 0;
     std::uint32_t dma_control_ = 0, dma_enable_ = 0x1201;
+    std::uint32_t dma_priority_ = 0;
     Sif sif_;
     Gs gs_;
+    Gif gif_;
+    GraphicsDma graphics_dma_;
     Vif vif_;
     VuControl vu_;
     std::uint64_t cycles_ = 0;

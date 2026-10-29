@@ -9,13 +9,14 @@ std::uint64_t SystemBus::load(std::uint32_t a, unsigned size) {
     const auto p = physical(a);
     if (Gs::maps(p)) return gs_.read(p,size);
     if (Vif::maps(p)) return vif_.read(p,size);
-    if (p >= 0x10003000 && p < 0x10003800)
-        throw runtime::MemoryFault("GIF: register interface is not implemented");
+    if (Gif::maps(p)) return gif_.read(p,size);
+    if (GraphicsDma::maps(p)) return graphics_dma_.read(p,size);
     if (Sif::maps(p)) {
         if (size != 4) throw runtime::MemoryFault("SIF: unsupported register access width");
         return sif_.read(p);
     }
     if (size == 4 && p == 0x1000e000) return dma_control_;
+    if (size == 4 && p == 0x1000e020) return dma_priority_;
     if (size == 4 && (p == 0x1000f520 || p == 0x1000f590)) return dma_enable_;
     if (size == 4 && p == 0x1000f000) return interrupt_status_;
     if (size == 4 && p == 0x1000f010) return interrupt_mask_;
@@ -43,8 +44,8 @@ void SystemBus::store(std::uint32_t a, unsigned size, std::uint64_t value) {
         return;
     }
     if (Vif::maps(p)) { vif_.write(p,size,static_cast<std::uint32_t>(value)); return; }
-    if (p >= 0x10003000 && p < 0x10003800)
-        throw runtime::MemoryFault("GIF: register interface is not implemented");
+    if (Gif::maps(p)) { gif_.write(p,size,static_cast<std::uint32_t>(value)); return; }
+    if (GraphicsDma::maps(p)) { graphics_dma_.write(p,size,static_cast<std::uint32_t>(value)); return; }
     if (Sif::maps(p)) {
         if (size != 4) throw runtime::MemoryFault("SIF: unsupported register access width");
         sif_.write(p,static_cast<std::uint32_t>(value)); return;
@@ -54,6 +55,11 @@ void SystemBus::store(std::uint32_t a, unsigned size, std::uint64_t value) {
         dma_control_ = static_cast<std::uint32_t>(value); return;
     }
     if (size == 4 && p == 0x1000f590) { dma_enable_ = static_cast<std::uint32_t>(value); return; }
+    if (size == 4 && p == 0x1000e020) {
+        if (value & 0x80000000U) throw runtime::MemoryFault("DMAC: priority-controlled arbitration is not implemented");
+        dma_priority_ = static_cast<std::uint32_t>(value) & 0x03ff03ff;
+        return;
+    }
     if (size == 4 && p == 0x1000f000) { interrupt_status_ &= ~static_cast<std::uint32_t>(value); return; }
     if (size == 4 && p == 0x1000f010) { interrupt_mask_ ^= static_cast<std::uint32_t>(value) & 65535; return; }
     if (size == 4 && p == 0x1000e010) {
@@ -82,12 +88,14 @@ void SystemBus::store(std::uint32_t a, unsigned size, std::uint64_t value) {
 }
 runtime::Register SystemBus::load_quad(std::uint32_t address) {
     last_address = address; last_size = 16; last_write = false;
+    if (Gif::maps(physical(address))) throw runtime::MemoryFault("GIF: quadword/FIFO access is not implemented");
     if (Gs::maps(physical(address))) throw runtime::MemoryFault("GS: quadword register accesses are not implemented");
     if (Vif::maps(physical(address))) throw runtime::MemoryFault("VIF: quadword/FIFO access is not implemented");
     return ram_.load_quad(address);
 }
 void SystemBus::store_quad(std::uint32_t address, runtime::Register value) {
     last_address = address; last_size = 16; last_write = true;
+    if (Gif::maps(physical(address))) throw runtime::MemoryFault("GIF: quadword/FIFO access is not implemented");
     if (Gs::maps(physical(address))) throw runtime::MemoryFault("GS: quadword register accesses are not implemented");
     if (Vif::maps(physical(address))) throw runtime::MemoryFault("VIF: quadword/FIFO access is not implemented");
     ram_.store_quad(address,value);
@@ -96,8 +104,11 @@ void SystemBus::advance_cycles(std::uint64_t cycles) {
     gs_.advance_cycles(cycles);
     interrupt_status_ |= gs_.take_interrupts();
     // One bounded transport step per diagnostic EE cycle. This is not bus timing.
-    for (std::uint64_t step = 0; step < cycles; ++step)
+    for (std::uint64_t step = 0; step < cycles; ++step) {
         sif_.step(ram_,(dma_control_ & 1) && !(dma_enable_ & 0x10000));
+        dma_status_ |= graphics_dma_.step(ram_,vif_,gif_,gs_,(dma_control_ & 1) && !(dma_enable_ & 0x10000));
+        interrupt_status_ |= gs_.take_interrupts();
+    }
     dma_status_ |= sif_.take_completions();
     cycles_ += cycles;
     for (unsigned index=0; index<timers_.size(); ++index) {

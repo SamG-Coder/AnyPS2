@@ -26,7 +26,9 @@ is an open-source hardware reference; it is not currently linked or bundled.
 ## Build and test
 
 Requires CMake 3.24 or later and a C++20 compiler. The tested platform is Windows
-x64 with Visual Studio's C++ workload.
+x64 with Visual Studio's C++ workload. Install the Vulkan SDK (including `glslc`
+and validation layers) and a Vulkan-capable graphics driver. GS solid-sprite
+drawing now uses Vulkan compute; there is no silent CPU rendering fallback.
 
 ```powershell
 cmake -S . -B build -A x64
@@ -36,6 +38,11 @@ ctest --test-dir build -C Release --output-on-failure
 
 Tests use synthetic fixtures, including generated C++ that is compiled and
 executed. See [testing](docs/testing.md) for opt-in local game validation.
+
+Run `.\build\Release\anyps2-display.exe` for the Vulkan presentation host. It
+displays an original synthetic GS sprite scene, not game output. `--smoke`
+presents three frames and exits. The initial host uses a fixed-size native
+Windows window; the renderer itself is a separate C++ library.
 
 ## Local conversion workflow
 
@@ -88,10 +95,11 @@ RPC initialization replies, and unsuccessful binds for unregistered RPC servers.
 SetSyscall is no
 longer the initial blocker. Unknown behavior stops explicitly.
 
-Graphics, audio, IOP/VU instruction execution, complete DMA and disc services,
-Remaining RPC services, idle waits, and timer-driven thread preemption
+Graphics, audio, IOP/VU microprogram execution, complete DMA and disc services,
+remaining RPC services, and timer-driven thread preemption
 remain unfinished. The timer model charges
-one modeled EE cycle per retired instruction; it is a diagnostic approximation.
+one modeled EE cycle per retired instruction and bounded device steps while all
+threads sleep; it is a diagnostic approximation.
 Full floating-point arithmetic and general self-modifying code are unsupported.
 
 SIF payload movement, completion, and registered DMAC/INTC handler delivery/return are
@@ -101,13 +109,38 @@ C++ service implementation, not a complete IOP emulator. DMA completion does not
 imply a successful RPC operation. See [SIF implementation](docs/sif.md).
 The local GT4 test passes timer interrupt delivery and now binds to a mounted
 file-I/O service. With the disc mounted it passes GS CSR initialization and
-GsPutIMR, SetGsCrt, VIF0/VIF1 reset and VU control initialization, then stops at
-GIF register initialization. The GS component
-supports privileged register storage, CSR reset/acknowledgement, IMR masks, and
-diagnostic interlaced NTSC/PAL scanout events. GIF processing and rendering remain
-unfinished. No visible game boot is verified.
+GsPutIMR, SetGsCrt, VIF0/VIF1 reset, VU control setup, GIF/DMA initialization and
+raw FPR transfers, vector addition/subtraction, masked moves, lane rotation,
+VU integer-register setup, scalar comparisons and finite scalar multiplication,
+passes initial VIF0 DMA transfers, thread sleep/wakeup and CP0 performance-counter
+initialization, GS image uploads, scalar arithmetic and both conversion directions,
+scalar minimum/maximum and packed interleaving, VIF buffer-address setup, FLUSH
+and DIRECT, then passes solid and filtered indexed sprite drawing. The current
+bounded run passes CD/DVD initialization and SifStopDma, then reaches the
+disc-supplied IOP module-manager startup boundary. The reboot path parses the
+disc archive, executes its memory bootstrap and allocates/loads/binds the module
+manager in a private IOP context, then executes its entry with boot parameters. Full
+module-manager/service startup and completed disc-backed reset remain unfinished.
+The GS component supports
+privileged register storage, CSR reset/acknowledgement, IMR masks, and
+diagnostic interlaced NTSC/PAL scanout events. GIF paths 2/3 support packed A_D
+configuration writes and REGLIST packets, including SIGNAL/LABEL/FINISH effects.
+Host uploads support PSMCT32/PSMCT24 pixels in swizzled local memory. Other image
+formats/directions and general rendering remain unfinished. Solid sprites support
+PSMCT32/PSMCT24 framebuffers, scissor, XYOFFSET, framebuffer masks and FBA.
+Vulkan texture sampling supports nearest and bilinear PSMCT32/PSMCT24 sprites with fixed UVs,
+MODULATE/DECAL and clamp modes. PSMT4 sampling supports 32/24-bit palettes and
+CSM1/CSM2 loading. Other indexed formats, mipmaps, mixed min/mag filters, blending and depth
+writes remain unsupported. No visible game boot is verified.
 The shared VIF register model supports idle reset/stop/cancel, error masks and
-configuration readback. VIF command streams, DMA and VU execution remain unsupported.
+configuration readback. VIF0/VIF1 DMA supports normal and basic source chains,
+configuration commands and microprogram uploads. VU microprogram execution,
+UNPACK and graphics packet processing remain unsupported. VU0 macro support includes finite VADD/VSUB with
+lane-wise and broadcast operands, VMOVE, VMR32 and raw vector transfers;
+extended numeric ranges and pipeline timing are
+not implemented.
+GIF supports reset, pause and mode configuration. GIF DMA shares normal/source-chain
+transport with VIF; unsupported packets stop before consuming their current beat.
 
 The generator uses bounded dispatch functions and instruction guards. Efficient
 basic blocks and measured performance are goals; producing a native executable

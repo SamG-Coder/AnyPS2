@@ -4,16 +4,16 @@
 
 namespace nt::r5900 {
 enum class Op {
-    unsupported, sll, srl, sra, sllv, srlv, srav, jr, jalr, movz, movn,
+    unsupported, pextlb, pextlh, pextlw, pextub, pextuh, pextuw, mov_s, abs_s, neg_s, mul_s, div_s, add_s, sub_s, max_s, min_s, cvt_s_w, cvt_w_s, compare_s, bc1f, bc1t, bc1fl, bc1tl, sll, srl, sra, sllv, srlv, srav, jr, jalr, movz, movn,
     syscall, breakpoint, sync, mfhi, mthi, mflo, mtlo, mult, multu, div, divu,
     add, sub, addi, addu, subu, bit_and, bit_or, bit_xor, bit_nor, slt, sltu, daddu, dsubu, dadd, dsub, daddi,
     dsll, dsrl, dsra, dsll32, dsrl32, dsra32, dsllv, dsrlv, dsrav,
     j, jal, beq, bne, blez, bgtz, bltz, bgez,
     beql, bnel, blezl, bgtzl, bltzl, bgezl,
     addiu, daddiu, slti, sltiu, andi, ori, xori, lui,
-    lb, lbu, lh, lhu, lw, lwu, ld, lq, ldl, ldr, lwl, lwr, sb, sh, sw, sd, sq, sdl, sdr, swl, swr,
+    lb, lbu, lh, lhu, lw, lwu, ld, lq, ldl, ldr, lwl, lwr, sb, sh, sw, sd, sq, sdl, sdr, swl, swr, lwc1, swc1,
     pand, por, pxor, pnor, padduw, pceqb, pceqh, pceqw, ppac5, pext5, ppacb, ppach, ppacw, mfhi1, mthi1, mflo1, mtlo1, mfsa, mtsa, mtsab, mtsah,
-    mfc1, mtc1, cfc1, ctc1, cfc2, ctc2, adda_s, pcpyh, pcpyld, pcpyud, ei, di, mfc0, mtc0, eret, plzcw, cache
+    mfc1, mtc1, cfc1, ctc1, cfc2, ctc2, qmfc2, qmtc2, lqc2, sqc2, vsub, vadd, vsub_bc, vadd_bc, vmove, vmr32, adda_s, pcpyh, pcpyld, pcpyud, ei, di, mfc0, mtc0, eret, plzcw, cache
 };
 struct Instruction {
     std::uint32_t pc, word;

@@ -5,6 +5,7 @@ cmake_minimum_required(VERSION 3.24)
 function(check_content relative physical)
     string(TOLOWER "${relative}" lower)
     if(NOT lower MATCHES "^(libraries|programs|tests)/[a-z0-9_./-]+\\.(cpp|hpp|h|cmake)$"
+       AND NOT lower MATCHES "^libraries/graphics/shaders/[a-z0-9_-]+\\.comp$"
        AND NOT lower MATCHES "^docs/[a-z0-9_./-]+\\.md$"
        AND NOT lower STREQUAL "docs/third-party/play-license.txt"
        AND NOT lower MATCHES "^(cmakelists\\.txt|readme\\.md|agents\\.md|disclaimer\\.md|\\.agent|\\.gitignore)$")

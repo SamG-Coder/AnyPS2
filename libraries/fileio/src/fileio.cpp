@@ -10,6 +10,14 @@ void validate_write(std::uint32_t address, std::uint32_t size) {
         throw runtime::MemoryFault("FILEIO: EE destination exceeds RAM");
 }
 }
+Bytes Service::read_disc_file(const std::string& guest_path, std::uint64_t limit) {
+    if ((!guest_path.starts_with("cdrom0:") && !guest_path.starts_with("cdrom:")) ||
+        guest_path.find('\0')!=std::string::npos)
+        throw runtime::MemoryFault("FILEIO: expected a disc path");
+    const auto entry=disc_.find(guest_path.substr(guest_path.find(':')+1));
+    if (entry.directory) throw runtime::MemoryFault("FILEIO: expected a disc file");
+    return disc_.read(entry,limit);
+}
 Reply Service::call(std::uint32_t method, ByteView args, std::uint32_t result_size) {
     Reply reply;
     ++statistics_.requests; statistics_.last_method = method;

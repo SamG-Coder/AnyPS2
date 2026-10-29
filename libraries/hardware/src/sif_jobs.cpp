@@ -29,8 +29,11 @@ std::int32_t Sif::status(std::uint32_t id) const {
 }
 void Sif::job_step(runtime::RamBus& ee) {
     if (job_.empty()) return;
+    const auto finish=[&] {
+        if (received_packets_>=job_completion_) { job_.clear(); completion_|=1U<<6; }
+    };
     if (job_index_ == job_.size()) {
-        if (received_packets_ >= job_completion_) { job_.clear(); completion_ |= 1U << 6; }
+        finish();
         return;
     }
     if (to_iop_.size() > 124) return;
@@ -46,6 +49,9 @@ void Sif::job_step(runtime::RamBus& ee) {
             to_iop_.push_back(static_cast<std::uint32_t>(half >> 32));
         }
         job_offset_ += 16;
-    } else { ++job_index_; job_offset_ = 0; job_tagged_ = false; }
+    } else {
+        ++job_index_; job_offset_ = 0; job_tagged_ = false;
+        if (job_index_==job_.size()) finish();
+    }
 }
 }

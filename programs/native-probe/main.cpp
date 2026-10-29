@@ -54,6 +54,7 @@ int main(int argc, char** argv) {
         const auto fault_address = bus.last_address;
         const auto fault_size = bus.last_size;
         const auto fault_write = bus.last_write;
+        std::cout << "cdvd_initialized=" << bus.sif().cdvd_initialized() << '\n';
         if (!result.detail.empty()) std::cout << "detail=" << result.detail << '\n';
         std::cout << "AnyPS2 diagnostic native execution (BIOS-free; partial hardware runtime)\n"
                   << "stop=" << nt::runtime::name(result.reason) << " pc=" << nt::hex32(result.pc)

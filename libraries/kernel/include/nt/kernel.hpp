@@ -22,6 +22,10 @@ public:
     bool return_from_handler(runtime::State& state, runtime::Bus& memory);
     std::size_t handler_depth() const { return frames_.size(); }
     void schedule(runtime::State& state);
+    bool waiting() const {
+        return current_thread_ && threads_.at(current_thread_).status == 4 &&
+               !interrupt_active() && frames_.empty();
+    }
     bool enter_interrupt(runtime::State& state, runtime::Bus& memory);
     bool return_from_interrupt(runtime::State& state);
     bool interrupt_active() const { return interrupt_frame_.has_value(); }
@@ -37,6 +41,8 @@ private:
         runtime::State context;
         std::uint64_t ready_order = 0;
         std::uint32_t wait_semaphore = 0;
+        std::uint32_t wakeups = 0;
+        bool sleeping = false;
     };
     std::map<std::uint32_t, Thread> threads_;
     std::uint32_t current_thread_ = 0;

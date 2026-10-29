@@ -1,0 +1,89 @@
+#version 450
+layout(local_size_x=8,local_size_y=8) in;
+layout(set=0,binding=0,std430) buffer Memory { uint pixels[]; } memory;
+layout(push_constant) uniform Draw {
+    uint left,top,right,bottom,base,pitch,color,mask;
+    uint texture_base,texture_pitch,texture_width,texture_height;
+    uint flags,clamp_u,clamp_v,texa;
+    int x0,y0,dx,dy,u0,v0,du,dv;
+    uint min_u,max_u,min_v,max_v;
+} draw;
+uint address(uint base,uint pitch,uint x,uint y) {
+    x &= 2047; y &= 2047;
+    uint page=(y/32)*pitch+x/64;
+    uint block=((x>>3)&1)|(((y>>3)&1)<<1)|(((x>>4)&1)<<2)|(((y>>4)&1)<<3)|(((x>>5)&1)<<4);
+    uint word=(x&1)|((y&1)<<1)|((x&6)<<1)|((y&6)<<3);
+    return (base*64+page*2048+block*64+word)&0xfffff;
+}
+int floor_div(int n,int d) {int q=n/d;return q-((n%d)!=0 && ((n<0)!=(d<0)) ? 1:0);}
+uint nibble_address(uint base,uint pitch,uint x,uint y) {
+    x &= 2047; y &= 2047;
+    uint page=(y/128)*(pitch/2)+x/128;
+    uint block=((y>>4)&1)|(((x>>5)&1)<<1)|(((y>>5)&1)<<2)|(((x>>6)&1)<<3)|(((y>>6)&1)<<4);
+    uint column=((x&1)<<3)|((x&2)<<4)|(((x>>2 ^ y>>1 ^ y>>2)&1)<<6)|
+        ((x&8)>>2)|((x&16)>>2)|((y&1)<<4)|((y&2)>>1)|((y&4)<<5)|((y&8)<<5);
+    return (base*512+page*16384+block*512+column)&0x7fffff;
+}
+uint wrap(int t,uint size,uint mode,uint low,uint high) {
+    if(mode==0) return uint(t)&(size-1);
+    if(mode==1) return uint(clamp(t,0,int(size)-1));
+    if(mode==2) return uint(clamp(t,int(low),int(high)));
+    return (uint(t)&low)|high;
+}
+uint texel_at(int u,int v) {
+        uint tx=wrap(u,draw.texture_width,draw.clamp_u,draw.min_u,draw.max_u);
+        uint ty=wrap(v,draw.texture_height,draw.clamp_v,draw.min_v,draw.max_v);
+        uint texel=memory.pixels[1048576+address(draw.texture_base,draw.texture_pitch,tx,ty)];
+        if((draw.flags&64)!=0) {
+            uint nibble=nibble_address(draw.texture_base,draw.texture_pitch,tx,ty);
+            uint index=(memory.pixels[1048576+nibble/8]>>((nibble%8)*4))&15;
+            texel=memory.pixels[2097152+index];
+        }
+        if((draw.flags&2)!=0) {
+            texel &= 0xffffff;
+            uint alpha=((draw.texa&0x8000)!=0 && texel==0) ? 0 : (draw.texa&255);
+            texel |= alpha<<24;
+        }
+        return texel;
+}
+uint interpolate(uint a,uint b,uint fraction) {
+    uint result=0;
+    for(uint channel=0;channel<4;++channel) {
+        uint av=(a>>(channel*8))&255, bv=(b>>(channel*8))&255;
+        result |= ((av*(16-fraction)+bv*fraction)>>4)<<(channel*8);
+    }
+    return result;
+}
+void main() {
+    uint x=draw.left+gl_GlobalInvocationID.x, y=draw.top+gl_GlobalInvocationID.y;
+    if (x>=draw.right || y>=draw.bottom) return;
+    uint output_address=address(draw.base,draw.pitch,x,y);
+    uint color=draw.color;
+    if ((draw.flags&1)!=0) {
+        int uf=draw.u0+floor_div((int(x)*16-draw.x0)*draw.du,draw.dx);
+        int vf=draw.v0+floor_div((int(y)*16-draw.y0)*draw.dv,draw.dy);
+        bool linear=(draw.flags&128)!=0;
+        if(linear) {uf-=8;vf-=8;}
+        int u=floor_div(uf,16), v=floor_div(vf,16);
+        uint texel=texel_at(u,v);
+        if(linear) {
+            uint fu=uint(uf-u*16), fv=uint(vf-v*16);
+            uint top=interpolate(texel,texel_at(u+1,v),fu);
+            uint bottom=interpolate(texel_at(u,v+1),texel_at(u+1,v+1),fu);
+            texel=interpolate(top,bottom,fv);
+        }
+        uint function=(draw.flags>>3)&3;
+        color=0;
+        for(uint channel=0;channel<4;++channel) {
+            uint t=(texel>>(channel*8))&255, c=(draw.color>>(channel*8))&255;
+            uint result=function==0 ? min((t*c)>>7,255) : t;
+            if(channel==3 && (draw.flags&4)==0) result=c;
+            color |= result<<(channel*8);
+        }
+    }
+    if((draw.flags&32)!=0) color |= 0x80000000;
+    // Aliased framebuffer pages can map different invocations onto one word.
+    // Atomic bit operations preserve masked bits without an unordered R/W race.
+    atomicAnd(memory.pixels[output_address],draw.mask);
+    atomicOr(memory.pixels[output_address],color&~draw.mask);
+}

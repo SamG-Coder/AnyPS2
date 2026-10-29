@@ -5,6 +5,7 @@
 #include <nt/system_bus.hpp>
 #include <iostream>
 #include <limits>
+#include <cmath>
 
 using namespace nt::runtime;
 Result nt_generated_run(State&, Bus&, std::uint64_t);
@@ -155,6 +156,12 @@ void scanout_interrupt_delivery(unsigned line) {
 void vu_initialization() {
     nt::hardware::SystemBus bus;
     for (const auto& [pc,word] : fixture::words()) bus.store(pc,4,word);
+    for (unsigned reg=0;reg<16;++reg) {
+        auto state=at(0xab00+reg*16); state.set(1,0xffff1234U+reg); state.gpr[2].hi=0x5678;
+        check(nt_generated_run(state,bus,2).reason == Stop::budget &&
+              state.gpr[2].lo == (reg ? 0x1234U+reg : 0) && state.gpr[2].hi == 0x5678,
+              "VU integer control transfer width/constant register differs");
+    }
     for (const auto value : {0xc0cU,0xc0eU,0xe0cU,0xe0eU}) {
         auto state = at(0x9b00); state.set(1,value); state.gpr[2].hi = 0x12345678;
         auto expected = value & 0xc0c;
@@ -169,7 +176,282 @@ void vu_initialization() {
     check(nt_generated_run(state,bus,1).reason == Stop::memory_fault && state.pc == 0x9b20 && state.executed == 0,
           "VU microprogram execution was silently accepted");
 }
+void vu_subtraction() {
+    nt::hardware::SystemBus bus;
+    for (const auto& [pc,word] : fixture::words()) bus.store(pc,4,word);
+    const auto pack = [](std::array<std::uint32_t,4> v) {
+        return Register{v[0] | (std::uint64_t(v[1])<<32),v[2] | (std::uint64_t(v[3])<<32)};
+    };
+    // One shared arithmetic milestone: vector/broadcast forms, each mask, and
+    // an aliased destination containing four distinct broadcast components.
+    const std::array<float,4> left{1,-2,4,-8}, right{2,4,-8,16};
+    for (unsigned operation=0;operation<2;++operation)
+        for (unsigned broadcast=0;broadcast<5;++broadcast)
+            for (unsigned mask=0;mask<16;++mask) {
+                std::array<std::uint32_t,4> av{},bv{},expected{};
+                for (unsigned i=0;i<4;++i) {
+                    av[i]=std::bit_cast<std::uint32_t>(left[i]);
+                    bv[i]=std::bit_cast<std::uint32_t>(right[i]);
+                    const float operand=right[broadcast<4 ? broadcast : i];
+                    expected[i]=(mask&(8U>>i)) ? std::bit_cast<std::uint32_t>(left[i]+(operation ? -operand : operand)) : bv[i];
+                }
+                bus.write_cop2_vector(1,pack(av)); bus.write_cop2_vector(2,pack(bv));
+                auto state=at(0xa000+((operation*5+broadcast)*16+mask)*16);
+                check(nt_generated_run(state,bus,1).reason == Stop::budget &&
+                      bus.read_cop2_vector(2).lo == pack(expected).lo && bus.read_cop2_vector(2).hi == pack(expected).hi,
+                      "VU vector/broadcast add-subtract alias/mask differs");
+            }
+    const std::array<std::uint32_t,4> a{0x3f800000,0x40000000,0x00800001,0x80000000};
+    const std::array<std::uint32_t,4> b{0x40000000,0x3f800000,0x00800000,0};
+    const std::array<std::uint32_t,4> difference{0xbf800000,0x3f800000,0,0x80000000};
+    for (unsigned mask=0;mask<16;++mask) {
+        auto state=at(0x9d00+mask*32); state.gpr[1]=pack(a); state.gpr[2]=pack(b);
+        auto expected=b;
+        for (unsigned lane=0;lane<4;++lane) if (mask&(8U>>lane)) expected[lane]=difference[lane];
+        check(nt_generated_run(state,bus,4).reason == Stop::budget &&
+              state.gpr[3].lo == pack(expected).lo && state.gpr[3].hi == pack(expected).hi,
+              "Compiled masked VSUB/aliased vector transfer differs");
+        const auto flags = ((mask&8)?0x80U:0U) | ((mask&2)?0x202U:0U) | ((mask&1)?0x11U:0U);
+        check(bus.read_cop2_control(17) == flags,"VSUB MAC lane flags differ");
+    }
+    check(bus.read_cop2_control(16) == 0x1c7,"VU current/sticky STATUS aggregation differs");
+    {
+        auto state=at(0x9f00); state.gpr[1]={~0ULL,~0ULL};
+        check(nt_generated_run(state,bus,3).reason == Stop::budget && state.gpr[3].lo == 0 &&
+              state.gpr[3].hi == 0x3f80000000000000ULL && bus.read_cop2_control(17) == 15,
+              "VF0 was modified or destination-zero flags were skipped");
+        check(bus.read_cop2_control(16) == 0x1c1,"VU sticky flags were lost");
+    }
+    // Independent exact-double oracle: exponent separation <= 20 keeps every
+    // subtraction exact in double. Adjust a rounded float toward zero if needed.
+    std::uint32_t seed=0x12345678;
+    for (unsigned sample=0;sample<512;++sample) {
+        const auto next = [&] { seed=seed*1664525U+1013904223U; return seed; };
+        const auto left=(next()&0x807fffffU)|((100U+sample%21)<<23);
+        const auto right=(next()&0x807fffffU)|((100U+(sample*7)%21)<<23);
+        const double exact=double(std::bit_cast<float>(left))-double(std::bit_cast<float>(right));
+        auto expected=std::bit_cast<std::uint32_t>(static_cast<float>(exact));
+        if (std::abs(double(std::bit_cast<float>(expected))) > std::abs(exact)) --expected;
+        auto state=at(0x9e00); state.gpr[1]=pack({left,0,0,0}); state.gpr[2]=pack({right,0,0,0});
+        check(nt_generated_run(state,bus,4).reason == Stop::budget &&
+              static_cast<std::uint32_t>(state.gpr[3].lo) == expected,"Finite VSUB disagrees with exact oracle");
+    }
+    for (const auto pair : {std::array<std::uint32_t,3>{0x3f800000,0x30800000,0x3f7fffff},
+                            std::array<std::uint32_t,3>{0x3f800000,0xb0800000,0x3f800000},
+                            std::array<std::uint32_t,3>{0x3f800000,0x00800000,0x3f7fffff},
+                            std::array<std::uint32_t,3>{0,0x80000001,0}}) {
+        auto state=at(0x9e00); // x lane only; disabled lanes contain unsupported exponents.
+        state.gpr[1]=pack({pair[0],0x7fc00000,0x7fc00000,0x7fc00000});
+        state.gpr[2]=pack({pair[1],0x7fc00000,0x7fc00000,0x7fc00000});
+        check(nt_generated_run(state,bus,4).reason == Stop::budget &&
+              static_cast<std::uint32_t>(state.gpr[3].lo) == pair[2],"VU rounding/denormal handling differs");
+    }
+    for (const auto pair : {std::array<std::uint32_t,2>{0x7fc00000,0},
+                            std::array<std::uint32_t,2>{0x7f7fffff,0xff7fffff}}) {
+        auto state=at(0x9ee0);
+        state.gpr[1]=pack({0x3f800000,pair[0],0,0}); state.gpr[2]=pack({0,pair[1],0,0});
+        const auto flags=bus.read_cop2_control(17), status=bus.read_cop2_control(16);
+        check(nt_generated_run(state,bus,4).reason == Stop::memory_fault && state.pc == 0x9ee8 && state.executed == 2 &&
+              bus.read_cop2_vector(2).lo == state.gpr[2].lo && bus.read_cop2_control(17) == flags &&
+              bus.read_cop2_control(16) == status,"Unsupported VSUB partially committed lanes/flags");
+    }
+    auto state=at(0x9f20); state.set(1,0x180000); state.set(2,0x180020);
+    bus.store_quad(0x180000,{0x1122334455667788ULL,0x8877665544332211ULL});
+    check(nt_generated_run(state,bus,2).reason == Stop::budget &&
+          bus.load_quad(0x180020).lo == 0x1122334455667788ULL &&
+          bus.load_quad(0x180020).hi == 0x8877665544332211ULL,"LQC2/SQC2 lost vector bits");
+    const auto flags = bus.read_cop2_control(17);
+    bus.write_cop2_vector(5,{~0ULL,~0ULL}); state=at(0x9f30);
+    check(nt_generated_run(state,bus,1).reason == Stop::budget &&
+          bus.read_cop2_vector(5).lo == 0xffffffff55667788ULL &&
+          bus.read_cop2_vector(5).hi == 0xffffffff44332211ULL && bus.read_cop2_control(17) == flags,
+          "VMOVE changed disabled lanes or flags");
+    check(nt_generated_run(state,bus,1).reason == Stop::budget &&
+          bus.read_cop2_vector(5).lo == 0x44332211ffffffffULL &&
+          bus.read_cop2_vector(5).hi == 0x55667788ffffffffULL && bus.read_cop2_control(17) == flags,
+          "Aliased VMR32 did not rotate all lanes or preserved flags incorrectly");
+}
 void test(RamBus& bus) {
+    for (unsigned upper=0;upper<2;++upper) {
+        for (unsigned kind=0;kind<3;++kind) {
+            auto state=at(0xb600+upper*64+kind*16);
+            state.gpr[1]={0x1716151413121110ULL,0x2726252423222120ULL};
+            state.gpr[2]={0x0706050403020100ULL,0x3736353433323130ULL};
+            const auto a=state.gpr[1],b=state.gpr[2];
+            std::array<std::uint8_t,16> expected{};
+            const unsigned bytes=1U<<kind;
+            for (unsigned index=0;index<16;++index) {
+                const bool left=((index/bytes)&1)!=0;
+                const auto source=left ? a : b;
+                const auto offset=(index/(bytes*2))*bytes+index%bytes;
+                expected[index]=static_cast<std::uint8_t>((upper ? source.hi : source.lo)>>(offset*8));
+            }
+            check(nt_generated_run(state,bus,1).reason==Stop::budget,"Packed interleave unsupported");
+            for (unsigned index=0;index<16;++index)
+                check(static_cast<std::uint8_t>((index<8 ? state.gpr[2].lo : state.gpr[2].hi)>>((index%8)*8))==expected[index],
+                      "Packed interleave lane order or aliased destination differs");
+        }
+    }
+    for (const auto pair : {std::array<std::uint32_t,2>{0,0x80000000}, {0x3f800000,0xbf800000},
+                            {0xbf800000,0xc0000000}, {1,0}, {0x80000000,0x80000001},
+                            {0x7fffffff,0x7f800000}, {0xff800000,0xffffffff}}) {
+        for (unsigned reverse=0;reverse<2;++reverse) {
+            auto state=at(0xb580); state.fpr[1]=pair[reverse]; state.fpr[2]=pair[1-reverse]; state.fcr31=0xffffffff;
+            check(nt_generated_run(state,bus,1).reason==Stop::budget && state.fpr[1]==pair[0] &&
+                  state.fcr31==0xffff3fff,"MAX.S raw ordering, alias or flags differ");
+            state.pc=0xb584; state.fpr[1]=pair[reverse]; state.fpr[2]=pair[1-reverse];
+            check(nt_generated_run(state,bus,1).reason==Stop::budget && state.fpr[2]==pair[1],"MIN.S raw ordering or alias differs");
+        }
+    }
+    for (const auto pair : {std::array<std::uint32_t,2>{0x3ff33333,1}, {0xbff33333,0xffffffff},
+                            {0x80000001,0}, {0x3f000000,0}, {0x4effffff,0x7fffff80},
+                            {0x4f000000,0x7fffffff}, {0xcf000000,0x80000000},
+                            {0x7fc12345,0x7fffffff}, {0xffc12345,0x80000000}}) {
+        auto state=at(0xb560); state.fpr[1]=pair[0]; state.fcr31=0xffffffff;
+        check(nt_generated_run(state,bus,1).reason==Stop::budget && state.fpr[1]==pair[1] && state.fcr31==0xffffffff,
+              "CVT.W.S truncation, signed saturation, alias or flags differ");
+    }
+    for (unsigned subtract=0;subtract<2;++subtract) {
+        for (const auto values : {std::array<std::uint32_t,4>{0x3f800000,0x3f000000,0x3fc00000,0},
+                                  {0xbf800000,0x3f800000,0,0}, {0x80000000,0x80000000,0x80000000,0},
+                                  {0x00800001,0x80800000,0,0x4008}, {0x3f800000,0x80000001,0x3f800000,0}}) {
+            auto state=at(0xb540+subtract*16); state.fpr[1]=values[0];
+            state.fpr[2]=values[1]^(subtract ? 0x80000000U : 0); state.fcr31=0x83c070;
+            check(nt_generated_run(state,bus,1).reason==Stop::budget && state.fpr[2]==values[2] &&
+                  state.fcr31==(0x830070U|values[3]),"Scalar add/sub alias, result or flags differ");
+        }
+        auto state=at(0xb540+subtract*16); state.fpr[1]=0x7f7fffff;
+        state.fpr[2]=0x7f7fffff^(subtract ? 0x80000000U : 0); state.fcr31=0x12345678;
+        const auto original=state.fpr;
+        check(nt_generated_run(state,bus,1).reason==Stop::memory_fault && state.fpr==original &&
+              state.fcr31==0x12345678 && state.executed==0,"Scalar add/sub overflow partially committed");
+    }
+    std::uint32_t division_seed=0x9137a5;
+    for (unsigned sample=0;sample<512;++sample) {
+        const auto operand=[&]() {
+            division_seed=division_seed*1664525U+1013904223U;
+            return (division_seed&0x807fffffU) | ((110U+(division_seed>>24)%31U)<<23);
+        };
+        auto state=at(0xb520); state.fpr[1]=operand(); state.fpr[2]=operand();
+        const auto expected=static_cast<float>(static_cast<double>(std::bit_cast<float>(state.fpr[1])) /
+                                               static_cast<double>(std::bit_cast<float>(state.fpr[2])));
+        check(nt_generated_run(state,bus,1).reason==Stop::budget && state.fpr[2]==std::bit_cast<std::uint32_t>(expected),
+              "Finite DIV.S corpus differs from nearest rounding");
+    }
+    for (const auto values : {std::array<std::uint32_t,4>{0x3f800000,0x40400000,0x3eaaaaab,0},
+                              {0xbf800000,0x40000000,0xbf000000,0}, {0,0,0x7f7fffff,0x20040},
+                              {0xbf800000,0,0xff7fffff,0x10020}, {0x80000001,0x3f800000,0x80000000,0},
+                              {0x00800000,0x40000000,0,0}}) {
+        auto state=at(0xb520); state.fpr[1]=values[0]; state.fpr[2]=values[1]; state.fcr31=0x83c018;
+        check(nt_generated_run(state,bus,1).reason==Stop::budget && state.fpr[2]==values[2] &&
+              state.fcr31==(0x80c018U|values[3]),"DIV.S result, alias or exception flags differ");
+    }
+    for (const auto pair : {std::array<std::uint32_t,2>{0x7f800000,0x3f800000}, {0x7f7fffff,0x00800000}}) {
+        auto state=at(0xb520); state.fpr[1]=pair[0]; state.fpr[2]=pair[1]; state.fcr31=0xffffffff;
+        check(nt_generated_run(state,bus,1).reason==Stop::memory_fault && state.executed==0 &&
+              state.fpr[2]==pair[1] && state.fcr31==0xffffffff,"DIV.S failure partially committed state");
+    }
+    for (const auto pair : {std::array<std::uint32_t,2>{0,0}, {1,0x3f800000}, {0xffffffff,0xbf800000},
+                            {0x7fffffff,0x4effffff}, {0x80000000,0xcf000000},
+                            {0x01000003,0x4b800001}, {0xfefffffd,0xcb800001}}) {
+        auto state=at(0xb500); state.fpr[1]=pair[0]; state.fcr31=0xffffffff;
+        check(nt_generated_run(state,bus,2).reason==Stop::budget && state.pc==0xb50c &&
+              !state.delay_slot && state.fpr[1]==pair[1] && state.fcr31==0xffffffff,
+              "CVT.S.W chop rounding, alias, flags or delay continuation differs");
+    }
+    bus.write_performance(0,0x12345678);
+    for (unsigned selector=0;selector<64;++selector) {
+        auto state=at(0xb000+selector*16); state.set(1,selector&1 ? 0xfedcba98 : selector ? 0xffffffff : 0x12345678);
+        state.gpr[2].hi=0xaabbccdd;
+        check(nt_generated_run(state,bus,2).reason==Stop::budget &&
+              state.gpr[2].lo==sx32(selector&1 ? 0xfedcba98 : 0x12345678) && state.gpr[2].hi==0xaabbccdd,
+              "Performance register selector/sign extension differs");
+    }
+    auto performance=at(0xb000); performance.set(1,0x80000040);
+    check(nt_generated_run(performance,bus,1).reason==Stop::memory_fault && performance.executed==0 &&
+          bus.read_performance(0)==0x12345678,"Unsupported performance counting changed control state");
+    bus.write_performance(1,0); bus.write_performance(3,0);
+    bus.write_performance(0,0x80031024); // Kernel cycles and coherent instruction-cache misses.
+    auto counted=at(0xb014); counted.cop0_status=0;
+    check(nt_generated_run(counted,bus,1).reason==Stop::budget && counted.gpr[2].lo==0 &&
+          bus.read_performance(1)==1 && bus.read_performance(3)==0,"Cycle counter/read ordering differs");
+    bus.advance_performance(4,9); bus.advance_performance(0x10,9);
+    check(bus.read_performance(1)==1,"Counter ignored ERL or privilege gate");
+    bus.write_performance(1,0x7ffffffe); bus.advance_performance(0,1);
+    bool overflow=false;
+    try { bus.advance_performance(0,1); } catch (const MemoryFault&) { overflow=true; }
+    check(overflow && bus.read_performance(1)==0x7fffffff,"Counter overflow silently wrapped");
+    bus.write_performance(0,0);
+    std::uint32_t multiply_seed=0x51480327;
+    for (unsigned sample=0;sample<512;++sample) {
+        const auto operand=[&]() {
+            multiply_seed=multiply_seed*1664525U+1013904223U;
+            return (multiply_seed & 0x807fffffU) | ((100U+(multiply_seed>>24)%51U)<<23);
+        };
+        auto state=at(0xae00); state.fpr[1]=operand(); state.fpr[2]=operand();
+        const double exact=static_cast<double>(std::bit_cast<float>(state.fpr[1])) *
+                           static_cast<double>(std::bit_cast<float>(state.fpr[2]));
+        float expected=static_cast<float>(exact);
+        if (std::abs(static_cast<double>(expected)) > std::abs(exact))
+            expected=std::nextafter(expected,0.0F);
+        check(nt_generated_run(state,bus,2).reason == Stop::budget &&
+              state.fpr[1] == std::bit_cast<std::uint32_t>(expected),"Finite MUL.S corpus differs from exact-product chop rounding");
+    }
+    for (const auto values : {
+        std::array<std::uint32_t,4>{0x3fc00000,0xc0200000,0xc0700000,0},
+        std::array<std::uint32_t,4>{0x3f800001,0x3f800001,0x3f800002,0},
+        std::array<std::uint32_t,4>{0x80000001,0x3f800000,0x80000000,0},
+        std::array<std::uint32_t,4>{0x00800000,0x3f000000,0,0x4008},
+        std::array<std::uint32_t,4>{0x80800000,0x00800000,0x80000000,0x4008}}) {
+        auto state=at(0xae00); state.fpr[1]=values[0]; state.fpr[2]=values[1]; state.fcr31=0x80c070;
+        check(nt_generated_run(state,bus,2).reason == Stop::budget && state.pc == 0xae0c &&
+              !state.delay_slot && state.fpr[1] == values[2] && state.fpr[2] == values[1] &&
+              state.fcr31 == (0x800070U | values[3]),"MUL.S alias, delay slot, result or flags differ");
+    }
+    for (const auto pair : {std::array<std::uint32_t,2>{0x7f800000,0},
+                            std::array<std::uint32_t,2>{0x7f7fffff,0x40000000}}) {
+        auto state=at(0xae00); state.fpr[1]=pair[0]; state.fpr[2]=pair[1]; state.fcr31=0xffffffff;
+        check(nt_generated_run(state,bus,2).reason == Stop::memory_fault && state.pc == 0xae04 &&
+              state.delay_slot && state.branch_pc == 0xae00 && state.executed == 1 &&
+              state.fpr[1] == pair[0] && state.fcr31 == 0xffffffff,"MUL.S failure partially committed state");
+    }
+    for (unsigned kind=0;kind<4;++kind) {
+        for (const auto pair : {std::array<std::uint32_t,2>{0xbf800000,0x3f800000},
+                                std::array<std::uint32_t,2>{0x80000001,0},
+                                std::array<std::uint32_t,2>{0x7fffffff,0x7f7fffff}}) {
+            auto state=at(0xad00+kind*32); state.fpr[1]=pair[0]; state.fpr[2]=pair[1]; state.fcr31=0x1234;
+            const bool equal=pair[0]!=0xbf800000, less=!equal;
+            const bool condition=kind==1 ? equal : kind==2 ? less : kind==3;
+            check(nt_generated_run(state,bus,1).reason == Stop::budget &&
+                  state.fcr31 == (0x1234U | (condition ? 0x800000U : 0)),"Scalar compare condition/flags differ");
+            const bool taken=(kind&1) ? condition : !condition;
+            const bool annul=kind>=2 && !taken;
+            check(nt_generated_run(state,bus,annul ? 1 : 2).reason == Stop::budget &&
+                  state.gpr[4].lo == (annul ? 0 : 1) && state.pc == 0xad00+kind*32+(taken ? 16 : 12),
+                  "BC1 branch target/delay-slot annul differs");
+        }
+    }
+    for (const auto bits : {0U,0x80000000U,0xffc12345U,0x3f800000U}) {
+        auto state=at(0xac00); state.fpr[3]=bits; state.fcr31=0xffffffff;
+        check(nt_generated_run(state,bus,1).reason == Stop::budget && state.fpr[4] == bits && state.fcr31 == 0xffffffff,"MOV.S altered bits/flags");
+        check(nt_generated_run(state,bus,2).reason == Stop::budget && state.fpr[4] == (bits&0x7fffffffU) &&
+              state.fpr[5] == (bits|0x80000000U) && state.fcr31 == 0xffff3fff,"Scalar sign operations altered payload/flags");
+    }
+    for (const auto bits : {0U,0x80000000U,0x7fc12345U,0xffffffffU}) {
+        bus.store(0x180000,4,bits); bus.store(0x180008,8,0xaabbccdd00000000ULL);
+        auto state = at(0x9c00); state.set(1,0xa0180004); state.set(2,123);
+        check(nt_generated_run(state,bus,2).reason == Stop::budget && state.fpr[0] == bits &&
+              bus.load(0x180008,8) == (0xaabbccdd00000000ULL | bits) && state.gpr[2].lo == 123,
+              "Raw FPR memory roundtrip changed bits, adjacent bytes or GPRs");
+    }
+    {
+        auto state = at(0x9c00); state.set(1,0x180005); state.fpr[0] = 123;
+        check(nt_generated_run(state,bus,1).reason == Stop::memory_fault && state.fpr[0] == 123 && state.executed == 0,
+              "Misaligned LWC1 changed state");
+        state = at(0x9c10); state.set(1,0x180001); state.fpr[31] = 42;
+        check(nt_generated_run(state,bus,2).reason == Stop::memory_fault && state.delay_slot && state.pc == 0x9c14 && state.executed == 1,
+              "SWC1 delay-slot fault lost branch state");
+    }
     for (auto pc : {0x9a00U,0x9a10U,0x9a20U}) {
         auto state=at(pc); state.set(1,pc==0x9a10 ? 0x8000000000000000ULL : 0x7fffffffffffffffULL);
         state.set(2,1); state.gpr[3]={17,23};
@@ -350,6 +632,35 @@ void handlers(RamBus& bus) {
     check(kernel.handler(0x90,bus) == 0, "Handler removal failed");
     s.gpr[4].lo = 256; s.gpr[5].lo = 0x6000;
     check(!kernel.service(s,bus), "Out-of-range SetSyscall accepted");
+}
+void sleep_interrupt_wakeup() {
+    nt::hardware::SystemBus bus;
+    nt::kernel::Kernel kernel;
+    for (const auto& [pc,word] : fixture::words()) bus.store(pc,4,word);
+    State s;
+    const auto service=[&](unsigned call,unsigned a0,unsigned a1) {
+        s.set(3,call); s.set(4,a0); s.set(5,a1);
+        check(kernel.service(s,bus),"Sleep fixture service unsupported");
+    };
+    s.set(6,0x1000); s.set(7,0x3000); s.set(8,0x2000);
+    service(0x3c,0,0x1fff000);
+    s.set(6,0xffffffff); s.set(7,0);
+    service(0x10,9,0xaf40); service(0x14,9,0);
+    kernel.initialize_cpu(s); s.pc=0xaf00; s.set(3,0x32); s.set(29,0x1fffd60);
+    s.gpr[16]={17,99}; s.fpr[4]=0x12345678;
+    bus.write_performance(0,0x8000003e);
+    auto result=nt::kernel::run(nt_generated_run,s,bus,kernel,20);
+    check(result.stop.reason==Stop::budget && kernel.waiting() && s.executed==2 &&
+          s.pc==0xaf10 && !s.delay_slot && s.gpr[16].lo==17 && bus.read_performance(1)==20,
+          "Sleep executed mainline, lost delay continuation or skipped idle cycles");
+    service(0x30,1,0x5000);
+    check(bus.load(0x5000,4)==4 && bus.load(0x5024,4)==1,"Sleep wait status differs");
+    bus.store(0x10000020,4,10); bus.store(0x10000010,4,0x180);
+    result=nt::kernel::run(nt_generated_run,s,bus,kernel,100);
+    check(result.stop.reason==Stop::unsupported && s.pc==0xaf14 && !kernel.waiting() &&
+          kernel.completed_interrupts()==1 && s.executed==8 && s.gpr[16].lo==18 &&
+          s.gpr[16].hi==99 && s.fpr[4]==0x12345678 && bus.read_performance(1)>20,
+          "Timer wakeup lost context/counter progress or executed idle instructions");
 }
 void thread_switches(RamBus& bus) {
     nt::kernel::Kernel kernel;
@@ -571,6 +882,7 @@ int main() {
         handlers(bus);
         extended_operations(bus);
         thread_switches(bus);
+        sleep_interrupt_wakeup();
         multiply_divide(bus);
         unaligned_doublewords(bus);
         leading_sign_bits(bus);
@@ -578,6 +890,7 @@ int main() {
         sif_interrupt_delivery();
         timer_interrupt_delivery();
         vu_initialization();
+        vu_subtraction();
         for (const auto line : {0U,2U,3U}) scanout_interrupt_delivery(line);
         semaphore_switches(bus);
         std::cout << "Compiled native instruction, memory, control-flow and stop-boundary tests passed\n";

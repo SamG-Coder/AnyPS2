@@ -1,5 +1,6 @@
 #include <nt/system_bus.hpp>
 #include <nt/kernel.hpp>
+#include <nt/iop_cpu.hpp>
 #include <iostream>
 
 namespace {
@@ -33,6 +34,40 @@ void registers() {
     bus.store(0x1000c020,4,0x12345);
     check(bus.load(0x1000c020,4) == 0x2345,"QWC not truncated to 16 bits");
 }
+void iop_sbus_access() {
+    for (const auto alias : {0x1d000000U,0x9d000000U,0xbd000000U}) {
+        SystemBus bus;
+        nt::iop::BootstrapDevices devices(&bus.sif());
+        nt::Bytes ram(2*1024*1024);
+        const std::uint32_t code[]{0x8d020000,0,0xad090010,0xad0a0020,0xad0b0030,0x8d030060,0};
+        for (unsigned i=0;i<std::size(code);++i)
+            for (unsigned byte=0;byte<4;++byte) ram[i*4+byte]=static_cast<std::uint8_t>(code[i]>>(byte*8));
+        bus.store(0x1000f200,4,0x1234); bus.store(0x1000f220,4,5);
+        nt::iop::Cpu cpu; cpu.registers[8]=alias; cpu.registers[9]=0x5678;
+        cpu.registers[10]=1; cpu.registers[11]=7;
+        const auto result=nt::iop::run(cpu,ram,std::size(code),&devices);
+        check(result.reason==nt::iop::CpuStop::budget && cpu.registers[2]==0x1234 && cpu.registers[3]==0 &&
+              bus.load(0x1000f210,4)==0x5678 && bus.load(0x1000f220,4)==4 && bus.load(0x1000f230,4)==7,
+              "IOP guest SBUS reads/writes did not share EE state");
+        bus.store(0x1000f230,4,2);
+        check(devices.read(0x1d000030,4)==5,"EE flag acknowledgement was invisible to IOP");
+        check(devices.write(0x1d000040,4,0x20),"IOP control toggle was rejected");
+        bus.store(0x1000f240,4,0x100);
+        check((*devices.read(0x1d000040,4)&0x2120)==0x2120 && (bus.load(0x1000f240,4)&0x2020)==0x2020,
+              "EE control write erased IOP control state");
+        check(devices.write(0x1d000040,4,0x20) && (*devices.read(0x1d000040,4)&0x2120)==0x2100,
+              "IOP control toggle did not retain EE state");
+        const auto before=devices.read(0x1d000040,4);
+        check(!devices.write(0x1d000040,4,0x100) && !devices.write(0x1d000040,2,0x20) &&
+              !devices.write(0x1d000000,4,0) && !devices.read(0x1d000050,4) &&
+              devices.read(0x1d000040,4)==before && bus.load(0x1000f200,4)==0x1234,
+              "Rejected SBUS access mutated shared state");
+        check(devices.write(0x1d000060,4,0xffffffff) && devices.read(0x1d000060,4)==0,
+              "SBUS zero-read register retained a write");
+    }
+    nt::iop::BootstrapDevices isolated;
+    check(!isolated.read(0x1d000060,4),"Missing SBUS attachment fabricated a register value");
+}
 void inbound() {
     SystemBus bus;
     std::vector<std::uint8_t> payload(4096);
@@ -47,6 +82,23 @@ void inbound() {
     check(bus.load(0x4000,4) == 0 && (bus.load(0x1000c000,4) & 0x100),"DMA ran while globally disabled");
     bus.store(0x1000e000,4,1);
     bus.store(0x1000e010,4,1U << 21);
+    bus.advance_cycles(8);
+    const auto remaining=bus.load(0x1000c020,4), address=bus.load(0x1000c010,4);
+    check(remaining>0 && remaining<256,"Pause fixture did not reach a partial payload");
+    nt::kernel::Kernel kernel;
+    nt::runtime::State state; state.gpr[3].lo=0x6b; state.gpr[2].lo=0x1234;
+    check(kernel.service(state,bus) && state.gpr[2].lo==0x1234,"SifStopDma result semantics differ");
+    check(kernel.service(state,bus),"Repeated SifStopDma failed");
+    bus.store_quad(0x8000,{0x12345678,0});
+    const std::array<nt::runtime::SifTransfer,1> outgoing{{{0x8000,0x3000,16,0}}};
+    const auto outgoing_id=bus.submit_sif(outgoing);
+    bus.advance_cycles(128);
+    check(outgoing_id && bus.sif_status(outgoing_id)==-1 && bus.sif().iop_memory()[0x3000]==0x78,
+          "Stopping SIF0 also stopped the independent SIF1 transmitter");
+    check(bus.load(0x1000c020,4)==remaining && bus.load(0x1000c010,4)==address &&
+          !(bus.load(0x1000e010,4)&32) && !(bus.load(0x1000c000,4)&0x100),
+          "Stopped SIF0 consumed input or fabricated completion");
+    bus.store(0x1000c000,4,bus.load(0x1000c000,4)|0x100);
     bus.advance_cycles(600);
     for (unsigned i = 0; i < payload.size(); ++i)
         check(bus.load(0x4000+i,1) == payload[i],"SIF0 corrupted payload");
@@ -100,6 +152,7 @@ void kernel_services() {
         return kernel.service(state,bus);
     };
     check(call(0x78) && bus.load(0x1000c000,4) == 0x184 && bus.load(0x1000e000,4) == 1,"SIF receive chain setup failed");
+    check(bus.load(0x1000f220,4)==0x10000,"EE SIF initialization did not publish transport readiness");
     check(call(0x7a,2) && state.gpr[2].lo == 0x1000 && bus.load(0x1000f230,4) == 0x30000,"IOP command service did not publish readiness");
     check(!call(0x78),"SIF rearm discarded an active receive");
     bus.advance_cycles(20);
@@ -215,7 +268,7 @@ void malformed_command() {
 }
 }
 int main() {
-    try { registers(); inbound(); outbound(false); outbound(true); invalid_chain(); kernel_services(); command_service(); hle_jobs(); source_chain(); malformed_command();
+    try { registers(); iop_sbus_access(); inbound(); outbound(false); outbound(true); invalid_chain(); kernel_services(); command_service(); hle_jobs(); source_chain(); malformed_command();
         std::cout << "SIF register, DMA, FIFO and IOP transport tests passed\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

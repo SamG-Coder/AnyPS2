@@ -59,6 +59,19 @@ void test() {
     bool status_fault = false;
     try { call(0x30,2,0x1fffff0); } catch (const nt::runtime::MemoryFault&) { status_fault = true; }
     check(status_fault && call(0x30,2) == 2, "Invalid status buffer corrupted a ready thread");
+    check(call(0x33,0)==~std::uint64_t(0) && call(0x33,4)==~std::uint64_t(0),"Wakeup accepted invalid/self target");
+    check(call(0x33,2)==2 && call(0x33,2)==2,"Ready thread did not queue wakeups");
+    call(0x30,2,0x5000);
+    check(memory.load(0x502c,4)==2,"Wakeup count missing in thread status");
+    check(call(0x35,2)==2 && call(0x36,2)==0,"CancelWakeup did not return and clear count");
+    check(call(0x33,2)==2,"Queued wakeup setup failed");
+    call(0x29,2,0); kernel.schedule(state);
+    check(call(0x2f)==2 && call(0x32)==2 && !kernel.waiting(),"Sleep failed to consume queued wakeup");
+    check(call(0x32)==2 && kernel.waiting(),"Sleep failed to block");
+    kernel.schedule(state);
+    check(call(0x2f)==4 && call(0x34,2)==2,"Sleeping thread did not wake");
+    kernel.schedule(state);
+    check(call(0x2f)==2 && !kernel.waiting(),"Wakeup failed to restore higher-priority thread");
 }
 }
 int main() {

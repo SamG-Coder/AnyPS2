@@ -13,6 +13,8 @@ public:
     explicit Service(const std::filesystem::path& image) : disc_(image) {}
     Reply call(std::uint32_t method, ByteView arguments, std::uint32_t result_size);
     Statistics statistics() const { return statistics_; }
+    void reset() { handles_.clear(); }
+    Bytes read_disc_file(const std::string& guest_path, std::uint64_t limit);
 private:
     struct Handle { disc::Entry entry; std::uint32_t offset = 0; };
     disc::Iso9660 disc_;

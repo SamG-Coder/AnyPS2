@@ -27,20 +27,46 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
         if (w == 0x42000038) i.op = Op::ei;
         if (w == 0x42000039) i.op = Op::di;
         if (w == 0x42000018) i.op = Op::eret;
-        if ((i.rd == 12 || i.rd == 14 || i.rd == 30) && (w & 0x7ff) == 0) {
+        if (((i.rd == 12 || i.rd == 14 || i.rd == 30) && (w & 0x7ff) == 0) ||
+            (i.rd == 25 && (w & 0x7c0) == 0)) {
             if (i.rs == 0) i.op = Op::mfc0;
             if (i.rs == 4) i.op = Op::mtc0;
         }
     } else if (opcode == 17) {
         switch (i.rs) { F(0,mfc1); F(2,cfc1); F(4,mtc1); F(6,ctc1); }
         if (i.rs == 16 && fn == 24) i.op = Op::adda_s;
+        if (i.rs == 16 && fn == 2) i.op = Op::mul_s;
+        if (i.rs == 16 && fn == 3) i.op = Op::div_s;
+        if (i.rs == 16 && fn == 0) i.op = Op::add_s;
+        if (i.rs == 16 && fn == 1) i.op = Op::sub_s;
+        if (i.rs == 16 && fn == 40) i.op = Op::max_s;
+        if (i.rs == 16 && fn == 41) i.op = Op::min_s;
+        if (i.rs == 20 && i.rt == 0 && fn == 32) i.op = Op::cvt_s_w;
+        if (i.rs == 16 && i.rt == 0 && fn == 36) i.op = Op::cvt_w_s;
+        if (i.rs == 16 && i.sa == 0 && (fn == 48 || fn == 50 || fn == 52 || fn == 54)) i.op = Op::compare_s;
+        if (i.rs == 8) {
+            switch (i.rt) { F(0,bc1f); F(1,bc1t); F(2,bc1fl); F(3,bc1tl); }
+        }
+        if (i.rs == 16 && i.rt == 0) {
+            if (fn == 5) i.op = Op::abs_s;
+            if (fn == 6) i.op = Op::mov_s;
+            if (fn == 7) i.op = Op::neg_s;
+        }
     } else if (opcode == 18) {
         // Bit zero selects interlock. No VU execution is currently accepted,
         // so either form observes an idle unit at the device boundary.
         if ((w & 0x7fe) == 0) {
             if (i.rs == 2) i.op = Op::cfc2;
             if (i.rs == 6) i.op = Op::ctc2;
+            if (i.rs == 1) i.op = Op::qmfc2;
+            if (i.rs == 5) i.op = Op::qmtc2;
         }
+        if (i.rs >= 16 && fn == 44) i.op = Op::vsub;
+        if (i.rs >= 16 && fn == 40) i.op = Op::vadd;
+        if (i.rs >= 16 && fn < 4) i.op = Op::vadd_bc;
+        if (i.rs >= 16 && fn >= 4 && fn < 8) i.op = Op::vsub_bc;
+        if (i.rs >= 16 && (w & 0x7ff) == 0x33c) i.op = Op::vmove;
+        if (i.rs >= 16 && (w & 0x7ff) == 0x33d) i.op = Op::vmr32;
     } else if (opcode == 28) {
         if (fn == 4 && i.rt == 0 && i.sa == 0) i.op = Op::plzcw;
         if (fn == 8 && i.sa == 30) i.op = Op::pext5;
@@ -48,6 +74,12 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
         if (fn == 8 && i.sa == 19) i.op = Op::ppacw;
         if (fn == 8 && i.sa == 23) i.op = Op::ppach;
         if (fn == 8 && i.sa == 27) i.op = Op::ppacb;
+        if (fn == 8 && i.sa == 18) i.op = Op::pextlw;
+        if (fn == 8 && i.sa == 22) i.op = Op::pextlh;
+        if (fn == 8 && i.sa == 26) i.op = Op::pextlb;
+        if (fn == 40 && i.sa == 18) i.op = Op::pextuw;
+        if (fn == 40 && i.sa == 22) i.op = Op::pextuh;
+        if (fn == 40 && i.sa == 26) i.op = Op::pextub;
         switch (fn) { F(16,mfhi1); F(17,mthi1); F(18,mflo1); F(19,mtlo1); }
         if (fn == 9 && i.sa == 18) i.op = Op::pand;
         if (fn == 9 && i.sa == 19) i.op = Op::pxor;
@@ -73,6 +105,8 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
         F(34,lwl); F(38,lwr); F(42,swl); F(46,swr);
         F(30,lq); F(31,sq); F(32,lb); F(33,lh); F(35,lw); F(36,lbu); F(37,lhu); F(39,lwu);
         F(40,sb); F(41,sh); F(43,sw); F(55,ld); F(63,sd);
+        F(49,lwc1); F(57,swc1);
+        F(54,lqc2); F(62,sqc2);
         F(44,sdl); F(45,sdr);
 #undef F
         }
@@ -80,9 +114,9 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
     return i;
 }
 bool Instruction::branch() const {
-    return (op >= Op::j && op <= Op::bgezl) || indirect();
+    return (op >= Op::j && op <= Op::bgezl) || (op >= Op::bc1f && op <= Op::bc1tl) || indirect();
 }
-bool Instruction::likely() const { return op >= Op::beql && op <= Op::bgezl; }
+bool Instruction::likely() const { return (op >= Op::beql && op <= Op::bgezl) || op == Op::bc1fl || op == Op::bc1tl; }
 bool Instruction::indirect() const { return op == Op::jr || op == Op::jalr; }
 bool Instruction::terminal() const { return op == Op::unsupported || op == Op::breakpoint || op == Op::eret; }
 std::uint32_t Instruction::target() const {
@@ -106,12 +140,20 @@ std::string_view name(Op op) {
     N(mtsab); N(mtsah);
     N(mfc1); N(mtc1); N(cfc1); N(ctc1); N(adda_s);
     N(cfc2); N(ctc2);
+    N(lwc1); N(swc1);
+    N(qmfc2); N(qmtc2); N(lqc2); N(sqc2); N(vsub);
+    N(vmove);
+    N(vmr32);
+    N(vadd); N(vadd_bc); N(vsub_bc);
+    N(mov_s); N(abs_s); N(neg_s); N(mul_s); N(div_s); N(add_s); N(sub_s); N(max_s); N(min_s); N(cvt_s_w); N(cvt_w_s);
+    N(compare_s); N(bc1f); N(bc1t); N(bc1fl); N(bc1tl);
     N(pcpyh); N(pcpyld); N(pcpyud); N(ei); N(di); N(mfc0); N(mtc0);
     N(eret); N(plzcw); N(cache);
     N(sdl); N(sdr); N(lwl); N(lwr); N(swl); N(swr); N(add); N(sub); N(addi);
     N(pceqb); N(pceqh); N(pceqw);
     N(ppac5); N(pext5);
     N(ppacb); N(ppach); N(ppacw);
+    N(pextlb); N(pextlh); N(pextlw); N(pextub); N(pextuh); N(pextuw);
     N(dadd); N(dsub); N(daddi);
     }
 #undef N
