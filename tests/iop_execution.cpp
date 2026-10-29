@@ -15,6 +15,39 @@
 
 namespace {
 void check(bool value,const char* detail) { if (!value) throw std::runtime_error(detail); }
+void sif0_send() {
+    nt::iop::BootstrapDevices devices; devices.enable_sif0_send();
+    nt::Bytes ram(4096); std::deque<std::uint32_t> fifo;
+    fixture::put32(ram,0x100,0x80000200); fixture::put32(ram,0x104,5);
+    fixture::put32(ram,0x108,0x70000002); fixture::put32(ram,0x10c,0x6000);
+    for (unsigned i=0;i<5;++i) fixture::put32(ram,0x200+i*4,10+i);
+    devices.write(0x1f80152c,4,0x100);
+    check(devices.write(0x1f801528,4,0x01000701),"SIF0 source-chain start rejected");
+    check(!devices.send_sif0(fifo,ram) && fifo.empty(),"SIF0 ignored disabled priority");
+    devices.write(0x1f801570,4,0x800);
+    check(!devices.send_sif0(fifo,ram) && fifo.size()==4 && fifo[0]==0x70000002 && fifo[1]==0x6000 &&
+          devices.read(0x1f80152c,4)==0x110,"SIF0 EE tag or next descriptor address differs");
+    fifo.clear(); fifo.resize(128,0);
+    check(!devices.send_sif0(fifo,ram) && devices.read(0x1f801520,4)==0x200,
+          "SIF0 FIFO backpressure consumed payload");
+    fifo.clear(); devices.write(0x1f801528,4,0);
+    check(!devices.send_sif0(fifo,ram) && fifo.empty() && !devices.write(0x1f80152c,4,0x300),
+          "Paused SIF0 lost its pending descriptor");
+    devices.write(0x1f801528,4,0x01000701);
+    check(!devices.send_sif0(fifo,ram) && fifo==std::deque<std::uint32_t>{10,11,12,13},
+          "SIF0 resumed at the wrong payload position");
+    fifo.clear();
+    check(devices.send_sif0(fifo,ram) && fifo==std::deque<std::uint32_t>{14,11,12,13} &&
+          !(*devices.read(0x1f801528,4)&0x01000000) && (*devices.read(0x1f801574,4)&(1U<<26)) &&
+          (*devices.read(0x1f801070,4)&8),"SIF0 final padding or completion interrupt differs");
+    fifo.clear(); devices.write(0x1f80152c,4,0x100);
+    fixture::put32(ram,0x100,0x80000ffc); fixture::put32(ram,0x104,2);
+    devices.write(0x1f801528,4,0x01000701);
+    bool rejected=false;
+    try { devices.send_sif0(fifo,ram); } catch (const std::runtime_error&) { rejected=true; }
+    check(rejected && fifo.empty() && devices.read(0x1f80152c,4)==0x100,
+          "Invalid SIF0 extent partially emitted its packet");
+}
 void dma_interrupt_dispatch() {
     nt::Bytes ram(0x10000);
     nt::iop::BootstrapDevices devices;
@@ -1127,6 +1160,6 @@ void module_startup() {
 }
 }
 int main() {
-    try { dma_interrupt_dispatch(); kernel_mode_callback(); native_interrupt_dispatch(); thread_context_switch(); resource_directory(); unaligned_words(); cdvd_initialization(); sif1_receive(); timer_interrupts(); timer_initialization(); startup_dependencies(); provider_registration(); heaplib_service(); dmacman_service(); intrman_service(); archive_dependencies(); delays(); imported_call(); status_register(); device_access(); interrupt_delivery(); hilo_arithmetic(); cache_isolation(); module_startup(); reboot_bootstrap(); std::cout<<"IOP execution, linked guest call and IRX startup passed\n"; }
+    try { sif0_send(); dma_interrupt_dispatch(); kernel_mode_callback(); native_interrupt_dispatch(); thread_context_switch(); resource_directory(); unaligned_words(); cdvd_initialization(); sif1_receive(); timer_interrupts(); timer_initialization(); startup_dependencies(); provider_registration(); heaplib_service(); dmacman_service(); intrman_service(); archive_dependencies(); delays(); imported_call(); status_register(); device_access(); interrupt_delivery(); hilo_arithmetic(); cache_isolation(); module_startup(); reboot_bootstrap(); std::cout<<"IOP execution, linked guest call and IRX startup passed\n"; }
     catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

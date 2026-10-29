@@ -11,12 +11,8 @@ void validate_write(std::uint32_t address, std::uint32_t size) {
 }
 }
 Bytes Service::read_disc_file(const std::string& guest_path, std::uint64_t limit) {
-    if ((!guest_path.starts_with("cdrom0:") && !guest_path.starts_with("cdrom:")) ||
-        guest_path.find('\0')!=std::string::npos)
-        throw runtime::MemoryFault("FILEIO: expected a disc path");
-    const auto entry=disc_.find(guest_path.substr(guest_path.find(':')+1));
-    if (entry.directory) throw runtime::MemoryFault("FILEIO: expected a disc file");
-    return disc_.read(entry,limit);
+    try { return files_.read_file(guest_path,limit); }
+    catch (const disc::PathError& error) { throw runtime::MemoryFault(error.what()); }
 }
 Reply Service::call(std::uint32_t method, ByteView args, std::uint32_t result_size) {
     Reply reply;
@@ -39,50 +35,26 @@ Reply Service::call(std::uint32_t method, ByteView args, std::uint32_t result_si
         const auto end = std::find(args.begin()+4,args.end(),0);
         if (end == args.end() || end - (args.begin()+4) >= 256) throw runtime::MemoryFault("FILEIO: unterminated path");
         std::string path(args.begin()+4,end);
-        if (mode != 1) result = -30; // Read-only filesystem.
-        else if (!path.starts_with("cdrom0:") && !path.starts_with("cdrom:")) result = -19;
-        else {
-            path.erase(0,path.find(':')+1);
-            // ISO resolution rejects traversal; it never resolves host paths.
-            disc::Entry entry;
-            try { entry = disc_.find(path); }
-            catch (const disc::PathError&) { result = -2; }
-            if (!entry.name.empty()) {
-                if (entry.directory) result = -21;
-                else if (handles_.size() >= 64) result = -24;
-                else {
-                    std::uint32_t fd = 3;
-                    while (handles_.contains(fd)) ++fd;
-                    handles_.emplace(fd,Handle{entry}); result = static_cast<std::int32_t>(fd);
-                    ++statistics_.opens;
-                }
-            }
-        }
+        result=files_.open(path,mode);
+        if (result>=0) ++statistics_.opens;
     } else if (method == 1 || method == 2 || method == 4) {
         const auto fd = argument(0);
-        const auto found = handles_.find(fd);
-        if (found == handles_.end()) result = -9;
-        else if (method == 1) { handles_.erase(found); result = 0; }
-        else if (method == 4) {
-            const auto offset = std::bit_cast<std::int32_t>(argument(1));
-            const auto whence = argument(2);
-            const auto& handle = found->second;
-            const auto base = whence == 0 ? 0LL : whence == 1 ? std::int64_t(handle.offset) : std::int64_t(handle.entry.size);
-            const auto position = base + offset;
-            if (whence > 2 || position < 0 || position > 0x7fffffff) result = -22;
-            else { found->second.offset = static_cast<std::uint32_t>(position); result = static_cast<std::int32_t>(position); }
+        if (!files_.contains(fd)) result=-9;
+        else if (method==1) result=files_.close(fd);
+        else if (method==4) {
+            result=files_.seek(fd,std::bit_cast<std::int32_t>(argument(1)),argument(2));
         } else {
             const auto destination = argument(1), size = argument(2), fixup = argument(3);
             if (size > 0x100000) throw runtime::MemoryFault("FILEIO: read exceeds bounded transfer size");
             validate_write(destination,size);
             if (fixup) validate_write(fixup,16);
-            auto& handle = found->second;
-            const auto count = handle.offset >= handle.entry.size ? 0U : std::min(size,handle.entry.size-handle.offset);
-            if (count) reply.writes.push_back({destination,disc_.read_range(handle.entry,handle.offset,count)});
+            auto data=files_.read(fd,size);
+            const auto count=static_cast<std::uint32_t>(data.result);
+            if (count) reply.writes.push_back({destination,std::move(data.bytes)});
             // HLE sends every requested byte, including unaligned edges. The guest
             // read callback therefore has no prefix/suffix fragments to copy.
             if (fixup) reply.writes.push_back({fixup,Bytes(16,0)});
-            handle.offset += count; result = static_cast<std::int32_t>(count);
+            result = static_cast<std::int32_t>(count);
             statistics_.bytes_read += count;
         }
     } else if (method == 3 || method == 6 || method == 7 || method == 8 || method == 13 || method == 14) result = -30;

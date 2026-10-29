@@ -3,12 +3,10 @@
 #include <map>
 
 namespace nt::iop {
-struct ExportTable {
-    std::string name;
-    std::uint16_t version;
-    std::vector<std::uint32_t> functions;
-};
-ExportTable read_exports(const elf::IopModule& owner, std::uint32_t table_address);
+using ExportTable=elf::IopExports;
+inline ExportTable read_exports(const elf::IopModule& owner,std::uint32_t table_address) {
+    return elf::read_iop_exports(owner,table_address);
+}
 // Only explicitly registered export tables are visible to import binding.
 // This registry does not start modules or auto-register tables found in an image.
 class Libraries {

@@ -1,4 +1,5 @@
 #include <nt/iop_dma.hpp>
+#include <nt/binary.hpp>
 #include <algorithm>
 #include <stdexcept>
 
@@ -67,9 +68,11 @@ bool DmaController::write(std::uint32_t address,unsigned bytes,std::uint32_t val
         }
         const auto offset=(address-base)&~3U;
         if (channel==10 && offset!=8 && ((channels_[10][2]&0x01000000) || sif1_packet_)) return false;
-        // Only the connected SIF1 destination-chain receiver can accept START.
+        if (channel==9 && offset!=8 && ((channels_[9][2]&0x01000000) || sif0_packet_)) return false;
+        // Only connected SIF chain modes can accept START.
         if (offset==8 && (value&0x01000000) &&
-            (channel!=10 || !sif1_connected_ || (value&~0x40000000U)!=0x01000300)) return false;
+            !((channel==10 && sif1_connected_ && (value&~0x40000000U)==0x01000300) ||
+              (channel==9 && sif0_connected_ && value==0x01000701))) return false;
         reg=value;
         return true;
     }
@@ -104,6 +107,34 @@ bool DmaController::receive_sif1(std::deque<std::uint32_t>& fifo,std::span<std::
         channel[2]&=~0x01000000U;
         signal_completion(10);
     }
+    return true;
+}
+bool DmaController::send_sif0(std::deque<std::uint32_t>& fifo,std::span<const std::uint8_t> ram) {
+    auto& channel=channels_[9];
+    if (!sif0_connected_ || !(channel[2]&0x01000000) || !(priority2_&0x800) || fifo.size()>124) return false;
+    if (!sif0_packet_) {
+        const auto tag=channel[3];
+        if (tag%4 || tag>ram.size() || 24>ram.size()-tag)
+            throw std::runtime_error("IOP SIF0: invalid source tag extent");
+        const auto control=le32(ram,tag), source=control&0xffffff, words=le32(ram,tag+4)&0xfffff;
+        if (source%4 || source>ram.size() || std::uint64_t(words)*4>ram.size()-source)
+            throw std::runtime_error("IOP SIF0: invalid source payload extent");
+        // The EE consumes a full quadword; its last two words overlap the next
+        // IOP descriptor and are ignored as tag fields, but can supply padding.
+        for (unsigned i=0;i<4;++i) sif0_previous_[i]=le32(ram,tag+8+i*4);
+        for (auto word : sif0_previous_) fifo.push_back(word);
+        channel[3]+=16; channel[0]=source;
+        sif0_remaining_=words; sif0_end_=(control&0xc0000000U)!=0; sif0_packet_=true;
+    } else if (sif0_remaining_) {
+        const auto words=std::min(4U,sif0_remaining_);
+        auto packet=sif0_previous_;
+        for (unsigned i=0;i<words;++i) packet[i]=le32(ram,channel[0]+i*4);
+        for (auto word : packet) fifo.push_back(word);
+        channel[0]+=words*4; sif0_remaining_-=words; sif0_previous_=packet;
+    }
+    if (sif0_remaining_) return false;
+    sif0_packet_=false;
+    if (sif0_end_) { channel[2]&=~0x01000000U; signal_completion(9); }
     return true;
 }
 }

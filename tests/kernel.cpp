@@ -56,11 +56,14 @@ int main() {
         check(kernel.service(s,memory) && s.gpr[2].lo == 1, "Semaphore creation failed");
         s.gpr[3].lo = 0x44; s.gpr[4].lo = 1;
         check(kernel.service(s,memory), "Available semaphore wait failed");
-        check(!kernel.service(s,memory), "Blocking wait was falsely completed");
+        check(kernel.service(s,memory) && kernel.waiting(), "Empty wait did not suspend the last runnable thread");
+        kernel.schedule(s);
+        check(kernel.waiting(), "Scheduling falsely resumed an idle semaphore waiter");
         s.gpr[3].lo = 0x45;
         check(kernel.service(s,memory) && s.gpr[2].lo == ~std::uint64_t(0), "Empty semaphore poll failed");
         s.gpr[3].lo = static_cast<std::uint64_t>(-0x43LL);
-        check(kernel.service(s,memory) && s.gpr[2].lo == 1, "Interrupt signal alias failed");
+        check(kernel.service(s,memory) && s.gpr[2].lo == 1 && !kernel.waiting(), "Interrupt signal did not wake the waiter");
+        check(kernel.service(s,memory), "Signal failed to restore a free permit after waking the waiter");
         check(!kernel.service(s,memory), "Semaphore overflow silently accepted");
         s.gpr[3].lo = 0x47; s.gpr[5].lo = 0x5100;
         check(kernel.service(s,memory) && memory.load(0x5100,4) == 1 && memory.load(0x5104,4) == 1, "Semaphore status failed");

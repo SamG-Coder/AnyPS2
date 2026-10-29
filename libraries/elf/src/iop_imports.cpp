@@ -18,6 +18,7 @@ std::vector<IopImport> iop_imports(const IopModule& module) {
             throw std::runtime_error("IOP imports: invalid library name");
         const std::string library(field.begin(),end);
         const auto version=le16(bytes,at+8);
+        const auto table_offset=static_cast<std::uint32_t>(at);
         at+=20;
         for (;;) {
             require_range(bytes,at,8);
@@ -25,7 +26,7 @@ std::vector<IopImport> iop_imports(const IopModule& module) {
             if (!jump && !delay) break;
             if (jump!=0x03e00008 || (delay&0xffff0000)!=0x24000000)
                 throw std::runtime_error("IOP imports: invalid unbound import stub");
-            imports.push_back({library,version,static_cast<std::uint16_t>(delay),static_cast<std::uint32_t>(at)});
+            imports.push_back({library,version,static_cast<std::uint16_t>(delay),static_cast<std::uint32_t>(at),table_offset});
             at+=8;
         }
         at+=4; // The enclosing loop advances past the second terminator word.

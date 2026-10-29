@@ -1,0 +1,31 @@
+#include <nt/iop_codegen.hpp>
+#include <charconv>
+#include <iostream>
+#include <stdexcept>
+
+namespace {
+std::uint32_t parse_base(std::string_view value) {
+    if (value.starts_with("0x")) value.remove_prefix(2);
+    std::uint32_t base=0;
+    const auto parsed=std::from_chars(value.data(),value.data()+value.size(),base,16);
+    if (parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size()) throw std::runtime_error("Invalid relocation base");
+    return base;
+}
+}
+int main(int argc,char** argv) {
+    try {
+        std::filesystem::path output;
+        if (argc>=5 && std::string_view(argv[1])=="--bundle" && (argc-3)%2==0) {
+            output=argv[2];
+            std::vector<nt::iop_codegen::ModuleSource> inputs;
+            for (int at=3;at<argc;at+=2) inputs.push_back({argv[at+1],parse_base(argv[at])});
+            nt::iop_codegen::project_bundle(inputs,output);
+        } else if (argc==4 && std::string_view(argv[1])!="--bundle") {
+            output=argv[2];
+            nt::iop_codegen::project(argv[1],output,parse_base(argv[3]));
+        } else throw std::runtime_error("Usage: ps2-iop-recompile <module.irx> <new-output-directory> <base-hex>\n"
+            "   or: ps2-iop-recompile --bundle <new-output-directory> <base-hex> <module.irx> [<base-hex> <module.irx> ...]");
+        std::cout<<"Generated IOP LLVM project: "<<output.string()
+            <<"\nConfigure with CMake and -DANYPS2_ROOT=<source directory>, then build iop-native.\n";
+    } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
+}

@@ -8,6 +8,7 @@
 namespace nt::iop {
 Reboot::Reboot(ByteView image,Sbus* sbus) : image_(image.begin(),image.end()), ram_(2*1024*1024), devices_(sbus) {
     devices_.enable_sif1_receive();
+    devices_.enable_sif0_send();
     const auto files=disc::parse_reboot_image(image_);
     const auto found=std::find_if(files.begin(),files.end(),[](const auto& file) { return file.name=="SYSMEM"; });
     if (found==files.end()) throw std::runtime_error("IOP reboot: archive has no SYSMEM bootstrap module");

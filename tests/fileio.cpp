@@ -146,6 +146,7 @@ void exercise(const std::filesystem::path& path) {
           "IOP manager did not wait for a real DMA payload");
     reset_bus.store_quad(0x7000,{0x1122334455667788ULL,0xaabbccddeeff0011ULL});
     const std::array<nt::runtime::SifTransfer,1> payload_dma{{{0x7000,0x800,16,0}}};
+    reset_bus.store(0x1000c000,4,0x184);
     const auto payload_job=reset_bus.submit_sif(payload_dma);
     check(payload_job!=0,"Guest reboot payload could not enter SIF transport");
     rejected=false;
@@ -166,6 +167,9 @@ void exercise(const std::filesystem::path& path) {
           nt::le32(reset_bus.sif().reboot_context()->memory(),0x80c)==0xaabbccdd &&
           nt::le32(reset_bus.sif().iop_memory(),0x800)==0,
           "Guest SIF1 payload was lost, remained pending, or reached obsolete HLE RAM");
+    check(reset_bus.load(0x6000,8)==0x1122334455667788ULL &&
+          reset_bus.load(0x6008,8)==0xaabbccddeeff0011ULL,
+          "Guest SIF0 DMA did not echo the SIF1 payload into EE memory");
     const auto stopped=reset_bus.sif().reboot_context()->executed();
     rejected=false;
     try { reset_bus.advance_cycles(1); } catch (const nt::runtime::MemoryFault&) { rejected=true; }

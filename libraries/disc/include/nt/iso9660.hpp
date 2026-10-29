@@ -1,6 +1,7 @@
 #pragma once
 #include <nt/binary.hpp>
 #include <fstream>
+#include <array>
 
 namespace nt::disc {
 class PathError : public std::runtime_error { public: using std::runtime_error::runtime_error; };
@@ -8,6 +9,7 @@ struct Entry {
     std::string name;
     std::uint32_t sector, size;
     bool directory;
+    std::array<std::uint8_t,7> recorded{};
 };
 class Iso9660 {
 public:

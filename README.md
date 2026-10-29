@@ -1,27 +1,50 @@
 # AnyPS2
 
 AnyPS2 is a generic, BIOS-free C++20 toolchain with the goal of converting a
-user-supplied PS2 ISO into **generated C++ compiled into a native PC executable**.
+user-supplied PS2 ISO into a **modern native PC executable using LLVM ahead-of-time compilation**.
 Gran Turismo 4 is the first integration target.
 
-The prototype imports a boot executable, discovers supported EE code, generates
-C++, and builds a Windows executable. Generated instructions execute as native
-host code against shared C++ runtime services. **GT4 does not yet boot to a visible
-screen or run as a playable game.**
+**The required output is an ahead-of-time compiled native program.** EE, IOP and VU program code must be translated during
+conversion and compiled into native host code. The final program must not fetch,
+decode or interpret PS2 instructions at runtime, use a JIT, or fall back to PCSX2
+or another emulator. Unsupported code must produce a conversion diagnostic.
+
+Conversion should also **modernize how the program works on a PC**. The converter
+should identify the purpose of console-specific operations and lower them to
+native service calls that use suitable PC systems instead of reproducing the PS2 hardware structure
+by default. Vulkan rendering is one example; the same approach applies to audio,
+input, files, memory management, threading and synchronization. Replacements must
+preserve the game's observable behavior, including ordering and numeric details
+where they matter. These are conversion goals, not claims of completed support.
+
+LLVM is the only game-code output backend. Typed AnyPS2 IR lowers to LLVM IR,
+which is compiled ahead of time and linked with reusable C++20 native services.
+There is no generated C++ game-code backend or C++ fallback. Retain local IR and
+build artifacts for reproducibility; keep converted commercial content ignored.
+The standalone IOP converter is implemented for a bounded subset. EE/VU LLVM
+conversion and integration into game startup remain unfinished.
+**GT4 does not yet boot to a visible screen or run as a playable game.**
+No performance improvement is claimed.
 
 ## Pipeline
 
 ```text
 User-owned PS2 ISO
-  -> import and validate boot ELF
-  -> discover code and translate supported instructions to C++
-  -> compile generated code with shared BIOS-free runtime
+  -> import and validate boot ELF, modules and program data
+  -> discover EE, IOP and VU code, including loadable modules
+  -> lift into typed AnyPS2 IR and recover functions/control flow
+  -> modernize supported operations into native service calls
+  -> lower to LLVM, compile ahead of time and link BIOS-free C++ services
   -> native PC executable and local game data
 ```
 
-The current executable is a diagnostic startup probe. It still requires its
-matching sibling `boot.elf`. PS2 hardware compatibility remains necessary. PCSX2
-is an open-source hardware reference; it is not currently linked or bundled.
+This is the target pipeline; complete IOP/VU conversion and LLVM integration into
+the main game startup path remain unfinished.
+Native services must preserve the game's observable
+graphics, audio, input, file-I/O and synchronization behavior. Vulkan is the
+graphics backend. These services must not hide an instruction interpreter or a
+whole-machine emulation loop. PCSX2 is an open-source behavior reference; it is
+not linked or bundled.
 
 ## Build and test
 
@@ -33,10 +56,10 @@ drawing now uses Vulkan compute; there is no silent CPU rendering fallback.
 ```powershell
 cmake -S . -B build -A x64
 cmake --build build --config Release --parallel 8
-ctest --test-dir build -C Release --output-on-failure
+ctest --test-dir build -C Release -R "^iop-llvm-" --output-on-failure
 ```
 
-Tests use synthetic fixtures, including generated C++ that is compiled and
+Tests use synthetic fixtures, including generated LLVM IR that is compiled and
 executed. See [testing](docs/testing.md) for opt-in local game validation.
 
 Run `.\build\Release\anyps2-display.exe` for the Vulkan presentation host. It
@@ -53,17 +76,130 @@ Import and generation require new output directories.
 ```powershell
 .\build\Release\AnyPS2.exe import 'C:\path\to\owned-game.iso' work\game
 .\build\Release\AnyPS2.exe inspect work\game\boot.elf --flow
-.\build\Release\AnyPS2.exe recompile work\game\boot.elf work\game-native
-.\build\Release\AnyPS2.exe build work\game-native (Get-Location).Path
 ```
 
-The result is `work/game-native/build/Release/ps2-native.exe`. Generation writes
-`generated.cpp`, `analysis.txt`, a matching `boot.elf`, and a CMake project.
-Indirect targets and copied code can require additional observed entry points and
-a local memory capture. These artifacts must never be committed.
-For disc-backed file I/O, pass `--disc=IMAGE.iso` to the generated probe after its
-ELF and instruction-budget arguments. Local CTest integration accepts the same
-image through `ANYPS2_TEST_DISC`; see [file-I/O service](docs/fileio.md).
+Boot ELF import and inspection are available. EE LLVM conversion is not yet
+implemented: `AnyPS2 recompile` reports that limitation without producing output.
+Use the standalone IOP workflow below for supported native module conversion.
+
+## Standalone IOP conversion
+
+An initial standalone IOP converter also generates a CMake project for a supported
+IRX module or an explicitly ordered module bundle. LLVM IR is the only output backend.
+It compiles ahead of time and links no instruction interpreter,
+decoder, JIT or device library. Its current scope is bounded integer/control flow
+and aligned byte, halfword and word RAM access. The `sysclib` major-version-1 `memcpy`,
+`memmove` and `memset` imports become checked native memory operations. `sysmem`
+major-version-1 allocation, release and memory-query imports use a host-owned
+allocator with reserved module/stack regions. `loadcore` registration/release
+imports maintain a native registry of validated, already-compiled exports, and
+library-table queries use that registry. Boot-mode queries read explicitly supplied
+native boot records; the standalone probe starts with an empty boot context.
+Native interrupt services register compiled handlers, retain masked events, and
+save/restore continuations during cooperative callback delivery. Device event
+producers and preemptive thread scheduling are not yet connected. A cooperative
+native scheduler now retains explicitly admitted continuations across SleepThread
+and foreground/interrupt wakeups, reporting idle waits without consuming execution
+budget. Compiled CreateThread/StartThread/DeleteThread calls manage native workers
+and owned stacks. StartThreadArgs copies bounded argument blocks onto the worker
+stack and supplies their byte count and pointer. ExitThread retains a dormant worker; ExitDeleteThread releases
+it after the exit call retires. Ready selection uses priority at cooperative switches. Native alarms use a
+monotonic host clock and compiled interrupt callbacks; asynchronous thread
+preemption remains unfinished. Native event
+flags support creation/deletion, signalling, keep-mask clearing, polling, status
+queries and scheduler-backed waits. Unsatisfied waits suspend their compiled
+continuations; signals and event deletion resume them with the appropriate result.
+GetSystemStatusFlag returns a shared native event initialized from supplied boot
+context; an empty context does not invent status bits.
+Native SIF transfer services can copy validated aligned batches into an explicitly
+connected EE data arena and deliver compiled completion callbacks. The standalone
+IOP probe has no converted EE endpoint yet, so these transfers stop there.
+Native SIF control supports explicit peer readiness, status acknowledgements and
+command-buffer addresses. Validated inbound payloads notify compiled SIF1 handlers
+and require receive rearming before another delivery.
+Native SIF command registration supports user/system handler tables and checked
+two-argument callback delivery from explicit peer packets. Outbound command and
+extra-data sends require a connected native peer endpoint and share raw-transfer
+completion callbacks, tokens and shutdown. Command initialization waits on the
+shared status event for an explicit peer acknowledgement. Inbound packets share
+one interrupt-gated native queue for control and registered handlers; RPC and the
+converted EE peer remain unfinished. The standalone host supplies no peer.
+Native ChangeThreadPriority updates scheduler ordering and yields to eligible
+ready workers at the service boundary; it preserves FIFO order among equal
+priorities. ReferThreadStatus reports native lifecycle state, creation metadata,
+priorities and event/sleep/delay waits. DelayThread uses a native host-clock
+deadline, and the standalone host sleeps until the next alarm or delayed worker.
+Asynchronous preemption remains unsupported.
+Native semaphores support creation, deletion, waiting, polling, signalling and
+status queries with FIFO or current-priority waiter selection. Priority inheritance
+is explicitly unsupported. Events and semaphores share native scheduler waits.
+Native message boxes support queued/direct delivery, receive/poll, deletion and
+status, with FIFO or priority ordering for messages and waiting workers.
+Native GetOtherData reads through an explicitly connected peer-memory endpoint,
+validates and snapshots bytes, and completes at the native service boundary.
+Both blocking and NOWAIT modes may complete immediately; absent peers stop.
+Native RPC queue/server registration and removal preserve public descriptor
+fields and require compiled handlers. Server-side bind requests can return a
+validated service description through an explicit peer. Incoming calls can deliver
+payloads, wake a registered worker and be retrieved in queue order. ExecRequest
+runs compiled handlers and delivers command-notified or polling-mode replies
+without rerunning a handler on delivery retries. RPC initialization waits for command setup, publishes readiness once and waits
+for explicit peer acknowledgement. The native RPC loop drains queued requests and sleeps through the shared scheduler
+until another request arrives. Client operations remain unfinished.
+A shared bounded native printf/Kprintf service supports common 32-bit integer, string and
+character diagnostics through a host-provided sink; unsupported formats stop
+without partial output. Read-only `ioman` open/read/seek/close imports use a shared ISO9660 file backend.
+Native getstat returns disc-derived file/root metadata, including size, read-only
+type flags and the ISO recording date, without allocating a file handle.
+Native dopen/dread/dclose enumerate ISO directories with independent cursors,
+shared descriptor limits and the same metadata encoding as getstat.
+The ISO mount rejects writes and path mutations with filesystem errors; it never
+modifies the supplied disc image or routes those paths to the host filesystem.
+Native lseek64 supports checked 64-bit cursor positions and the O32 two-register
+return convention; the legacy seek retains its signed 32-bit range.
+Native disc ioctl/ioctl2 validate descriptors and reject unknown or non-streaming
+controls with I/O errors. Known hardware ioctl commands remain unsupported.
+Mount your image at execution time with `iop-native --disc <image.iso>`; guest
+paths are restricted to disc files and never resolve to arbitrary host files.
+Constant CreateThread descriptor addresses can seed worker discovery from
+initialized bundle data, including cross-module descriptors and address aliases.
+The converter can compile a bundle of disjoint modules and bind imports
+to their compiled exports, with explicit unlink/relink and release protection.
+The bundle CLI invokes startup entries in input order with shared native services;
+automated disc module discovery and loading are unfinished.
+Other imports and unresolved indirect
+calls/jumps are rejected during conversion; complete module/service conversion
+is unfinished. This separate probe is not yet integrated into GT4 startup.
+
+```powershell
+.\build\Release\ps2-iop-recompile.exe 'C:\path\to\module.irx' work\iop-native 1000
+cmake -S work\iop-native -B work\iop-native\build -A x64 "-DANYPS2_ROOT=$((Get-Location).Path)"
+cmake --build work\iop-native\build --config Release --target iop-native
+.\work\iop-native\build\Release\iop-native.exe
+```
+
+To package multiple modules, specify each relocation base and path in startup order:
+
+```powershell
+.\build\Release\ps2-iop-recompile.exe --bundle work\iop-bundle `
+    1000 'C:\path\to\provider.irx' 3000 'C:\path\to\client.irx'
+```
+
+Use the same CMake commands with `work\iop-bundle` as the project directory.
+The bases must leave disjoint module ranges below the host invocation stack.
+`modules.txt` records the startup order, entry points and memory extents. All
+initialized data is loaded before the first entry runs. Startup stops at the first
+unsupported operation; entry return values are reported without interpreting them
+as PS2 module residency status. This is explicit native startup orchestration,
+not automatic GT4 boot discovery.
+
+LLVM output contains `generated.ll`, metadata in `module_metadata.cpp`, and initialized
+`module.data`. The initial LLVM build requires Clang on PATH and Windows x86-64
+with MSVC. CMake compiles the IR with Clang at `-O2` and links the native object.
+Other host targets are not yet validated or enabled by the generated project.
+It needs AnyPS2 headers, native disc sources and its probe host source at build time, and `module.data`
+beside the executable at run time. It does not load the original IRX or decode
+the data as instructions. Keep all converted commercial content under `work/`.
 
 ## Components
 
@@ -72,10 +208,11 @@ image through `ANYPS2_TEST_DISC`; see [file-I/O service](docs/fileio.md).
 | `AnyPS2` | Front door for the separate command-line tools |
 | `ps2-import` | Read ISO9660, resolve SYSTEM.CNF, validate and extract boot ELF |
 | `ps2-inspect` | Inspect ELF metadata and discovered control flow |
-| `ps2-recompile` | Emit C++ and a CMake project from supported code |
+| `ps2-recompile` | Report that EE LLVM conversion is not yet implemented |
+| `ps2-iop-recompile`, `nt_iop_codegen` | Convert supported IOP modules into LLVM projects |
 | `ps2-build` | Invoke CMake and compiler with explicit process arguments |
 | `nt_binary`, `nt_disc`, `nt_elf` | Bounded input parsing |
-| `nt_r5900`, `nt_analysis`, `nt_codegen` | Decode, discover, and generate code |
+| `nt_r5900`, `nt_analysis` | Decode and discover EE code |
 | `nt_runtime`, `nt_hardware` | Guest state, RAM, and partial device models |
 | `nt_kernel` | BIOS-free startup services and guest-installed syscall handlers |
 | `nt_fileio` | Read-only disc file handles and legacy FILEIO RPC operations |

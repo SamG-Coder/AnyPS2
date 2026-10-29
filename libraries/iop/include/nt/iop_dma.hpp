@@ -16,6 +16,8 @@ public:
     bool forced_interrupt() const { return ((interrupts_[0]|interrupts_[1])&0x8000)!=0; }
     bool signal_completion(unsigned channel);
     void enable_sif1_receive() { sif1_connected_=true; }
+    void enable_sif0_send() { sif0_connected_=true; }
+    bool send_sif0(std::deque<std::uint32_t>& fifo,std::span<const std::uint8_t> ram);
     // One bounded FIFO step; true means a destination packet finished.
     bool receive_sif1(std::deque<std::uint32_t>& fifo,std::span<std::uint8_t> ram);
 private:
@@ -24,5 +26,8 @@ private:
     std::array<std::uint32_t,2> interrupts_{};
     bool sif1_connected_=false, sif1_packet_=false, sif1_end_=false;
     std::uint32_t sif1_remaining_=0;
+    bool sif0_connected_=false, sif0_packet_=false, sif0_end_=false;
+    std::uint32_t sif0_remaining_=0;
+    std::array<std::uint32_t,4> sif0_previous_{};
 };
 }

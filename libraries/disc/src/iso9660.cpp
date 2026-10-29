@@ -50,7 +50,9 @@ Entry Iso9660::record(ByteView b) {
         throw std::runtime_error("Extended attributes, interleaving and multi-extent files are unsupported");
     if (le32(b, 2) != be32(b, 6) || le32(b, 10) != be32(b, 14))
         throw std::runtime_error("ISO extent byte orders disagree");
-    return {std::string(b.begin() + 33, b.begin() + 33 + b[32]), le32(b, 2), le32(b, 10), bool(b[25] & 2)};
+    Entry entry{std::string(b.begin() + 33, b.begin() + 33 + b[32]), le32(b, 2), le32(b, 10), bool(b[25] & 2)};
+    std::copy_n(b.begin()+18,7,entry.recorded.begin());
+    return entry;
 }
 Bytes Iso9660::read(const Entry& entry, std::uint64_t limit) {
     if (entry.size > limit) throw std::runtime_error("Disc file exceeds read limit");

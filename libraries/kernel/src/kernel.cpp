@@ -147,9 +147,8 @@ bool Kernel::service(runtime::State& state, runtime::Bus& memory) {
         } else if (call >= 0x44 && call <= 0x46) {
             if (!sema.count) {
                 if (call == 0x44) {
-                    if (!current_thread_ || !frames_.empty() || interrupt_active() || sema.attributes ||
-                        std::none_of(threads_.begin(),threads_.end(),[](const auto& item) { return item.second.status == 2; }))
-                        return false; // Idle and non-FIFO waits remain unsupported.
+                    if (!current_thread_ || !frames_.empty() || interrupt_active() || sema.attributes)
+                        return false; // Non-FIFO waits and guest kernel continuations remain unsupported.
                     auto& current = threads_.at(current_thread_);
                     current.status = 4; current.wait_semaphore = id;
                     sema.waiters.push_back(current_thread_);

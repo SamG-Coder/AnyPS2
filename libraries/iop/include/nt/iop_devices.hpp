@@ -46,6 +46,12 @@ public:
     void instruction_retired() override { interrupts_.raise(timers_.tick()); }
     InterruptController& interrupts() { return interrupts_; }
     void enable_sif1_receive() { dma_.enable_sif1_receive(); }
+    void enable_sif0_send() { dma_.enable_sif0_send(); }
+    bool send_sif0(std::deque<std::uint32_t>& fifo,std::span<const std::uint8_t> ram) {
+        const auto completed=dma_.send_sif0(fifo,ram);
+        if (completed && dma_.interrupt_pending()) interrupts_.raise(8);
+        return completed;
+    }
     bool receive_sif1(std::deque<std::uint32_t>& fifo,std::span<std::uint8_t> ram) {
         const auto completed=dma_.receive_sif1(fifo,ram);
         if (completed && dma_.interrupt_pending()) interrupts_.raise(8);

@@ -3,7 +3,7 @@
 ## Goal
 
 Build a generic, BIOS-free C++20 toolchain that converts a user-supplied PS2 ISO
-into generated C++ and compiles it into a native PC executable. Gran Turismo 4
+into a modern native PC executable through typed IR and LLVM ahead-of-time compilation. Gran Turismo 4
 is the first integration target. Preserve AnyPS2 and other user-supplied names;
 do not add alternative place names or naming subtitles.
 
@@ -11,6 +11,45 @@ Implement reusable PS2 behavior. Never select runtime behavior by game title,
 disc ID, hash, instruction address, or observed GT4 register values. Unsupported
 behavior must stop with actionable diagnostics. Do not fake successful services
 to advance a trace. Do not require, embed, or reconstruct a proprietary BIOS.
+
+## Native conversion is mandatory
+
+- Convert PS2 program code into typed IR and compile it ahead of time through
+  LLVM into the output executable. This includes EE, IOP and VU code and loadable modules discovered
+  in the user-supplied input. Generating an emulator wrapper is not conversion.
+- The final program must not fetch/decode/interpret PS2 instructions at runtime,
+  use a JIT, or fall back to PCSX2 or another emulator. Unsupported code or unknown
+  executable content must produce actionable conversion diagnostics.
+- Recover functions and generate native service calls. Translate graphics,
+  audio, input, file-I/O and synchronization behavior into native implementations;
+  use Vulkan for graphics. Do not hide whole-machine emulation behind these APIs.
+- Modernize the implementation for native PC systems during conversion. Identify
+  the purpose of console-specific operations and replace them with suitable PC
+  APIs, data structures and execution models where behavior can be preserved.
+  Vulkan rendering is the model for this approach; apply the same reasoning to
+  audio, input, file access, memory management, threading and synchronization.
+  Do not reproduce PS2 register banks, DMA machinery or timing loops by default
+  when a direct native operation can provide the required observable behavior.
+- The deliverable is a native PC executable plus reproducible conversion/build
+  artifacts. LLVM is the only backend; do not generate C++ game code. Make modernization changes in the
+  converter and reusable native libraries, not by hand-editing generated files.
+  Document semantic differences, retain ordering and numeric behavior needed by
+  the game, and verify replacements with relevant behavior-level tests. Do not
+  substitute approximate behavior silently or claim performance without measuring.
+- The existing IOP interpreter and hardware models are diagnostic scaffolding,
+  not the target architecture. Do not extend the interpreter as the production
+  boot path. Prioritize replacing it with ahead-of-time native code and isolating reference
+  execution from shipped output. Never report interpreted startup as converted
+  execution or as fulfillment of the user's native-program requirement.
+- Acceptance requires compiling and executing generated code for the converted
+  subsystems, plus inspecting output dependencies to verify there is no runtime
+  instruction interpreter, decoder or JIT fallback. A native file extension,
+  successful link or higher instruction count is insufficient evidence.
+- Keep generation and compilation as explicit, reproducible stages. Write the
+  IR and build configuration to the local output directory, then compile through
+  LLVM and link native C++ services to produce the `.exe`. Retain artifacts for
+  inspection and rebuilding; all game-code output must use LLVM. Report generation, compilation and
+  execution results separately; source emission alone is not completion.
 
 ## Clean and reusable C++
 
@@ -34,7 +73,7 @@ Use automated tests for major behavior changes and integration milestones, not
 every small edit or helper. Prefer end-to-end subsystem regressions over tests
 that mirror implementation details. A build, manual trace, or larger instruction
 count does not establish correctness or a game boot. Commit only original synthetic
-instruction, ELF, and ISO fixtures. Compile and execute generated C++ in tests.
+instruction, ELF, and ISO fixtures. Compile and execute generated native code in tests.
 Cover malformed inputs, delay slots, state transitions, unsupported paths, and
 regressions relevant to each change. Run only tests related to the changed
 behavior and its affected integration paths, rather than the full suite by

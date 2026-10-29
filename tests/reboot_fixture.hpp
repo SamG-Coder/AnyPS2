@@ -57,15 +57,20 @@ inline nt::Bytes manager_bootstrap_image() {
 }
 inline nt::Bytes manager_handshake_image() {
     auto archive=manager_bootstrap_image();
-    // Original manager waits for an EE flag, enables SIF1, and waits for payload.
+    // Original manager waits for SIF1 payload, then echoes it through SIF0 DMA.
     nt::Bytes imports(archive.begin()+480+160,archive.begin()+480+200);
-    archive.resize(480+256,0);
+    archive.resize(480+448,0);
     std::fill(archive.begin()+480+128,archive.end(),0);
-    put32(archive,76,256); put32(archive,480+68,128);
-    std::copy(imports.begin(),imports.end(),archive.begin()+480+208);
+    put32(archive,76,448); put32(archive,480+68,320); put32(archive,480+72,320);
+    std::copy(imports.begin(),imports.end(),archive.begin()+480+400);
     constexpr std::uint32_t words[]{0x3c08bd00,0x8d090020,0,0x1120fffd,0,
         0x3c08bf80,0x34098000,0xad091570,0x3c094100,0x35290300,0xad091538,
-        0x8c020800,0,0x1040fffd,0,0x03e00008,0};
+        0x8c020800,0,0x1040fffd,0,
+        0x34098800,0xad091570, // Enable both SIF channel priorities.
+        0x3c098000,0x35290800,0xac090900,0x24090004,0xac090904,
+        0x3c097000,0x35290001,0xac090908,0x24096000,0xac09090c,
+        0x24090900,0xad09152c,0x3c090100,0x35290701,0xad091528,
+        0x8d091528,0x3c0a0100,0x012a4824,0x1520fffc,0,0x03e00008,0};
     for (unsigned i=0;i<std::size(words);++i) put32(archive,480+128+4*i,words[i]);
     return archive;
 }

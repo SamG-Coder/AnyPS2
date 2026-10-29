@@ -1,11 +1,609 @@
 # Architecture
 
+Current policy: LLVM is the only supported conversion backend. Older sections
+below describe historical diagnostic C++/interpreter milestones; those are not
+supported output paths. The EE C++ generator and its execution test have been removed. IOP milestones now run through iop-llvm-execution and iop-llvm-project.
+
+
 ## Contract and layers
 
-AnyPS2 translates supported guest instructions into C++ and compiles them for the
-host. Generated code calls shared runtime interfaces for guest state, memory,
-devices, and BIOS-free services. Hardware compatibility remains necessary even
-when CPU instructions have been translated ahead of time.
+The target pipeline lifts PS2 programs into typed AnyPS2 IR, modernizes supported
+operations, lowers to LLVM and compiles ahead of time. Native C++ services provide
+Vulkan rendering and other PC facilities. There is no production interpreter/JIT
+fallback. LLVM is the only supported game-code backend.
+
+The initial IOP IR separates decoding and reachable-code discovery (`ir.cpp`)
+from LLVM emission (`llvm.cpp`). It records semantic operations, register
+operands, widths, immediates and control-flow targets without source strings or
+raw instruction words. It is still a low-level IOP representation, not recovered
+high-level game logic or SSA. Delay slots and load ordering remain backend
+responsibilities. Function recovery and native-service transformations remain
+unfinished; EE/VU do not yet share this representation.
+
+IOP discovery starts from the module entry, explicit extra roots and functions
+in validated export-table candidates. Export parsing is shared in the ELF layer
+with the diagnostic library registry; the compiler does not link the IOP runtime.
+The inventory scans aligned initialized words for the export signature and fails
+on malformed candidates. This is conservative discovery, not proof of runtime
+registration or exhaustive recovery of callbacks. A converted entry path alone
+does not establish that all callable module functions are supported.
+
+The LLVM backend emits textual IR with explicit wrapping arithmetic, load delays,
+aligned/bounded RAM access and precise fault stops. It uses a small C ABI with
+fixed-width words, avoiding C++ struct layout assumptions. Clang compiles the IR
+at build time; the executable does not link LLVM or parse instructions. The
+initial build target is Windows x86-64/MSVC. Sequential instructions and branch
+delay-slot entry use direct LLVM edges instead of returning to PC dispatch.
+Entry/resumption and completed delay slots still dispatch their current or saved
+target. Every instruction checks the remaining slice before execution, including
+along direct edges. Execution still uses explicit state memory; recovered functions
+and further block optimization remain future work, with no measured speed claim.
+Both output backends share
+the same synthetic execution regression. LLVM is the only standalone CLI backend.
+
+LLVM execution functions cover fixed 1 KiB address ranges, with at most 256
+translated instructions per function. Direct edges stay within a range; crossing
+it returns to a nonrecursive module dispatcher with the same remaining budget and
+pending control/load state. Execution functions are marked noinline so ordinary
+optimization does not merge the module back into one function. Code-write checks
+also use per-range membership tables. Analysis is bounded to 65,536 reachable
+instructions per module. These ranges are compiler
+partitions, not recovered game functions, and imply no measured speed improvement.
+
+Indirect register calls and jumps are accepted when forward value-set analysis
+proves a finite set of targets across incoming paths. Each register retains up to
+16 values; merges take the union, and excessive growth widens to unknown instead
+of dropping destinations. External roots start unknown. Load results, service
+effects and call-continuation registers are forgotten conservatively. Immediate
+construction and selected integer operations propagate bounded sets without
+reading mutable data as function pointers. Every possible reachable callee is
+converted ahead of time. Delay-slot effects follow target capture. Backends guard
+the physical destination against the proven set before retirement, including at
+budget boundaries and trapping delay slots. Unknown sets fail conversion. This
+supports branch-selected callbacks; memory-based callback recovery and general
+jump tables remain unfinished. No runtime instruction decoding is introduced.
+
+Compiled SYSCALL sites return a typed service request without retiring the
+instruction. `run_native` can route that boundary to an explicitly supplied
+`NativeServices` provider and resume compiled code after a successful return.
+The return-value contract carries v0's selector and a0-a3, commits pending loads
+with the result write taking precedence, and charges the syscall to the execution
+budget. Missing/unsupported services leave the continuation unchanged; providers
+must validate requests before mutating RAM. Delay-slot services, context switches
+and callbacks are not supported by this contract. No PS2 syscall provider is
+installed by default, and the standalone host stops on these requests. The
+synthetic test provider proves routing only, not PS2 kernel-service support.
+
+Native library bindings cover `sysclib` major version 1, ordinals 12-14 (`memcpy`,
+`memmove`, `memset`). Import recognition creates memory IR operations instead of
+translating unbound stubs or linking a guest library. LLVM emits memory intrinsics;
+C++ uses standard host memory functions. Both settle pending argument loads,
+validate full source/destination ranges before mutation, reject destination overlap
+with converted instruction words, return the original destination pointer and
+resume at the caller's return address. Zero-length operations access neither
+pointer. `memmove` supports overlapping ranges; `memcpy` rejects overlap explicitly,
+including overlap through RAM aliases, rather than invoking host undefined behaviour.
+A replacement counts as one native operation for execution budgeting; that is not
+the replaced PS2 function's instruction count or timing. Other library major versions
+and ordinals fail conversion explicitly. Minor revisions share these ordinal bindings;
+this does not imply support for other services in that library. Conversion reports
+all unresolved imports with library, major/minor version, ordinal and stub address
+before emitting output.
+Write protection covers both words of each replaced import stub. Protected words
+and executable entry points are separate sets: entering the ordinal/delay word
+does not invoke a native service or become an executable target. LLVM emits bounded
+membership helpers for both sets and uses only executable entries for dispatch.
+
+Native `sysmem` major-version-1 imports 4-10 use an explicit library-service
+boundary, distinct from syscall selectors. Generated code returns an import request;
+the native driver dispatches it to the supplied provider and resumes at the saved
+return address. Pending argument and return-address loads settle at this boundary.
+Missing providers and delay-slot imports stop without retiring or mutating memory.
+The LLVM ABI uses stop code 9 and its existing detail word: low 16 bits hold
+the import ordinal, high 16 bits select sysmem (0), loadcore (1), a compiled
+library call (2), ioman (3), or intrman (4).
+
+The standalone host supplies `NativeHeapServices`: host-owned ordered extents over
+the data arena, with 256-byte allocation granularity, first/last/fixed-address
+allocation, exact-base free, coalescing, total/largest-free queries and block queries
+with the public free flag. Allocation failure returns zero; invalid free and block
+queries return -1. Requests cannot allocate reserved regions. The host reserves
+memory through the module end and from the invocation stack onward; this is a
+native arena policy, not a reproduction of a console allocator's internal layout.
+Metadata never occupies guest RAM; allocation/free do not initialize or erase the
+payload. Internal allocator structures and printf callbacks are unsupported. The
+provider is serialized by the native driver; concurrent entry requires future
+scheduler synchronization. This does not implement a module loader or native boot.
+
+Native `loadcore` major-version-1 registration/release imports (6/7) operate on
+converter-emitted export descriptors. The ELF inventory retains each table address;
+project generation emits the library identity, ABI version and compiled function
+addresses. Discovery is not registration. The host checks the declaration in RAM
+against that metadata before exposing exports. Unknown or modified declarations
+return the public illegal-library error; bad RAM pointers fault without retirement.
+Duplicate/older registrations and absent releases return their public errors. A
+newer minor revision takes precedence; releasing it exposes an older registration.
+
+`NativeLibraryServices::resolve` provides a host lookup of active exports by name,
+major ABI and ordinal. A composed provider routes library and allocator requests
+without treating syscall numbers as import ordinals. The registry does not rewrite
+guest export headers, patch guest instructions, execute loadcore code or compile
+new code. Known import descriptors bind when their provider registers. Explicit
+loadcore LinkLibraryEntries/UnLinkLibraryEntries (8/9) operate on recorded import
+tables in the supplied range, without decoding or modifying instruction bytes.
+Relinking validates all selected dependencies before committing any bindings.
+Explicitly unlinked clients stay unlinked until a successful link request.
+Release refuses providers with bound clients using the public in-use error.
+
+A compiled library import transfers execution to the bound native target while
+preserving arguments, v0 and the caller's return address; pending loads settle
+before transfer. The next native dispatch executes only code present at build time.
+An unregistered or unlinked call stops without retirement. Imports do not create
+new executable content. Data-arena descriptors and function addresses are sealed
+by conversion; mutating an import table is not a way to add a runtime dependency.
+
+`emit_bundle` accepts separately relocated modules with disjoint data ranges,
+collects their export catalog, validates each dependency and compiles every module
+through the shared IR/backends. Unknown imports, missing ordinals/major versions,
+overlapping modules and unsupported provider code fail before output. Additional
+roots must belong to a module. The generated program shares one native dispatch
+space; providers must still register before clients can call them. `project_bundle`
+and the `--bundle` CLI package explicit base/path pairs into one executable and
+initialized data image. Module extents and the host invocation stack cannot overlap.
+Each module's entry and global pointer are retained. The host loads all initial data,
+then invokes entries in input order using a fresh CPU call frame and a shared arena,
+allocator and registry. Module BSS and inter-module gaps start zeroed. An unsupported
+stop aborts startup; return values are reported without claiming residency handling.
+The single-module command uses the same packaging path. Disc-wide discovery and
+layout, dependency-driven startup, module load/unload and active-call lifetime
+tracking remain unfinished. QueryLibraryEntryTable (11) reads a bounded library
+identity and returns the active compiled export array address, using the same
+version selection as host resolution; absent matches return null. Unsupported
+loadcore services continue to fail conversion explicitly.
+
+QueryBootMode (12) is served by `NativeBootServices`, whose context is explicitly
+supplied by the host. The record ABI is a 16-bit value, 8-bit mode ID, 8-bit payload
+word count, then payload words. Construction validates the complete set before
+writing to caller-reserved data-arena storage. Queries return stable arena pointers
+to the first matching record or null, and reject record lengths that no longer
+match their reserved extents. Host pointers and firmware globals are never exposed.
+The standalone probe has no reboot context and therefore supplies an empty set;
+no console mode or firmware version is invented. RegisterBootMode, reboot-context
+construction from EE requests, and CLI boot-record configuration remain unfinished.
+
+Native ioman major-version-1 open/close/read/lseek imports (4/5/6/8) are served by
+`NativeDiscServices` when the host mounts an image with `--disc`. The shared
+`disc::Files` backend owns read-only handles and is also used by the older FILEIO
+RPC adapter; ISO path lookup, descriptor lifetime, seek and read logic are not
+duplicated. Guest cdrom paths never name host files. Missing files, invalid
+handles, unsupported device prefixes and write modes return negative file errors.
+Native reads are bounded to 1 MiB and paths to 255 characters plus a terminator.
+
+The adapter validates the requested data-arena extent and every overlapping code
+word before reading, so invalid destinations neither change RAM nor advance the
+file cursor. Both backends export the same compiled-code membership predicate;
+no instruction bytes are decoded for this check. Zero-length reads touch no data
+pointer. Read data is copied only after the ISO backend has completed the read.
+Native output compiles only the binary reader, ISO reader and shared file backend,
+with no CPU/device/RPC runtime dependency. Missing mounted images leave file imports
+unhandled and stop execution explicitly. Writes, device drivers, ioctl and other
+ioman services remain unsupported. This data path does not imply game boot.
+
+Native intrman major-version-1 imports 4-9, 17/18 and 23 manage a serialized host
+event domain: registration/release, per-cause masks, global disable/enable,
+suspend/resume and context queries. Output pointers are validated before any state
+change and may not overwrite compiled code. Handler registration accepts only
+addresses present in the compiled instruction map, distinct from protected import
+metadata. Constant registration arguments extend conversion discovery to handler
+code across the bundle, including non-exported handlers in modules analyzed earlier.
+Discovery revisits owners with newly found roots until no new callbacks remain;
+unaligned addresses, unowned addresses and roots outside executable extents reject
+conversion before output. Unknown callback addresses are checked at runtime and never decoded.
+
+The host posts events explicitly. Pending causes coalesce and remain pending while
+masked. A deterministic scan selects an enabled handler at a native checkpoint,
+after any outstanding delay slot. The dispatcher snapshots the continuation,
+uses a separate callback stack, supplies the registered argument, and runs compiled
+code through the same service router. Budget exhaustion preserves the callback;
+normal return restores the complete foreground state while retaining the total
+native-operation count. Nonzero handler returns re-enable the cause; zero leaves
+it disabled. Callback faults remain visible and do not resume the foreground.
+Global mask state is restored on return. All registers are preserved, supporting
+the public modes' permitted clobbers without recreating assembly save frames.
+
+Delivery is cooperative in slices of at most 256 native operations, not PS2 cycle
+or hardware timing. Nested delivery, thread preemption callbacks, software-event
+enable semantics and device/SIF event producers remain unfinished. The standalone
+host supplies the event domain with interrupts initially disabled, but fabricates
+no periodic events. Its callback stack starts at 0x1f7000 within the reserved stack
+region, below the ordinary invocation stack. Native mode/flag tokens retain API
+state only; there are no emulated interrupt-controller or DMA registers.
+
+Native `thevent` major-version-1 ordinals 4-11 and 13/14 use host-owned event
+objects with opaque positive handles. The standalone host shares them across
+module startup entries. IDs are monotonic, deleted IDs remain invalid, and the
+service limits live objects to 4096. Attributes, option and initial/current bits
+are retained without exposing a guest kernel object layout. Set ORs bits;
+ClearEventFlag applies a keep mask. AND/OR polling returns the full current
+pattern, and clear-on-success clears the entire pattern after validating output.
+Status writes the five defined words and leaves the two reserved words untouched.
+
+The native service request carries interrupt context from the compiled execution
+continuation. Foreground calls reject interrupt context; the interrupt-only set,
+clear and status variants require it. Compiled handlers can therefore signal
+native events through the same service router. No guest kernel instructions are
+executed. WaitEventFlag returns immediately when its condition already holds.
+With an explicitly connected scheduler, an unmet wait validates its output, queues
+an opaque continuation ID and retires once before suspending that continuation.
+Without a scheduler it still stops explicitly without retirement.
+
+Waiters are considered in FIFO order. Signalling first validates all selected
+outputs, then writes full result patterns, applies clear-on-success and makes
+matching continuations ready. A clearing waiter can leave later waiters blocked.
+Single-waiter events reject a second wait/poll while a waiter exists. Status
+reports the live queue length; event deletion releases queued continuations with
+the deletion error without writing result patterns. WakeupThread does not release
+an event wait: it retains a wakeup credit for a subsequent SleepThread instead.
+The standalone host shares one scheduler and event domain across startup entries.
+Forced release/termination of event waits and asynchronous dispatch are not yet
+implemented.
+
+Native GetSystemStatusFlag (thbase ordinal 41) returns a stable handle to an
+ordinary multi-waiter event in the shared native event service. Bootstrap creates
+it with zero initial bits and option zero. If supplied boot-mode record 4 exists,
+it sets the bit selected by that record's low two value bits through the same
+event service. Missing boot context leaves current bits zero. No readiness,
+firmware version or completed boot stage is fabricated.
+
+Foreground and interrupt queries return the same handle. Compiled event queries,
+waits and signals therefore operate on the actual status object. The standalone
+host owns this service across startup entries. As with the public fixed-handle
+contract, deleting the event does not silently create a replacement on query.
+Event allocation is shared with ordinary CreateEventFlag rather than duplicated.
+
+Native `thbase` imports 20 and 24-28 provide thread identity, sleep, foreground/
+interrupt wakeup and cancellation of queued wakeups. The cooperative scheduler
+owns explicitly admitted compiled continuations. Sleep retires once, saves the
+return continuation and yields to the next ready continuation. A wakeup of a
+sleeping thread makes it ready; an early wakeup increments a counter consumed by
+a later sleep. Cancellation returns and clears that count. Context checks and
+invalid/finished thread errors are explicit. No guest instruction fetch occurs.
+
+When all continuations sleep, the scheduler offers an idle continuation to the
+native interrupt domain. A posted interrupt can execute a compiled handler and
+wake a sleeper. Callback budget exhaustion retains the idle callback until it
+finishes, before switching to the awakened thread. With no runnable continuation
+or deliverable event, execution returns `thread_wait` without consuming budget.
+Total execution accounting includes idle callbacks as well as thread work.
+
+The standalone probe admits each module startup invocation with its own
+register/stack context. Compiled CreateThread/StartThread/DeleteThread imports
+4-6 additionally manage guest-requested workers. Create validates the public
+descriptor and compiled entry, rounds stack size to 256 bytes, uses the shared
+allocator and captures the caller GP. The descriptor receives the aligned size.
+Default stack fill and clear-on-delete flags are respected; descriptor/stack
+writes cannot overlap compiled code. Handles are opaque and never reused.
+
+Start resets the worker continuation, passes its argument and captured GP, gives
+it an aligned native invocation stack and makes it ready. Ready selection chooses
+the lowest numeric priority, preserving FIFO order among equals. Start is a
+cooperative scheduling point. A normal compiled return makes the worker dormant;
+it can be restarted or deleted, releasing its stack. The standalone host continues
+past worker completion while its startup continuation is still running.
+
+StartThreadArgs (ordinal 7) shares worker startup with StartThread. It reserves a
+16-byte-aligned block at the high end of the owned stack, copies the requested
+bytes and passes their count/pointer in a0/a1. SP and FP are aligned below the
+block with native call space. The converter runtime retains at least 0x130 bytes
+below the block; negative/oversized counts stop unsupported before changing the
+worker. Invalid source ranges fault before queuing or copying. The checked copy
+uses memmove so an overlapping source retains its original bytes. Zero counts
+ignore the source; a null source leaves reserved argument bytes unchanged, matching
+the public call contract. No guest register-context frame is constructed.
+
+Explicit thbase exits (ordinals 8/9) retire the exit import once and hand control
+back to the scheduler without returning into the worker's following code.
+ExitThread retains its stack and dormant continuation for restart/deletion.
+ExitDeleteThread defers stack clearing/release and handle removal until retirement,
+using the same validated release path as DeleteThread. Both reject interrupt
+context. Zero remaining budget prevents exit-side effects. Host-admitted startup
+entries have externally owned stacks, so ExitDeleteThread remains unsupported for
+those entries; their ordinary return or ExitThread is supported.
+
+Worker entries must be in the compiled map. Besides exports and explicit roots,
+constant CreateThread descriptor addresses now seed discovery from initialized
+module data. The descriptor and entry may use RAM aliases and belong to different
+modules. The existing bundle discovery loop includes newly found workers and
+revisits owners as needed. Only complete, aligned, initialized descriptors are
+read; nonzero initial entries must resolve to executable code or conversion fails
+before output. Zero/unavailable initial entries provide no candidate.
+
+Initial descriptor data is a discovery hint, not proof of immutability. Runtime
+creation still validates the actual entry against compiled instructions. Descriptors
+built or overwritten dynamically may require further analysis or explicit roots;
+this change does not recover arbitrary runtime stores or enable fallback decoding.
+Priority changes and asynchronous preemption
+remain unsupported. This is not complete threadman compatibility. Thread completion is reported at the explicit host return sentinel;
+traps and unknown code targets remain visible failures.
+
+Native alarm imports (thbase 34-38) implement GetSystemTime, SetAlarm/iSetAlarm and
+CancelAlarm/iCancelAlarm. A host steady clock supplies 64-bit ticks at the default
+36,864,000 Hz rate; tests inject the clock, and a native caller can supply another
+frequency explicitly. The minimum interval is 100 microseconds converted to ticks.
+Short registration intervals update the supplied low word only after pointer and
+code-write validation. Duplicate pending callback/userdata pairs and incorrect
+foreground/interrupt contexts return the public errors. At most 1024 pending
+alarms are retained. Unknown compiled entries and deadline overflow stop explicitly.
+
+Constant alarm callback arguments extend ahead-of-time discovery. Due alarms feed
+the same context-preserving callback path as interrupts, with interrupt context,
+userdata, a separate stack and budget suspension. Global interrupt masking and
+delay-slot deferral apply. A zero callback result removes the alarm; a nonzero
+result, clamped to the minimum, advances its previous deadline. Overdue repeated
+alarms catch up through bounded compiled execution. An active alarm is absent from
+the pending queue, matching cancellation and re-registration behaviour. No timer
+registers, guest timer ISR or instruction-based clock are simulated.
+
+When all threads wait and alarm delivery is enabled, the standalone probe sleeps
+on the host until the next deadline and then resumes native execution. Its startup
+probe limits idle alarm waiting to five seconds per module and retains the existing
+operation budget. A masked timer or a wait with no scheduled alarm remains an
+explicit wait boundary. This is not a claim of precise console interrupt latency.
+Microsecond conversion imports, clock-profile selection from boot records and
+asynchronous thread preemption remain unfinished.
+
+Native SIF transfer services (sifman 7/8 and 30-32) replace supported outbound
+transfer batches with direct native data copies. The caller must supply an EE
+arena and its compiled-code write guard. The standalone IOP probe deliberately
+supplies no endpoint, so these services remain unsupported there. This does not
+create a second CPU interpreter or pretend that an EE consumer has booted.
+
+The current subset accepts 1-32 descriptors with 16-byte-aligned source,
+destination and nonzero size, at most 1 MiB total payload, and attributes 0 or
+INT_I. All descriptor ranges, IOP source bytes, EE destination ranges and write
+guards are checked before any destination mutation. Source payloads are captured
+before writes, then committed in descriptor order. Invalid later descriptors leave
+all earlier destinations unchanged. Irregular tails, EE interrupt/tag attributes,
+hardware chain parsing and additional transfer modes remain unsupported.
+
+Accepted copies return an opaque positive token and are already complete for
+DmaStat; completion callbacks are queued separately. General-handler selection is
+resolved when delivery occurs, so resetting it suppresses a queued general call.
+Per-transfer callbacks retain their supplied handler/userdata. Completion callback
+return values are ignored, as required by their void contract. Queue capacity is
+bounded, with space reserved before destination writes. Constant handler arguments
+participate in ahead-of-time callback discovery.
+
+A shared callback multiplexer fairly selects pending alarms and SIF completions,
+retaining source ownership across compiled budget slices. It reuses the existing
+interrupt-context snapshot, masking and stack path. Completion ordering is native
+and cooperative; it does not reproduce DMA registers, hardware transfer timing or
+exact interrupt grouping. A converted EE command producer/consumer is still required for the actual game
+startup path.
+
+Native SIF control (sifman 2, 5/6, 21-27 and 29) uses explicit link coordination.
+The EE owner publishes its command-buffer address and status bits. Initialization
+stops unsupported until that peer supplies SIFINIT; on success it publishes the
+IOP readiness bit, clears the initial sub-buffer address and arms reception.
+Repeated initialization preserves established state. CheckInit reports actual
+initialization, including zero for a disconnected probe. Status publication ORs
+the sender's bits; acknowledgement clears the recipient-observed bits. Command
+buffer addresses are shared protocol data, not an emulated MMIO register bank.
+
+An explicit receive call validates a nonempty aligned payload, destination range
+and compiled IOP code protection before copying. It then disarms reception and
+posts cause 43 to the native interrupt domain. The compiled SIF1 handler observes
+committed bytes; masking and callback budgets use the existing delivery path.
+SetDChain rearms this native receiver. Invalid delivery leaves data and receive
+readiness unchanged; a second delivery cannot overwrite an unacknowledged buffer.
+The current receive API handles one aligned batch up to 1 MiB, not DMA tag parsing.
+
+Deinitialization stops reception and outbound submissions, clears queued native
+completion callbacks and releases/disables the SIF0 handler. Already committed
+bytes remain committed; the historical CheckInit marker and peer status remain.
+Cleanup works without a connected peer and is repeatable. An active completion or
+interrupt context stops unsupported before any teardown effect. Pending SIF1
+notifications still describe data committed before teardown. Restarting a stopped
+transport requires a new native session; SetDChain cannot silently reconnect it.
+
+The standalone host constructs disconnected control and outbound services and
+coordinates their teardown. It never publishes an EE peer automatically. Explicit
+EE interrupt notification, reconnection and actual converted EE command execution
+remain unfinished.
+
+Native SIF command registration (sifcmd 8-11) binds explicit user/system tables,
+adds compiled callbacks and removes handlers. User entries occupy eight bytes;
+system entries occupy twelve, with the third word preserved. Table extents and
+indices are bounded; registration validates targets and protected code before
+writing. A constant AddCmdHandler function argument seeds native code discovery,
+including bundle callbacks, without using a title or fixed game address.
+
+The command receive API accepts an explicit peer packet and caller-reserved RAM
+buffer. It validates the header, packet length (16-112 bytes), destination and
+current handler pointer before committing anything. Extra-data payloads remain
+unsupported. An accepted packet captures its callback and user argument and uses
+the shared native interrupt/callback scheduler. Callback entry supplies packet
+and user pointers in a0/a1; completion restores foreground state. Packet storage
+must remain reserved until completion. One packet may be pending or active, so
+later arrivals cannot overwrite a suspended callback's packet. Registered tables
+cannot overlap packet storage. Removed handlers consume no callback; a mutated
+unknown pointer is rejected rather than executed or interpreted.
+
+The standalone host installs registration support but supplies no peer packets.
+The optional SIF1 observer, command exit and complete native RPC remain unfinished. This does not replace all of the disc's SIFCMD
+module or resolve its indirect calls; it supplies a native service boundary for
+converted clients instead of reproducing that module's dispatcher.
+
+Native outbound command services (sifcmd 12/13 and 28/29) marshal the O32 register and
+stack arguments and require an explicit NativeSifCommandEndpoint. Packet sizes
+16-112 are supported. Positive extra-data sizes up to 1 MiB copy exactly that
+many bytes; nonpositive sizes clear the extra-data header fields. The sender
+preserves the option word, fills size/destination/command fields and accounts for
+source buffers overlapping the updated header. Regular SendCmd is unsupported
+in interrupt context; iSendCmd supports that context. SendCmdIntr/iSendCmdIntr
+also read the callback and user argument from the O32 stack. A nonnull callback
+must already belong to compiled code; unknown targets reject the send without
+changing either side. Dynamically constructed stack callback arguments may need
+additional conversion roots; the sender never interprets an unknown target.
+
+The endpoint owns a supplied EE data arena, code-write guard and published
+command-buffer address. It validates both destination extents and snapshots
+source data before committing writes. Extra data becomes visible before the
+command packet and notification. A peer consumes an owned packet via take();
+there is no fabricated DMA engine or instruction execution. One pending packet
+provides backpressure: a busy send returns zero and preserves peer data, while
+still applying the caller's header update. Other validation failures leave both
+sides unchanged. Successful submissions return increasing positive tokens from the same allocator
+as raw SIF transfers. Both paths share one commit helper: validate callbacks and
+reserve queue storage before a nonthrowing data commit, then publish completion.
+The general SIF callback and optional per-command callback run through the native
+interrupt domain; void return values never repeat them. SIF status reports these
+synchronous copies complete. Shared teardown cancels queued completions and
+prevents new command submissions while preserving already committed peer data
+and notifications. A converted EE packet consumer remains unfinished; the
+standalone probe deliberately has no endpoint. This transport
+milestone is not evidence of EE startup or RPC completion.
+
+Native command session services implement InitCmd and Get/SetSreg (sifcmd 4,
+6/7). The 32 software values are protocol state, not emulated hardware registers.
+Local and peer writes share the same bounded array. InitCmd requires an explicit
+peer and an initialized, live SIF link. It uses the ordinary shared system-status
+event: publish CMDINIT and yield until bit 0x100 is signalled. No scheduler means
+no suspended continuation and no fabricated readiness publication. Repeated calls
+observe the existing event state without resetting it.
+
+The inbound router delegates built-in control packets to receive_control. Change
+Address publishes a validated peer command-buffer address; Set Sreg updates a
+bounded software value. Init Command with option zero validates the peer address,
+signals 0x100, acknowledges the peer CMDINIT bit and publishes the buffer. A
+nonzero option signals 0x800 instead, without satisfying the command-init wait or
+changing the address. Validation and event errors must not partially publish the
+buffer or acknowledge readiness. A deleted status event is not recreated.
+
+The command session, handler dispatcher and outgoing endpoint remain explicit
+native components. NativeSifInbound connects the session and dispatcher through a
+single owned 112-byte packet mailbox with an optional payload up to 1 MiB.
+Acceptance requires a live link and snapshots both buffers; delivery runs through the callback multiplexer only with interrupts enabled,
+no active callback and no branch delay slot. Zero-budget execution cannot deliver
+packets. Built-in control IDs 0-2 use the native session unless the caller installs
+its own system table; that table then takes precedence. Other packets resolve
+registered compiled callbacks at delivery, preserving mutable handler checks.
+
+Deferred validation failures stop native execution with the command ID and fault
+address; they remain latched until the owner explicitly discards the packet. No
+failure is swallowed as an empty callback queue, and a running callback cannot be
+discarded. A sliced user callback retains its mailbox reservation until completion.
+The standalone host installs this router with packet storage at the start of its
+reserved stack region, but supplies no EE packets. Bootstrap ownership and the
+converted EE producer remain unfinished; InitCmd still stops without a peer.
+
+Native RPC server ownership implements SetRpcQueue, RegisterRpc, RemoveRpc and
+RemoveRpcQueue (sifcmd 19, 17, 24/25). C++ maps own descriptor identities and queue
+membership; bounded vectors preserve registration order. Public queue/server
+link fields are mirrored in RAM, preserving address aliases and untouched server
+request fields. Registration validates complete descriptor extents, code-write
+protection, stack arguments and compiled function pointers before committing.
+Constant primary RegisterRpc function arguments seed code discovery; dynamically
+supplied and secondary callbacks must already be part of the compiled program.
+
+Duplicate live queues/servers and overlapping owned records stop unsupported
+instead of creating cyclic lists. The limits are 128 owned queues and 1024
+servers. Removing a queue detaches it from published order while retaining any
+server membership for later cleanup. Removing its final server releases native
+ownership; empty removed descriptor storage can be reused. Only foreground
+registration/removal is supported. Buffer pointers are recorded, not dereferenced
+at registration; actual request sizes and buffer validation belong to delivery.
+Client operations
+remain unfinished, so no successful remote call is implied by registration.
+
+Native server-side RPC binding handles the public Bind command through the
+inbound router when no custom system-handler table overrides it. Lookup scans
+published queues and their server registrations in insertion order. It reads
+current service IDs and buffer pointers from the owned descriptors, revalidates
+the selected compiled function and creates a zero-initialized 64-byte RPC End
+reply containing the originating packet/client identities and bind result.
+Unknown service IDs receive a null server/buffer pair. Detached queues are not
+visible to this lookup. No host pointer or uninitialized memory enters the reply.
+
+The router retains the prepared reply while the shared native endpoint is busy,
+without dropping the request, inventing success or creating an alarm-driven spin
+loop. Retries use the same snapshot even if descriptors change. Once accepted,
+the endpoint's existing data/notification/completion ordering applies. Protected
+or invalid peer destinations become deferred execution faults; explicit discard
+also releases the prepared reply. Missing peers remain unsupported. This is
+server-side discovery only, not execution of an RPC function or an EE client.
+
+Native RPC Call admission validates the complete packet and payload lengths, a
+registered idle server in a published queue, its compiled function, request and
+queue storage, and the registered receive buffer. The packet's extra-data address
+must identify that buffer. Payloads cannot overlap queue/server metadata or another
+outstanding request's payload. No caller-owned packet bytes are used after the
+inbound snapshot. Request metadata and allocation are prepared before worker
+wakeup; only bounded nonthrowing writes remain after a successful wake.
+
+Admission fills the public request fields, copies input data and appends a native
+FIFO entry. A nonnegative queue thread ID is woken through the existing iWakeupThread
+service when the queue is inactive; a missing or invalid worker cannot fabricate
+successful admission. Negative thread IDs permit explicit polling. GetNextRequest
+(sifcmd 20) updates queue active/start state and returns the original server pointer,
+including its alias. Empty retrieval returns zero. The public end field retains
+its last value when the queue drains, matching the queue contract.
+
+Queued and retrieved server records remain busy until the execution/reply
+path completes them. Reusing those servers or removing their queue stops unsupported
+rather than losing a request. Admission alone wakes and retrieves work; it does
+not invoke the RPC function or report remote completion.
+
+Native ExecRequest (sifcmd 21) supports command-notified (rmode 1) and polling-mode
+(rmode 0) replies. It
+revalidates the retrieved server's compiled function and admitted buffer/size,
+then enters that function with the request number, input pointer and length.
+Registration captures the function's global pointer. The native service bridge
+saves the caller continuation and uses a dedicated return sentinel; neither the
+sentinel nor callback execution fetches or decodes PS2 instructions. Execution
+budgets and native thread suspension retain the service continuation.
+
+On function return, the service validates and snapshots the returned bytes (or no
+bytes for a null pointer), builds an RPC End reply and submits through the shared
+peer endpoint. A busy peer returns thread_wait at the service return boundary;
+resuming retries the saved reply without rerunning the function or consuming a
+busy-loop instruction budget. Faults likewise retain the completed function's
+continuation. Only accepted reply delivery restores the caller registers/PC,
+preserves its aggregate operation count and makes the server reusable. Public
+request fields remain available in RAM. The queue's active bit changes on the
+next GetNextRequest, as before.
+
+Polling-mode delivery copies the result bytes and then a 64-byte completion
+record to the peer's supplied packet address. The completion clears rec_id and
+rpc_id and preserves the client and RPC Call subtype. Both writes are validated
+and snapshotted before committing through the shared native completion service.
+This path neither occupies nor consumes the command mailbox; an unrelated
+pending command does not block it. It uses native memory copies rather than DMA
+registers or guest instruction execution. Publication assumes the current
+serialized peer owner; a concurrent peer would need explicit synchronization.
+
+Pending native calls require a stable Cpu address; the production scheduler owns
+stable thread states. Up to 128 contexts may hold RPC continuations. Nested
+ExecRequest on the same context and invalid reply modes stop unsupported
+before invoking a handler. Client APIs and
+converted EE consumption remain unfinished. These limits must not be described
+as complete RPC compatibility or a game boot.
+
+Native stdio printf (major-version-1 ordinal 4) formats diagnostic text in C++
+and sends it to an explicitly supplied host sink. It supports d/i/u/o/x/X/s/c,
+literal percent, ordinary integer flags, numeric or star width/precision, and
+32-bit long integers. O32 variadic words come from a1-a3 and then caller stack
+slots beginning at SP+16; the service request carries the settled guest SP.
+Integer conversion handles the full unsigned range and signed minimum without UB.
+
+Format/string scans are bounded to 4096 bytes, each width/precision to 4096,
+argument positions to 127 variadic words and output to 16 KiB. Precision-limited
+strings need no terminator beyond the requested bytes. Pointer/stack failures
+report address faults; unsupported forms (including floats, long long, percent-n
+and pointer formatting) stop explicitly. Formatting validates completely before
+calling the sink once, so failures cannot emit a partial diagnostic. The result
+is the byte count or -1 on sink failure. The standalone host supplies stdout;
+library code does not select files or write to the console itself.
 
 CP0 performance registers are CPU-global bus state, outside thread and interrupt
 snapshots. Selector aliases support control and two 32-bit counters with signed
@@ -106,7 +704,7 @@ measurements. Other active events and overflow exceptions remain explicit stops.
    Reboot tracks every allocation it makes and rejects overlap before installing
    another provider or handoff buffer. The DMA controller shares channel address,
    block and inactive-control registers between MMIO and service calls for
-   channels 0ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¾ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¾ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¾ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¾ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“12, with tag registers only on supported channels. Primary and
+   channels 0–12, with tag registers only on supported channels. Primary and
    secondary priority registers support channel priority and enable updates.
    Transfer starts, unimplemented dmacman exports and unsupported DMA operations stop
    without latching a transfer or manufacturing completion. Native registration
@@ -420,7 +1018,7 @@ IOP DMA interrupt control exposes both DICR banks, channel enables, force IRQ,
 computed status and write-one-to-clear completion flags. A completion signal
 interface routes sources into primary IRQ 3; it does not perform transfers.
 SIF0/1 completion sources retain their unmaskable tag-interrupt behavior. The
-SIF1 destination-chain START is supported when connected to guest RAM; other
+SIF1 destination-chain and SIF0 source-chain START are supported with guest RAM.
 Additional DMA transfer paths remain unfinished; native DMA interrupt dispatch is supported.
 
 Disc-backed IOP reset runs in bounded 64-instruction slices during SIF device
@@ -517,4 +1115,267 @@ and control bits. Guest handlers run on the existing budgeted interrupt path;
 a zero return clears that channel's completion enable. The primary cascade is
 reenabled after all channel causes drain, before normal preemption processing.
 Unregistered channel handlers and forced DMA interrupts remain explicit stops.
-SIF0 outbound DMA transfer execution remains unsupported.
+SIF0 source-chain output feeds the same FIFO consumed by the EE receiver.
+
+IOP SIF0 source chains transfer at most one quadword per device step and honor
+priority gating, FIFO capacity and pause/resume. Tag and payload extents are
+validated before tag emission. Each tag advances TADR by 16 bytes; the EE tag
+occupies a full FIFO quadword, including the following descriptor's ignored
+words. Partial payload quadwords retain trailing lanes from the preceding
+quadword. Stop/IRQ tags clear START and raise channel 9 completion after payload
+transfer. Normal-block modes remain unsupported; timing is diagnostic.
+
+IOP analysis retains a call's return continuation even when its indirect target
+set is unknown. The delay slot is still decoded and validated; reachable unknown
+transfers are reported together with their source register. Unknown indirect
+jumps have no assumed fallthrough. This does not authorize an arbitrary runtime
+call: all unresolved transfers still reject conversion before source or LLVM
+emission. Mutable callback tables need target recovery across registration and
+use; their initial contents are not proof of their later values.
+
+### Native RPC initialization
+
+InitRpc (sifcmd 14) uses the existing command session and shared system-status
+event. It first waits for command setup (bit 0x100), then publishes a SetSreg
+packet for RPCINIT index 0 with value 1 exactly once per session. A busy peer
+keeps the import pending; a failed send does not mark readiness as published.
+It finally waits for the explicit peer RPC acknowledgement (bit 0x800).
+The mode argument is unused, matching the public contract.
+
+The first wait retains the native import PC through a retry-yield service reply.
+The scheduler suspends the caller on the event and retries that import when it
+wakes; it does not retire the import or return to the caller between phases.
+The final wait uses the ordinary event continuation. Repeated initialization
+shares publication state and does not reset registered RPC servers or queues.
+A standalone caller without a scheduler can retry the final acknowledgement wait
+explicitly. Missing peers, stopped links and interrupt-context initialization
+remain unsupported. No peer acknowledgement or client operation is fabricated.
+
+### Native RPC worker loop
+
+RpcLoop (sifcmd 22) reuses native queue ownership, compiled handler invocation,
+reply delivery and thread sleep/wakeup. It requires the queue's registered worker
+to be the current native thread. A queued request is validated and its saved
+continuation allocated before removal from the FIFO. Reply completion restores
+the loop import PC and queue argument, rather than returning to the original
+caller. Both reply modes and retry snapshots use the same ExecRequest path.
+
+An empty queue clears its public active/start fields and sleeps through the
+thread provider. Wakeup resumes at the loop import. An existing wakeup credit
+consumes one budgeted service operation before rechecking, preventing an internal
+unbounded busy loop. No generated instructions are decoded and no guest kernel
+loop is executed. Detached queues, absent schedulers and mismatched worker IDs
+stop explicitly. Concurrent peer ownership still requires future synchronization.
+
+### Native thread priority changes
+
+ChangeThreadPriority (thbase 14) updates the existing cooperative scheduler.
+Thread ID zero selects the current continuation; priority zero inherits the
+current continuation's priority. Explicit priorities range from 1 to 126.
+Unknown handles, dormant workers, invalid priorities and interrupt-context calls
+return the public errors without changing scheduling state. Resolving a current
+thread without an active scheduler remains unsupported.
+
+A changed ready worker moves to the back of the ready list, whose stable minimum
+selection preserves FIFO ordering within each priority. Lowering the current
+worker to an eligible ready priority, or raising another ready worker above it,
+yields at the compiled service boundary. The normal scheduler saves and resumes
+the caller. Sleeping workers keep their wait state with the updated priority.
+This supplies cooperative scheduling behavior, not asynchronous preemption or
+interrupt-context iChangeThreadPriority.
+
+### Native thread status
+
+ReferThreadStatus (thbase 22) writes the public 68-byte foreground status record
+from native scheduler state. It distinguishes the current running thread, ready
+workers, sleeping/event-waiting workers and dormant entries. Thread ID zero
+selects the current continuation. Creation attributes, option, entry, allocated
+stack, GP, initial/current priority and queued wakeups are retained explicitly.
+Restarting a created worker restores its initial priority.
+
+Event suspension now records the native event handle; completion clears it.
+Sleep reports its wait type with no event handle. The entire output region is
+validated for bounds, alignment and generated-code protection before writing.
+Unknown thread handles and interrupt-context queries return public errors.
+The foreground record's interrupt-only register-context field and reserved words
+are zero; no host pointer is exposed. iReferThreadStatus remains unsupported.
+Host-admitted continuations expose their known entry and GP, with zero stack
+allocation metadata because the scheduler does not own their stack.
+
+### Native delayed workers
+
+DelayThread (thbase 33) suspends the current native continuation until a steady
+host-clock deadline. It records the original microsecond argument in thread
+status and applies a 100-microsecond minimum wait. Deadline arithmetic is checked
+before changing state. Tests may inject a clock; production uses steady_clock.
+
+The scheduler releases expired delays at its normal execution boundaries when
+interrupt delivery is enabled. Zero-budget calls cannot release them. Ordinary
+WakeupThread does not shorten a delay; its wakeup credit remains for a later sleep.
+Completion clears delay wait metadata and resumes the already-retired service.
+This is cooperative host scheduling, not cycle-exact console timing or an
+asynchronous preemption mechanism. A worker that does not yield can defer another
+worker's resumption until the next scheduler boundary.
+
+The native probe chooses the earlier of its alarm and thread-delay deadlines for
+host sleeping, retaining its existing bounded startup wait. No guest timer
+registers, instruction-count delays or busy-loop instructions are required.
+
+### Native semaphores
+
+The thsemap native provider supports ordinals 4-9 and 11-12: creation, deletion,
+foreground/interrupt signalling, waiting, polling and foreground/interrupt status.
+It owns bounded semaphore records and monotonic handles. Counts are bounded by a
+positive signed maximum; unsupported count configurations and priority-inheritance
+attribute 0x100 stop explicitly. Unknown attribute bits return the public error.
+
+An empty WaitSema suspends its compiled continuation through NativeThreadWaits,
+shared with event flags. Thread status reports semaphore wait type and handle.
+Signal transfers one permit directly to one waiter; it does not also increment
+the count. Attribute zero preserves FIFO arrival order; attribute one selects the
+lowest current native thread priority with FIFO ties. Priority changes while
+waiting therefore affect subsequent selection. Foreground wake/delete operations
+can yield through the scheduler; interrupt signalling never switches inside the
+callback. Deletion resumes pending waiters with the public deleted-object error.
+Polling and count-overflow errors do not change state. Status preserves reserved
+words and validates the full output record before writing.
+
+These are native cooperative synchronization objects, not host-blocking semaphore
+calls or an emulated thread manager. The standalone converted host connects the
+provider explicitly. Priority inheritance and arbitrary thread termination while
+queued are outside the currently supported lifecycle.
+
+### Native message boxes
+
+The thmsgbx provider supports ordinals 4-9 and 11-12 through bounded native queue
+ownership. Public packet addresses retain their aliases, and the packet's circular
+next links are mirrored in RAM. The host never follows those links to find work.
+FIFO messages preserve arrival order; priority messages are inserted by their
+unsigned priority byte with stable ties. Duplicate or overlapping queued message
+headers, including aliases across boxes, stop before mutation. Queued headers and
+receive/status outputs are validated for bounds and generated-code protection.
+
+ReceiveMbx uses the public output-pointer-first argument order. An empty receive
+suspends through the shared native wait interface with mailbox wait type/handle.
+SendMbx delivers directly to one waiting receiver when present; otherwise it
+queues the packet. Receiver selection uses FIFO or current native thread priority.
+Interrupt sends wake without switching inside the callback. DeleteMbx releases
+waiting workers with the public deleted-object error and releases queue ownership
+without freeing caller-owned messages. Polling an empty box returns its public
+error. Status exposes counts and the next packet while preserving reserved words.
+
+Queues are limited to 4096 messages per mailbox and handles are never recycled.
+Concurrent peer/thread mutation remains outside the serialized native scheduler
+contract. Arbitrary termination of queued waiters is not implemented.
+
+### Native kernel diagnostics
+
+Sysmem Kprintf (ordinal 14) shares the existing native stdio formatter and explicit
+host output sink. Its O32 register/stack arguments, bounded strings, formatting
+limits, return count and sink failures use the same implementation as printf.
+Heap services continue to own only allocation/query ordinals; the router passes
+Kprintf to the diagnostic provider. No output provider means an unsupported call,
+not a fabricated successful print.
+
+A null Kprintf format is callback-specific control rather than text and remains
+unsupported. Guest KprintfSet callback registration is also unsupported. The
+native host sink is the explicit replacement for kernel diagnostic output.
+
+### Native RPC peer reads
+
+GetOtherData (sifcmd 23) uses a separate native data provider backed by an explicit
+converted-peer endpoint. Since the native owner exposes a serialized memory view,
+the provider replaces request/response transport with a bounded, snapshotted copy.
+Both blocking and NOWAIT mode complete before return. It does not consume or
+publish command packets, and an unrelated occupied command mailbox does not block
+this native operation. A missing or stopped peer remains unsupported.
+
+The O32 fifth argument supplies mode. Source/destination aliases are normalized;
+byte-aligned data up to one MiB is supported. Descriptor bounds, output code
+protection, mode, source extent and descriptor/output overlap are checked before
+writes. Zero-length reads do not dereference unused data pointers. Successful
+completion clears the descriptor packet pointer, assigns a native request ID and
+records that no semaphore is needed. Remaining descriptor fields are preserved.
+Failures leave data and descriptor untouched. Null or uninitialized packet fields
+in caller-owned receive descriptors are not followed as host pointers.
+
+This is an intentional native transport replacement, not emulation of remote
+packet latency. It requires serialized access to the supplied peer memory;
+concurrent ownership would need synchronization. It does not implement client
+BindRpc/CallRpc or inbound remote-data packet handling. The standalone probe has
+no converted EE endpoint yet and therefore cannot fabricate successful reads.
+
+### Native disc metadata
+
+Ioman getstat (ordinal 16) uses the shared disc filesystem to resolve file or
+root-directory metadata without opening a handle or advancing a cursor. ISO
+entries retain their seven-byte recording-date field. The native provider writes
+the 40-byte legacy io_stat layout with read-only regular/directory mode bits,
+zero attributes/high-size and the actual extent size. Creation/access/modification
+fields use the disc recording date, as the public disc-driver contract does.
+The stored wall-clock fields are preserved without host timezone conversion.
+
+Paths remain confined to cdrom/cdrom0. The root accepts slash/backslash forms;
+traversal and absent paths retain normal filesystem errors. The path is captured
+before output writes, and the entire output is checked for alignment, bounds and
+compiled-code protection. Lookup errors leave the output untouched. Device registration and writable media remain unfinished.
+
+### Native directory handles
+
+Ioman dopen/dclose/dread (ordinals 13-15) enumerate the user-supplied ISO through
+the shared disc filesystem. Directory and file handles share the 64-descriptor
+limit and number space. Each opened directory owns an independent snapshot of
+its entries and cursor. Files cannot be opened as directories; byte reads/seeks
+reject directory handles, and file/directory close operations check handle type.
+
+Dread validates the entire 300-byte legacy directory record before advancing the
+cursor. It reuses getstat's metadata encoder, preserves ISO entry names including
+version suffixes, null-terminates the name and emits no host private-data pointer.
+It returns one for an entry and zero at EOF; EOF leaves output untouched. Invalid
+output storage leaves the next entry available for retry. The parser excludes
+ISO self/parent records, and empty directories return EOF immediately. No paths
+resolve against the host filesystem and enumeration does not modify the image.
+
+### Read-only disc mutation contract
+
+Ioman write (ordinal 7) rejects read-only disc descriptors with EBADF before
+reading the source buffer, including zero-length writes. Standard streams 0-2
+remain unsupported by the disc provider so a console provider can own them.
+Remove, mkdir, rmdir, chstat and format (10-12, 17-18) resolve the bounded path's
+device and return EROFS for cdrom/cdrom0. Foreign devices return ENODEV.
+
+These are explicit errors for a mounted read-only filesystem, not successful
+mutation stubs. No source/stat payload is dereferenced after the read-only check,
+no handle/cursor changes occur, and the ISO is never opened for writing. This
+does not implement writable memory cards, host filesystem writes or arbitrary
+device-control operations.
+
+### Native 64-bit disc seeks
+
+Ioman lseek64 (ordinal 30 in the extended legacy table) decodes its O32 offset
+from a2/a3 and whence from stack offset 16. The native service bridge optionally
+returns a high word in v1 alongside v0, preserving ordinary 32-bit service
+behavior. Pending register loads retire before the returned pair takes effect.
+
+File cursors are 64-bit. Both seek variants use one checked position calculation;
+legacy lseek enforces its signed 32-bit return range before committing. lseek64
+supports nonnegative positions through INT64_MAX, including beyond EOF, while
+negative positions and arithmetic overflow return EINVAL without changing state.
+Negative error results are sign-extended across both return registers. Reads past
+EOF return zero without truncating a large cursor. This expands cursor arithmetic,
+not ISO extent support: the existing ISO reader still supports single-extent
+32-bit file sizes and rejects unsupported disc layouts explicitly.
+
+### Native disc descriptor controls
+
+Legacy ioman ioctl (9) and ioctl2 (34) bind to the native disc provider. Invalid
+disc descriptors return EBADF before examining caller buffers. Standard streams
+and directory controls remain unsupported by this provider. The mount currently
+opens only ordinary read-only files, so ioctl2 returns EIO, including stream
+pause/resume/status requests. No streaming state or success is fabricated.
+
+Unknown ioctl commands return EIO. Recognized hardware controls (processor/port
+queries, spin control, decoding, disc keys and disc type) remain explicit
+unsupported import stops until a native contract exists. These paths neither
+read payload pointers nor write outputs, change the file cursor, or touch the
+image. This is partial device-control coverage, not a complete drive service.

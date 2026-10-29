@@ -1,5 +1,10 @@
 # Testing AnyPS2
 
+Current policy: LLVM is the only supported conversion backend. Older sections
+below describe historical diagnostic C++/interpreter milestones; those are not
+supported output paths. The EE C++ generator and its execution test have been removed. IOP milestones now run through iop-llvm-execution and iop-llvm-project.
+
+
 ## Default tests
 
 Add tests for major behavior changes and integration milestones. Extend an
@@ -22,6 +27,21 @@ generated instructions, kernel behavior, hardware registers, process arguments,
 repository content, and rejection fixtures for the repository policy. They need
 no commercial game or BIOS. A generated native fixture is compiled by the normal
 build so tests execute the generator's output.
+
+The `iop-native-execution` milestone compiles generated IOP C++ without linking the
+interpreter. Its RAM contains data only, proving execution does not fetch guest
+instruction bytes. It checks branch/load delays, budget resumption, RAM aliases,
+signed/unsigned byte and halfword access, alignment faults and rejection of writes
+to converted instructions. Fixture generation also rejects unsupported code and
+unresolved indirect transfers before emitting output, and checks the generated
+function bound including delay slots.
+The `iop-native-project` milestone converts an original synthetic IRX, configures
+and compiles its generated CMake project, removes the original IRX and executes
+the resulting binary. It checks the return value, rejects malformed data size,
+and checks generated source/build dependencies for interpreter references. These
+tests cover the standalone converter, not full IOP service or game conversion.
+Run them with `ctest --test-dir build -C Release -R '^iop-native-' --output-on-failure`.
+
 The disc-file-I/O milestone uses a synthetic ISO and exercises the actual SIF
 request/reply path. No commercial image is needed for that test.
 The SIF transport milestone also executes synthetic IOP loads/stores through
@@ -424,3 +444,425 @@ The DMA cascade regression covers simultaneous completions in both banks,
 per-channel acknowledgement, chained guest execution across budgets, zero-return
 mask changes, final aggregate-latch clearing, context restoration and preservation
 of unregistered pending completions.
+
+The SIF0 sender milestone checks priority and FIFO stalls, pause/resume, payload
+order, trailing-lane padding, completion flags and atomic rejection of bad extents.
+The synthetic disc-reset manager now echoes an EE SIF1 payload back through guest
+SIF0 source-chain registers into EE RAM, exercising the shared transport end to end.
+
+## LLVM ahead-of-time milestone
+
+With Clang available on Windows x86-64/MSVC, `iop-llvm-execution` compiles emitted
+LLVM IR at `-O2` and links it into the same data-only RAM execution regression used
+by the C++ backend. Coverage includes direct calls/returns, aliases, arithmetic,
+branch/load delays, byte/halfword/word memory and fault stops. It links no interpreter
+or LLVM runtime. Signed comparison and branch coverage includes SLT/SLTI and
+BLTZ/BGEZ/BLEZ/BGTZ across zero, positive, negative and signed-limit inputs, with
+taken/untaken paths and budget suspension. Branch-and-link REGIMM forms remain
+unsupported. The test uses generated synthetic routines in both backends.
+Shift coverage includes arithmetic-right immediate shifts and all three variable
+shift forms. Zero, sign-bit, signed-limit and negative inputs are combined with
+counts at and beyond the word width, checking five-bit count masking and sign
+extension while suspending between instructions. All fixtures are original.
+HI/LO coverage verifies initial state, signed/unsigned 64-bit products, explicit
+HI/LO writes and readback across one-instruction and larger slices. The LLVM
+adapter uses ABI entry version 2 for the enlarged state buffer; rebuild generated
+objects and their hosts together when changing the ABI.
+Division coverage uses explicit quotient/remainder expectations for zero divisors,
+signed overflow, all sign combinations and high unsigned operands. Both backends
+run the same fixture with several slice sizes. Signed division widens to 64 bits
+and the LLVM backend substitutes a nonzero divisor before evaluating division,
+so exceptional guest inputs cannot introduce host undefined behaviour or poison.
+BREAK coverage checks guarded normal paths, explicit trap codes, delay-slot traps,
+pending-load preservation and suspension immediately before a trap. Discovery
+does not decode unreachable bytes beyond a terminal trap. The native backend
+returns a diagnostic stop without retiring the BREAK; exception-handler delivery
+is not implemented, and this is not a successful execution result.
+Native-service integration uses an explicitly synthetic provider to verify
+argument/result routing, resuming compiled continuations, pending-load retirement,
+slice accounting and exactly-once invocation. It also checks missing providers,
+unsupported requests, provider faults and rejection of delay-slot services.
+It does not claim implementation of PS2 context switching or syscall services.
+The native fixture's shift, multiplication and division routines are discovered
+through an original export table rather than explicit entry roots. Both compiled
+backends execute them; malformed export targets must fail before output. The
+format suite separately checks the shared export parser and library registry.
+The LLVM execution fixture additionally compiles and runs a 1,102-instruction
+routine across five bounded execution functions. Branch/delay-slot and pending
+load pairs straddle function boundaries. Slice sizes of 1, 255, 256, 257 and 2,048
+verify retirement counts, state, data and return values across all RAM aliases.
+The C++ fixture remains within its explicit backend size limit.
+Indirect-transfer fixtures materialize original routine addresses and execute
+register calls/jumps through both backends. They check aliases, return links,
+delay slots and suspended execution. Unknown entry-state and memory-loaded target
+variants must reject conversion without partial output, while an unexpected
+runtime target must stop before changing the return link or retiring the call.
+Checked ADD/ADDI/SUB coverage compares compiled results against wider arithmetic
+over zero, sign and signed-limit operands. Overflow must preserve PC, destination,
+pending loads and delay-slot state, even when the destination is register zero.
+LLVM uses signed-overflow intrinsics; the C++ backend uses unsigned arithmetic
+and sign-bit checks. Neither relies on undefined signed host overflow. Overflow
+currently reports a diagnostic stop rather than dispatching a PS2 exception handler.
+An original sysclib import table and caller verify native `memset` lowering through
+both backends. Checks cover alias pointers, truncation to the fill byte, untouched
+neighbours, returned pointers, zero lengths, atomic bounds failure and code-write
+protection. An unsupported import ordinal must fail before emitting LLVM output.
+`iop-llvm-project` exercises the default CLI backend through
+IRX conversion, native object compilation, executable linking and execution after
+the original IRX is removed. The C++ pipeline remains covered with `--cpp`.
+Run `ctest --test-dir build -C Release -R '^iop-(llvm|native)-' --output-on-failure`
+after building `iop-llvm-tests`, `iop-native-tests` and `ps2-iop-recompile`.
+These tests do not establish game booting, complete module support or performance.
+
+Native memory-copy coverage uses original import callers for memcpy and memmove.
+It verifies copied data, caller return, alias pointers, pending source loads,
+forward/backward/identical overlapping moves and empty operations. Invalid source
+ranges, protected destinations and overlapping memcpy fail before any destination
+mutation. Both compiled backends run the same regression.
+The standalone IRX pipeline contains original sysmem allocate/free and sysclib memset imports and a
+caller that fills a byte, reads it back and returns 43. The test configures and
+links the emitted project, removes the input IRX, and checks the executable's
+result and 12-operation count for both backends. Stub protection also checks writes
+to the replaced ordinal/delay word and rejects execution starting at that word.
+
+Native allocator integration uses original sysmem import stubs and a compiled
+caller on both backends. It covers sliced call/return, pending loads, native fill
+of allocated memory, rounded first/last/fixed allocations, exhaustion, free-range
+coalescing, reserved regions, invalid frees and queries, and absent providers.
+No console allocator instructions or guest allocator metadata are used.
+
+Finite indirect-call analysis is covered by a synthetic branch-selected pair of
+callees compiled by both backends. Execution checks both paths, RAM aliases,
+single-operation slices, rejection of unproven destinations and trapping delay
+slots. An unbounded pointer-producing loop must fail conversion without partial
+output rather than truncate its target set. Unknown incoming paths remain errors.
+
+Native library registry integration executes compiled register/release imports,
+checks lookup visibility and executes a resolved compiled export. It covers ABI
+major/ordinal rejection, duplicate/older versions, newer-version precedence and
+release restoration, unknown/mutated declarations and invalid pointers. The
+standalone IRX test now registers a converter-emitted export descriptor before
+allocating, filling, reading and freeing memory; registration failure traps. Both
+LLVM and C++ standalone builds must return 43 after 31 native operations.
+
+Cross-module compilation uses two original, disjoint synthetic modules. The client
+stops before provider registration, then resumes through an imported native call
+and returns the expected value. Both backends verify pending arguments and sliced
+execution, release-in-use rejection, unlink/release, failed relink and successful
+explicit relink. Bundle validation rejects overlapping modules, incompatible
+provider ABIs and unsupported provider instructions before emitting output.
+
+Both standalone project tests also convert two original IRX files through the
+bundle CLI, build a single executable, delete the inputs, and verify ordered
+provider/client startup with shared native registration. The provider returns 43
+after 31 native operations; the client calls its compiled export and returns 43
+after 11 operations. Overlapping layouts and missing providers must fail before
+creating output directories. Single-module packaging remains covered in each run.
+
+Loader-query integration executes native imports through both generated backends.
+Boot coverage includes empty context, first duplicate selection, full-width mode
+IDs, public record layout, a compiled load through the returned pointer, atomic
+configuration failure and rejection of mutated lengths. Library-table query
+coverage includes registration/release, version precedence, ABI-major rejection
+and truncated identity pointers without instruction retirement.
+
+Native disc integration runs compiled ioman imports over an original synthetic
+ISO and checks cross-sector reads, RAM aliases, seeking, short reads/EOF, close,
+read-only errors and disc-path isolation. Invalid RAM/code destinations must leave
+both data and cursor unchanged. The standalone bundle adds a third module that
+opens SYSTEM.CNF, reads one byte and closes it. It stops without `--disc` and returns
+the fixture byte with an image mounted after the source IRX files are deleted.
+The existing disc-fileio-rpc regression covers reuse of the shared handle backend.
+A local opt-in LLVM run also read the first SYSTEM.CNF byte from the supplied GT4
+image and matched the independent parser read; it executed synthetic modules and
+is evidence of native disc access only, not converted GT4 execution or boot.
+
+Native interrupt integration discovers a callback from a constant registration
+argument and executes it through both backends. Coverage includes duplicate
+handlers, global/per-cause masks, nested suspend tokens, pending-event retention,
+context queries, zero-budget and sliced callbacks, foreground HI/LO/pending-load
+restoration, delay-slot deferral, zero-return disabling and visible callback traps.
+Unknown handler addresses and code-overwriting state outputs are rejected without
+retirement. Callback data is placed outside the large LLVM fixture's code ranges.
+
+Bundle callback coverage registers and executes a non-exported handler from another
+module through both native backends. Reversed module ordering exercises revisiting
+an already analyzed owner. Unaligned, unowned and BSS callback roots reject
+conversion without partial generated output.
+
+Native event integration runs compiled imports through creation, AND/OR polls,
+keep-mask clearing, clear-on-success, status and deletion. A compiled interrupt
+handler signals the same event through iSetEventFlag, then foreground code
+consumes it. Coverage includes full result patterns, initial-state retention,
+reserved status words, invalid modes/patterns, context rejection, stale IDs and
+code-write rejection without consuming bits. Without a connected scheduler, an unsatisfied wait must stop at its
+import without retirement.
+
+The native sleep/wakeup milestone runs two compiled continuations through sleep,
+foreground wakeup and completion, and separately wakes an idle scheduler through
+a compiled interrupt handler. Single-operation slices verify callback retention,
+thread HI/LO/register preservation, exact retirement and aggregate execution
+accounting. An idle wait must consume no operations, and finished threads cannot
+be revived. Early wakeup counts, cancellation and compiled thread identity are
+also checked. Standalone LLVM/C++ project tests exercise host scheduler admission.
+
+Scheduler-backed event tests execute compiled WaitEventFlag calls and interrupt
+signalling across single-operation slices. Multiple waiting continuations verify
+FIFO clear-on-success selection, deletion results and single-waiter exclusion.
+Status must count suspended continuations. Standalone project execution verifies
+that the host keeps its scheduler and event-service lifetimes shared across entries.
+
+Native thread lifecycle coverage executes compiled CreateThread, StartThread and
+DeleteThread imports against the shared native allocator. It checks aligned stack
+reservation and default fill, worker argument/GP/stack setup, cooperative priority
+selection, restart after return, clear-on-delete, released capacity, stale handles
+and rejection of uncompiled entries before allocation or retirement. Both emitted
+backends execute the lifecycle; standalone project tests cover the shared host.
+
+Explicit native thread-exit coverage runs compiled ExitThread/ExitDeleteThread
+calls with a BREAK immediately after each call. Both must retire once and stop
+without reaching it. Budget slicing immediately before exit checks zero-budget
+immutability and deferred cleanup. Tests also cover dormant restart/deletion,
+clear-on-delete, stack capacity recovery, caller resumption and interrupt-context
+rejection on both native backends.
+
+Native argument-block startup executes compiled StartThreadArgs and a compiled
+worker that reads the copied block. It verifies byte count, destination alignment,
+SP/FP setup, aliased source addresses, independence from later caller writes and
+overlapping copies. Invalid source ranges and oversized counts must preserve the
+dormant worker and leave the import unretired. Both native backends run this path.
+
+Thread-entry discovery coverage removes the argument worker from explicit roots.
+A compiled CreateThread call points through an aliased address to a descriptor
+in another module, whose aliased entry points back to that worker. Both generated
+backends create/start it successfully. Reversed bundle ordering is covered, and
+an invalid descriptor entry must reject conversion before emitting partial code.
+
+The native system-status milestone queries GetSystemStatusFlag through compiled
+imports in foreground and interrupt context. Status checks preserve zero initial
+bits while supplied boot-mode data selects current bits. A compiled waiter blocks
+on an unset bit and a compiled interrupt handler signals that same shared event.
+An empty boot context must leave status bits unset; unrelated event allocation
+must not change the returned handle.
+
+Native alarm integration uses an injected monotonic tick source and compiled
+registration/callback code. It checks minimum-interval writeback, duplicate and
+context errors, masked/early/zero-budget delivery, single-operation callback
+suspension, one-shot removal, periodic catch-up relative to the previous deadline,
+cancellation, and waking an idle sleeping thread. GetSystemTime retains both words
+of one clock sample; unknown handlers, protected interval output and deadline
+overflow must not register an alarm. Standalone project builds include the host
+clock and idle-wait integration; deterministic alarm semantics do not claim exact
+wall-clock delivery latency.
+
+Native SIF integration executes compiled transfer/status/handler imports against
+an explicit synthetic EE data arena. It checks multi-descriptor copies, aliases,
+completed tokens, masked and sliced callbacks, void completion results, handler
+reset, and callback-source ownership when alarms and transfers are both ready.
+Invalid later descriptors, protected EE destinations, unsupported attributes and
+unknown completion handlers must leave the entire batch unchanged. An absent EE
+endpoint must stop without retirement or fabricated success. This is a native
+transport test, not execution of converted EE game code.
+
+Native SIF control integration executes compiled initialization, status and address
+imports. It checks disconnected/not-ready peers, actual readiness publication,
+acknowledgement directions, repeated initialization and command-buffer aliases.
+An explicit incoming payload must be visible before a compiled SIF1 handler runs;
+masking retains the notification, and SetDChain must rearm before a second receive.
+Invalid/protected destinations preserve reception readiness and data. This fixture
+publishes a synthetic peer explicitly and is not evidence of converted EE startup.
+
+Compiled native printf coverage crosses register and stack variadic arguments,
+including signed minimum, unsigned maximum, hex prefixes/zero padding, string
+precision, characters, 32-bit long, dynamic width/precision, alternate octal zero
+and literal percent. Unsupported formats, unterminated out-of-range strings and
+wrapped stack addresses must not retire or emit partial text. Host sink failure
+returns an error through compiled execution on both native backends.
+
+Native SIF teardown coverage invokes the compiled deinitialization import with
+pending completion work, verifies cancellation without undoing committed bytes,
+and checks disabled/released SIF0 handlers, preserved CheckInit, repeated cleanup,
+disconnected cleanup and refusal of new transfers/rearming after shutdown.
+An active completion or interrupt context must reject cleanup without partial
+state changes. Both LLVM and optional C++ generated execution share this fixture.
+
+The conversion fixture checks multiple unresolved calls in one control-flow path
+on both backends. Unknown calls must not hide a malformed delay slot or an
+unsupported instruction in the return continuation. Every failed conversion must
+leave its output empty; existing bounded-target, widening and compiled-execution
+fixtures remain part of this compiler milestone.
+
+Native SIF command integration compiles registration and a private two-argument
+handler on both backends. It verifies discovery from AddCmdHandler, user/system
+table strides, reserved-word preservation, aliases, packet visibility, masked
+and sliced callback delivery, foreground restoration, removal and mutable-target
+revalidation. Busy reception, malformed headers, extra-data packets, invalid
+indices/extents, protected code and packet/table overlap must not partially
+modify state. This is synthetic native command delivery, not an EE handshake or
+commercial-game boot test.
+
+Outbound command integration executes compiled SendCmd/iSendCmd imports with a
+synthetic peer arena. It covers stack-passed extra-data arguments, header fields
+and preserved options, exact byte lengths, aliases, interrupt context, peer
+backpressure, owned packet notifications and increasing success tokens. It also
+checks overlapping caller buffers, nonpositive extra-data sizes, disconnected
+peers, invalid packet lengths, stack overflow and protected/out-of-range peer
+destinations. Rejected sends cannot partially write extra data or command bytes.
+
+The shared SIF completion milestone mixes compiled raw and command transfers and
+checks consecutive tokens and completed status through the same service. It
+executes general and per-command callbacks under masking and budget slicing,
+rejects unknown callback addresses before writes, and verifies that a busy peer
+does not enqueue a duplicate completion. Teardown must reject active callbacks,
+cancel pending command callbacks, stop new sends and retain committed peer
+notifications. Both callback-send variants are exercised with stack arguments.
+
+The command-session milestone runs compiled InitCmd through the native scheduler
+and proves it remains suspended until an explicit peer command acknowledgement.
+It checks separate command/RPC phase bits, peer flag acknowledgement, subsequent
+outbound buffer selection, repeated initialization, compiled Get/SetSreg and peer
+register writes. Disconnected/unready/stopped links, absent wait continuations,
+protected peer addresses, invalid register indices and a deleted shared status
+event must not fabricate initialization or partially publish peer state.
+
+Unified inbound integration queues the actual command-init acknowledgement through
+the native callback multiplexer and scheduler. It must remain pending under an
+interrupt mask or zero budget, then wake the suspended compiled InitCmd caller.
+User-command coverage checks owned packet storage, backpressure, branch-delay
+boundaries, active-callback lifetime, sliced execution and explicit system-table
+overrides. Mutating a handler after packet acceptance must produce a deferred
+execution fault without changing packet RAM; the fault remains visible until an
+explicit discard, after which later valid packets can execute normally.
+
+RPC registration integration executes compiled queue/server imports and discovers
+and runs a private RPC function through the converter. It checks O32 stack
+arguments, alias-preserving links, untouched request fields, insertion/removal
+order, wrong-queue removal, detached queue cleanup/republication and descriptor
+reuse. Duplicate/overlapping records, uncompiled primary/secondary functions,
+protected/out-of-range storage and interrupt-context calls must not partially
+modify registration state. This milestone does not enqueue or execute RPC calls.
+
+Native RPC bind integration registers servers through compiled imports, queues a
+synthetic peer request through the interrupt-gated inbound router, and inspects
+the actual native peer reply. It checks packet/client identities, server/buffer
+fields, unknown services, insertion order and exclusion of detached queues.
+Backpressure retains an unchanged reply snapshot across descriptor mutation;
+protected reply destinations and mutated uncompiled handlers must produce
+explicit faults without a partial peer response.
+
+RPC admission coverage queues owned payloads through the inbound scheduler, wakes
+a sleeping compiled worker and executes compiled GetNextRequest. It checks exact
+request fields, original pointer aliases, FIFO links/order, active/empty queue
+state and absence of fabricated replies. A mismatched payload destination and a
+second request for a busy server must leave prior data and queue state intact;
+removal cannot discard requests awaiting execution.
+
+ExecRequest integration enters a compiled three-argument RPC handler, slices its
+execution, validates its result and inspects the peer's actual reply/payload.
+A full peer mailbox must stop at the native return boundary without rerunning
+the handler; changing input RAM during that wait cannot change the saved reply.
+The fixture checks caller PC/register/GP restoration, unchanged execution counts
+on retry and server release after successful delivery. Invalid reply modes and
+uncompiled replacement functions cannot enter the handler. Polling-mode delivery
+writes result bytes and clears the completion IDs at the original packet address
+while preserving an unrelated pending command. A protected reply leaves both
+peer regions unchanged, retains the completed continuation and can be retried
+without reexecution. Both generated backends run this same integration fixture.
+
+The native command-session integration also enters compiled InitRpc before
+command setup is complete. It verifies that the first event wait retains the
+import PC and operation count, that an RPC acknowledgement cannot satisfy the
+command phase, and that command acknowledgement alone cannot finish RPC startup.
+It inspects the outgoing RPCINIT packet, rejects duplicate publication during a
+retry, and delivers the final acknowledgement through the interrupt-gated inbound
+path before verifying caller resumption and idempotent initialization.
+
+The RPC integration enters compiled RpcLoop on a registered worker, verifies an
+empty queue sleeps at the import without retirement, and admits two requests.
+An uncompiled replacement handler must leave the FIFO and input data unchanged.
+After repair, command-notified and polling replies both complete, the FIFO drains
+and the worker sleeps again. Reusing a completed server wakes that same worker
+and runs exactly one additional handler without a fabricated command reply.
+
+The shared generated-code scheduler regression calls ChangeThreadPriority to
+lower its current continuation and verifies two ready workers execute in FIFO
+order before that caller resumes. It then raises another ready worker and checks
+that the caller yields after exactly one service operation. Dormant-worker,
+invalid-priority and interrupt-context requests return errors. Both LLVM and
+optional C++ output execute the same scenario.
+
+Compiled ReferThreadStatus is checked across ready, running, sleeping, event-wait
+and dormant transitions. The fixture verifies event identity clears on completion,
+creation option/attributes and stack metadata survive, current-thread lookup works,
+and reserved/context fields are initialized without host pointers. Invalid output
+ranges, generated-code destinations and unknown handles must leave RAM unchanged.
+
+DelayThread integration uses an injected steady clock and compiled import. It
+checks public wait metadata, no early completion, preserved wakeup credit,
+zero-budget behavior, interrupt-masked completion, exact caller resumption and
+the minimum wait for a zero-duration request. Standalone generated-project tests
+also compile the host's combined alarm/thread deadline handling.
+
+The semaphore integration runs compiled creation, wait, signal, poll, deletion and
+status imports. Two suspended workers verify wait metadata and priority selection
+after a priority change; deleting the semaphore releases the remaining worker
+with the deleted-object result. A second semaphore verifies FIFO selection despite
+a later worker's higher priority, including interrupt signalling. Count saturation,
+polling exhaustion, stale handles, reserved status words, protected/out-of-range
+outputs and interrupt-context errors are checked in the same subsystem fixture.
+The existing event regressions verify the shared native wait-interface refactor.
+
+The mailbox integration executes compiled creation, send, receive, poll, deletion
+and status imports. It checks priority message order and mirrored circular links,
+FIFO delivery, pointer-alias preservation, duplicate-message rejection, protected
+receive destinations and reserved status words. Two native receivers suspend;
+a changed priority affects direct interrupt delivery, and deletion resumes the
+remaining waiter with its public error. Wrong-context sends and stale handles
+must fail without fabricating delivery.
+
+The full native diagnostic-format integration now runs through both compiled
+stdio printf and sysmem Kprintf imports. It verifies register/stack arguments,
+format flags, malformed formats, invalid strings, stack-address overflow and
+sink failure without partial output. Null Kprintf control requests must stop
+without retirement or sink output.
+
+Compiled GetOtherData integration verifies blocking and NOWAIT native copies,
+byte alignment, pointer aliases, completion metadata, preserved descriptor fields
+and coexistence with an occupied command mailbox. Out-of-range peer reads,
+protected or truncated outputs, descriptor overlap, missing/stopped peers and
+unknown modes must reject without partial writes. Zero-byte reads must ignore
+unused data pointers and still complete. Both generated backends run the fixture.
+
+Native getstat integration uses an original synthetic ISO with a known leap-day
+recording date. Compiled calls verify file/root type and size, all three timestamp
+fields, zero high-size, aliases and unchanged output on missing files or invalid
+output storage. The following open still obtains the first descriptor, verifying
+that metadata queries did not allocate handles. Format and disc-fileio regressions
+also cover the shared ISO Entry metadata extension.
+
+Native directory integration extends the synthetic ISO with an empty file and an
+empty subdirectory. Compiled dopen/dread/dclose verify shared descriptor numbering,
+independent cursors, regular/empty/directory entries, names, metadata, EOF and
+handle reuse. Protected/truncated output records must not consume the first
+entry. Wrong handle-type operations and closed directory reads return errors.
+
+Compiled disc-mutation calls verify read-only and foreign-device errors for remove,
+mkdir, rmdir, chstat and format. Write rejects read-only descriptors, even with
+zero count or an invalid source pointer. The integration compares the original
+synthetic image bytes, RAM and current cursor after rejection, then continues
+ordinary reads from that same handle.
+
+Compiled lseek64 integration covers positions beyond 4 GiB, high-word return and
+pending-load replacement, signed relative/end offsets, INT64_MAX/INT64_MIN,
+overflow, invalid whence and handles, and EOF reads from a large cursor. Legacy
+seek must reject an unrepresentable current position without changing it. Invalid
+stack storage must preserve the cursor and unretired pending register state.
+
+### Native disc control boundary
+
+The compiled disc integration exercises ioctl and ioctl2 through real synthetic
+import stubs on both backends. It checks invalid descriptors, unknown commands,
+stream controls on ordinary files, unchanged RAM/cursors, and explicit stops
+without retirement for known unimplemented hardware ioctl commands. Unused
+payload pointers are deliberately invalid to verify rejection precedes access.
+Run the iop-native and iop-llvm execution/project tests in Release.

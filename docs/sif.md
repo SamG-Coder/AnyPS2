@@ -135,3 +135,8 @@ The timer integration scenario covers regular and alias registrations, masking,
 delay-slot deferral, budget resumption, concurrent DMAC/INTC priority, preserved
 CPU context, and leaving unregistered interrupts pending.
 No commercial instruction or packet payload is included in these tests.
+
+During disc-backed reboot, guest SIF0 source-chain DMA now sends descriptors and
+payload from private IOP RAM into the existing EE FIFO. Guest replies therefore
+reach the ordinary EE destination-chain receiver and interrupt path. This does
+not synthesize RPC replies or establish that all disc services are ready.

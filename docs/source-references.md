@@ -14,6 +14,10 @@ references. No BIOS image or BIOS disassembly was used for this implementation.
   `Hw.cpp`, and `Cache.cpp` were also consulted for FIFO capacity, tag behavior,
   DMA enable/reset values, register directionality, and data-cache operations.
 - PS2SDK, revision `2a18d15da1332665451a9bcf9a0d4df9029c9490`:
+  `iop/system/sysclib/include/sysclib.h` supplies the public sysclib 1.1
+  memory-function signatures and import ordinals. The native memcpy/memmove/memset bindings use
+  those ABI declarations with standard host memory functions; no PS2SDK memory
+  function implementation was copied or linked.
   https://github.com/ps2dev/ps2sdk/blob/master/ee/startup/src/crt0.c
   https://github.com/ps2dev/ps2sdk/blob/master/ee/kernel/include/kernel.h
   https://github.com/ps2dev/ps2sdk/blob/master/ee/kernel/include/syscallnr.h
@@ -386,3 +390,234 @@ original; no firmware handler instructions are embedded.
 DMA cascade ordering, acknowledgement and handler-result enable behavior use
 the pinned PS2SDK intrman public device interface. Pending-channel selection
 reuses AnyPS2's DMA device state rather than duplicating register semantics.
+
+IOP SIF0 source-chain mode and tag fields use the pinned PS2SDK sifman interface
+and PCSX2 Sif0.cpp/Sif.h public behavior, including partial-quadword trailing
+lanes. The bounded sender implementation and synthetic echo program are original.
+
+Native IOP memory import binding uses the major-version compatibility rule in the
+pinned PS2SDK loadcore public source (`aLinkLibEntries` and
+`compLibMinVersion_major_1`). Only the three implemented sysclib ordinals bind;
+minor-version compatibility does not advertise a complete library. The original
+C++ resolver and aggregate diagnostics copy no upstream implementation. Synthetic
+major-1 minor revisions and incompatible major versions cover the binding policy.
+
+Native allocation service ordinals, modes and query flags use the pinned PS2SDK
+`iop/system/sysmem/include/sysmem.h` public ABI. Allocation granularity, failure
+returns and block-query behavior were checked in the corresponding public
+`sysmem.c`. AnyPS2 uses an original host C++ ordered-extent allocator; no upstream
+allocator implementation, metadata layout or firmware code is copied or linked.
+
+Native library registration/release uses the pinned PS2SDK public loadcore header
+ordinals, registration-version and release contracts in `loadcore.c`, and library
+error constants in `iop/kernel/include/kerr.h`. The compiled-descriptor validation,
+host registry and service composition are original C++; no guest linked-list
+implementation, stub patching or firmware code is copied or linked.
+
+Native import binding and range-based link/unlink use the pinned PS2SDK loadcore
+public ordinals and library error constants. Host descriptors replace instruction
+patching and guest linked lists; the bundle compiler, transactional binding and
+native transfer driver are original implementations. Test modules are synthetic.
+
+Native loader query ordinals, the `iop_bootmode_t` public layout and query contracts
+use the pinned PS2SDK loadcore header/source. Boot records are host-supplied data;
+no firmware globals or implementation are copied. The Play! reference currently
+returns a fixed null boot query; AnyPS2 instead implements configurable bounded
+records and explicitly identifies the standalone probe's empty context.
+
+Native ioman file calls use the pinned PS2SDK ioman.h ordinal/signature declarations
+and io_common.h read-only flag. The host adapter reuses AnyPS2's original ISO9660
+parser and file-handle logic extracted from its FILEIO RPC service. Only synthetic
+ISO fixtures are committed; the user's commercial image and local read evidence
+remain outside tracked source.
+
+Native interrupt ordinals, signatures, permitted handler modes, suspend/resume
+state and error values use the pinned PS2SDK intrman public header/source and
+kerr.h. The native event domain, pending-cause queue, compiled callback discovery
+and continuation snapshot are original C++; no exception-vector, controller or
+firmware implementation is copied or installed.
+
+Native event services use the pinned PS2SDK threadman/thevent.h public ordinals,
+flags and structure declarations, thevent.c observable event/context contracts,
+and kerr.h error constants. Host event storage, checked output and compiled
+service integration are original C++; no guest scheduler, handle encoding or
+upstream implementation is copied or linked. Only synthetic fixtures are used.
+
+Native cooperative thread services use pinned PS2SDK thbase.h ordinals and
+thbase.c sleep, wakeup, identity and cancellation contracts, with kerr.h errors.
+The host continuation map, ready queue, idle interrupt integration and budget
+accounting are original C++; no guest scheduler structures or upstream context
+switch implementation are copied or linked.
+
+Scheduler-backed event waits use the same pinned public thevent contracts for
+FIFO waiter matching, clear-on-success, single-waiter exclusion and deletion
+errors. The opaque continuation interface and native queue integration are
+original implementations; guest saved-register pointers are not used as queues.
+
+Native worker creation/start/deletion uses pinned PS2SDK thbase.h descriptor,
+attribute and ordinal declarations and public thbase.c validation, alignment,
+stack-fill/clear and dormant-state contracts. Native stacks and continuation
+setup use AnyPS2's original allocator and scheduler; no guest register-frame or
+kernel implementation is copied or executed.
+
+Explicit native thread exits use the pinned public thbase ordinal and lifecycle
+contracts: ordinary exit becomes dormant; exit-delete defers destruction until
+execution has left the worker. AnyPS2 performs this transition after compiled
+service retirement and reuses its original checked stack-release path.
+
+Native StartThreadArgs uses the pinned public thbase.h signature/ordinal and
+thbase.c argument-count, argument-pointer and null-source contracts. AnyPS2 uses
+bounded native stack storage and a checked host copy, not the reference guest
+register-frame construction. Oversized argument blocks stop explicitly.
+
+Native GetSystemStatusFlag uses the pinned PS2SDK thbase.h/thbase.c stable-handle
+contract and thcommon.c public initialization behaviour: a multi-waiter event,
+zero initial bits and an optional bit selected by boot-mode record 4. AnyPS2
+constructs this through its original native event service using supplied context;
+no firmware initialization code or banner is copied or executed.
+
+Native alarms use pinned PS2SDK thbase.h ordinals/signatures and the public
+thbase.c/thcommon.c interval, duplicate/cancel, minimum-delay and callback-repeat
+contracts. The default tick frequency follows the public conversion ratio.
+AnyPS2's host clock, pending-alarm storage and compiled callback integration are
+original C++; no hardware timer implementation, interrupt vector or firmware is
+copied or executed.
+
+Native outbound SIF transfer services use pinned PS2SDK sifman.h descriptor and
+callback declarations, public sifman.c completion/status behaviour and exports.tab
+ordinals. The supported aligned subset uses original direct host copies and
+compiled completion queues. No DMA tag generator, hardware register implementation,
+firmware code or proprietary packet payload is copied or linked.
+
+Native SIF coordination uses pinned PS2SDK sifman.h/c readiness and command-address
+contracts and sifcmd.c SIF1 completion/rearm usage. Status publish/acknowledge
+semantics were cross-checked in pinned PCSX2 HwWrite.cpp and IopMem.cpp. AnyPS2
+implements original native link state and receive notification, with no MMIO bank,
+DMA engine or proprietary initialization code copied or linked.
+
+Native diagnostic output uses the pinned PS2SDK stdio.h printf signature and
+export ordinal, the existing IOP O32 register/stack calling convention, and
+standard supported C integer/string formatting rules. The bounded parser,
+formatter and host sink interface are original C++; no upstream formatter or
+proprietary diagnostic strings are copied into the project.
+
+Native SIF teardown follows the pinned public sifman_deinit contract: stop both
+transfer directions and disable/release SIF0 while retaining the initialization
+marker. AnyPS2 implements lifecycle changes through its own native transfer and
+interrupt services. Reconnection is explicitly unsupported in the current subset;
+no hardware shutdown sequence or proprietary code is copied.
+
+Native SIF command registration/delivery uses pinned PS2SDK sifcmd-common.h
+packet and callback declarations, exports.tab ordinals and public sifcmd.c table
+selection/removal contracts. The original native implementation uses validated
+RAM table access and the shared compiled callback scheduler. It does not copy
+firmware, packet payloads, upstream dispatch code or DMA/interrupt machinery.
+
+Native outbound commands use the same pinned public sifcmd declarations and
+_sceSifSendCmd argument/header/ordering contract. The bounded peer mailbox,
+transaction validation and byte-copy implementation are original C++. No
+upstream DMA descriptors, hardware code or commercial packet contents are copied.
+
+Command completion variants follow pinned public sifcmd exports 28/29 and the
+SIF completion callback ABI. AnyPS2 reuses its original native transfer commit,
+token and callback queue for both raw data and command sends, without copying
+upstream interrupt or DMA implementations.
+
+Native command-session semantics use the pinned public sifcmd.c InitCmd,
+Get/SetSreg and control-message contracts, sifcmd-common.h packet layouts, and
+sifman.h CMDINIT flag. AnyPS2 reuses its original event/scheduler and native link
+services; it does not copy the upstream module bootstrap, firmware, banners or
+interrupt dispatcher.
+
+Unified inbound routing follows the previously recorded public command handler
+and system-table selection contracts. Its owned mailbox, deferred-error handling
+and integration with the original native callback scheduler are new AnyPS2 code;
+no PS2 interrupt dispatcher or commercial packet data is copied.
+
+Native RPC registration follows pinned sifrpc-common.h public queue/server layouts
+and signatures and sifrpc.c registration/removal contracts. The native maps,
+ownership checks and compiled-function discovery are original AnyPS2 code; no
+upstream RPC allocator, proprietary server implementation or game data is copied.
+
+Server-side RPC bind replies use pinned sifrpc-common.h Bind/End packet layouts
+and public sifrpc.c service-search and bind-response field contracts. The original
+AnyPS2 router retains a native reply snapshot under backpressure instead of
+copying upstream packet pools, retry alarms or RPC implementation code.
+
+Native RPC Call admission and GetNextRequest follow pinned sifrpc-common.h call
+and server-record layouts and public sifrpc.c request-queue/wakeup contracts.
+The owned payload snapshots, descriptor protection, native FIFO and scheduler
+integration are original code; no upstream RPC execution or proprietary handlers
+are copied or used as fixtures.
+
+Native ExecRequest follows the pinned public SifRpcFunc_t signature and sifrpc.c
+command-notified reply contract. The service-call continuation, bounded reply
+snapshot and backpressure handling are original AnyPS2 mechanisms. No upstream
+RPC execution wrapper, proprietary handler or firmware code is copied.
+
+Native InitRpc uses the same pinned public sifrpc.c initialization sequence,
+sifcmd-common.h RPCINIT register index and system-status event contracts. Its
+session publication state and native retry-yield continuation are original C++
+implementations; no upstream packet pool or proprietary startup code is copied.
+
+Native RpcLoop follows the pinned public sifrpc.c GetNextRequest/ExecRequest/
+SleepThread ordering contract. It reuses original native queue ownership and
+continuations instead of copying the upstream loop or executing guest kernel code.
+
+Native ChangeThreadPriority uses the pinned public thbase.h ordinal/signature,
+priority range and thbase.c current-thread, priority-zero and rescheduling
+contracts. The implementation updates the existing original native ready list;
+no upstream kernel scheduler implementation is copied.
+
+Native ReferThreadStatus follows pinned thbase.h's foreground status layout and
+public thbase.c lifecycle/wait-field contracts. Creation metadata and wait IDs
+come from original native scheduler records; the interrupt-only register context
+is not exposed. Restart priority follows the public thread-start contract.
+
+Native DelayThread uses pinned thbase.h ordinal 33 and public thbase.c delay-wait,
+minimum-alarm and wakeup contracts. Original host-clock deadlines replace the
+console alarm callback implementation; no upstream kernel code is copied.
+
+Native semaphore semantics use the pinned public thsemap.h ordinals/record layouts,
+thsemap.c count, waiter, deletion and status contracts, and kerr.h error values.
+The provider and shared native wait interface are original C++ implementations;
+no upstream kernel lists, handles or scheduler code are copied.
+
+Native mailbox semantics use pinned thmsgbx.h ordinals, packet/status layouts,
+thmsgbx.c queue and receiver ordering contracts, and kerr.h error values. Native
+vectors own messages and waiters; the original implementation mirrors public
+links without copying upstream kernel list or scheduling code.
+
+Native Kprintf uses the pinned public sysmem.h ordinal/signature and sysmem.c
+callback-routing contract. The existing original bounded C++ formatter and host
+sink replace text output; callback-specific null-format controls are unsupported.
+
+Native GetOtherData uses pinned sifrpc-common.h receive-descriptor layout and
+sifrpc.c ordinal-23 arguments, completion and NOWAIT contracts. An original bounded
+native copy replaces request/response latency when the peer owner supplies its
+memory; public completion metadata is written without guest packet allocation.
+
+Native getstat uses pinned io_common.h legacy record layout, iox_stat.h legacy
+mode bits and public cdvdman recording-date conversion contracts. The existing
+original ISO parser retains directory-record date bytes; native metadata encoding
+is original code and does not depend on proprietary disc-driver implementation.
+
+Native directory imports use pinned ioman.h ordinals and io_common.h's legacy
+io_dirent_t layout. Original ISO directory parsing and shared metadata encoding
+provide entries; the implementation owns native snapshots/cursors and never
+copies a proprietary directory driver or exposes its host data structures.
+
+Read-only mutation dispatch uses pinned ioman.h ordinals and ioman.c's write-access
+check before calling a device. The native ISO mount reports standard EBADF,
+EROFS and ENODEV failures according to its explicit read-only device policy.
+
+Native lseek64 uses the pinned iomanx exports.tab legacy ioman 1.4 ordinal 30 and
+iomanX.h signed 64-bit signature, with O32 even-register-pair argument/return
+layout. Original checked arithmetic serves both native seek widths; it does not
+copy an upstream driver implementation.
+
+Native ioctl/ioctl2 dispatch uses the pinned PS2SDK iomanx exports.tab and
+iomanX.c descriptor-validation contract, common/include/cdvd-ioctl.h command
+identifiers, and iop/cdvd/cdvdman/src/cdvdman.c ordinary-file ioctl2 failure and
+unknown ioctl failure contracts. The implementation is original native dispatch;
+no upstream driver code is copied. Known hardware controls remain unsupported.

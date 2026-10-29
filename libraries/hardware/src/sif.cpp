@@ -144,6 +144,7 @@ void Sif::iop_step(runtime::RamBus& ee) {
         if (!reboot_failure_.empty()) throw runtime::MemoryFault(reboot_failure_);
         try {
             if (reboot_->receive_sif1(to_iop_)) ++received_packets_;
+            reboot_->send_sif0(to_ee_);
         } catch (const std::exception& error) {
             reboot_failure_="SIF reset: "+std::string(error.what());
             throw runtime::MemoryFault(reboot_failure_);

@@ -22,6 +22,7 @@ public:
     std::uint32_t pending_interrupts() const { return devices_.pending_sources(); }
     const Cpu* manager_cpu() const { return manager_call_ ? &manager_call_->cpu() : nullptr; }
     bool receive_sif1(std::deque<std::uint32_t>& fifo) { return devices_.receive_sif1(fifo,ram_); }
+    bool send_sif0(std::deque<std::uint32_t>& fifo) { return devices_.send_sif0(fifo,ram_); }
     bool intrman_registered() const { return intrman_ && le32(ram_,intrman_->registration_flag())==1; }
     bool dmacman_registered() const { return dmacman_ && le32(ram_,dmacman_->registration_flag())==1; }
     bool heaplib_registered() const { return heaplib_ && le32(ram_,heaplib_->registration_flag())==1; }
