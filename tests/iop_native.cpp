@@ -3,6 +3,8 @@
 #include <nt/iop_native_libraries.hpp>
 #include <nt/iop_native_boot.hpp>
 #include <nt/iop_native_disc.hpp>
+#include <nt/iop_native_drivers.hpp>
+#include <nt/iop_native_driver_files.hpp>
 #include <nt/iop_native_interrupts.hpp>
 #include <nt/iop_native_events.hpp>
 #include <nt/iop_native_semaphores.hpp>
@@ -2090,6 +2092,58 @@ int main() {
         check(result.reason==NativeStop::branch_in_delay && !cpu.executed,
               "Branch-in-delay changed generated execution state");
         {
+            NativeDriverServices drivers;
+            store_native_word(ram,0xc000,0xc040); store_native_word(ram,0xc004,0x10);
+            store_native_word(ram,0xc008,0); store_native_word(ram,0xc010,0xc020);
+            store_native_word(ram,0xc020,0x2860); store_native_word(ram,0xc024,0x2880);
+            const std::string name="fixture";
+            std::copy(name.begin(),name.end(),ram.begin()+0xc040); ram[0xc040+name.size()]=0;
+            const auto call=[&](unsigned pc,unsigned argument) {
+                auto cpu=initial(); cpu.pc=pc; cpu.registers[4]=argument; cpu.registers[28]=0x1234;
+                const auto stop=run_native(nt_iop_generated_run,cpu,ram,32,&drivers);
+                check(stop.reason==NativeStop::unmapped_code && cpu.pc==0x5000 &&
+                      cpu.registers[28]==0x1234 && !cpu.native_call_owner,
+                      "Compiled driver lifecycle lost its caller continuation");
+                return cpu.registers[2];
+            };
+            auto adding=initial(); adding.pc=0x281c; adding.registers[4]=0x8000c000;
+            adding.load_register=12; adding.load_value=99;
+            const auto driver_stop=run_native(nt_iop_generated_run,adding,ram,1,&drivers);
+            check(driver_stop.reason==NativeStop::budget &&
+                  adding.pc==0x2860 && adding.registers[4]==0x8000c000 && adding.registers[12]==99 &&
+                  adding.native_call_owner==&drivers && drivers.size()==0,
+                  "AddDrv published before initialization or failed to enter compiled init");
+            check(call(0x281c,0xc000)==0xffffffffU,"Concurrent registration did not reject reentry");
+            adding.native_call_owner=nullptr;
+            check(drivers.invoke({0,{0,0,0,0},NativeServiceKind::native_return,0,false,0,0,&adding},ram).status==NativeServiceStatus::unsupported,
+                  "Driver registry consumed another continuation's return");
+            adding.native_call_owner=&drivers;
+            check(run_native(nt_iop_generated_run,adding,ram,32,&drivers).reason==NativeStop::unmapped_code &&
+                  adding.pc==0x5000 && adding.registers[2]==0 && !adding.native_call_owner && drivers.size()==1,
+                  "Successful compiled initialization did not publish the native driver");
+            check(drivers.invoke({4,{0,0,0,0},NativeServiceKind::ioman},ram).status==NativeServiceStatus::unsupported,
+                  "Ready driver registry did not delegate file operations");
+            check(call(0x2824,0xc040)==0 && drivers.size()==0,
+                  "Legacy DelDrv did not execute teardown and ignore its negative result");
+            check(call(0x2824,0xc040)==0xffffffffU,"Missing driver deletion succeeded");
+            store_native_word(ram,0xc008,0xffffffff);
+            check(call(0x281c,0xc000)==0xffffffffU && drivers.size()==0,
+                  "Failed initializer left a registered device");
+            store_native_word(ram,0xc008,1);
+            for (unsigned index=0;index<16;++index) check(call(0x281c,0xc000)==0,"Driver table filled prematurely");
+            check(call(0x281c,0xc000)==0xffffffffU && drivers.size()==16,"Driver table exceeded its legacy bound");
+            for (unsigned index=0;index<16;++index) check(call(0x2824,0xc040)==0,"Duplicate-name lifecycle order lost a registration");
+            store_native_word(ram,0xc024,0xc100);
+            auto invalid=initial(); invalid.pc=0x281c; invalid.registers[4]=0xc000;
+            const auto before=ram;
+            check(run_native(nt_iop_generated_run,invalid,ram,32,&drivers).reason==NativeStop::unmapped_code &&
+                  !invalid.executed && !drivers.size() && ram==before,
+                  "Uncompiled teardown target changed registry or memory");
+            invalid.pc=0x281c; invalid.registers[4]=0xfffc;
+            check(run_native(nt_iop_generated_run,invalid,ram,32,&drivers).reason==NativeStop::address_fault &&
+                  !invalid.executed && !drivers.size(),"Truncated driver descriptor was accepted");
+        }
+        {
             struct TemporaryImage {
                 std::filesystem::path path=std::filesystem::temp_directory_path()/
                     ("anyps2-native-disc-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".iso");
@@ -2106,7 +2160,8 @@ int main() {
             disc_image.resize(disc_image.size()+2048);
             fixture::record(disc_image,directory_offset,"EMPTY",empty_sector,2048,true);
             nt::write_file(image.path,disc_image);
-            NativeDiscServices files(image.path);
+            NativeFileDescriptors descriptors;
+            NativeDiscServices files(image.path,&descriptors);
             const auto path=[&](const std::string& name) {
                 std::copy(name.begin(),name.end(),ram.begin()+0x2000); ram[0x2000+name.size()]=0;
             };
@@ -2178,6 +2233,185 @@ int main() {
             const auto fd=file_call(4,0x80002000,1);
             check(fd==3 && file_call(6,fd,0xa0003001,2051)==2051,"Native disc open or cross-sector read failed");
             check(std::equal(payload.begin(),payload.begin()+2051,ram.begin()+0x3001),"Native disc payload differs");
+            {
+                NativeHeapServices heap(static_cast<std::uint32_t>(ram.size()),0xd000,0xe000);
+                NativeDriverServices drivers;
+                NativeDriverFiles driver_files(drivers,descriptors,heap);
+                NativeServiceRouter router({&drivers,&driver_files,&files,&heap});
+                store_native_word(ram,0xc000,0xc040); store_native_word(ram,0xc004,0x10);
+                store_native_word(ram,0xc008,1); store_native_word(ram,0xc010,0xc300);
+                for (const auto [offset,target] : {std::pair{0U,0x2860U},{4U,0x2880U},{12U,0x2940U},{16U,0x2960U},{20U,0x2980U},{24U,0x2a00U},{28U,0x2a40U},{48U,0x2b00U},{52U,0x2b80U},{56U,0x2b20U}})
+                    store_native_word(ram,0xc300+offset,target);
+                const std::string device_name="fixture",file_path="fixture7:QR";
+                std::copy(device_name.begin(),device_name.end(),ram.begin()+0xc040); ram[0xc040+device_name.size()]=0;
+                std::copy(file_path.begin(),file_path.end(),ram.begin()+0xc080); ram[0xc080+file_path.size()]=0;
+                const auto call=[&](unsigned pc,unsigned a,unsigned b=0,unsigned c=0) {
+                    auto cpu=initial(); cpu.pc=pc; cpu.registers[4]=a; cpu.registers[5]=b; cpu.registers[6]=c;
+                    const auto stop=run_native(nt_iop_generated_run,cpu,ram,128,&router);
+                    check(stop.reason==NativeStop::unmapped_code && cpu.pc==0x5000 && !cpu.native_call_owner,
+                          "Compiled driver file operation did not restore its caller");
+                    return cpu.registers[2];
+                };
+                const auto driver_seek64=[&](unsigned handle,std::int64_t offset,unsigned whence) {
+                    auto cpu=initial(); cpu.pc=0x23e4; cpu.registers[4]=handle; cpu.registers[5]=0xdeadbeef;
+                    const auto bits=static_cast<std::uint64_t>(offset);
+                    cpu.registers[6]=static_cast<std::uint32_t>(bits); cpu.registers[7]=static_cast<std::uint32_t>(bits>>32);
+                    cpu.registers[29]=0x8000c460; store_native_word(ram,0xc470,whence);
+                    cpu.load_register=3; cpu.load_value=0xabcdef01;
+                    const auto stop=run_native(nt_iop_generated_run,cpu,ram,128,&router);
+                    check(stop.reason==NativeStop::unmapped_code && cpu.pc==0x5000 &&
+                          !cpu.load_register && !cpu.native_call_owner && cpu.registers[29]==0x8000c460,
+                          "Compiled wide seek lost its continuation, stack or pending load");
+                    return std::bit_cast<std::int64_t>(std::uint64_t(cpu.registers[2])|(std::uint64_t(cpu.registers[3])<<32));
+                };
+                const auto free_bytes=[&] { return heap.invoke({8,{},NativeServiceKind::sysmem},ram).value; };
+                const auto initial_free=free_bytes();
+                check(call(0x281c,0xc000)==0,"File driver initialization failed");
+                const auto driver_fd=call(0x1614,0x8000c080,1);
+                check(driver_seek64(0x7fffffff,0,0)==-9 && driver_seek64(driver_fd,0,0)==-48,"Legacy device accepted an extended seek or lost signed error width");
+                const auto record=descriptors.find(driver_fd);
+                check(driver_fd==4 && record && record->owner==&driver_files &&
+                      load_native_word(ram,record->local)==1 && load_native_word(ram,record->local+4)==7 &&
+                      load_native_word(ram,record->local+8)==0xc000 && load_native_word(ram,record->local+12)==0xc089,
+                      "Compiled open lost device unit/path, file ABI, or collided with ISO handle");
+                check(call(0x1624,driver_fd,0xc200,1)==1 && ram[0xc200]=='Q' &&
+                      call(0x1624,driver_fd,0xffffffff,0)==0 && file_call(8,fd,0,1)==2051,
+                      "Compiled read did not use private state or changed another mount's cursor");
+                check(call(0x23b4,driver_fd,0xffffffff,1)==static_cast<std::uint32_t>(-9),
+                      "Compiled write ignored a read-only handle");
+                check(call(0x162c,driver_fd,1,1)==1 && call(0x1624,driver_fd,0xc200,1)==1 && ram[0xc200]=='R' &&
+                      call(0x162c,driver_fd,0xffffffff,1)==0xffffffffU && call(0x1624,driver_fd,0xc200,1)==1 && ram[0xc200]=='Q',
+                      "Compiled seek lost its signed offset/return or private cursor update");
+                check(call(0x162c,driver_fd,99,3)==static_cast<std::uint32_t>(-22) &&
+                      call(0x1624,driver_fd,0xc200,1)==1 && ram[0xc200]=='Q',
+                      "Invalid seek origin reached the compiled driver");
+                auto rejected=initial(); rejected.pc=0x1624; rejected.registers[4]=driver_fd;
+                rejected.registers[5]=0x1000; rejected.registers[6]=1;
+                check(run_native(nt_iop_generated_run,rejected,ram,128,&router).reason==NativeStop::code_write && !rejected.executed,
+                      "Compiled read accepted a code destination");
+                rejected=initial(); rejected.pc=0x2824; rejected.registers[4]=0xc040;
+                check(run_native(nt_iop_generated_run,rejected,ram,128,&router).reason==NativeStop::import_request &&
+                      !rejected.executed && drivers.size()==1,"Driver was removed while its file was open");
+                check(call(0x161c,driver_fd)==static_cast<std::uint32_t>(-7) && !descriptors.find(driver_fd) &&
+                      free_bytes()==initial_free,"Failed close leaked the file record or descriptor");
+                const auto disc_fd=file_call(4,0x2000,1);
+                check(disc_fd==driver_fd && file_call(5,disc_fd)==0,"ISO mount could not reuse a released driver descriptor");
+                store_native_word(ram,0xc008,0xffffffff);
+                check(call(0x1614,0xc080,1)==0xffffffffU && free_bytes()==initial_free && !descriptors.find(4),
+                      "Failed compiled open leaked allocation or published its handle");
+                store_native_word(ram,0xc008,1);
+                const auto write_only=call(0x1614,0xc080,2);
+                check(write_only==4 && call(0x1624,write_only,0xffffffff,1)==static_cast<std::uint32_t>(-9) &&
+                      call(0x161c,write_only)==static_cast<std::uint32_t>(-7),"Read ignored the descriptor access mode");
+                const auto writable=call(0x1614,0xc080,3);
+                ram[0xc220]='X';
+                check(writable==4 && call(0x23b4,writable,0x8000c220,1)==1 &&
+                      call(0x1624,writable,0xc200,1)==1 && ram[0xc200]=='X' &&
+                      call(0x23b4,writable,0xffffffff,0)==0,
+                      "Compiled write did not consume its source or preserve driver state");
+                auto invalid_write=initial(); invalid_write.pc=0x23b4; invalid_write.registers[4]=writable;
+                invalid_write.registers[5]=0xffff; invalid_write.registers[6]=2;
+                const auto before_write=ram;
+                check(run_native(nt_iop_generated_run,invalid_write,ram,128,&router).reason==NativeStop::address_fault &&
+                      !invalid_write.executed && ram==before_write &&
+                      call(0x23b4,writable,0xc220,0x100001)==static_cast<std::uint32_t>(-22),
+                      "Invalid compiled-write source changed state or reached the callback");
+                check(call(0x161c,writable)==static_cast<std::uint32_t>(-7),"Read/write file close failed");
+                const auto directory=call(0x239c,0xc080),other_directory=call(0x239c,0xc080);
+                check(directory==4 && other_directory==5 && call(0x161c,directory)==static_cast<std::uint32_t>(-9) &&
+                      call(0x1624,directory,0xc500,1)==static_cast<std::uint32_t>(-21),
+                      "Compiled directory handles allowed file-only operations");
+                for (const auto output : {0x1000U,0xff00U,0xc501U}) {
+                    auto read=initial(); read.pc=0x23ac; read.registers[4]=directory; read.registers[5]=output;
+                    const auto before=ram;
+                    check(run_native(nt_iop_generated_run,read,ram,128,&router).reason==
+                          (output==0x1000 ? NativeStop::code_write : NativeStop::address_fault) &&
+                          !read.executed && ram==before,"Invalid compiled directory output reached its callback");
+                }
+                std::fill_n(ram.begin()+0xc500,300,0xdd);
+                check(call(0x23ac,directory,0xc500)==1 && load_native_word(ram,0xc500)==0x14 &&
+                      load_native_word(ram,0xc508)==17 && load_native_word(ram,0xc628)==0 &&
+                      std::string(reinterpret_cast<const char*>(ram.data()+0xc528))=="entry" &&
+                      call(0x23ac,other_directory,0xc700)==1,
+                      "Compiled directory read lost its record or shared a cursor");
+                const auto before_eof=ram;
+                check(call(0x23ac,directory,0xc500)==0 && ram==before_eof &&
+                      call(0x23a4,directory)==0 && call(0x23a4,other_directory)==0 && free_bytes()==initial_free,
+                      "Compiled directory EOF or close lost state/ownership");
+                store_native_word(ram,0xc330,0x2940); store_native_word(ram,0xc008,0xffffffff);
+                check(call(0x239c,0xc080)==0xffffffffU && free_bytes()==initial_free && !descriptors.find(4),
+                      "Failed directory open leaked its file record or descriptor");
+                store_native_word(ram,0xc330,0x2b00); store_native_word(ram,0xc008,1);
+                check(call(0x2824,0xc040)==0 && !drivers.size() && free_bytes()==initial_free,
+                      "File driver teardown or heap accounting failed");
+                store_native_word(ram,0xc004,0x10000010);
+                check(call(0x281c,0xc000)==0,"Extended device registration failed");
+                store_native_word(ram,0xc338,0x2d00);
+                const auto extended_directory=call(0x239c,0xc080);
+                const auto directory_record=descriptors.find(extended_directory)->local;
+                const auto directory_free=free_bytes();
+                check(extended_directory==4 && load_native_word(ram,directory_record)==8,
+                      "Extended directory did not receive its public open-mode flag");
+                std::fill_n(ram.begin()+0xc700,300,0xa5); ram[0xc82c]=0x7c;
+                auto extended=initial(); extended.pc=0x23ac; extended.registers[4]=extended_directory; extended.registers[5]=0xc700;
+                check(run_native(nt_iop_generated_run,extended,ram,1,&router).reason==NativeStop::budget &&
+                      extended.pc==0x2d00 && extended.registers[5]%64==0 && extended.registers[5]!=0xc700 &&
+                      load_native_word(ram,directory_record+12)==0 && free_bytes()<directory_free,
+                      "Extended dread did not allocate an aligned isolated output record");
+                check(nt_iop_generated_run(extended,ram,128).reason==NativeStop::unmapped_code &&
+                      extended.pc==native_service_return && load_native_word(ram,directory_record+12)==1,
+                      "Extended directory callback did not complete exactly one entry");
+                check(run_native(nt_iop_generated_run,extended,std::span(ram).first(0xc800),1,&router).reason==NativeStop::address_fault &&
+                      extended.pc==native_service_return && free_bytes()<directory_free,
+                      "Directory completion did not retain a retryable continuation after output fault");
+                check(run_native(nt_iop_generated_run,extended,ram,1,&router).reason==NativeStop::unmapped_code &&
+                      extended.pc==0x5000 && extended.registers[2]==1 && free_bytes()==directory_free &&
+                      load_native_word(ram,0xc700)==0x17 && load_native_word(ram,0xc708)==17 &&
+                      load_native_word(ram,0xc704)==0 && load_native_word(ram,0xc724)==0 &&
+                      std::string(reinterpret_cast<const char*>(ram.data()+0xc728))=="entry" &&
+                      load_native_word(ram,0xc828)==0xa5a5a5a5 && ram[0xc82c]==0x7c,
+                      "Extended-to-legacy directory conversion lost fields, private data or bounds");
+                const auto extended_eof=ram;
+                check(call(0x23ac,extended_directory,0xc700)==0 &&
+                      std::equal(ram.begin()+0xc700,ram.begin()+0xc82d,extended_eof.begin()+0xc700) && free_bytes()==directory_free,
+                      "Extended directory EOF overwrote caller output or leaked temporary storage");
+                store_native_word(ram,0xc338,0x2880);
+                check(call(0x23ac,extended_directory,0xc700)==0xffffffffU &&
+                      std::equal(ram.begin()+0xc700,ram.begin()+0xc82d,extended_eof.begin()+0xc700) && free_bytes()==directory_free,
+                      "Extended directory error overwrote caller output or leaked temporary storage");
+                store_native_word(ram,0xc338,0x2d00);
+                const auto occupied=heap.invoke({4,{0,directory_free,0,0},NativeServiceKind::sysmem},ram).value;
+                check(occupied && call(0x23ac,extended_directory,0xc700)==static_cast<std::uint32_t>(-12) &&
+                      load_native_word(ram,directory_record+12)==1,"Scratch allocation failure executed directory callback");
+                heap.invoke({5,{occupied,0,0,0},NativeServiceKind::sysmem},ram);
+                check(call(0x23a4,extended_directory)==0 && free_bytes()==initial_free,
+                      "Extended directory close leaked retained storage");
+                store_native_word(ram,0xc358,0x2c80);
+                const auto extended_fd=call(0x1614,0xc080,1);
+                const auto extended_record=descriptors.find(extended_fd)->local;
+                check(driver_seek64(extended_fd,0x1234567800000005LL,1)==0x1234567800000005LL &&
+                      load_native_word(ram,extended_record+12)==1 && driver_seek64(extended_fd,INT64_MIN,2)==INT64_MIN &&
+                      load_native_word(ram,extended_record+12)==2,
+                      "Compiled wide seek truncated its signed offset/result or lost the stack origin");
+                check(driver_seek64(extended_fd,0,3)==-22 && load_native_word(ram,extended_record+12)==2,
+                      "Invalid wide seek origin reached its callback or lost error sign extension");
+                auto bad_wide=initial(); bad_wide.pc=0x23e4; bad_wide.registers[4]=extended_fd;
+                bad_wide.registers[29]=0xfffffff8; bad_wide.load_register=3; bad_wide.load_value=77;
+                const auto before_bad_wide=ram;
+                check(run_native(nt_iop_generated_run,bad_wide,ram,128,&router).reason==NativeStop::address_fault &&
+                      !bad_wide.executed && bad_wide.load_register==3 && ram==before_bad_wide,
+                      "Invalid wide seek stack changed state before dispatch");
+                store_native_word(ram,0xc358,0xc100); store_native_word(ram,0xc470,0);
+                bad_wide.registers[29]=0xc460;
+                check(run_native(nt_iop_generated_run,bad_wide,ram,128,&router).reason==NativeStop::unmapped_code &&
+                      !bad_wide.executed && load_native_word(ram,extended_record+12)==2,
+                      "Wide seek accepted an uncompiled function target");
+                store_native_word(ram,0xc358,0x2c80);
+                check(call(0x161c,extended_fd)==static_cast<std::uint32_t>(-7) && free_bytes()==initial_free,
+                      "Wide seek damaged descriptor ownership");
+                check(call(0x2824,0xc040)==0,"Extended device teardown failed");
+            }
+
             check(file_call(8,fd,static_cast<std::uint32_t>(-3),2)==5000 && file_call(6,fd,0x3000,8)==3 &&
                   std::equal(payload.end()-3,payload.end(),ram.begin()+0x3000) && file_call(6,fd,0x3000,8)==0,
                   "Native seek, EOF or short read differs");

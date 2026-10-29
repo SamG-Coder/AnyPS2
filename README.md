@@ -95,6 +95,14 @@ allocator with reserved module/stack regions. `loadcore` registration/release
 imports maintain a native registry of validated, already-compiled exports, and
 library-table queries use that registry. Boot-mode queries read explicitly supplied
 native boot records; the standalone probe starts with an empty boot context.
+Native AddDrv/DelDrv run compiled lifecycle routines and maintain bounded native
+registrations. Failed initialization rolls back; teardown runs before removal.
+Compiled driver open/read/write/seek/close calls use native handle ownership and heap-backed
+public file records. They share a collision-free descriptor pool with the ISO
+mount. Legacy compiled drivers also support dopen/dread/dclose with independent cursors.
+Extended compiled drivers support lseek64 with two-register offsets and results.
+Extended directory records are converted to the legacy caller layout through
+aligned temporary storage; other unsupported operations stop explicitly.
 Native interrupt services register compiled handlers, retain masked events, and
 save/restore continuations during cooperative callback delivery. Device event
 producers and preemptive thread scheduling are not yet connected. A cooperative

@@ -14,10 +14,13 @@ struct NativeServiceRequest {
     const Cpu* context=nullptr; // Stable native continuation identity; never exposed to guest RAM.
     std::uint32_t resume_pc=0;
 };
-enum class NativeServiceStatus { unsupported, returned, address_fault, transferred, code_write, unmapped_code, yielded, called, restored, waiting, retry_yielded };
+// unsupported declines ownership; unavailable claims the request but stops execution.
+enum class NativeServiceStatus { unsupported, returned, address_fault, transferred, code_write, unmapped_code, yielded, called, restored, waiting, retry_yielded, unavailable };
 struct NativeServiceCall {
+    // Ownership prevents nested providers from consuming each other's returns.
     std::array<std::uint32_t,4> arguments{};
     std::uint32_t global_pointer=0;
+    const void* owner=nullptr;
 };
 inline constexpr std::uint32_t native_service_return=0xfffffff0U;
 struct NativeServiceReply {
@@ -70,10 +73,10 @@ inline NativeResult run_native(NativeEntry entry,Cpu& cpu,std::span<std::uint8_t
         }
         const auto resume=imported ? reg(31) : cpu.pc+4;
         const NativeServiceRequest request{imported ? result.trap_code&65535U : cpu.registers[2],
-            returning ? std::array<std::uint32_t,4>{reg(2),0,0,0} : std::array<std::uint32_t,4>{reg(4),reg(5),reg(6),reg(7)},
+            returning ? std::array<std::uint32_t,4>{reg(2),reg(3),0,0} : std::array<std::uint32_t,4>{reg(4),reg(5),reg(6),reg(7)},
             kind,cpu.pc,cpu.interrupt_depth!=0,reg(28),reg(29),&cpu,resume};
         const auto reply=services->invoke(request,ram);
-        if (reply.status==NativeServiceStatus::unsupported) return result;
+        if (reply.status==NativeServiceStatus::unsupported || reply.status==NativeServiceStatus::unavailable) return result;
         if (reply.status==NativeServiceStatus::address_fault) return {NativeStop::address_fault,cpu.pc,reply.address};
         if (reply.status==NativeServiceStatus::code_write) return {NativeStop::code_write,cpu.pc,reply.address};
         if (reply.status==NativeServiceStatus::unmapped_code) return {NativeStop::unmapped_code,cpu.pc,reply.address};
@@ -89,6 +92,7 @@ inline NativeResult run_native(NativeEntry entry,Cpu& cpu,std::span<std::uint8_t
             if (cpu.load_register) cpu.registers[cpu.load_register]=cpu.load_value;
             cpu.load_register=0;
             for (unsigned index=0;index<4;++index) cpu.registers[4+index]=reply.call->arguments[index];
+            cpu.native_call_owner=reply.call->owner;
             cpu.registers[28]=reply.call->global_pointer; cpu.registers[31]=native_service_return;
             cpu.registers[0]=0; cpu.pc=reply.value; ++cpu.executed; --budget;
             if (!budget) return {NativeStop::budget,cpu.pc};

@@ -621,3 +621,36 @@ iomanX.c descriptor-validation contract, common/include/cdvd-ioctl.h command
 identifiers, and iop/cdvd/cdvdman/src/cdvdman.c ordinary-file ioctl2 failure and
 unknown ioctl failure contracts. The implementation is original native dispatch;
 no upstream driver code is copied. Known hardware controls remain unsupported.
+
+Native AddDrv/DelDrv use the pinned public PS2SDK ioman.h descriptor/operation
+layout and ioman.c legacy 16-slot, initialization-failure and teardown-result
+contracts. iomanX.c documents rejection of concurrent lifecycle calls. Original
+C++ ownership, LLVM callback discovery and saved native continuations replace the
+console manager implementation; no source or binary driver is copied.
+
+Compiled driver files use the pinned ioman.h 16-byte file structure and operation
+signatures, plus ioman.c device/unit path parsing, open result normalization,
+read access checking and unconditional close cleanup contracts. Descriptor
+ownership, native heap integration and LLVM callback invocation are original
+implementations. The fixture driver and file contents are original synthetic data.
+
+Compiled write/seek dispatch follows the same pinned ioman.h operation table and
+ioman.c io_write access-bit and io_lseek origin-validation contracts. Native
+buffer checks and shared continuation handling are original C++; no proprietary
+file implementation or data is included in the synthetic regression.
+
+Legacy compiled directory calls follow pinned ioman.c io_dopen/io_dread/io_dclose
+contracts, ioman.h operation slots, and io_common.h's 300-byte io_dirent layout.
+iomanX.c and iox_stat.h establish the distinct extended layout. Native directory classification and bounded output validation
+are original code, and the compiled enumeration fixture is synthetic.
+
+Compiled-driver wide seek follows the pinned iomanX.h lseek64 operation signature
+and slot, iomanX.c extended-device/origin checks and signed error contract, and the
+O32 aligned argument/return pair. Original native continuation code preserves the
+wide result; the synthetic callback contains no commercial implementation.
+
+Extended directory conversion follows pinned ioman_sbv.c's ioman_dread/statx2stat
+field-selection contract, iomanX.c modex2mode access/type mapping, and iox_stat.h
+alignment/layout. Original native encoding preserves the legacy private word;
+zero-initialized scratch and unchanged EOF/error output avoid propagating
+uninitialized wrapper storage. No upstream implementation is copied.

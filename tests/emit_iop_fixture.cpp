@@ -253,7 +253,7 @@ int main(int argc,char** argv) {
         std::copy(std::begin(file_name),std::end(file_name),module.memory.begin()+0x60c);
         const unsigned file_ordinals[]{4,5,6,8};
         for (unsigned index=0;index<4;++index) { file_word(20+index*8,0x03e00008); file_word(24+index*8,0x24000000|file_ordinals[index]); }
-        module.memory.resize(0x1900);
+        module.memory.resize(0x1e00);
         const auto irq_word=[&](unsigned address,std::uint32_t word) {
             for (unsigned byte=0;byte<4;++byte) module.memory[address-module.base+byte]=static_cast<std::uint8_t>(word>>(byte*8));
         };
@@ -327,6 +327,54 @@ int main(int argc,char** argv) {
         irq_word(0x2800,0x41e00000); irq_word(0x2808,0x104);
         std::copy(std::begin(stat_library),std::end(stat_library),module.memory.begin()+0x180c);
         irq_word(0x2814,0x03e00008); irq_word(0x2818,0x24000022);
+        irq_word(0x281c,0x03e00008); irq_word(0x2820,0x24000014);
+        irq_word(0x2824,0x03e00008); irq_word(0x2828,0x24000015);
+        // Lifecycle routines are private: only the AddDrv descriptor discovers them.
+        irq_word(0x2840,0x240428c0); irq_word(0x2844,0x08000a07); irq_word(0x2848,0);
+        irq_word(0x2860,0x8c820008); irq_word(0x2864,0x03e00008); irq_word(0x2868,0);
+        irq_word(0x2880,0x2402ffff); irq_word(0x2884,0x03e00008); irq_word(0x2888,0);
+        irq_word(0x28c0,0x28e0); irq_word(0x28c4,0x10); irq_word(0x28d0,0x28f0);
+        constexpr char driver_name[]="fixture";
+        std::copy(std::begin(driver_name),std::end(driver_name),module.memory.begin()+0x18e0);
+        irq_word(0x28f0,0x2860); irq_word(0x28f4,0x2880);
+        irq_word(0x28fc,0x2940); irq_word(0x2900,0x2960); irq_word(0x2904,0x2980);
+        irq_word(0x2908,0x2a00); irq_word(0x290c,0x2a40);
+        irq_word(0x2920,0x2b00); irq_word(0x2924,0x2b80); irq_word(0x2928,0x2b20);
+        // Original device: open preserves the relative path as private data;
+        // read returns its first byte; close reports an error after cleanup.
+        constexpr std::uint32_t driver_open[]{0x8c880008,0,0x8d020008,0,0xac85000c,0x03e00008,0};
+        constexpr std::uint32_t driver_close[]{0xac80000c,0x2402fff9,0x03e00008,0};
+        constexpr std::uint32_t driver_read[]{0x10c00008,0x8c88000c,0,0x91090000,0,0xa0a90000,0x24020001,0x03e00008,0,0x24020000,0x03e00008,0};
+        for (unsigned i=0;i<std::size(driver_open);++i) irq_word(0x2940+i*4,driver_open[i]);
+        for (unsigned i=0;i<std::size(driver_close);++i) irq_word(0x2960+i*4,driver_close[i]);
+        for (unsigned i=0;i<std::size(driver_read);++i) irq_word(0x2980+i*4,driver_read[i]);
+        // Write changes one byte at the private cursor. Seek moves that cursor
+        // and returns the signed displacement to expose argument/result wiring.
+        constexpr std::uint32_t driver_write[]{0x10c00008,0x8c88000c,0,0x90a90000,0,0xa1090000,0x24020001,0x03e00008,0,0x24020000,0x03e00008,0};
+        constexpr std::uint32_t driver_seek[]{0x8c88000c,0,0x01054021,0xac88000c,0x00a01021,0x03e00008,0};
+        for (unsigned i=0;i<std::size(driver_write);++i) irq_word(0x2a00+i*4,driver_write[i]);
+        for (unsigned i=0;i<std::size(driver_seek);++i) irq_word(0x2a40+i*4,driver_seek[i]);
+        constexpr std::uint32_t directory_open[]{0xac80000c,0x03e00008,0x00001021};
+        constexpr std::uint32_t directory_read[]{0x8c88000c,0,0x1500000f,0x24020000,0x24080001,0xac88000c,
+            0x24090014,0xaca90000,0x24090011,0xaca90008,0x3c097274,0x35296e65,0xaca90028,
+            0x24090079,0xa0a9002c,0xa0a0002d,0xaca00128,0x24020001,0x03e00008,0};
+        for (unsigned i=0;i<std::size(directory_open);++i) {
+            irq_word(0x2b00+i*4,directory_open[i]); irq_word(0x2b80+i*4,directory_open[i]);
+        }
+        for (unsigned i=0;i<std::size(directory_read);++i) irq_word(0x2b20+i*4,directory_read[i]);
+        irq_word(0x2ba0,0x24042bc0); irq_word(0x2ba4,0x08000a07); irq_word(0x2ba8,0);
+        irq_word(0x2bc0,0x28e0); irq_word(0x2bc4,0x10000010); irq_word(0x2bd0,0x2c00);
+        irq_word(0x2c00,0x2860); irq_word(0x2c04,0x2880); irq_word(0x2c0c,0x2940); irq_word(0x2c10,0x2960);
+        irq_word(0x2c58,0x2c80);
+        irq_word(0x2c30,0x2b00); irq_word(0x2c34,0x2b80); irq_word(0x2c38,0x2d00);
+        auto extended_read=std::to_array(directory_read);
+        extended_read[6]=0x240921d0; // Extended regular-file type and access bits.
+        extended_read[12]=0xaca90040; extended_read[14]=0xa0a90044; extended_read[15]=0xa0a00045;
+        extended_read[16]=0xaca00140; // Extended private word at byte 320.
+        for (unsigned i=0;i<extended_read.size();++i) irq_word(0x2d00+i*4,extended_read[i]);
+        // Echo both offset words and record the stack-supplied origin.
+        constexpr std::uint32_t seek64_driver[]{0x00c01021,0x00e01821,0x8fa80010,0,0xac88000c,0x03e00008,0};
+        for (unsigned i=0;i<std::size(seek64_driver);++i) irq_word(0x2c80+i*4,seek64_driver[i]);
         irq_word(0x2340,0x41e00000); irq_word(0x2348,0x102);
         std::copy(std::begin(heap_name),std::end(heap_name),module.memory.begin()+0x134c);
         irq_word(0x2354,0x03e00008); irq_word(0x2358,0x2400000e);
@@ -385,7 +433,7 @@ int main(int argc,char** argv) {
         for (unsigned index=0;index<std::size(create_from_data);++index) irq_word(0x1f20+index*4,create_from_data[index]);
         module.initialized_size=static_cast<std::uint32_t>(module.memory.size());
         std::vector<std::uint32_t> bundle_roots=entries;
-        bundle_roots.insert(bundle_roots.end(),{0x13ec,0x1418,0x1420,0x1514,0x151c,0x1614,0x161c,0x1624,0x162c,0x171c,0x1724,0x172c,0x1734,0x173c,0x1744,0x174c,0x1754,0x1a40,0x1a50,0x1b00,0x1b40,0x1c00,0x1d00,0x1d80,0x1dc0,0x1e00,0x1e40,0x1f20,0x2140,0x2180,0x21c0,0x2314,0x2354,0x2394,0x239c,0x23a4,0x23ac,0x23b4,0x23bc,0x23c4,0x23cc,0x23d4,0x23dc,0x23e4,0x23ec,0x2814,0x2414,0x241c,0x242c,0x2434,0x243c,0x2444,0x244c,0x2454,0x245c,0x2464,0x246c,0x2480,0x251c,0x2524,0x252c,0x2534,0x253c,0x2544,0x254c,0x2580,0x2600,0x2680,0x2714,0x271c,0x2724,0x272c,0x2734,0x273c,0x2744,0x274c,0x2794,0x279c,0x27a4,0x27ac,0x27b4,0x27bc,0x27c4,0x27cc});
+        bundle_roots.insert(bundle_roots.end(),{0x13ec,0x1418,0x1420,0x1514,0x151c,0x1614,0x161c,0x1624,0x162c,0x171c,0x1724,0x172c,0x1734,0x173c,0x1744,0x174c,0x1754,0x1a40,0x1a50,0x1b00,0x1b40,0x1c00,0x1d00,0x1d80,0x1dc0,0x1e00,0x1e40,0x1f20,0x2140,0x2180,0x21c0,0x2314,0x2354,0x2394,0x239c,0x23a4,0x23ac,0x23b4,0x23bc,0x23c4,0x23cc,0x23d4,0x23dc,0x23e4,0x23ec,0x2814,0x2824,0x2840,0x2ba0,0x2414,0x241c,0x242c,0x2434,0x243c,0x2444,0x244c,0x2454,0x245c,0x2464,0x246c,0x2480,0x251c,0x2524,0x252c,0x2534,0x253c,0x2544,0x254c,0x2580,0x2600,0x2680,0x2714,0x271c,0x2724,0x272c,0x2734,0x273c,0x2744,0x274c,0x2794,0x279c,0x27a4,0x27ac,0x27b4,0x27bc,0x27c4,0x27cc});
         for (unsigned index=0;index<std::size(thread_ordinals);++index)
             if (thread_ordinals[index]!=4 && thread_ordinals[index]!=35) bundle_roots.push_back(0x1914+index*8);
         for (unsigned index=0;index<std::size(event_ordinals);++index) bundle_roots.push_back(0x1814+index*8);

@@ -866,3 +866,55 @@ stream controls on ordinary files, unchanged RAM/cursors, and explicit stops
 without retirement for known unimplemented hardware ioctl commands. Unused
 payload pointers are deliberately invalid to verify rejection precedes access.
 Run the iop-native and iop-llvm execution/project tests in Release.
+
+## LLVM driver lifecycle integration
+
+The original synthetic module calls AddDrv with a constant initialized descriptor.
+Its private init/deinit functions are discovered through that data, not explicit
+callback roots. Compiled execution checks budgeted init entry, delayed publication,
+rollback, teardown with a negative return, duplicate names, the 16-slot limit,
+missing deletion, invalid targets/descriptors, and retained caller GP/load state.
+A foreign continuation return cannot consume the pending registration. The normal
+LLVM execution regression also covers existing RPC continuations with owner tags.
+Standalone-project testing compiles the host with the registry installed. Only
+iop-llvm-execution and iop-llvm-project are needed for this native milestone.
+
+## Compiled driver file integration
+
+The LLVM execution milestone registers an original synthetic driver whose private
+open/read/close routines are discovered from initialized operation-table data.
+It opens that device while a native ISO file remains open, checks unique handles,
+device-unit/path parsing and the public file record, reads using driver private
+state, rejects code destinations and forbidden access modes, and prevents driver
+removal with an open file. Failed open and negative close results must release
+heap storage and descriptors; a native ISO open then reuses the freed handle.
+Existing ISO reads, directory cursors and 64-bit seeks run through the shared pool.
+Run iop-llvm-execution and iop-llvm-project in Release for this milestone.
+
+The compiled file milestone also covers write permission on read-only handles,
+read/write round trips through driver-private cursor state, zero-length writes,
+source address aliases, source extent faults and transfer-size rejection. Seek
+checks forward/backward signed displacement, unchanged cursor on invalid origin,
+and preservation of a negative callback result. Synthetic write/seek functions
+are discovered through the registered operation table, not added as explicit
+entry roots. Run only the LLVM execution and standalone-project tests.
+
+The same LLVM compiled-driver integration now enumerates two independently opened
+legacy directories. It verifies a synthetic name/type/size record, output bounds,
+alignment and code guards before cursor advancement, EOF with unchanged output,
+file/directory handle separation, failed-open rollback and close cleanup. Extended records use an isolated conversion buffer, covered below.
+
+Wide compiled-driver seek is covered by an extended synthetic descriptor and a
+private LLVM callback discovered from operation slot 22. It echoes both offset
+words and records the stack origin, checking values above 4 GiB, INT64_MIN, signed
+manager errors, source-stack aliases and preserved caller/pending-load state.
+Invalid origins, overflowed stack addresses and uncompiled callback targets must
+stop without changing driver-private state. Existing RPC tests exercise the
+shared return bridge after adding v1 to native return requests.
+
+Extended directory integration checks the open flag, isolated 64-byte-aligned
+scratch record, type/permission conversion, size/name fields, preserved caller
+privdata and output canaries. A budgeted callback is completed separately, then
+its return is retried after a truncated-arena fault to verify no duplicate cursor
+advance. Entry/EOF/error completions must release temporary storage; EOF/errors
+preserve caller output. Exhausting the heap returns ENOMEM without calling dread.

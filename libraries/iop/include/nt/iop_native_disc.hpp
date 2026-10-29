@@ -2,15 +2,30 @@
 #include <nt/iop_native_services.hpp>
 #include <nt/iop_native_code.hpp>
 #include <nt/disc_files.hpp>
+#include <nt/iop_native_file_descriptors.hpp>
 #include <algorithm>
 #include <bit>
 
 namespace nt::iop {
 class NativeDiscServices final : public NativeServices {
 public:
-    explicit NativeDiscServices(const std::filesystem::path& image) : files_(image) {}
-    NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
-        if (request.kind!=NativeServiceKind::ioman) return {};
+    explicit NativeDiscServices(const std::filesystem::path& image,NativeFileDescriptors* descriptors=nullptr)
+        : files_(image),descriptors_(descriptors ? *descriptors : owned_descriptors_) {}
+    NativeServiceReply invoke(const NativeServiceRequest& incoming,std::span<std::uint8_t> ram) override {
+        if (incoming.kind!=NativeServiceKind::ioman) return {};
+        auto request=incoming;
+        const bool descriptor_call=(request.selector>=5 && request.selector<=9) ||
+            request.selector==14 || request.selector==15 || request.selector==30 || request.selector==34;
+        if (descriptor_call) {
+            const auto entry=descriptors_.find(request.arguments[0]);
+            if (entry && entry->owner!=this) return {};
+            if (entry) request.arguments[0]=entry->local;
+            else if (request.arguments[0]>=3) {
+                NativeServiceReply reply{NativeServiceStatus::returned,static_cast<std::uint32_t>(-9)};
+                if (request.selector==30) reply.high_return=0xffffffffU;
+                return reply;
+            }
+        }
         const auto& args=request.arguments;
         const auto returned=[](std::int32_t value) { return NativeServiceReply{NativeServiceStatus::returned,static_cast<std::uint32_t>(value)}; };
         // Disc descriptors are opened read-only. Validate access before touching
@@ -42,8 +57,8 @@ public:
             if (end==bytes.end()) return available==256 ? returned(-36) : NativeServiceReply{NativeServiceStatus::address_fault,0,args[0]};
             const std::string path(bytes.begin(),end);
             if (mutation) return returned(disc::Files::mutation_error(path));
-            if (request.selector==4) return returned(files_.open(path,args[1]));
-            if (request.selector==13) return returned(files_.open_directory(path));
+            if (request.selector==4) return returned(publish(files_.open(path,args[1]),false));
+            if (request.selector==13) return returned(publish(files_.open_directory(path),true));
             const auto output=ram_offset(args[1],4,ram.size());
             if (!output || ram.size()-*output<40 || 0x200000-*output<40)
                 return {NativeServiceStatus::address_fault,0,args[1]};
@@ -67,7 +82,7 @@ public:
             NativeServiceReply reply{NativeServiceStatus::returned,static_cast<std::uint32_t>(value)};
             reply.high_return=static_cast<std::uint32_t>(value>>32); return reply;
         }
-        if (request.selector==14) return returned(files_.close(args[0],true));
+        if (request.selector==14) return returned(close(incoming.arguments[0],args[0],true));
         if (request.selector==15) {
             if (!files_.directory(args[0])) return returned(-9);
             const auto output=ram_offset(args[1],4,ram.size());
@@ -83,7 +98,7 @@ public:
             std::copy(record.begin(),record.end(),ram.begin()+*output);
             return returned(1);
         }
-        if (request.selector==5) return returned(files_.close(args[0]));
+        if (request.selector==5) return returned(close(incoming.arguments[0],args[0],false));
         if (request.selector==8) return returned(files_.seek(args[0],std::bit_cast<std::int32_t>(args[1]),args[2]));
         if (request.selector!=6) return {};
         if (!files_.contains(args[0])) return returned(-9);
@@ -111,6 +126,19 @@ private:
             static_cast<std::uint8_t>(year),static_cast<std::uint8_t>(year>>8)};
         for (unsigned offset : {12U,20U,28U}) std::copy(timestamp.begin(),timestamp.end(),record.begin()+offset);
     }
+    std::int32_t publish(std::int32_t local,bool directory) {
+        if (local<0) return local;
+        const auto fd=descriptors_.allocate(this,static_cast<std::uint32_t>(local));
+        if (fd) return static_cast<std::int32_t>(*fd);
+        files_.close(static_cast<std::uint32_t>(local),directory); return -24;
+    }
+    std::int32_t close(std::uint32_t fd,std::uint32_t local,bool directory) {
+        const auto result=files_.close(local,directory);
+        if (!result) descriptors_.release(fd,this);
+        return result;
+    }
     disc::Files files_;
+    NativeFileDescriptors owned_descriptors_;
+    NativeFileDescriptors& descriptors_;
 };
 }

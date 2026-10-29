@@ -1379,3 +1379,115 @@ queries, spin control, decoding, disc keys and disc type) remain explicit
 unsupported import stops until a native contract exists. These paths neither
 read payload pointers nor write outputs, change the file cursor, or touch the
 image. This is partial device-control coverage, not a complete drive service.
+
+## Native driver lifecycle
+
+Legacy ioman AddDrv/DelDrv (20/21) use an original native registry with 16 slots.
+The descriptor, bounded name and first two operation pointers are validated
+before dispatch. Initializer and teardown targets must already be compiled.
+Constant AddDrv descriptors and their operation tables in initialized module
+images seed both private lifecycle roots, including across bundle modules.
+
+AddDrv saves a caller continuation, invokes init(device), and publishes only on
+nonnegative return. Negative initialization returns -1 without a registration.
+DelDrv finds the first matching registered name, calls deinit with the original
+device pointer and registration GP, then removes it; legacy teardown return values
+are ignored. Duplicate names retain slot order. Concurrent/reentrant lifecycle
+requests return -1. Missing devices and a full table return -1. Interrupt-context
+calls, malformed names and changed registered names/teardown targets stop rather
+than silently substituting behavior. Other mutable descriptor semantics are not
+implemented yet. No device operations are executed through host function pointers.
+
+Lifecycle and RPC continuations carry a host-only owner tag in Cpu. It is excluded
+from the LLVM state ABI and restored with the caller. A provider consumes only its
+own return, allowing distinct services to nest without stealing continuations.
+The unavailable service result claims an operation while preserving its explicit
+unsupported stop; unlike unsupported, routers must not try another provider.
+
+The standalone host installs the registry and compiled file provider ahead of
+the ISO provider. During lifecycle calls, file dispatch remains unsupported.
+Registration alone is not proof of a functional driver or game startup.
+
+## Compiled driver file dispatch
+
+NativeDriverFiles implements legacy ioman open/read/write/seek/close using native ownership
+and already-compiled operations. Initialized registration tables also seed open,
+close, read, write and seek callback discovery. The descriptor's operation-table pointer is
+checked against the registered snapshot, and each selected function must be a
+compiled instruction entry. Unknown operations remain explicit stops.
+
+A shared NativeFileDescriptors pool reserves 0..2 for console providers and owns
+64 ordinary descriptors. Native ISO handles are translated through that pool;
+compiled drivers receive distinct descriptors from the same pool. A provider
+never handles another provider's descriptor. Registered device names take
+precedence over native ISO paths; unmatched names may reach the native mount.
+
+Open splits the device prefix and decimal unit from a bounded path. It allocates
+the public 16-byte iop_file record through the shared native heap, initializes
+mode/unit/device/private-data fields, and calls open(record,relative-path,mode).
+A nonnegative callback result becomes the native descriptor; failure releases the
+record, descriptor and retained registration. Read checks the access mode and
+entire destination before invoking read(record,buffer,count); the callback owns
+file contents and private state. Close always frees the descriptor and record
+after the compiled callback, even when its return is negative, matching legacy
+manager behavior. DelDrv stops while a file retains the registration.
+
+Pending calls preserve their caller and service owner across LLVM budget slices.
+This initial provider serializes file callbacks and stops on nested/concurrent
+file operations. Device controls for compiled drivers remain unfinished; the native ISO implementation retains its
+existing supported operations. No interpreter or host-pointer dispatch is used.
+
+Compiled writes reuse the descriptor access check and bounded buffer validation,
+but treat the payload as readable input: source bytes may overlap compiled-code
+data addresses. Zero-length requests do not validate the unused buffer. Both read
+and write enforce the existing 1 MiB service bound. The converted driver performs
+the transfer and supplies its result; the manager invents neither contents nor a
+successful byte count. A write callback's own stores retain LLVM memory guards.
+
+32-bit seek accepts only origins 0..2 before dispatch. It forwards the original
+32-bit signed-offset bit pattern and origin to the compiled operation, preserving
+its result and private cursor state. Read/write/seek share a value-returning
+continuation; only open and close change handle ownership. Native ISO writes
+remain read-only errors and never modify the input disc image.
+
+Legacy compiled-directory dispatch uses the same native descriptor/heap ownership
+as regular files. Dopen initializes mode zero for the legacy manager ABI and
+invokes dopen(record,relative-path). A separate native directory flag prevents
+file read/write/seek/close from consuming a directory handle and prevents directory
+calls on ordinary files. Dread validates aligned writable space for the complete
+300-byte io_dirent record before calling the compiled function. The driver owns
+entry contents and its cursor; the manager forwards positive, zero/EOF and negative
+results without inventing metadata. Dclose frees the record and descriptor after
+the callback; failed opens use the existing rollback path.
+
+The initialized operation table supplies dopen/dclose/dread discovery roots.
+Legacy devices receive the 300-byte caller record directly; extended devices
+receive a separate aligned record as described below. Device type and operation-
+table pointer changes after registration stop explicitly before file dispatch.
+
+Compiled-driver lseek64 dispatch requires the extended device type and operation
+slot 22. Discovery reads that slot only from descriptors with known extended type
+bits, avoiding overreads of ordinary legacy operation tables. O32 arguments retain
+the even a2/a3 offset pair and validated origin at sp+16; only a0 changes from the
+public handle to the driver file record. The callback runs with the original
+stack and registered GP. Its v0/v1 result is restored through a wide-value
+continuation. Native return requests carry both result words; 32-bit services
+continue to consume only v0. Manager errors sign-extend into v1. Invalid native
+handles return EBADF even when no ISO mount is installed, while handles belonging
+to another provider are left for that provider. No 64-bit cursor is simulated in
+the manager; the compiled driver's own implementation supplies the semantics.
+
+Extended directory opens set FIO_O_DIROPEN (8). Reads allocate a 384-byte,
+64-byte-aligned iox_dirent buffer through the same native heap helper used for
+file records. The allocator currently provides 256-byte alignment. The buffer is
+zero-initialized and cannot overlap the legacy destination. Positive callback
+results convert the first 40 stat bytes, including extended type/access bits,
+and copy the 256-byte name with bounded strncpy-style zero padding. The legacy
+privdata word is preserved, matching the public wrapper's field selection.
+
+Temporary storage is released on entry, EOF and error returns. EOF/error calls
+leave the caller output untouched instead of exposing uninitialized temporary
+fields. Completion validates the original heap arena and output again; a fault
+retains the saved result and allocation so retrying does not invoke dread twice.
+Allocation failure returns ENOMEM before the callback and does not advance its
+cursor. Unknown extended type encodings remain unsupported.

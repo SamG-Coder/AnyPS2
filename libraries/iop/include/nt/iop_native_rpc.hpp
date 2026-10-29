@@ -218,13 +218,13 @@ private:
         if (caller.load_register) caller.registers[caller.load_register]=caller.load_value;
         caller.load_register=0; caller.delay_slot=false; caller.pc=request.resume_pc; caller.registers[2]=0; caller.registers[0]=0;
         NativeServiceReply result{NativeServiceStatus::called,function};
-        result.call=NativeServiceCall{{load_native_word(ram,*offset+36),buffer,size,0},server.global_pointer};
+        result.call=NativeServiceCall{{load_native_word(ram,*offset+36),buffer,size,0},server.global_pointer,this};
         invocations_.emplace(request.context,Invocation{caller,*offset});
         server.state=RequestState::executing;
         return result;
     }
     NativeServiceReply finish_request(const NativeServiceRequest& request,std::span<std::uint8_t> ram) {
-        if (request.interrupt_context) return {};
+        if (request.interrupt_context || !request.context || request.context->native_call_owner!=this) return {};
         const auto found=invocations_.find(request.context);
         if (found==invocations_.end()) return {};
         auto& invocation=found->second;

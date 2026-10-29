@@ -15,6 +15,7 @@ struct Cpu {
     unsigned interrupt_depth=0;
     bool delay_slot=false;
     std::uint64_t executed=0;
+    const void* native_call_owner=nullptr; // Host continuation tag; never enters the LLVM machine-state ABI.
 };
 enum class CpuStop { budget, unsupported, address_fault, branch_in_delay, overflow, interrupt_pending };
 struct CpuResult { CpuStop reason; std::uint32_t pc, instruction; std::optional<std::uint32_t> address{}; };

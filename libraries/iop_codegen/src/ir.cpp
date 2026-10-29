@@ -25,7 +25,7 @@ std::optional<Operation> native_operation(const elf::IopImport& import) {
     if (import.library=="thevent" && (import.version>>8)==1 &&
         ((import.ordinal>=4 && import.ordinal<=11) || import.ordinal==13 || import.ordinal==14))
         return Operation::native_import;
-    if (import.library=="ioman" && (import.version>>8)==1 && ((import.ordinal>=4 && import.ordinal<=9) || (import.ordinal>=10 && import.ordinal<=18) || import.ordinal==30 || import.ordinal==34))
+    if (import.library=="ioman" && (import.version>>8)==1 && ((import.ordinal>=4 && import.ordinal<=9) || (import.ordinal>=10 && import.ordinal<=18) || import.ordinal==20 || import.ordinal==21 || import.ordinal==30 || import.ordinal==34))
         return Operation::native_import;
     if (import.library=="sysmem" && (import.version>>8)==1 && ((import.ordinal>=4 && import.ordinal<=10) || import.ordinal==14))
         return Operation::native_import;
@@ -216,6 +216,34 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                 for (const auto address : *input.registers[4]) if (address) discover_callback(address);
             if (instruction.operation==Operation::native_import && instruction.immediate==0x70020 && input.registers[6])
                 for (const auto address : *input.registers[6]) if (address) discover_callback(address);
+            if (instruction.operation==Operation::native_import && instruction.immediate==0x30014 && input.registers[4]) {
+                const auto initial_word=[&](std::uint32_t address)->std::optional<std::uint32_t> {
+                    const auto physical=physical_address(address);
+                    if (physical%4) return {};
+                    for (const auto& owner : data_modules) {
+                        if (physical<owner.base) continue;
+                        const auto offset=physical-owner.base;
+                        if (offset>owner.initialized_size || owner.initialized_size-offset<4 ||
+                            offset>owner.memory.size() || owner.memory.size()-offset<4) continue;
+                        return le32(owner.memory,offset);
+                    }
+                    return {};
+                };
+                for (const auto descriptor : *input.registers[4]) {
+                    if (descriptor>0xffffffffU-16) continue;
+                    const auto operations=initial_word(descriptor+16);
+                    if (!operations || *operations>0xffffffffU-56) continue;
+                    for (const auto offset : {0U,4U,12U,16U,20U,24U,28U,48U,52U,56U}) {
+                        const auto function=initial_word(*operations+offset);
+                        if (function && *function) discover_callback(*function);
+                    }
+                    const auto type=initial_word(descriptor+4);
+                    if (type && (*type&0xf0000000U)==0x10000000U && *operations<=0xffffffffU-88) {
+                        const auto function=initial_word(*operations+88);
+                        if (function && *function) discover_callback(*function);
+                    }
+                }
+            }
             if (instruction.operation==Operation::native_import && instruction.immediate==0x60004 && input.registers[4]) {
                 for (const auto address : *input.registers[4]) {
                     const auto descriptor=physical_address(address);
