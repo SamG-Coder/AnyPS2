@@ -3,14 +3,8 @@ project(AnyPS2 VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-find_package(Vulkan REQUIRED COMPONENTS glslc)
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/sprite.inc"
-    COMMAND Vulkan::glslc -mfmt=c "${CMAKE_CURRENT_SOURCE_DIR}/libraries/graphics/shaders/sprite.comp"
-        -o "${CMAKE_CURRENT_BINARY_DIR}/sprite.inc"
-    DEPENDS libraries/graphics/shaders/sprite.comp VERBATIM)
-add_library(nt_vulkan libraries/graphics/src/vulkan_renderer.cpp "${CMAKE_CURRENT_BINARY_DIR}/sprite.inc")
-target_include_directories(nt_vulkan PUBLIC libraries/graphics/include PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
-target_link_libraries(nt_vulkan PUBLIC Vulkan::Vulkan)
+include(libraries/graphics/vulkan.cmake)
+anyps2_add_vulkan(nt_vulkan)
 if(WIN32)
     add_executable(anyps2-display programs/anyps2-display/main.cpp)
     target_link_libraries(anyps2-display PRIVATE nt_vulkan user32)
@@ -60,7 +54,8 @@ target_include_directories(nt_runtime PUBLIC libraries/runtime/include)
 target_link_libraries(nt_runtime PUBLIC nt_binary)
 add_library(nt_fileio libraries/fileio/src/fileio.cpp)
 target_include_directories(nt_fileio PUBLIC libraries/fileio/include)
-target_link_libraries(nt_fileio PUBLIC nt_disc nt_runtime)
+target_link_libraries(nt_fileio PUBLIC nt_disc)
+target_include_directories(nt_fileio PUBLIC libraries/runtime/include)
 add_library(nt_hardware libraries/hardware/src/system_bus.cpp libraries/hardware/src/graphics_dma.cpp libraries/hardware/src/gs.cpp libraries/hardware/src/gs_vertex.cpp libraries/hardware/src/gs_sprite.cpp libraries/hardware/src/gs_texture.cpp libraries/hardware/src/gif.cpp libraries/hardware/src/vif.cpp libraries/hardware/src/vu_vector.cpp libraries/hardware/src/sif.cpp libraries/hardware/src/sif_commands.cpp libraries/hardware/src/sif_jobs.cpp libraries/hardware/src/sif_rpc.cpp)
 target_include_directories(nt_hardware PUBLIC libraries/hardware/include)
 target_link_libraries(nt_hardware PUBLIC nt_runtime nt_fileio nt_vulkan nt_iop)
@@ -96,8 +91,8 @@ if(BUILD_TESTING)
             COMMAND "${ANYPS2_CLANG}" -target x86_64-pc-windows-msvc -Werror -Wno-override-module -O2 -c
                 "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.ll" -o "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj"
             DEPENDS emit-ee-fixture VERBATIM)
-        add_executable(ee-llvm-tests tests/ee_native.cpp tests/ee_batch.cpp libraries/ee_native/src/io.cpp libraries/ee_native/src/numeric.cpp libraries/ee_native/src/vector.cpp "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj")
-        target_link_libraries(ee-llvm-tests PRIVATE nt_ee_native)
+        add_executable(ee-llvm-tests tests/ee_native.cpp tests/ee_batch.cpp tests/ee_file_rpc.cpp libraries/ee_native/src/io.cpp libraries/ee_native/src/numeric.cpp libraries/ee_native/src/vector.cpp "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj")
+        target_link_libraries(ee-llvm-tests PRIVATE nt_ee_native nt_fileio)
         add_test(NAME ee-llvm-execution COMMAND ee-llvm-tests)
         add_test(NAME ee-llvm-project COMMAND "${CMAKE_COMMAND}"
             "-DFIXTURE=$<TARGET_FILE:emit-ee-fixture>" "-DCONVERTER=$<TARGET_FILE:ps2-recompile>"

@@ -249,6 +249,15 @@ int main(int argc,char** argv) {
     for (unsigned index=0;const auto word:{0xaf840000U,0x2403ff88U,12U,0x03e00008U,0U}) {
         code.push_back(nt::r5900::decode(0x3c0000+index*4,word)); ++index;
     }
+    for (unsigned index=0;const auto pair:std::array<std::pair<std::uint32_t,std::uint32_t>,4>{{
+        {0x7c880000U,0x78890000U},{0xfc880000U,0xdc890000U},{0xac880000U,0x8c890000U},{0xa0880000U,0x80890000U}}}) {
+        const auto pc=0x3d0000+index++*16;
+        code.push_back(nt::r5900::decode(pc,pair.first)); code.push_back(nt::r5900::decode(pc+4,12));
+        code.push_back(nt::r5900::decode(pc+8,pair.second)); code.push_back(nt::r5900::decode(pc+12,12));
+    }
+    code.push_back(nt::r5900::decode(0x3e0000,0xaf840000));
+    code.push_back(nt::r5900::decode(0x3e0004,0x03e00008));
+    code.push_back(nt::r5900::decode(0x3e0008,0));
     const std::array payloads{payload};
     std::ostringstream generated; nt::ee_codegen::emit_llvm(generated,code,{},payloads);
     if (generated.str().find("fence seq_cst")==std::string::npos) throw std::runtime_error("Native SYNC ordering was omitted");
@@ -272,10 +281,11 @@ int main(int argc,char** argv) {
         word(40,0x00200034); word(44,2);
         word(52,1); word(56,0x100); word(60,0x1000); word(68,0x80); word(72,0x80); word(76,5); word(80,4);
         word(84,1); word(88,0x180); word(92,0x2000); word(100,4); word(104,32); word(108,6); word(112,4);
-        const std::uint32_t entry[]{0x24042000,0x8c880000,0x8c890004,0x25080001,0xac880004,0x0c000410,0x25290001,0x0000000c};
+        const std::uint32_t entry[]{0x24042000,0x8c880000,0x8c890004,0x25080001,0xac880004,0x24051040,0x0c000418,0,0x8c990008,0x0320f809,0x25290001,0x0000000c};
         for (unsigned i=0;i<std::size(entry);++i) word(0x100+i*4,entry[i]);
-        word(0x120,0xffffffff); // Unreachable after the syscall: must not be translated.
+        word(0x130,0xffffffff); // Unreachable after the syscall: must not be translated.
         word(0x140,0x8c820004); word(0x144,0x03e00008); word(0x148,0x00491021); word(0x180,41);
+        word(0x160,0xac850008); word(0x164,0x03e00008); word(0x168,0);
         nt::write_file(argv[2],elf);
         const auto original=elf;
         const std::uint32_t startup[]{0x24040000,0x24054000,0x24061000,0x24072000,0x24081040,
@@ -283,6 +293,18 @@ int main(int argc,char** argv) {
             0x00408021,0x2403003e,12,0x2403007f,12};
         for (unsigned i=0;i<std::size(startup);++i) word(0x100+i*4,startup[i]);
         nt::write_file(std::string(argv[2])+".startup",elf);
+        elf=original;
+        elf.resize(0x300,0);
+        word(100,32); word(32,0x200); word(44,0x00280002); word(48,0x00020003);
+        word(0x22c,1); word(0x228,1); word(0x230,2); word(0x234,0x2010);
+        word(0x238,0x190); word(0x23c,12); word(0x248,4);
+        word(0x254,3); word(0x260,0x280); word(0x264,8);
+        const std::string section_name("\0.ctors\0",8);
+        std::copy(section_name.begin(),section_name.end(),elf.begin()+0x280);
+        word(0x190,0xffffffff); word(0x194,0x1070); word(0x198,0);
+        word(0x12c,0x8c990014); word(0x130,0x0320f809); word(0x134,0); word(0x138,12);
+        word(0x170,0x24420007); word(0x174,0x03e00008); word(0x178,0);
+        nt::write_file(std::string(argv[2])+".lifecycle",elf);
         elf=original;
         word(92,0x1000); nt::write_file(std::string(argv[2])+".overlap",elf);
         word(92,0x2000); word(0x100,0x4c000000); nt::write_file(std::string(argv[2])+".unsupported",elf);

@@ -7,6 +7,7 @@
 int main() {
     try {
         nt::graphics::VulkanRenderer gpu(nullptr,true);
+        gpu.synchronize();
         std::vector<std::uint32_t> memory(1024*1024,0x12345678), expected=memory;
         // Independent block/column lookup, including page crossing and VRAM wrap.
         constexpr unsigned blocks[4][8]={{0,1,4,5,16,17,20,21},{2,3,6,7,18,19,22,23},
@@ -21,6 +22,7 @@ int main() {
                 expected[address]=(expected[address]&draw.mask)|(draw.color&~draw.mask);
             }
             gpu.sprite(memory,draw);
+            gpu.synchronize();
             if (memory!=expected) throw std::runtime_error("GPU sprite pixels differ from independent reference");
         }
         // A 2x2 original texture, with known column addresses, rendered into

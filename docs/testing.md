@@ -1737,3 +1737,121 @@ passed the uncached reply-buffer access and interrupt-safe receive rearm, then
 stopped at an uncompiled indirect command callback after 3,802,999 operations.
 This is a discovery boundary; no runtime decoding fallback was added. Visible
 boot remains unestablished.
+
+
+Stored callback discovery milestone:
+
+- `analysis` passes original synthetic table stores, direct-call delay-slot
+  stores, invalid/non-executable targets, unknown values and volatile-register
+  boundaries.
+- `ee-llvm-project` now stores a function pointer into writable data, loads it
+  and calls it indirectly. The converter must discover that target before LLVM
+  compilation; the resulting native executable returns the expected result.
+- Private GT4 conversion and native compilation succeed. A bounded native run
+  reaches a second undiscovered registered RPC callback after 3,803,412 operations,
+  beyond the previous command-table callback. No game boot is claimed.
+
+
+Registration-function discovery milestone:
+
+- `analysis` covers callback arguments copied in branch delay slots, modified
+  pointers, unknown values, non-executable data, branch-likely annulment and loops.
+- `ee-llvm-project` now passes a callback pointer to an original registration
+  function, then loads and calls the stored pointer in the compiled executable.
+- `ee-llvm-execution` covers the negative interrupt-safe semaphore aliases in
+  the existing compiled service lifecycle, including status-buffer validation
+  and preservation of interrupt state.
+
+- Regenerated private GT4 LLVM output compiles and executes the RPC completion
+  callback and interrupt-safe semaphore signal. A 100,000,000-operation bounded
+  run records 14 completion signals while retrying the unavailable file-I/O
+  service. This confirms callback return and repeated delivery, not game boot.
+
+
+Native file-I/O RPC milestone:
+
+- `ee-llvm-execution` includes an original synthetic ISO and full native RPC
+  lifecycle: bind, backpressure/retry, open, unaligned read, EOF, seek, version,
+  close, invalid descriptor, protected output, immutable request snapshot and
+  malformed payload. Replies run through a compiled interrupt callback and rearm
+  reception. Failed preflight checks do not consume a file handle or cursor.
+- `ee-llvm-project` compiles the generated project with direct native ISO/file
+  sources and retains the check excluding runtime execution scaffolding.
+- `disc-fileio-rpc` passes for the existing shared service integration.
+- Private GT4 generation/build succeeds; execution with the explicit ISO completes
+  one FILEIO request and stops at another undiscovered indirect target after
+  3,805,328 operations. Actual GT4 file opens/bytes read remain zero.
+
+
+ELF lifecycle discovery milestone:
+
+- `formats` validates typed initialization arrays, legacy constructor/destructor
+  metadata, aliases and count/sentinel forms; malformed layouts, names, extents
+  and non-executable targets are rejected.
+- `ee-llvm-project` compiles and executes an original program which loads a
+  constructor from its ELF table and calls it indirectly, checking the changed
+  result and exact retired-operation count.
+- `analysis` continues to pass the existing callback/control-flow milestone.
+
+- Private GT4 conversion and native compilation succeed with lifecycle roots.
+  Execution proceeds past the constructor table and stops on unsupported
+  scratchpad storage after 3,807,087 operations. No game boot is claimed.
+
+
+Native scratchpad storage milestone:
+
+- `ee-llvm-execution` compiles byte, word, doubleword and quadword stores/loads
+  against independent scratchpad storage, including the last valid extent.
+  Checks cover unchanged main RAM, distinct per-platform storage, an unaligned
+  word, out-of-range access, missing backing storage and a truncated buffer.
+- `ee-llvm-project` exercises the generated project's memory ABI and complete
+  generation/build/execution pipeline with the updated lowering.
+
+- Private GT4 generation, native compilation and execution succeed through
+  scratchpad initialization. The run stops at unsupported GS CSR access after
+  3,808,495 operations; this is startup progress, not rendering or game boot.
+
+
+Native graphics lifecycle milestone:
+
+- `ee-llvm-execution` exercises compiled 64-bit service stores/loads, full-width
+  values, failed-read state preservation, misalignment, missing/failed reset
+  backends, successful reset, CSR/mask reads and flush without an extra reset.
+- `ee-llvm-project` builds and executes converted fixtures with the shared native
+  Vulkan target while continuing to reject diagnostic execution dependencies.
+- `vulkan-rendering` synchronizes the actual device before and between existing
+  sprite rendering comparisons, retaining its validation-error checks.
+
+- The graphics lifecycle test also executes GsGetIMR/GsPutIMR and their negative
+  aliases through compiled syscall boundaries, checking mask consistency and
+  preservation of the void setter's return register.
+
+- The private generated executable creates a real Vulkan renderer on the local
+  GPU, completes one reset and mask configuration, then reaches unsupported
+  SetGsCrt after 5,968,757 operations. This verifies initialization, not a rendered
+  GT4 frame, visible boot or gameplay.
+
+
+Native SetGsCrt/display-clock milestone:
+
+- `ee-llvm-execution` covers compiled SetGsCrt calls, invalid modes, synchronization
+  failure preserving configuration, NTSC/PAL boundaries, CSR acknowledgement,
+  interrupt unmasking, field parity, rollback, large elapsed intervals and reset.
+- An original compiled VBlank handler receives the event and returns through the
+  native interrupt dispatcher; timing comes from an injected clock.
+- `ee-llvm-project` exercises conversion/build/execution with the updated mode
+  service and memory interface.
+
+- Private GT4 generation, compilation and execution pass SetGsCrt on the native
+  Vulkan-backed path. Execution reaches unsupported VIF0 reset/control access
+  after 5,968,955 operations. Visible boot and rendering remain unverified.
+
+
+Native VIF/GIF initialization milestone:
+
+- `ee-llvm-execution` covers compiled reads/writes for both VIF channels, reset,
+  stop/break/cancel, masked configuration, channel isolation, GIF pause/reset,
+  and explicit rejection of FIFO input without retirement or completion.
+- `ee-llvm-project` passes generated LLVM compilation and execution.
+- The private GT4 executable passes VIF0 reset and stops at an unsupported VU
+  control read after 5,968,957 operations. This is startup progress, not boot.

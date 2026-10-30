@@ -19,6 +19,7 @@ public:
     ~VulkanRenderer();
     VulkanRenderer(const VulkanRenderer&) = delete;
     VulkanRenderer& operator=(const VulkanRenderer&) = delete;
+    void synchronize();
     void sprite(std::span<std::uint32_t> memory, const Sprite& draw, std::span<const std::uint32_t> palette = {});
     void present(std::span<const std::uint32_t> rgba, unsigned width, unsigned height);
     const std::string& device_name() const;

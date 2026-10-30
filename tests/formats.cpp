@@ -45,6 +45,32 @@ void test_elf() {
     rejects([&] { nt::elf::parse(bad); });
     bad = good; put32(bad, 28, 0xfffffff0);
     rejects([&] { nt::elf::parse(bad); });
+    auto lifecycle=good; lifecycle.resize(0x200,0);
+    put32(lifecycle,32,0x80); lifecycle[46]=40; lifecycle[48]=2;
+    put32(lifecycle,68,16); put32(lifecycle,72,16);
+    // Original allocated INIT_ARRAY with a pointer into executable file data.
+    put32(lifecycle,0xac,14); put32(lifecycle,0xb0,2); put32(lifecycle,0xb4,0x100004);
+    put32(lifecycle,0xb8,0x104); put32(lifecycle,0xbc,4); put32(lifecycle,0xcc,4);
+    put32(lifecycle,0x104,0x100000);
+    for (const auto type:{14U,15U,16U}) {
+        put32(lifecycle,0xac,type);
+        check(nt::elf::parse(lifecycle).lifecycle_entries==std::vector<std::uint32_t>{0x100000},"Lifecycle root lost");
+    }
+    for (const auto [offset,value]:std::initializer_list<std::pair<unsigned,unsigned>>{
+        {0xb8,0x108},{0xbc,3},{0xcc,8},{0x104,0x100001},{0x104,0x100010},{32,0xfffffff0}}) {
+        auto invalid=lifecycle; put32(invalid,offset,value);
+        rejects([&] { nt::elf::parse(invalid); });
+    }
+    // Named legacy constructor/destructor tables with sentinel and count forms.
+    lifecycle[48]=3; lifecycle[50]=2;
+    put32(lifecycle,0xa8,1); put32(lifecycle,0xac,1); put32(lifecycle,0xbc,12); put32(lifecycle,0xcc,0);
+    put32(lifecycle,0xd4,3); put32(lifecycle,0xe0,0x180); put32(lifecycle,0xe4,8);
+    const std::string name("\0.ctors\0",8); std::copy(name.begin(),name.end(),lifecycle.begin()+0x180);
+    put32(lifecycle,0x104,0xffffffff); put32(lifecycle,0x108,0x80100000); put32(lifecycle,0x10c,0);
+    check(nt::elf::parse(lifecycle).lifecycle_entries==std::vector<std::uint32_t>{0x100000},"Legacy aliased constructor root lost");
+    lifecycle[0x182]='d'; put32(lifecycle,0x104,1);
+    check(nt::elf::parse(lifecycle).lifecycle_entries.size()==1,"Legacy destructor count form lost");
+    auto invalid=lifecycle; put32(invalid,0xe4,2); rejects([&] { nt::elf::parse(invalid); });
 }
 void test_reboot_image() {
     const auto image=fixture::reboot_image();

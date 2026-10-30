@@ -630,3 +630,201 @@ The public negative iSifDmaStat, iSifSetDma and iSifSetDChain aliases use the sa
 native implementation as their ordinary forms. Explicit registered overrides are
 still checked using the original syscall number first. Compiled receive callbacks
 can rearm the endpoint before returning, without replacing the interrupt context.
+
+
+### Runtime-built callback tables
+
+Conversion now considers recoverable executable addresses stored by reachable
+word-store instructions as additional compilation entries. This handles callback
+tables initialized by application code, including stores in direct-call delay
+slots. Slicing remains bounded and validates alignment and file-backed executable
+extents. Dynamic values and volatile registers across calls are not guessed.
+These are compilation candidates only: generated code retains the actual store,
+load and indirect call, with no constant-folding assumption about mutable tables.
+
+The private integration run executes the previously undiscovered command callback
+and progresses to a second registered RPC callback after 3,803,412 operations.
+That target is passed to a registration function rather than directly stored by
+its caller. Interprocedural registration discovery remains unfinished. This is
+native startup progress, not visible boot or gameplay.
+
+
+### Registration functions and interrupt-safe semaphore calls
+
+Direct-call analysis now summarizes which of the first four arguments a callee
+stores. Summaries track exact register copies across supported operations and
+branch paths, including likely-branch annulment and delay-slot stores. They are
+bounded to 256 visited states, stop at unsupported operations or further calls,
+and are reused per callee. Caller arguments use the existing bounded constant
+slicer and shared executable-pointer validation. This discovers callback tables
+populated through registration functions without replacing mutable table reads
+or adding runtime decoding. Nested registration wrappers and arbitrary dataflow
+remain outside this initial summary.
+
+The native service dispatcher also recognizes the public negative-number aliases
+for iSignalSema, iPollSema and iReferSemaStatus. They share the existing semaphore
+implementation, preserve interrupt context and retain existing unsupported
+contended-wait and overflow behavior. Raw registered syscall overrides still take
+precedence over built-in alias normalization.
+
+
+With these changes the private converted program executes the registered RPC
+completion callback, signals its semaphore, returns from the interrupt and
+consumes the completion in startup. A 100,000,000-operation bounded run repeatedly
+binds to unavailable file-I/O service 0x80000001 (14 completion signals observed).
+The peer reports that missing server in optional probe diagnostics. The next
+integration requirement is a native file-I/O RPC server backed by the existing
+disc service; returning a non-null server without that implementation would be
+incorrect. No visible game boot or gameplay has been established.
+
+
+### Native disc-backed file RPC
+
+The native command peer now registers explicit service owners before connection.
+A mounted ISO enables the legacy FILEIO server through the reusable read-only
+`fileio::Service`; without a disc the bind reply still reports absence. Service
+and buffer tokens belong to the native endpoint namespace, not firmware storage.
+Payload-bearing calls accept one bounded argument packet followed by its command
+packet. Sizes, destinations and reply mode are checked before invoking a service.
+
+The file adapter validates result, read-buffer and optional edge-fixup extents,
+including compiled-code protection, before changing handles. Receive readiness
+and the completion destination are validated first. Backpressure leaves the
+immutable outgoing request pending without opening a file or advancing a cursor.
+Successful calls write result bytes directly into native application memory and
+then deliver the completion packet and interrupt. Unaligned outputs preserve
+adjacent bytes. Host paths are never derived from guest filenames.
+
+Generated projects compile the existing file and ISO sources directly, with no
+hardware model, interpreter, decoder or JIT dependency. The native executable
+accepts `--disc <image.iso>`; optional service tracing reports completed requests,
+opens, bytes read and the last method. Request statistics now count completed
+service calls, excluding malformed calls that throw before completion.
+
+With the private disc mounted, GT4 binds FILEIO and completes the version query,
+then reaches another undiscovered indirect target after 3,805,328 operations.
+It has not yet opened or read a disc file. No visible boot or gameplay is claimed.
+
+
+### ELF lifecycle tables
+
+The ELF reader now records candidate entries from allocated `.ctors`/`.dtors`
+sections and typed INIT_ARRAY, FINI_ARRAY and PREINIT_ARRAY sections. It validates
+section/name-table bounds, word layout, correspondence with loaded file bytes,
+and executable targets. Legacy sentinel/count forms and supported kernel address
+aliases are handled explicitly. Stripped inputs without sections still work;
+missing metadata does not trigger scanning arbitrary data for pointer-like words.
+
+Discovery compiles these entries alongside ordinary reachable code. It neither
+runs constructors itself nor changes their order: the original compiled startup
+still reads the tables and invokes the functions. Unknown indirect targets remain
+explicit stops. Optional probe diagnostics now include the return address when
+an indirect destination is missing, to make subsequent discovery work actionable.
+
+
+The private generated executable now runs the previously missing constructor and
+continues through additional startup initialization. It reaches an unsupported
+scratchpad-memory access after 3,807,087 operations. The next implementation gap
+is owned native storage for that workspace and matching LLVM memory lowering.
+FILEIO still reports one completed version query with no game file opens or reads;
+visible boot and gameplay remain unverified.
+
+
+### Native scratchpad workspace
+
+Each native platform owns a zero-initialized 16 KiB heap buffer for the application
+workspace addressed through the EE scratchpad range. LLVM memory lowering selects
+that buffer and its bounded offset directly, alongside the main application RAM
+path. Ordinary byte/word/doubleword/quadword accesses need no device callback or
+instruction decoding. Existing alignment, merged-access and register-bank
+lowering stays shared; bounds and backing-pointer checks precede native accesses.
+
+Scratchpad offsets do not alias protected main-memory code addresses. Main RAM
+code protection is unchanged. Platforms cannot be copied because memory views and
+callbacks refer to their owner. This is native data storage only: it does not
+introduce scratchpad execution, DMA channels or a timing model. Native service
+buffer APIs retain their existing supported address spaces unless explicitly
+extended; direct compiled access does not imply every service accepts scratchpad
+pointers yet.
+
+
+With native scratchpad storage, the private converted program advances to GS CSR
+access after 3,808,495 operations. The next boundary is native graphics reset and
+initialization connected to Vulkan; the diagnostic hardware implementation is
+not linked into the generated executable. FILEIO still has one version query and
+no game file reads. Visible boot and gameplay remain unverified.
+
+
+### Native graphics reset and 64-bit service access
+
+LLVM LD/SD lowering now supports atomic 64-bit native service calls. A failed
+read does not update its destination register; failure retains the instruction
+boundary and original fault address. Wider access is not implemented by splitting
+one operation into two independent 32-bit side effects. Event publication is
+shared with the existing 32-bit service path.
+
+The native graphics lifecycle accepts GS CSR reset/flush and the interrupt-mask
+view. Reset and flush synchronize a real Vulkan device before completing; absent
+or failed backends stop explicitly. The probe creates the renderer lazily on the
+first synchronization request and reports initialization errors. Reset restores
+the initial mask without clearing graphics memory. Status currently describes
+an empty synchronous command stream, with no fabricated scanout or finish events
+and no proprietary chip revision. Other GS operations remain unsupported.
+
+The root project and generated executables share `libraries/graphics/vulkan.cmake` to build
+the same Vulkan renderer and shader. Converted programs do not link the diagnostic
+GS/hardware implementation. This milestone establishes device initialization and
+synchronization only; it does not translate drawing packets or present a frame.
+
+
+GsGetIMR/GsPutIMR and their public interrupt-safe aliases now use the same native
+mask owner as direct accesses. Put preserves the caller's return register because
+its API is void; Get reports the mask including reserved bits. This adds no scanout
+interrupt producer. GS reset on the private converted executable was verified
+against the local Vulkan device before advancing to subsequent startup calls.
+
+
+The current private converted run initializes the local Vulkan device, completes
+one GS reset and applies GsPutIMR, then stops at SetGsCrt after 5,968,757 operations.
+The request is interlaced NTSC frame mode. Native display-mode/scanout setup remains
+unimplemented; no game frame has been rendered or presented. FILEIO still records
+only its version query, with no game file opens or reads.
+
+
+### Native display-mode deadlines
+
+SetGsCrt now configures supported interlaced NTSC/PAL frame or field modes after
+backend synchronization. Invalid or unsupported modes and backend failures retain
+the previous configuration. The native mode owner exposes SMODE2 consistently;
+unsupported direct mode changes still stop instead of fabricating configuration.
+
+Display deadlines use the same monotonic nanosecond clock abstraction as native
+timers. Reduced rational arithmetic derives nominal NTSC (60000/1001 fields per
+second) and PAL (50 fields per second) phase, blanking boundaries and field parity.
+Elapsed intervals are folded arithmetically, without per-scanline stepping or an
+instruction-count time source. Long pauses coalesce pending interrupt bits while
+preserving current field parity. Clock rollback does not rewind state.
+
+CSR sync flags latch until acknowledged. IMR changes can expose an already pending
+GS event, and the platform publishes GS/VBlank-start/VBlank-end events through the
+existing native interrupt owner. Reset stops display deadlines. These are logical
+application display events, not evidence of physical monitor vsync or presentation;
+framebuffer configuration, drawing translation and presentation remain separate
+unfinished work.
+
+
+The private generated executable passed SetGsCrt and reached VIF0 reset/control
+access after 5,968,955 operations. Vulkan reset remained successful.
+
+### Native VIF/GIF initialization
+
+A shared native submission configuration owner now supports both VIF channels,
+including reset, stop/break/cancel, configuration masks and row/column storage.
+GIF configuration supports reset, pause and mode readback. FIFO input and command
+execution remain explicitly unsupported; configuration never fabricates packet
+completion or interrupts.
+
+The latest private executable passes VIF0 reset and reaches an unsupported VU
+control read after 5,968,957 operations. A native vector-control owner is not yet
+connected. No game drawing or presentation has occurred; FILEIO still records
+only its version query.

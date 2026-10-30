@@ -2,7 +2,9 @@
 #include <nt/ee_sif_link.hpp>
 #include <nt/ee_sif_outbound.hpp>
 #include <array>
+#include <optional>
 #include <nt/sif_rpc_reply.hpp>
+#include <nt/ee_rpc_service.hpp>
 
 namespace nt::ee {
 // Original native bootstrap command service. Its address is a configured message
@@ -21,9 +23,17 @@ public:
         link_.publish_peer(port_,0x30000);
         return true;
     }
+    bool register_service(NativeRpcService& service) {
+        if (connected_ || !service.server || !service.buffer || service.server>=0x200000 ||
+            service.buffer%16 || service.buffer>0x200000-4096 || service.server==port_ || service.buffer==port_) return false;
+        for (const auto* existing:services_)
+            if (existing->id==service.id || existing->server==service.server || existing->buffer==service.buffer) return false;
+        services_.push_back(&service); return true;
+    }
     std::uint32_t receive_address() const { return receive_address_; }
     std::uint32_t software_register(unsigned index) const { return index<registers_.size() ? registers_[index] : 0; }
     std::uint32_t last_option() const { return last_option_; }
+    std::optional<std::uint32_t> last_unavailable_server() const { return unavailable_server_; }
     std::uint32_t last_command() const { return last_command_; }
 private:
     static std::uint32_t word(std::span<const std::uint8_t> bytes,unsigned offset) {
@@ -39,15 +49,40 @@ private:
         return {delivered,delivered==Stop::budget ? 1U : 0U};
     }
     IoRead receive(std::span<const NativeSifPacket> packets) {
-        // Payload-bearing RPC and multi-descriptor publication need a session
-        // owner; reject them atomically rather than partially applying a batch.
-        if (!connected_ || packets.size()!=1) return {Stop::unsupported_system};
-        const auto& packet=packets.front();
+        if (!connected_ || packets.empty() || packets.size()>2) return {Stop::unsupported_system};
+        const auto& packet=packets.back();
         if (packet.destination!=port_ || packet.bytes.size()<16) return {Stop::invalid_state};
         const auto header=word(packet.bytes,0),length=header&255;
-        if ((header>>8) || length<16 || length>112 || ((length+15)&~15U)!=packet.bytes.size()) return {Stop::invalid_state};
+        if (length<16 || length>112 || ((length+15)&~15U)!=packet.bytes.size()) return {Stop::invalid_state};
         const auto command=word(packet.bytes,8),option=word(packet.bytes,12);
         last_command_=command; last_option_=option;
+        if (command==0x8000000a) {
+            if (!rpc_ready_ || length<56 || option || word(packet.bytes,48)!=1) return {Stop::unsupported_system};
+            NativeRpcService* service=nullptr;
+            for (auto* item:services_) if (item->server==word(packet.bytes,52)) service=item;
+            if (!service) return {Stop::unsupported_system};
+            const auto size=word(packet.bytes,36);
+            if (size>4096 || (header>>8)!=size || packets.size()!=(size ? 2U : 1U)) return {Stop::invalid_state};
+            std::span<const std::uint8_t> args;
+            if (size) {
+                const auto& payload=packets.front();
+                if (payload.destination!=service->buffer || word(packet.bytes,4)!=service->buffer ||
+                    payload.bytes.size()!=((size+15U)&~15U)) return {Stop::invalid_state};
+                args=std::span(payload.bytes).first(size);
+            }
+            if (!receiver_ || !memory_.completions || !receive_address_) return {Stop::unsupported_system};
+            if (!receiver_->accepting()) return {Stop::budget,0};
+            const auto valid=receiver_->validate(memory_,protection_,receive_address_,64);
+            if (valid!=Stop::budget) return {valid};
+            std::array<std::uint8_t,64> response{};
+            const std::array<std::uint32_t,12> fields{64,0,0x80000008U,0,
+                word(packet.bytes,16),word(packet.bytes,20),word(packet.bytes,24),word(packet.bytes,28),0x8000000aU,0,0,0};
+            std::memcpy(response.data(),fields.data(),sizeof(fields));
+            const auto called=service->call(memory_,protection_,word(packet.bytes,32),args,word(packet.bytes,40),word(packet.bytes,44));
+            if (called!=Stop::budget) return {called};
+            return reply(response);
+        }
+        if ((header>>8) || packets.size()!=1) return {Stop::invalid_state};
         if (command==0x80000002 && option==1) {
             // Publishing register zero acknowledges the available RPC dispatcher,
             // not any particular RPC server or successful game module startup.
@@ -61,10 +96,13 @@ private:
         if (command==0x80000009) {
             if (!rpc_ready_) return {Stop::unsupported_system};
             if (length<36 || option) return {Stop::invalid_state};
-            // No native servers are registered yet. The public bind protocol
-            // reports absence using null server/buffer tokens, not fake success.
-            const auto response=nt::sif::bind_reply(word(packet.bytes,20),word(packet.bytes,28),0,0);
-            return reply(response);
+            NativeRpcService* service=nullptr;
+            for (auto* item:services_) if (item->id==word(packet.bytes,32)) service=item;
+            const auto response=nt::sif::bind_reply(word(packet.bytes,20),word(packet.bytes,28),
+                service ? service->server : 0,service ? service->buffer : 0);
+            const auto result=reply(response);
+            if (!service && result.status==Stop::budget && result.value==1) unavailable_server_=word(packet.bytes,32);
+            return result;
         }
         if (command==0x80000001) {
             if (length<24 || option || word(packet.bytes,16)>=registers_.size()) return {Stop::invalid_state};
@@ -90,6 +128,8 @@ private:
     std::uint32_t port_,receive_address_=0,last_command_=0,last_option_=0;
     std::array<std::uint32_t,32> registers_{};
     NativeSifReceive* receiver_;
+    std::vector<NativeRpcService*> services_;
     bool connected_=false,rpc_ready_=false;
+    std::optional<std::uint32_t> unavailable_server_;
 };
 }

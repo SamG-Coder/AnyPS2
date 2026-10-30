@@ -7,6 +7,7 @@
 #include <nt/ee_interrupts.hpp>
 #include <nt/ee_threads.hpp>
 #include <nt/ee_settings.hpp>
+#include <nt/ee_graphics.hpp>
 #include <nt/ee_completions.hpp>
 #include <nt/ee_sif_link.hpp>
 #include <nt/ee_sif_outbound.hpp>
@@ -48,8 +49,24 @@ public:
             }
             return handlers_.install(state,memory);
         }
-        number=sif_syscall_number(number);
+        number=native_syscall_number(number);
         if (!startup_syscall(number)) return Stop::syscall;
+        if (number==2) {
+            if (!memory.graphics) return Stop::unsupported_system;
+            const auto result=memory.graphics->configure(static_cast<std::uint32_t>(state.gpr[4].lo),
+                static_cast<std::uint32_t>(state.gpr[5].lo),static_cast<std::uint32_t>(state.gpr[6].lo));
+            return result==Stop::budget ? returned(state,state.gpr[2].lo) : result;
+        }
+        if (number==0x70) {
+            if (!memory.io.read64) return Stop::unsupported_system;
+            const auto result=memory.io.read64(memory.io.context,0x12001010);
+            return result.status==Stop::budget ? returned(state,result.value) : result.status;
+        }
+        if (number==0x71) {
+            if (!memory.io.write64) return Stop::unsupported_system;
+            const auto result=memory.io.write64(memory.io.context,0x12001010,state.gpr[4].lo);
+            return result==Stop::budget ? returned(state,state.gpr[2].lo) : result;
+        }
         if (number==0x76 || number==0x77) {
             if (!memory.sif_outbound || !memory.completions) return Stop::unsupported_system;
             const auto argument=static_cast<std::uint32_t>(state.gpr[4].lo);

@@ -196,6 +196,7 @@ struct VulkanRenderer::Impl {
 };
 VulkanRenderer::VulkanRenderer(void* window,bool validation):impl_(std::make_unique<Impl>()) {impl_->initialize(window,validation);}
 VulkanRenderer::~VulkanRenderer()=default;
+void VulkanRenderer::synchronize() { check(vkDeviceWaitIdle(impl_->device),"Synchronize graphics"); }
 const std::string& VulkanRenderer::device_name() const {return impl_->name;}
 unsigned VulkanRenderer::validation_errors() const {return impl_->errors.load();}
 void VulkanRenderer::sprite(std::span<std::uint32_t> memory,const Sprite& draw,std::span<const std::uint32_t> palette) {

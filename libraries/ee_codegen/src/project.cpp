@@ -99,6 +99,16 @@ void project(const std::filesystem::path& input,const std::filesystem::path& out
                 std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;
             continuations.push_back(address); added=true;
         }
+        for (const auto address:analysis::stored_code_pointers(bytes,executable,discovered)) {
+            if (discovered.instructions.contains(address) ||
+                std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;
+            continuations.push_back(address); added=true;
+        }
+        for (const auto address:analysis::registered_code_pointers(bytes,executable,discovered)) {
+            if (discovered.instructions.contains(address) ||
+                std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;
+            continuations.push_back(address); added=true;
+        }
         if (!payloads.empty()) for (const auto address:analysis::materialized_code_pointers(bytes,executable,discovered)) {
             const auto payload=std::find_if(payloads.begin(),payloads.end(),[&](const auto& p) {
                 return address>=p.address && std::uint64_t(address)<std::uint64_t(p.address)+p.bytes.size();
@@ -135,10 +145,16 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated.obj"
   DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/generated.ll" VERBATIM)
 add_executable(ps2-native "${ANYPS2_ROOT}/programs/ee-native-probe/main.cpp"
   "${ANYPS2_ROOT}/libraries/binary/src/reader.cpp" "${ANYPS2_ROOT}/libraries/ee_native/src/numeric.cpp"
+  "${ANYPS2_ROOT}/libraries/fileio/src/fileio.cpp"
+  "${ANYPS2_ROOT}/libraries/disc/src/disc_files.cpp" "${ANYPS2_ROOT}/libraries/disc/src/iso9660.cpp"
   "${ANYPS2_ROOT}/libraries/ee_native/src/io.cpp" "${ANYPS2_ROOT}/libraries/ee_native/src/vector.cpp" "${CMAKE_CURRENT_BINARY_DIR}/generated.obj")
+include("${ANYPS2_ROOT}/libraries/graphics/vulkan.cmake")
+anyps2_add_vulkan(nt_vulkan)
+target_link_libraries(ps2-native PRIVATE nt_vulkan)
 target_compile_features(ps2-native PRIVATE cxx_std_20)
 target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codegen/include"
-  "${ANYPS2_ROOT}/libraries/runtime/include" "${ANYPS2_ROOT}/libraries/binary/include")
+  "${ANYPS2_ROOT}/libraries/runtime/include" "${ANYPS2_ROOT}/libraries/binary/include"
+  "${ANYPS2_ROOT}/libraries/disc/include" "${ANYPS2_ROOT}/libraries/fileio/include")
 )cmake";
     cmake<<"target_compile_definitions(ps2-native PRIVATE ANYPS2_EE_ENTRY="<<executable.entry
          <<"U ANYPS2_EE_SYSCALL_TABLE="<<syscall_table<<"U ANYPS2_EE_DATA_SIZE="<<image.size()<<"U ANYPS2_EE_DATA_HASH="<<fingerprint(image)<<"ULL)\n";
@@ -156,7 +172,7 @@ target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codeg
     }
     write_file(output/"program.data",image);
     save(output/"conversion.txt","AnyPS2 EE LLVM entry-flow conversion\n"
-         "Discovery follows recognized native startup continuations. Other syscalls stop; no EE/IOP link is supplied.\n"
+         "Discovery follows recognized native startup continuations. Other syscalls stop; only supported native bootstrap services are supplied.\n"
          "Indirect destinations must already belong to the discovered code set; other targets stop.\n"
          "Build with ps2-build, then run ps2-native <program.data> [operation-budget].\n"
          "Data contains private input material and must remain local. This is not game boot.\n");

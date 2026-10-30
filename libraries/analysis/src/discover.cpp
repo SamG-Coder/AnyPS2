@@ -1,4 +1,5 @@
 #include <nt/analysis.hpp>
+#include <array>
 #include <deque>
 #include <optional>
 #include <stdexcept>
@@ -17,6 +18,7 @@ Program discover(ByteView bytes, const elf::Executable& elf, std::size_t limit,
     // A delay slot is visited as an instruction but must not independently cause
     // fallthrough from an unconditional jump. A separate ordinary visit can.
     std::deque<std::pair<std::uint32_t, bool>> pending{{elf.entry, false}};
+    for (const auto pc:elf.lifecycle_entries) pending.emplace_back(pc,false);
     for (auto pc : additional_entries) {
         if (!word_at(pc)) throw std::runtime_error("Additional entry is not executable ELF memory");
         pending.emplace_back(pc,false);
@@ -51,6 +53,73 @@ std::optional<std::uint32_t> initial_word(ByteView bytes,const elf::Executable& 
         if (address>=segment.address && std::uint64_t(address)+4<=std::uint64_t(segment.address)+segment.file_size)
             return le32(bytes,std::size_t(segment.offset)+address-segment.address);
     return {};
+}
+std::optional<std::uint32_t> executable_pointer(const elf::Executable& elf,std::uint32_t value) {
+    if (value>=0x80000000U && value<0xc0000000U) value&=0x1fffffffU;
+    if (!value || value%4) return {};
+    for (const auto& segment:elf.segments)
+        if ((segment.flags&1) && value>=segment.address &&
+            std::uint64_t(value)+4<=std::uint64_t(segment.address)+segment.file_size) return value;
+    return {};
+}
+// Track exact argument copies, not general data dependencies. A bounded callee
+// summary identifies arguments written to word-sized callback/data slots.
+unsigned stored_arguments(const Program& program,std::uint32_t entry) {
+    using r5900::Op;
+    using Origins=std::array<unsigned,32>;
+    Origins initial{};
+    for (unsigned reg=4;reg<8;++reg) initial[reg]=1U<<(reg-4);
+    std::deque<std::pair<std::uint32_t,Origins>> pending{{entry,initial}};
+    std::set<std::pair<std::uint32_t,Origins>> visited;
+    unsigned stored=0,budget=256;
+    const auto transfer=[&](const r5900::Instruction& i,Origins& origins) {
+        unsigned destination=0,value=0;
+        switch (i.op) {
+        case Op::sw: stored|=origins[i.rt]; return true;
+        case Op::sb: case Op::sh: case Op::sd: case Op::sq: return true;
+        case Op::addu: case Op::daddu: case Op::bit_or:
+            destination=i.rd;
+            if (!i.rt) value=origins[i.rs];
+            else if (!i.rs) value=origins[i.rt];
+            break;
+        case Op::addiu: case Op::daddiu: case Op::ori:
+            destination=i.rt; if (!i.immediate) value=origins[i.rs]; break;
+        case Op::sll: destination=i.rd; if (!i.sa) value=origins[i.rt]; break;
+        case Op::lui: case Op::lw: case Op::lwu: case Op::ld: case Op::lq:
+        case Op::lb: case Op::lbu: case Op::lh: case Op::lhu:
+        case Op::andi: case Op::xori: case Op::slti: case Op::sltiu:
+            destination=i.rt; break;
+        case Op::bit_and: case Op::bit_xor: case Op::bit_nor: case Op::subu:
+        case Op::dsubu: case Op::slt: case Op::sltu: case Op::srl: case Op::sra:
+        case Op::sllv: case Op::srlv: case Op::srav: case Op::mult: case Op::multu:
+        case Op::mflo: case Op::mfhi:
+            destination=i.rd; break;
+        default: return false;
+        }
+        if (destination) origins[destination]=value;
+        return true;
+    };
+    while (!pending.empty() && budget--) {
+        auto [pc,origins]=pending.front(); pending.pop_front();
+        if (!visited.emplace(pc,origins).second || pc>0xfffffff7U) continue;
+        const auto found=program.instructions.find(pc);
+        if (found==program.instructions.end()) continue;
+        const auto& i=found->second;
+        if (!i.branch()) {
+            if (transfer(i,origins)) pending.emplace_back(pc+4,origins);
+            continue;
+        }
+        // Calls and link branches require another summary; do not carry volatile
+        // origins across them or into their delay slots with a stale link value.
+        if (i.op==Op::jal || i.op==Op::jalr || i.op==Op::bltzal || i.op==Op::bgezal ||
+            i.op==Op::bltzall || i.op==Op::bgezall) continue;
+        const auto before_slot=origins;
+        const auto slot=program.instructions.find(pc+4);
+        if (slot==program.instructions.end() || !transfer(slot->second,origins)) continue;
+        if (!i.indirect()) pending.emplace_back(i.target(),origins);
+        if (i.op!=Op::j && i.op!=Op::jr) pending.emplace_back(pc+8,i.likely() ? before_slot : origins);
+    }
+    return stored;
 }
 // Bounded backward slicing is used only to propose code for compilation. A load
 // reads the initial ELF image, not a claim that writable data stays constant.
@@ -143,11 +212,42 @@ std::set<std::uint32_t> materialized_code_pointers(ByteView bytes,const elf::Exe
         unsigned fuel=128;
         const auto value=candidate(bytes,elf,program,pc+4,reg,fuel,0xffffffffU);
         if (!value) continue;
-        const auto address=*value>=0x80000000U && *value<0xc0000000U ? *value&0x1fffffffU : *value;
-        if (address%4) continue;
-        for (const auto& segment:elf.segments)
-            if ((segment.flags&1) && address>=segment.address && std::uint64_t(address)+4<=std::uint64_t(segment.address)+segment.file_size)
-                result.insert(address);
+        if (const auto address=executable_pointer(elf,*value)) result.insert(*address);
+    }
+    return result;
+}
+// Stores of recoverable executable addresses provide candidates for callback
+// tables built during startup. Do not fold the stored value or constrain later
+// indirect dispatch: writable tables may change after initialization.
+std::set<std::uint32_t> stored_code_pointers(ByteView bytes,const elf::Executable& elf,const Program& program) {
+    std::set<std::uint32_t> result;
+    for (const auto& [pc,i]:program.instructions) {
+        if (i.op!=r5900::Op::sw || !i.rt) continue;
+        unsigned fuel=128;
+        // A call delay-slot store consumes the value before the callee runs.
+        const auto prior=pc>=4 ? program.instructions.find(pc-4) : program.instructions.end();
+        const auto call_site=prior!=program.instructions.end() && prior->second.op==r5900::Op::jal ? pc-4 : 0xffffffffU;
+        const auto value=candidate(bytes,elf,program,pc,i.rt,fuel,call_site);
+        if (!value || !*value) continue;
+        if (const auto address=executable_pointer(elf,*value)) result.insert(*address);
+    }
+    return result;
+}
+std::set<std::uint32_t> registered_code_pointers(ByteView bytes,const elf::Executable& elf,const Program& program) {
+    std::set<std::uint32_t> result;
+    std::map<std::uint32_t,unsigned> summaries;
+    for (const auto& [pc,call]:program.instructions) {
+        if (call.op!=r5900::Op::jal || pc>0xfffffff7U) continue;
+        for (unsigned reg=4;reg<8;++reg) {
+            unsigned fuel=128;
+            const auto value=candidate(bytes,elf,program,pc+8,reg,fuel,pc);
+            if (!value) continue;
+            const auto address=executable_pointer(elf,*value);
+            if (!address) continue;
+            auto found=summaries.find(call.target());
+            if (found==summaries.end()) found=summaries.emplace(call.target(),stored_arguments(program,call.target())).first;
+            if (found->second&(1U<<(reg-4))) result.insert(*address);
+        }
     }
     return result;
 }

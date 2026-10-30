@@ -33,7 +33,7 @@ if(NOT result EQUAL 1 OR NOT original STREQUAL preserved)
     message(FATAL_ERROR "EE conversion overwrote an existing project")
 endif()
 file(READ "${run}/project/CMakeLists.txt" project)
-if(project MATCHES "target_link_libraries|add_subdirectory|decoder|runtime.cpp|iop")
+if(project MATCHES "add_subdirectory|decoder|runtime.cpp|nt_runtime|nt_hardware|nt_kernel|iop")
     message(FATAL_ERROR "EE output introduced execution scaffolding")
 endif()
 set(platform)
@@ -47,7 +47,7 @@ set(executable "${run}/build/Release/ps2-native${EXE_SUFFIX}")
 file(REMOVE "${run}/fixture.elf")
 execute_process(COMMAND "${executable}" "${run}/project/program.data"
     RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
-if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x0000101c executed=10 v0=43")
+if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x0000102c executed=17 v0=43")
     message(FATAL_ERROR "Compiled EE ELF execution differs: ${out} ${err}")
 endif()
 execute_process(COMMAND "${executable}" "${run}/project/program.data" 1
@@ -69,4 +69,14 @@ execute_process(COMMAND "${run}/startup-build/Release/ps2-native${EXE_SUFFIX}" "
     RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
 if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00001040 executed=16 v0=16384 syscall=127")
     message(FATAL_ERROR "Compiled startup service continuation differs: ${out} ${err}")
+endif()
+
+checked("${CONVERTER}" "${run}/fixture.elf.lifecycle" "${run}/lifecycle")
+checked("${CMAKE_COMMAND}" -S "${run}/lifecycle" -B "${run}/lifecycle-build" -G "${GENERATOR}"
+    ${platform} "-DANYPS2_ROOT=${ROOT}")
+checked("${CMAKE_COMMAND}" --build "${run}/lifecycle-build" --config Release --target ps2-native --parallel 2)
+execute_process(COMMAND "${run}/lifecycle-build/Release/ps2-native${EXE_SUFFIX}" "${run}/lifecycle/program.data"
+    RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
+if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00001038 executed=23 v0=50")
+    message(FATAL_ERROR "Compiled lifecycle callback differs: ${out} ${err}")
 endif()

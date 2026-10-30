@@ -11,11 +11,14 @@ struct PerformanceState { std::uint32_t control=0; std::uint32_t counters[2]{}; 
 // Native service accesses return Stop::budget on completion; other stops must
 // preserve service state and remain retryable. No callback receives guest code.
 struct IoRead { Stop status; std::uint32_t value=0; };
+struct IoRead64 { Stop status; std::uint64_t value=0; };
 struct NativeIo {
     void* context=nullptr;
     IoRead (*read32)(void*,std::uint32_t)=nullptr;
     Stop (*write32)(void*,std::uint32_t,std::uint32_t)=nullptr;
     void (*poll)(void*)=nullptr;
+    IoRead64 (*read64)(void*,std::uint32_t)=nullptr;
+    Stop (*write64)(void*,std::uint32_t,std::uint64_t)=nullptr;
 };
 // Compile-time selected address-space requests; no instruction words reach a provider.
 // A provider must preserve its state on failure and implement mappings consistently
@@ -26,10 +29,13 @@ struct NativeAddressSpace {
     IoRead (*request)(void*,AddressSpaceOperation,std::uint32_t,std::uint32_t)=nullptr;
 };
 // RAM is caller-owned; the generated code never fetches instructions from it.
+class NativeGraphics;
 class NativeInterrupts;
 class NativeCompletions;
 class NativeSifLink;
 class NativeSifOutbound;
+inline constexpr std::uint32_t scratchpad_begin=0x70000000U;
+inline constexpr std::uint32_t scratchpad_size=0x4000U;
 struct Memory {
     std::uint8_t* data=nullptr;
     std::uint64_t size=0;
@@ -46,6 +52,9 @@ struct Memory {
     NativeCompletions* completions=nullptr;
     NativeSifLink* sif_link=nullptr;
     NativeSifOutbound* sif_outbound=nullptr;
+    std::uint8_t* scratchpad=nullptr;
+    std::uint64_t scratchpad_bytes=0;
+    NativeGraphics* graphics=nullptr;
 };
 // Syscall boundaries retain PC and do not retire until a native service handles them.
 using Entry = Stop (*)(runtime::State*,Memory*,std::uint64_t);

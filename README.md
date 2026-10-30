@@ -90,13 +90,23 @@ boundaries. The latest larger local startup region now emits LLVM, compiles to a
 native executable, and runs through semaphore creation, callback registration and
 compiled handler execution. A guest-readable view of native registrations lets startup find those handlers.
 With a private copied-payload mapping, the latest bounded run executes the
-ahead-of-time compiled payload and registers its syscall handlers, then stops at
-an undiscovered command callback after 3,802,999 operations, past
+ahead-of-time compiled payload and registers its syscall handlers, then reaches
+an unsupported VU control read after 5,968,957 operations, past
 Timer 2 interrupt configuration, thread creation, priority change, native
 application settings, further copied-handler registrations and native SIF receiver
 initialization and interrupt-safe receive rearm. A native bootstrap command peer now accepts command-buffer and
 software-register updates, RPC initialization and unavailable-server bind replies.
-RPC server implementation and game-supplied IOP module integration remain unfinished. DMA completion delivery now shares the native interrupt
+Stored command-table pointers and callback arguments passed to registration
+functions are now discovered ahead of time. Interrupt-safe semaphore completion
+returns to startup. With an explicit disc image, native file-I/O RPC binding and
+the service version query complete. Open/read/seek/close and compiled interrupt
+completion pass synthetic disc tests; GT4 has not opened or read a file yet.
+ELF constructor/destructor tables now supply additional compilation entries.
+Native scratchpad storage, Vulkan-backed GS reset and GS mask access are available.
+SetGsCrt and nominal display deadlines use a host monotonic clock. Native VIF/GIF
+reset and configuration are available; packet execution, VU control integration,
+drawing translation/presentation, further indirect-target discovery
+and game-supplied IOP module integration remain unfinished. DMA completion delivery now shares the native interrupt
 dispatcher and is verified with a compiled packet-to-handler test. Address-translation
 routines compile to native requests, but no production mapping provider is connected. Native
 thread lifecycle and cooperative priority switching are implemented, with worker
@@ -113,7 +123,7 @@ not connected, so executing these calls currently stops explicitly.
 ```powershell
 .\build\Release\AnyPS2.exe recompile work\game\boot.elf work\ee-project
 .\build\Release\AnyPS2.exe build work\ee-project .
-.\work\ee-project\build\Release\ps2-native.exe work\ee-project\program.data
+.\work\ee-project\build\Release\ps2-native.exe work\ee-project\program.data 10000000 --disc "path/to/your-game.iso"
 ```
 
 The last command reports a diagnostic stop, not a successful game boot. Unsupported

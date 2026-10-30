@@ -1078,3 +1078,36 @@ Native application aliases reuse AnyPS2's existing `default_ram_address` policy;
 public pointer conventions were checked against pinned PS2SDK `kernel.h`
 UNCACHED_SEG and UCAB_SEG. Interrupt-safe SIF aliases follow pinned `syscallnr.h`.
 No dynamic TLB model or firmware mapping table was imported.
+
+
+Interrupt-safe semaphore syscall aliases were checked against pinned PS2SDK
+`ee/kernel/include/syscallnr.h` and the public RPC completion usage in
+`ee/kernel/src/sifrpc.c`. They reuse original AnyPS2 semaphore services. Bounded
+registration-function summaries and their synthetic instruction fixtures are
+original analysis code; no commercial function bodies are included.
+
+The unavailable RPC identifier 0x80000001 is identified as the file-I/O service
+by pinned PS2SDK `ee/kernel/src/fileio.c`. Probe diagnostics report the actual
+request identifier rather than selecting runtime behavior from a game address.
+
+
+The native FILEIO RPC adapter reuses the original AnyPS2 disc/file service and
+public RPC field layout already used by its diagnostic transport. Payload/header
+size and destination conventions were checked against pinned PS2SDK
+`ee/kernel/src/sifcmd.c` and `ee/kernel/src/sifrpc.c`. The service registry,
+preflight checks and direct native memory publication are original code. Tests
+use a generated ISO containing original numeric data, not commercial game bytes.
+
+
+Native GS lifecycle handling reuses the existing AnyPS2 public CSR/IMR bit
+contract, with reset/flush mapped to real Vulkan device synchronization. It does
+not import a firmware initialization sequence or claim a proprietary chip
+revision. GsGetIMR/GsPutIMR and negative aliases were checked against pinned
+PS2SDK `ee/kernel/include/syscallnr.h`. The shared Vulkan build helper and atomic
+64-bit service adapter are original code.
+
+
+Native display deadlines reuse the project's public NTSC/PAL phase convention,
+with original rational monotonic-time arithmetic replacing diagnostic cycle
+stepping. No firmware register tables or initialization sequence are supplied.
+Tests use an injected host clock and original compiled interrupt fixtures.

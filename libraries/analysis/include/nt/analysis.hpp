@@ -20,5 +20,9 @@ std::set<std::uint32_t> syscall_callbacks(ByteView bytes,const elf::Executable& 
 std::set<std::uint32_t> materialized_code_pointers(ByteView bytes,const elf::Executable& executable,
                                                 const Program& program);
 std::set<std::uint32_t> thread_entries(ByteView bytes,const elf::Executable& executable,const Program& program);
+// Compilation candidates stored into runtime callback tables; not immutable values.
+std::set<std::uint32_t> stored_code_pointers(ByteView bytes,const elf::Executable& executable,const Program& program);
+// Resolve constant arguments that a bounded direct callee stores through copies.
+std::set<std::uint32_t> registered_code_pointers(ByteView bytes,const elf::Executable& executable,const Program& program);
 void describe(std::ostream& out, const Program& program);
 }

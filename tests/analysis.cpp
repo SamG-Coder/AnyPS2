@@ -106,6 +106,55 @@ int main() {
             put(image,0x40,0x24030021);
             check(roots().empty(),"Non-create wrapper treated as thread creation");
         }
+        {
+            nt::Bytes image(0x100,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,0x80,0x80,5,4},{0x80,0x2000,0x80,0x80,6,4}}};
+            // Original callback-table initialization, including a call delay slot.
+            put(image,0,0x24081060); put(image,4,0xac88000c);
+            put(image,8,0x0c000410); put(image,12,0xac880010); put(image,16,12);
+            put(image,0x40,0x03e00008); put(image,0x60,0x03e00008);
+            const auto roots=[&] {
+                return nt::analysis::stored_code_pointers(image,fixture,nt::analysis::discover(image,fixture,128,{},true));
+            };
+            check(roots()==std::set<std::uint32_t>{0x1060},"Stored callback not discovered");
+            put(image,4,0);
+            check(roots()==std::set<std::uint32_t>{0x1060},"Delay-slot stored callback lost");
+            for (const auto value:{0U,0x1061U,0x2000U,0x3000U}) {
+                put(image,0,0x24080000|value);
+                check(roots().empty(),"Invalid stored callback accepted");
+            }
+            put(image,0,0x8ca80000);
+            check(roots().empty(),"Dynamic stored callback guessed");
+            put(image,0,0x24081060); put(image,12,0); put(image,16,0xac880010); put(image,20,12);
+            check(roots().empty(),"Volatile pointer propagated across call");
+        }
+        {
+            nt::Bytes image(0x100,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,0x80,0x80,5,4},{0x80,0x2000,0x80,0x80,6,4}}};
+            put(image,0,0x0c000410); put(image,4,0x24051070); put(image,8,12);
+            // Copy the argument in a branch delay slot, then store on one path.
+            put(image,0x40,0x10800003); put(image,0x44,0x00a0402d);
+            put(image,0x48,0xac880000); put(image,0x4c,0);
+            put(image,0x50,0x03e00008); put(image,0x54,0);
+            put(image,0x70,0x03e00008);
+            const auto roots=[&] {
+                return nt::analysis::registered_code_pointers(image,fixture,nt::analysis::discover(image,fixture,128,{},true));
+            };
+            check(roots()==std::set<std::uint32_t>{0x1070},"Registered argument callback lost");
+            put(image,0x44,0x24a80004);
+            check(roots().empty(),"Modified argument treated as an exact pointer copy");
+            put(image,0x44,0x00a0402d); put(image,0x48,0x8c880000);
+            check(roots().empty(),"Loaded value treated as a stored argument");
+            put(image,0x48,0xac880000); put(image,4,0x24052000);
+            check(roots().empty(),"Non-executable registered argument accepted");
+            put(image,4,0x8c850000);
+            check(roots().empty(),"Dynamic registered argument guessed");
+            put(image,4,0x24051070); put(image,0x40,0x50800003);
+            // Likely-false path must not execute the argument-copy delay slot.
+            check(roots().empty(),"Annulled argument copy leaked into fallthrough");
+            put(image,0x40,0x1000ffff); put(image,0x44,0);
+            check(roots().empty(),"Loop summary escaped its reachable graph");
+        }
         std::cout << "Control-flow discovery and address-boundary tests passed\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

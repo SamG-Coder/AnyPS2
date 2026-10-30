@@ -1,15 +1,15 @@
 #pragma once
 #include <nt/ee_native.hpp>
 #include <array>
-#include <chrono>
+#include <nt/ee_clock.hpp>
 
 namespace nt::ee {
 // Native elapsed-time timers. Event production is arithmetic over monotonic
 // time; no per-tick loop or instruction-count clock is involved.
 class NativeTimers {
 public:
-    using Clock=std::uint64_t (*)();
-    explicit NativeTimers(Clock clock=nullptr) : clock_(clock ? clock : now) {}
+    using Clock=NativeClock;
+    explicit NativeTimers(Clock clock=nullptr) : clock_(clock ? clock : native_now) {}
     void connect_events(bool connected=true) { events_connected_=connected; }
     std::uint32_t poll() {
         const auto time=clock_();
@@ -19,10 +19,6 @@ public:
     NativeIo interface() { return {this,read,write}; }
 private:
     struct Timer { std::uint32_t count=0,mode=0,target=0xffff,hold=0; std::uint64_t epoch=0,fraction=0; };
-    static std::uint64_t now() {
-        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count());
-    }
     static bool decode(std::uint32_t address,unsigned& index,unsigned& field) {
         if (address<0x10000000U || address>=0x10002000U || address%16) return false;
         index=(address-0x10000000U)/0x800; field=address&0x7ff;

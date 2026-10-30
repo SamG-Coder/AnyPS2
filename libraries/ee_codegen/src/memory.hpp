@@ -90,15 +90,20 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
     const auto user_alias=w.binary("or","i1",in_range(runtime::uncached_ram_begin,runtime::uncached_ram_end),
         in_range(runtime::accelerated_ram_begin,runtime::accelerated_ram_end));
     physical=w.value("select i1 "+user_alias+", i32 "+w.binary("and","i32",address,"268435455")+", i32 "+physical);
-    const bool native_io=access.bytes==4 && access.bank==RegisterBank::integer && access.merge==Merge::none;
+    const auto scratchpad=in_range(ee::scratchpad_begin,ee::scratchpad_begin+ee::scratchpad_size);
+    const auto main_memory=w.value("xor i1 "+scratchpad+", true");
+    const bool native_io=(access.bytes==4 || access.bytes==8) && access.bank==RegisterBank::integer && access.merge==Merge::none;
     if (native_io) {
         const auto device_address=w.value("icmp uge i32 "+physical+", 268435456");
-        const auto aligned=w.value("icmp eq i32 "+w.binary("and","i32",address,"3")+", 0");
-        const auto native_address=w.binary("and","i1",device_address,aligned);
+        const auto aligned=w.value("icmp eq i32 "+w.binary("and","i32",address,std::to_string(access.bytes-1))+", 0");
+        const auto native_address=w.binary("and","i1",w.binary("and","i1",device_address,main_memory),aligned);
         w.out<<"  br i1 "<<native_address<<", label %io"<<suffix<<", label %ram"<<suffix
              <<"\nio"<<suffix<<":\n";
         std::string status;
-        if (access.write) status=w.value("call i32 @nt_ee_io_write32(ptr %memory, i32 "+physical+", i32 "+w.narrow(w.reg(i.rt))+")");
+        if (access.bytes==8) {
+            status=access.write ? w.value("call i32 @nt_ee_io_write64(ptr %memory, i32 "+physical+", i64 "+w.reg(i.rt)+")") :
+                w.value("call i32 @nt_ee_io_read64(ptr %state, ptr %memory, i32 "+physical+", i32 "+std::to_string(i.rt)+")");
+        } else if (access.write) status=w.value("call i32 @nt_ee_io_write32(ptr %memory, i32 "+physical+", i32 "+w.narrow(w.reg(i.rt))+")");
         else {
             const auto packed=w.value("call i64 @nt_ee_io_read32(ptr %memory, i32 "+physical+")");
             status=w.narrow(w.binary("lshr","i64",packed,"32"));
@@ -110,7 +115,7 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
             }
             w.out<<"  br label %memory_done"<<suffix<<"\nio_stop"<<suffix<<":\n  ret i32 "<<status<<"\nram"<<suffix<<":\n";
         }
-        if (access.write) {
+        if (access.write || access.bytes==8) {
             const auto ready=w.value("icmp eq i32 "+status+", 0");
             w.out<<"  br i1 "<<ready<<", label %memory_done"<<suffix<<", label %io_stop"<<suffix
                  <<"\nio_stop"<<suffix<<":\n  ret i32 "<<status<<"\nram"<<suffix<<":\n";
@@ -118,13 +123,15 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
     }
     if (access.bytes==16 && access.bank!=RegisterBank::vector) physical=w.binary("and","i32",physical,"4294967280");
     if (access.merge!=Merge::none) physical=w.binary("and","i32",physical,std::to_string(~std::uint32_t(access.bytes-1)));
+    physical=w.value("select i1 "+scratchpad+", i32 "+w.binary("and","i32",physical,std::to_string(ee::scratchpad_size-1))+", i32 "+physical);
     const auto offset=w.value("zext i32 "+physical+" to i64");
     const auto end=w.binary("add","i64",offset,std::to_string(access.bytes));
-    const auto size=w.load("i64",offsetof(ee::Memory,size),"%memory");
-    const auto data=w.load("ptr",offsetof(ee::Memory,data),"%memory");
+    const auto size=w.value("select i1 "+scratchpad+", i64 "+w.load("i64",offsetof(ee::Memory,scratchpad_bytes),"%memory")+", i64 "+w.load("i64",offsetof(ee::Memory,size),"%memory"));
+    const auto data=w.value("select i1 "+scratchpad+", ptr "+w.load("ptr",offsetof(ee::Memory,scratchpad),"%memory")+", ptr "+w.load("ptr",offsetof(ee::Memory,data),"%memory"));
     const auto null=w.value("icmp eq ptr "+data+", null");
     const auto outside=w.value("icmp ugt i64 "+end+", "+size);
-    const auto device=w.value("icmp ugt i64 "+end+", 33554432");
+    const auto limit=w.value("select i1 "+scratchpad+", i64 "+std::to_string(ee::scratchpad_size)+", i64 33554432");
+    const auto device=w.value("icmp ugt i64 "+end+", "+limit);
     const auto low=w.binary("and","i32",address,std::to_string((access.bytes==16 && access.bank!=RegisterBank::vector) || access.merge!=Merge::none ? 0 : access.bytes-1));
     const auto unaligned=w.value("icmp ne i32 "+low+", 0");
     const auto invalid=w.binary("or","i1",w.binary("or","i1",outside,device),w.binary("or","i1",null,unaligned));
@@ -135,7 +142,7 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
     // boundary; executable writes are still rejected at every memory store.
     if (i.op==Op::cache) { w.out<<"  fence seq_cst\n"; return; }
     if (access.write) {
-        const auto overlap=code_overlap(w,offset,end,code);
+        const auto overlap=w.binary("and","i1",main_memory,code_overlap(w,offset,end,code));
         w.out<<"  br i1 "<<overlap<<", label %code_write"<<suffix<<", label %access"<<suffix<<"\ncode_write"<<suffix<<":\n";
         w.store("i32",address,offsetof(ee::Memory,fault_address),"%memory");
         w.out<<"  ret i32 5\naccess"<<suffix<<":\n";
@@ -166,7 +173,7 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
             w.store("i32",value,offsetof(runtime::State,fpr)+i.rt*sizeof(std::uint32_t)); return;
         }
         if (i.op==Op::lwr) {
-            const auto full=w.value("icmp eq i32 "+w.binary("and","i32",address,"3")+", 0");
+            const auto full=w.value("icmp eq i32 "+w.binary("and","i32",address,std::to_string(access.bytes-1))+", 0");
             const auto kept=w.binary("and","i64",w.reg(i.rt),"18446744069414584320");
             const auto merged=w.binary("or","i64",kept,w.value("zext i32 "+value+" to i64"));
             value=w.value("select i1 "+full+", i64 "+w.extend(value)+", i64 "+merged);

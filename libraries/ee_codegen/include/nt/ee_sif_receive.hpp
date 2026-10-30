@@ -34,23 +34,30 @@ public:
         else count_=value&0xffffU;
         return Stop::budget;
     }
-    Stop deliver(Memory& memory,CodeOverlap protection,NativeCompletions& completions,
-                 std::uint32_t packet_destination,std::span<const std::uint8_t> bytes,
-                 bool terminal=true,bool tag_interrupt=false) {
+    Stop validate(Memory& memory,CodeOverlap protection,std::uint32_t packet_destination,std::size_t size) const {
         if (!accepting()) return Stop::unsupported_system;
         const bool chain=(control_&4)!=0;
-        if ((!chain && bytes.size()!=std::uint64_t(count_)*16) || bytes.size()>0xffff0 || bytes.size()%16)
+        if ((!chain && size!=std::uint64_t(count_)*16) || size>0xffff0 || size%16)
             return Stop::invalid_state;
         const auto raw=chain ? packet_destination : destination_;
         const auto address=runtime::default_ram_address(raw);
-        if (address%16 || std::uint64_t(address)+bytes.size()>0x2000000U ||
-            std::uint64_t(address)+bytes.size()>memory.size || (!bytes.empty() && !memory.data)) {
+        if (address%16 || std::uint64_t(address)+size>0x2000000U ||
+            std::uint64_t(address)+size>memory.size || (size!=0 && !memory.data)) {
             memory.fault_address=raw; return Stop::memory_fault;
         }
         if (!protection) return Stop::invalid_state;
-        if (!bytes.empty() && protection(address,static_cast<std::uint32_t>(bytes.size()))) {
+        if (size!=0 && protection(address,static_cast<std::uint32_t>(size))) {
             memory.fault_address=raw; return Stop::code_write;
         }
+        return Stop::budget;
+    }
+    Stop deliver(Memory& memory,CodeOverlap protection,NativeCompletions& completions,
+                 std::uint32_t packet_destination,std::span<const std::uint8_t> bytes,
+                 bool terminal=true,bool tag_interrupt=false) {
+        const auto valid=validate(memory,protection,packet_destination,bytes.size());
+        if (valid!=Stop::budget) return valid;
+        const bool chain=(control_&4)!=0;
+        const auto address=runtime::default_ram_address(chain ? packet_destination : destination_);
         // memmove also permits a native producer whose owned data aliases RAM.
         if (!bytes.empty()) std::memmove(memory.data+address,bytes.data(),bytes.size());
         destination_=address+static_cast<std::uint32_t>(bytes.size()); count_=0;

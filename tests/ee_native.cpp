@@ -23,6 +23,7 @@ static std::uint64_t timer_now=0;
 static std::uint64_t timer_clock() { return timer_now; }
 static std::uint64_t stepping_timer_clock() { timer_now+=1000; return timer_now; }
 void run_ee_batch_tests();
+void run_ee_file_rpc_tests();
 int main() {
     try {
         for (const auto slice : {1U,2U,64U}) {
@@ -279,14 +280,15 @@ int main() {
             check(call(0x44,1)==nt::ee::Stop::syscall && state.executed==retired && state.pc==0x11ec);
             check(call(0x45,1)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
             check(call(0x42,1)==nt::ee::Stop::budget && state.gpr[2].lo==1);
-            check(call(0x43,1)==nt::ee::Stop::budget);
+            state.cop0_status=0x10c02; // Service entered from an interrupt callback.
+            check(call(0xffffffbdU,1)==nt::ee::Stop::budget && state.cop0_status==0x10c02);
             check(call(0x42,1)==nt::ee::Stop::syscall && ram==original);
             check(call(0x47,1,0x1000)==nt::ee::Stop::code_write && ram==original);
-            check(call(0x48,1,0xfffffff0)==nt::ee::Stop::memory_fault && ram==original);
-            check(call(0x47,1,0x4000)==nt::ee::Stop::budget);
+            check(call(0xffffffb8U,1,0xfffffff0)==nt::ee::Stop::memory_fault && ram==original);
+            check(call(0xffffffb8U,1,0x4000)==nt::ee::Stop::budget);
             std::memcpy(fields.data(),ram.data()+0x4000,24);
             check(fields==std::array<std::uint32_t,6>{2,2,1,0,0,123});
-            check(call(0x46,1)==nt::ee::Stop::budget);
+            check(call(0xffffffbaU,1)==nt::ee::Stop::budget && state.cop0_status==0x10c02);
             check(call(0x41,1)==nt::ee::Stop::budget);
             check(call(0x45,1)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
             check(call(0x40,0x4001)==nt::ee::Stop::memory_fault);
@@ -1604,7 +1606,168 @@ int main() {
                 check(ram[0x180000]==0x7a && platform.sif_receive.read(0x1000c010).value==0x180010);
             }
         }
+        {
+            // Byte, word, doubleword and quadword accesses share the native workspace.
+            std::vector<std::uint8_t> ram(0x10000,0xcc);
+            const auto original=ram;
+            nt::ee::Memory memory{ram.data(),ram.size()};
+            nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::runtime::State state;
+            state.gpr[8]={0x1234567812345678ULL,0xabcdefff12345678ULL};
+            for (unsigned index=0;const auto width:{16U,8U,4U,1U}) {
+                const auto pc=0x3d0000+index++*16;
+                for (const auto offset:{0x1000U,nt::ee::scratchpad_size-width}) {
+                    state.pc=pc; state.set(4,nt::ee::scratchpad_begin+offset);
+                    check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && ram==original);
+                    state.pc=pc+8; state.gpr[9]={};
+                    check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+                    const auto mask=width>=8 ? ~std::uint64_t(0) : (std::uint64_t(1)<<(width*8))-1;
+                    check(state.gpr[9].lo==(state.gpr[8].lo&mask));
+                    if (width==16) check(state.gpr[9].hi==state.gpr[8].hi);
+                }
+            }
+            const auto pointer=memory.scratchpad;
+            for (const auto raw:{0x70001001U,0x70004000U}) {
+                state.pc=0x3d0020; state.set(4,raw); const auto retired=state.executed;
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::memory_fault && state.executed==retired && memory.fault_address==raw);
+            }
+            state.pc=0x3d0020; state.set(4,0x70001000); memory.scratchpad=nullptr;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::memory_fault);
+            memory.scratchpad=pointer; memory.scratchpad_bytes=0x1001;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::memory_fault);
+            nt::ee::NativePlatform independent; independent.attach(memory);
+            check(memory.scratchpad!=pointer && memory.scratchpad[0x1000]==0 && ram==original);
+        }
+        {
+            // Compiled SD/LD use atomic native 64-bit service calls.
+            nt::ee::Memory memory;
+            struct Backend { std::uint64_t value=0; bool fail=false; unsigned calls=0; } backend;
+            memory.io.context=&backend;
+            memory.io.write64=[](void* context,std::uint32_t,std::uint64_t value) {
+                auto& b=*static_cast<Backend*>(context); ++b.calls;
+                if (b.fail) return nt::ee::Stop::unsupported_system;
+                b.value=value; return nt::ee::Stop::budget;
+            };
+            memory.io.read64=[](void* context,std::uint32_t) {
+                auto& b=*static_cast<Backend*>(context); ++b.calls;
+                return nt::ee::IoRead64{b.fail ? nt::ee::Stop::unsupported_system : nt::ee::Stop::budget,b.value};
+            };
+            nt::runtime::State state; state.pc=0x3d0010; state.set(4,0x12001000); state.set(8,0xfedcba9876543210ULL);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && backend.value==state.gpr[8].lo && backend.calls==1);
+            state.pc=0x3d0018; state.gpr[9]={7,99};
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.gpr[9].lo==backend.value && state.gpr[9].hi==99);
+            backend.fail=true; const auto retired=state.executed; state.pc=0x3d0018; state.set(9,7);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system && state.gpr[9].lo==7 && state.executed==retired && state.pc==0x3d0018);
+            const auto calls=backend.calls; state.set(4,0x12001004);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::memory_fault && backend.calls==calls);
+            nt::ee::NativePlatform platform; platform.attach(memory);
+            state.pc=0x3d0010; state.set(4,0x12001000); state.set(8,0x200);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system && !platform.graphics.resets());
+            platform.graphics.context=&backend;
+            platform.graphics.synchronize=[](void* context) {
+                auto& b=*static_cast<Backend*>(context); ++b.calls;
+                return b.fail ? nt::ee::Stop::unsupported_system : nt::ee::Stop::budget;
+            };
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system && !platform.graphics.resets());
+            backend.fail=false;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && platform.graphics.resets()==1);
+            state.pc=0x3d0018;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.gpr[9].lo==0x4000);
+            state.pc=0x3d0010; state.set(4,0x12001010); state.set(8,0);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+            state.pc=0x3d0018;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.gpr[9].lo==0x6000);
+            state.pc=0x3d0010; state.set(4,0x12001000); state.set(8,0x100);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && platform.graphics.resets()==1);
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap);
+            for (const auto number:{0x71U,0xffffff8fU}) {
+                state.pc=0x3a0000; state.set(3,number); state.set(4,0x100); state.set(2,123);
+                check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::budget && state.gpr[2].lo==123);
+                state.pc=0x3a0000; state.set(3,number==0x71 ? 0x70 : 0xffffff90U);
+                check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::budget && state.gpr[2].lo==0x6100);
+            }
+        }
+        {
+            timer_now=0;
+            std::vector<std::uint8_t> ram(0x10000,0);
+            nt::ee::Memory memory{ram.data(),ram.size()};
+            nt::ee::NativePlatform platform(timer_clock); platform.attach(memory);
+            bool fail=false; platform.graphics.context=&fail;
+            platform.graphics.synchronize=[](void* p) { return *static_cast<bool*>(p) ? nt::ee::Stop::unsupported_system : nt::ee::Stop::budget; };
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
+            nt::runtime::State state;
+            const auto configure=[&](unsigned standard,unsigned frame=1) {
+                state.pc=0x3a0000; state.cop0_status=0; state.set(3,2); state.set(4,1); state.set(5,standard); state.set(6,frame); state.set(2,123);
+                return nt::ee::run(nt_ee_generated_run,state,memory,1,services);
+            };
+            check(configure(2)==nt::ee::Stop::budget && state.gpr[2].lo==123 && platform.graphics.read(0x12000020).value==3);
+            const auto edge=[](std::uint64_t ticks) { return (ticks*2002000+62)/63; };
+            const auto poll=[&] { memory.io.poll(memory.io.context); platform.interrupts.publish(memory); };
+            state.set(4,2); state.set(5,0x3e0000); state.set(6,0); state.set(7,0); state.set(28,0x6000);
+            check(platform.interrupts.service(0x10,state,nt_ee_generated_contains).status==nt::ee::Stop::budget);
+            platform.interrupts.write(0x1000f010,13);
+            timer_now=edge(480)-1; poll(); check(!memory.pending_interrupts);
+            timer_now=edge(480); poll(); check(memory.pending_interrupts==0x400);
+            state.pc=0x3a0000; state.cop0_status=0x10c01; state.set(29,0xff00);
+            check(nt::ee::run(nt_ee_generated_run,state,memory,3,services)==nt::ee::Stop::budget && state.pc==0x3a0000);
+            std::uint32_t line; std::memcpy(&line,ram.data()+0x6000,4); check(line==2 && !memory.pending_interrupts);
+            timer_now=edge(487); poll(); check((platform.graphics.read(0x12001000).value&0x2008)==0x2008 && !memory.pending_interrupts);
+            platform.graphics.write(0x12001010,0x7700); poll(); check(platform.interrupts.read(0x1000f000).value==1);
+            platform.interrupts.write(0x1000f000,1); poll(); check(!memory.pending_interrupts);
+            platform.graphics.write(0x12001000,8); timer_now=edge(525); poll();
+            check(platform.interrupts.read(0x1000f000).value==8 && !(platform.graphics.read(0x12001000).value&8));
+            platform.interrupts.write(0x1000f000,8); timer_now=edge(1012); poll();
+            check((platform.graphics.read(0x12001000).value&0x2008)==8);
+            const auto before=platform.graphics.read(0x12001000).value;
+            timer_now-=100; poll(); check(platform.graphics.read(0x12001000).value==before);
+            check(configure(99)==nt::ee::Stop::unsupported_system && platform.graphics.mode()->standard==2);
+            fail=true; check(configure(3)==nt::ee::Stop::unsupported_system && platform.graphics.mode()->standard==2);
+            fail=false; platform.interrupts.write(0x1000f000,15);
+            const auto epoch=timer_now;
+            check(configure(3,0)==nt::ee::Stop::budget && platform.graphics.read(0x12000020).value==1);
+            timer_now=epoch+576*32000ULL; poll(); check(platform.interrupts.read(0x1000f000).value==4);
+            timer_now=epoch+625*32000ULL*1000000; poll();
+            check((platform.interrupts.read(0x1000f000).value&12)==12);
+            check(platform.graphics.write(0x12001000,0x200)==nt::ee::Stop::budget && !platform.graphics.mode());
+            platform.interrupts.write(0x1000f000,15); timer_now+=1000000000; poll(); check(!memory.pending_interrupts);
+        }
+        {
+            nt::ee::Memory memory; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::runtime::State state;
+            const auto write=[&](unsigned address,unsigned value) {
+                state.pc=0x360000; state.set(4,address); state.set(8,value);
+                return nt_ee_generated_run(&state,&memory,1);
+            };
+            const auto read=[&](unsigned address) {
+                state.pc=0x360008; state.set(4,address);
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+                return static_cast<std::uint32_t>(state.gpr[8].lo);
+            };
+            for (const auto base:{0x10003800U,0x10003c00U}) {
+                check(read(base)==0 && read(base+0x60)==0);
+                check(write(base+0x20,~0U)==nt::ee::Stop::budget);
+                check(write(base+0x30,0x12345678)==nt::ee::Stop::budget);
+                check(write(base+0x50,~0U)==nt::ee::Stop::budget);
+                check(write(base+0x70,0xabcdef01)==nt::ee::Stop::budget);
+                for (unsigned lane=0;lane<8;++lane) check(write(base+0x100+lane*16,lane+100)==nt::ee::Stop::budget);
+                check(write(base+0x10,6)==nt::ee::Stop::budget && read(base)==0x300 && !read(base+0x10));
+                check(write(base+0x10,8)==nt::ee::Stop::budget && read(base)==0 && read(base+0x20)==7);
+                check(write(base+0x10,7)==nt::ee::Stop::budget && read(base)==0 && !read(base+0x20));
+                check(read(base+0x30)==0x5678 && read(base+0x50)==3 && read(base+0x70)==0xabcdef01);
+                for (unsigned lane=0;lane<8;++lane) check(read(base+0x100+lane*16)==lane+100);
+            }
+            check(write(0xb0003830,7)==nt::ee::Stop::budget && read(0x10003830)==7 && read(0x10003c30)==0x5678);
+            check(write(0x10003c00,0x800000)==nt::ee::Stop::unsupported_system && read(0x10003c00)==0);
+            check(write(0x10003010,~0U)==nt::ee::Stop::budget && write(0x10003000,8)==nt::ee::Stop::budget && read(0x10003020)==13);
+            check(write(0x10003000,9)==nt::ee::Stop::budget && !read(0x10003020) && read(0x10003830)==7);
+            for (const auto address:{0x10003840U,0x100038f0U,0x10003020U,0x10004000U,0x10005000U,0x10006000U}) {
+                const auto retired=state.executed;
+                check(write(address,0)==nt::ee::Stop::unsupported_system && state.executed==retired && state.pc==0x360000);
+            }
+            check(!memory.pending_interrupts && !platform.completions.status());
+        }
         run_ee_batch_tests();
+        run_ee_file_rpc_tests();
         return 0;
     } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

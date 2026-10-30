@@ -16,11 +16,11 @@ Bytes Service::read_disc_file(const std::string& guest_path, std::uint64_t limit
 }
 Reply Service::call(std::uint32_t method, ByteView args, std::uint32_t result_size) {
     Reply reply;
-    ++statistics_.requests; statistics_.last_method = method;
     if (method == 255) {
         if (result_size != 4 && result_size != 8) throw runtime::MemoryFault("FILEIO: invalid version result size");
         reply.result = {'1','0','0','0','.','.','.','.'};
         reply.result.resize(result_size);
+        ++statistics_.requests; statistics_.last_method = method;
         return reply;
     }
     if (result_size != 4) throw runtime::MemoryFault("FILEIO: expected a four-byte result");
@@ -61,6 +61,7 @@ Reply Service::call(std::uint32_t method, ByteView args, std::uint32_t result_si
     else throw runtime::MemoryFault("FILEIO: unsupported method " + std::to_string(method));
     reply.result.resize(4);
     for (unsigned i=0;i<4;++i) reply.result[i] = static_cast<std::uint8_t>(static_cast<std::uint32_t>(result) >> (8*i));
+    ++statistics_.requests; statistics_.last_method = method;
     return reply;
 }
 }
