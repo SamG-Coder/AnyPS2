@@ -41,12 +41,25 @@ public:
           interrupts(layout.interrupt_stack,&callbacks),sif_control(interrupts,&sif),threads(interrupts,&heap),
           rpc_servers(peer_.get(),&threads),rpc_data(peer_.get()),events(&threads),semaphores(&threads),mailboxes(&threads),
           system(events,boot,ram),command_session(events,system,sif_control,peer_.get()),stdio(std::move(output)),
-          disc_service(disc.empty() ? nullptr : std::make_unique<NativeDiscServices>(disc,&descriptors,&events)),router(providers()),arena_(ram) {
+          disc_service(disc.empty() ? nullptr : std::make_unique<NativeDiscServices>(disc,&descriptors,&events)),router(providers()),arena_(ram),packet_buffer_(layout.packet_buffer) {
         inbound.connect(commands,command_session,sif_control,&rpc_servers);
     }
     NativeServiceContext(const NativeServiceContext&)=delete;
     NativeServiceContext& operator=(const NativeServiceContext&)=delete;
     NativeSifCommandEndpoint* endpoint() const { return peer_.get(); }
+    // Explicit native replacement for command-module startup. The EE owner must
+    // publish its link first. This installs our reserved receive mailbox, but
+    // neither acknowledges the EE handshake nor declares RPC/reset completion.
+    NativeServiceReply initialize_commands() {
+        if (!peer_) return {NativeServiceStatus::unavailable};
+        if (sif_control.ready())
+            return {sif_control.sub_address()==packet_buffer_ ? NativeServiceStatus::returned : NativeServiceStatus::unavailable};
+        const auto initialized=sif_control.invoke({5,{},NativeServiceKind::sifman},arena_);
+        if (initialized.status!=NativeServiceStatus::returned || !sif_control.ready())
+            return {NativeServiceStatus::unavailable};
+        sif_control.invoke({27,{packet_buffer_,0,0,0},NativeServiceKind::sifman},arena_);
+        return {NativeServiceStatus::returned};
+    }
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
         if (ram.data()!=arena_.data() || ram.size()!=arena_.size()) return {NativeServiceStatus::address_fault};
         return router.invoke(request,ram);
@@ -101,5 +114,6 @@ private:
     std::unique_ptr<NativeDiscServices> disc_service;
     NativeServiceRouter router;
     std::span<std::uint8_t> arena_;
+    std::uint32_t packet_buffer_;
 };
 }

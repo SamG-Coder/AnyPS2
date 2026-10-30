@@ -72,9 +72,10 @@ int main() {
         nt::ee::NativeIopCommands incoming(control,inbound);
         require(platform.sif_outbound.connect(incoming.sink()));
         // Explicit EE owner publication, followed by actual IOP initialization.
+        require(context.initialize_commands().status==NativeServiceStatus::unavailable && !control.ready() && !control.sub_flags());
         control.publish_main(0x6000,0x10000);
-        require(control.invoke({5,{},NativeServiceKind::sifman},iop_ram).status==NativeServiceStatus::returned);
-        require(control.invoke({27,{0xce00},NativeServiceKind::sifman},iop_ram).value==0xce00);
+        require(context.initialize_commands().status==NativeServiceStatus::returned && control.sub_address()==0xce00);
+        require(context.initialize_commands().status==NativeServiceStatus::returned && control.sub_flags()==0x10000);
         require(commands.invoke({8,{0xcc00,4},NativeServiceKind::sifcmd},iop_ram).status==NativeServiceStatus::returned);
         NativeServices& iop_services=context;
         Cpu registration; registration.pc=0x2480; registration.registers[31]=0x5000;
@@ -104,6 +105,7 @@ int main() {
         std::vector<std::uint8_t> fresh_ram(0x10000);
         NativeServiceContext fresh(fresh_ram,{0xc000,0xcc00,0xce00,0xf000},{},{},[](std::string_view) { return true; });
         require(!fresh.endpoint() && !fresh.sif.accepting() && !fresh.sif_control.ready() && !fresh.inbound.busy());
+        require(fresh.initialize_commands().status==NativeServiceStatus::unavailable && !fresh.sif_control.sub_flags());
         require(fresh.invoke({29,{},NativeServiceKind::sifman},fresh_ram).value==0 &&
                 context.invoke({29,{},NativeServiceKind::sifman},iop_ram).value==1);
         require(fresh.invoke({29,{},NativeServiceKind::sifman},iop_ram).status==NativeServiceStatus::address_fault);

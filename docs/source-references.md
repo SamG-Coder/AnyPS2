@@ -530,6 +530,9 @@ Get/SetSreg and control-message contracts, sifcmd-common.h packet layouts, and
 sifman.h CMDINIT flag. AnyPS2 reuses its original event/scheduler and native link
 services; it does not copy the upstream module bootstrap, firmware, banners or
 interrupt dispatcher.
+Native context startup also follows the module-start link initialization and
+receive-buffer publication contracts. Initialization is explicit and owner-driven;
+peer handshake, RPC readiness and reset completion remain separate transitions.
 
 Unified inbound routing follows the previously recorded public command handler
 and system-table selection contracts. Its owned mailbox, deferred-error handling
