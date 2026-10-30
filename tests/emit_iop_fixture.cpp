@@ -622,7 +622,7 @@ int main(int argc,char** argv) {
             dispatch_word(base+8,0x00401821); // Still sees the old architectural value.
             dispatch_word(base+12,0x03e00008); bundle_roots.push_back(base);
         }
-        nt::elf::IopModule factories{0xb000,0xb000,nt::Bytes(0x400),0x400,{}};
+        nt::elf::IopModule factories{0xb000,0xb000,nt::Bytes(0x600),0x600,{}};
         const auto factory_word=[&](unsigned pc,std::uint32_t word) { fixture::put32(factories.memory,pc-factories.base,word); };
         constexpr std::uint32_t factory_caller[]{0x03e08021,0x0c002c10,0,0x0200f821,0x03e00008,0};
         for (unsigned i=0;i<std::size(factory_caller);++i) factory_word(0xb000+i*4,factory_caller[i]);
@@ -641,6 +641,30 @@ int main(int argc,char** argv) {
             0x00041080,0x00521021,0x8c420000,0,0x00400008,0,0,0,0x03e00008,0x00001021};
         for (unsigned i=0;i<std::size(hoisted);++i) factory_word(0xb180+i*4,hoisted[i]);
         bundle_roots.push_back(0xb180);
+        factory_word(0xb400,0x41e00000); factory_word(0xb408,0x107);
+        constexpr char modload_name[]="modload";
+        std::copy(std::begin(modload_name),std::end(modload_name),factories.memory.begin()+0x40c);
+        constexpr unsigned loader_ordinals[]{12,13,14,7};
+        for (unsigned i=0;i<std::size(loader_ordinals);++i) {
+            factory_word(0xb414+i*8,0x03e00008); factory_word(0xb418+i*8,0x24000000|loader_ordinals[i]);
+            bundle_roots.push_back(0xb414+i*8);
+        }
+        factory_word(0xb480,0x41e00000); factory_word(0xb488,0x103);
+        constexpr char cache_library[]="loadcore";
+        std::copy_n(cache_library,8,factories.memory.begin()+0x48c);
+        for (unsigned i=0;i<2;++i) {
+            factory_word(0xb494+i*8,0x03e00008); factory_word(0xb498+i*8,0x24000004+i);
+            bundle_roots.push_back(0xb494+i*8);
+        }
+        constexpr std::uint32_t register_loader[]{0x03e08021,0x3404b280,0x3405b288,0x3406b290,
+            0x0c002d05,0,0x0200f821,0x03e00008,0};
+        for (unsigned i=0;i<std::size(register_loader);++i) factory_word(0xb200+i*4,register_loader[i]);
+        constexpr std::uint32_t register_path[]{0x03e08021,0x3404b298,0x0c002d07,0,0x0200f821,0x03e00008,0};
+        for (unsigned i=0;i<std::size(register_path);++i) factory_word(0xb240+i*4,register_path[i]);
+        for (unsigned i=0;i<4;++i) {
+            factory_word(0xb280+i*8,0x03e00008); factory_word(0xb284+i*8,0x24020060+i);
+        }
+        bundle_roots.insert(bundle_roots.end(),{0xb200,0xb240});
         {
             auto unknown=factories; fixture::put32(unknown.memory,0x84,0x8c820000);
             const auto analyzed=nt::iop_codegen::ir::discover(unknown);

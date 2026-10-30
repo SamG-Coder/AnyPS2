@@ -9,8 +9,12 @@
 namespace nt::iop_codegen::ir {
 namespace {
 std::optional<Operation> native_operation(const elf::IopImport& import) {
+    // Binding identifies the host ABI, not successful implementation. Module
+    // lifecycle operations remain explicit runtime stops without a provider.
+    if (import.library=="modload" && (import.version>>8)==1 && import.ordinal>=6 && import.ordinal<=23)
+        return Operation::native_import;
     // Minor revisions share an ordinal ABI; only explicitly implemented entries bind.
-    if (import.library=="loadcore" && (import.version>>8)==1 && ((import.ordinal>=6 && import.ordinal<=10) || import.ordinal==11 || import.ordinal==12 || import.ordinal==20 || import.ordinal==27))
+    if (import.library=="loadcore" && (import.version>>8)==1 && ((import.ordinal>=4 && import.ordinal<=10) || import.ordinal==11 || import.ordinal==12 || import.ordinal==20 || import.ordinal==27))
         return Operation::native_import;
     if (import.library=="intrman" && (import.version>>8)==1 &&
         ((import.ordinal>=4 && import.ordinal<=9) || import.ordinal==14 || import.ordinal==17 || import.ordinal==18 || import.ordinal==23))
@@ -155,7 +159,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         }
         Instruction call; call.address=module.base+import.offset;
         call.operation=*operation; call.flow=Flow::native_return;
-        call.immediate=import.ordinal|(!host ? 0x20000U : import.library=="loadcore" ? 0x10000U : import.library=="ioman" ? 0x30000U : import.library=="intrman" ? 0x40000U : import.library=="thevent" ? 0x50000U : import.library=="thbase" ? 0x60000U : import.library=="sifman" ? 0x70000U : import.library=="stdio" ? 0x80000U : import.library=="sifcmd" ? 0x90000U : import.library=="thsemap" ? 0xa0000U : import.library=="thmsgbx" ? 0xb0000U : import.library=="sysclib" ? 0xc0000U : import.library=="heaplib" ? 0xd0000U : 0U);
+        call.immediate=import.ordinal|(!host ? 0x20000U : import.library=="loadcore" ? 0x10000U : import.library=="ioman" ? 0x30000U : import.library=="intrman" ? 0x40000U : import.library=="thevent" ? 0x50000U : import.library=="thbase" ? 0x60000U : import.library=="sifman" ? 0x70000U : import.library=="stdio" ? 0x80000U : import.library=="sifcmd" ? 0x90000U : import.library=="thsemap" ? 0xa0000U : import.library=="thmsgbx" ? 0xb0000U : import.library=="sysclib" ? 0xc0000U : import.library=="heaplib" ? 0xd0000U : import.library=="modload" ? 0xe0000U : 0U);
         native_imports.emplace(call.address,call);
         if (!host) {
             auto bound=import; bound.offset+=module.base; bound.table_offset+=module.base;
@@ -192,6 +196,12 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         if (stored!=input.stack_words.end() && stored->second)
             for (const auto entry : *stored->second) if (entry) discover_callback(entry);
     };
+    const auto discover_loader_callbacks=[&](std::uint32_t service,const Constants& input) {
+        if (service!=0xe000c && service!=0xe000d) return;
+        const auto count=service==0xe000c ? 3U : 1U;
+        for (unsigned index=0;index<count;++index) if (input.registers[4+index])
+            for (const auto target : *input.registers[4+index]) if (target) discover_callback(target);
+    };
     const auto append=[&](std::uint32_t pc) {
         if (pc%4 || pc<module.base || pc-module.base>=extent)
             throw std::runtime_error("IOP conversion: unresolved code target "+hex32(pc));
@@ -222,6 +232,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
             const auto after=transfer(instruction,input);
             if (instruction.flow==Flow::trap) continue;
             if (instruction.flow==Flow::native_return) {
+                if (instruction.operation==Operation::native_import) discover_loader_callbacks(instruction.immediate,input);
                 if (instruction.operation==Operation::native_import && instruction.immediate==0x90011 && input.registers[6])
                     for (const auto address : *input.registers[6]) if (address) discover_callback(address);
                 if (instruction.operation==Operation::native_import && instruction.immediate==0x9000a && input.registers[5])
@@ -311,6 +322,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
             if (instruction.flow==Flow::call || instruction.flow==Flow::direct) {
                 const auto target=native_imports.find(instruction.target);
                 if (target!=native_imports.end() && target->second.immediate==0x60004) discover_stack_thread(successor);
+                if (target!=native_imports.end()) discover_loader_callbacks(target->second.immediate,successor);
             }
             if (indirect) {
                 for (const auto target : instruction.targets) enqueue(target,successor);

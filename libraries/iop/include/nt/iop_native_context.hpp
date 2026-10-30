@@ -13,6 +13,7 @@
 #include <nt/iop_native_sif_inbound.hpp>
 #include <nt/iop_native_rpc_data.hpp>
 #include <nt/iop_native_stdio.hpp>
+#include <nt/iop_native_modload.hpp>
 #include <memory>
 
 namespace nt::iop {
@@ -61,6 +62,7 @@ public:
     NativeFileDescriptors descriptors;
     NativeDriverFiles driver_files;
     NativeBootServices boot; // Empty until the owner supplies real boot metadata.
+    NativeModloadServices modload;
     NativeAlarmServices alarms;
     NativeSifTransfers sif;
 private:
@@ -91,7 +93,7 @@ private:
     }
     std::vector<NativeServices*> providers() {
         std::vector<NativeServices*> result{&boot_callbacks,&heaplib,&prnt,&sysclib,&drivers,&driver_files,&heap,&libraries,
-            &boot,&interrupts,&events,&semaphores,&mailboxes,&threads,&system,&alarms,&sif,&sif_control,&stdio,
+            &boot,&modload,&interrupts,&events,&semaphores,&mailboxes,&threads,&system,&alarms,&sif,&sif_control,&stdio,
             &commands,&command_session,&rpc_servers,&rpc_data};
         if (disc_service) result.push_back(disc_service.get());
         return result;

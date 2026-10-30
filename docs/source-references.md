@@ -1130,6 +1130,18 @@ execution or dispatch code is included. Private observed MPG data is kept only
 under ignored work/ and must never become a committed test fixture.
 
 
+## Native loader ABI references
+
+Native modload ABI binding and callback ownership use the pinned PS2SDK
+`iop/system/modload/include/modload.h`, `src/exports.tab`, and
+`src/modload.c` registration/query contracts. The native owner stores only
+validated AOT callback addresses; absent registrations remain null. It performs
+no authentication or module loading. Recognized lifecycle imports stop at their
+native service boundary until an implementation owns them. The pinned loadcore
+`exports.tab` identifies FlushIcache/FlushDcache; immutable AOT code and coherent
+native data replace cache banks, with a host publication fence at these calls.
+No firmware cache routine or upstream implementation is copied.
+
 ## GT4 recompilation research reference
 
 - Repository: https://github.com/moesuito/gt4-staticrecomp

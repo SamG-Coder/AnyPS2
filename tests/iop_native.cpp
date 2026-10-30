@@ -24,6 +24,7 @@
 #include <nt/iop_native_rpc.hpp>
 #include <nt/iop_native_rpc_data.hpp>
 #include <nt/iop_native_stdio.hpp>
+#include <nt/iop_native_modload.hpp>
 #include "disc_fixture.hpp"
 #include <chrono>
 #include <vector>
@@ -55,6 +56,42 @@ public:
 int main() {
     try {
         using namespace nt::iop;
+        {
+            std::vector<std::uint8_t> data(0x10000);
+            NativeModloadServices loader;
+            const auto call=[&](std::uint32_t entry,std::array<std::uint32_t,4> args={}) {
+                auto cpu=initial(); cpu.pc=entry;
+                std::copy(args.begin(),args.end(),cpu.registers.begin()+4);
+                return run_native(nt_iop_generated_run,cpu,data,128,&loader);
+            };
+            check(call(0xb424,{0xc000,0xc004}).reason==NativeStop::unmapped_code &&
+                  load_native_word(data,0xc000)==0 && load_native_word(data,0xc004)==0,
+                  "Unregistered loader callbacks were fabricated");
+            check(call(0xb200).reason==NativeStop::unmapped_code && call(0xb240).reason==NativeStop::unmapped_code,
+                  "Compiled loader callback registration failed");
+            check(call(0xb424,{0x8000c000,0xa000c004}).reason==NativeStop::unmapped_code &&
+                  load_native_word(data,0xc000)==0xb298 && load_native_word(data,0xc004)==0xb290,
+                  "Loader query lost registered callback identity");
+            for (const auto output : {0x10000U,0xb000U}) {
+                const auto before=data;
+                check(call(0xb424,{0xc000,output}).reason==
+                      (output==0xb000 ? NativeStop::code_write : NativeStop::address_fault) && data==before,
+                      "Rejected callback query partially wrote its outputs");
+            }
+            check(call(0xb414,{0xb280,0xffff,0}).reason==NativeStop::unmapped_code &&
+                  call(0xb424,{0xc000,0xc004}).reason==NativeStop::unmapped_code && load_native_word(data,0xc004)==0xb290,
+                  "Invalid loader callback partially changed registration");
+            check(call(0xb42c).reason==NativeStop::import_request,
+                  "Unimplemented module loading invented success");
+            for (const auto callback : {0xb280U,0xb288U,0xb290U,0xb298U}) {
+                auto cpu=initial(); cpu.pc=callback;
+                check(nt_iop_generated_run(cpu,data,8).reason==NativeStop::unmapped_code &&
+                      cpu.pc==0x5000 && cpu.registers[2]==0x60+(callback-0xb280)/8,
+                      "Registered loader callback was not compiled");
+            }
+            check(call(0xb494).pc==0x5000 && call(0xb49c).pc==0x5000,
+                  "Native cache publication did not return to compiled code");
+        }
         {
             std::vector<std::uint8_t> data(0x10000);
             for (unsigned i=0;i<3;++i) store_native_word(data,0xb300+i*4,0xb080+i*16);
