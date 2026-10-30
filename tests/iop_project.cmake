@@ -92,8 +92,13 @@ checked("${CMAKE_COMMAND}" --build "${run}/linked-build" --config Release --targ
 set(linked "${run}/linked-build/Release/ps2-native${EXE_SUFFIX}")
 execute_process(COMMAND "${linked}" "${run}/ee-project/program.data" --probe-iop-reset "${run}/project/module.data"
     RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
-if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x0000102c executed=17 v0=43" OR out MATCHES "iop_reset_probe")
+if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x0000102c executed=17 v0=43" OR out MATCHES "iop_reset_accepted")
     message(FATAL_ERROR "Linked IOP probe changed EE startup without reset: ${out} ${err}")
+endif()
+execute_process(COMMAND "${linked}" "${run}/ee-project/program.data" --iop-reset-session "${run}/project/module.data"
+    RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
+if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x0000102c executed=17 v0=43" OR out MATCHES "iop_reset_accepted")
+    message(FATAL_ERROR "Linked session ran before an EE reset request: ${out} ${err}")
 endif()
 file(WRITE "${run}/invalid-iop.data" "invalid")
 execute_process(COMMAND "${linked}" "${run}/ee-project/program.data" --probe-iop-reset "${run}/invalid-iop.data"

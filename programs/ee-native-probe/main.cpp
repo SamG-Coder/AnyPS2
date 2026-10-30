@@ -69,7 +69,16 @@ struct NativeGpu {
     }
 };
 bool trace_services=false;
+#ifdef ANYPS2_NATIVE_IOP
+probe::IopReset* active_iop=nullptr;
+#endif
 nt::ee::Stop execute(nt::runtime::State* state,nt::ee::Memory* memory,std::uint64_t budget) {
+#ifdef ANYPS2_NATIVE_IOP
+    if (active_iop) {
+        const auto result=active_iop->pump();
+        if (result!=nt::ee::Stop::budget) return result;
+    }
+#endif
     const auto stop=nt_ee_generated_run(state,memory,budget);
     if (trace_services && stop==nt::ee::Stop::syscall) {
         std::cerr<<"service pc="<<nt::hex32(state->pc)<<" number="<<state->gpr[3].lo;
@@ -84,6 +93,7 @@ int main(int argc,char** argv) {
         std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--disc <image.iso>] [--capture-vu <new-private-directory>] [--capture-stop <new-private-directory>]\n";
 #ifdef ANYPS2_NATIVE_IOP
         std::cerr<<"Linked IOP investigation: --probe-iop-reset <module.data> (stops without acknowledging reset)\n";
+        std::cerr<<"Explicit selected-bundle execution: --iop-reset-session <module.data> --disc <image.iso>\n";
 #endif
         return 2;
     }
@@ -93,13 +103,15 @@ int main(int argc,char** argv) {
         bool has_budget=false;
 #ifdef ANYPS2_NATIVE_IOP
         std::filesystem::path iop_data;
+        bool iop_session=false;
 #endif
         for (int index=2;index<argc;++index) {
             const std::string_view text=argv[index];
             if (text=="--trace-services") { trace_services=true; continue; }
 #ifdef ANYPS2_NATIVE_IOP
-            if (text=="--probe-iop-reset") {
+            if (text=="--probe-iop-reset" || text=="--iop-reset-session") {
                 if (!iop_data.empty() || index+1==argc) throw std::runtime_error("Expected one linked IOP data path");
+                iop_session=text=="--iop-reset-session";
                 iop_data=argv[++index]; continue;
             }
 #endif
@@ -174,8 +186,9 @@ int main(int argc,char** argv) {
 #ifdef ANYPS2_NATIVE_IOP
         std::unique_ptr<probe::IopReset> iop_reset;
         if (!iop_data.empty()) {
-            iop_reset=std::make_unique<probe::IopReset>(iop_data,disc,memory,platform,nt_ee_generated_code_overlap);
+            iop_reset=std::make_unique<probe::IopReset>(iop_data,disc,memory,platform,nt_ee_generated_code_overlap,iop_session);
             if (!command_peer.reset_owner(iop_reset->owner())) throw std::runtime_error("Cannot bind compiled IOP reset probe");
+            active_iop=iop_reset.get();
         }
 #endif
         std::unique_ptr<nt::ee::NativeFileRpc> files;
@@ -193,10 +206,11 @@ int main(int argc,char** argv) {
 #ifdef ANYPS2_NATIVE_IOP
         if (iop_reset && iop_reset->invoked()) {
             const auto result=iop_reset->result();
-            std::cout<<"iop_reset_probe=stopped entries_returned="<<iop_reset->returned()
+            std::cout<<"iop_reset_accepted="<<iop_reset->accepted()<<" entries_returned="<<iop_reset->returned()
                      <<" startup_finished="<<iop_reset->finished()<<" executed="<<iop_reset->executed()
                      <<" reason="<<static_cast<unsigned>(result.reason)<<" pc="<<nt::hex32(result.pc)
-                     <<" address="<<nt::hex32(result.address)<<" trap="<<nt::hex32(result.trap_code)<<'\n';
+                     <<" address="<<nt::hex32(result.address)<<" trap="<<nt::hex32(result.trap_code)
+                     <<" last_bind="<<nt::hex32(iop_reset->last_server())<<'\n';
         }
 #endif
         if (!capture_directory.empty()) capture.save(capture_directory);

@@ -129,6 +129,21 @@ int main() {
         control.publish_main(0x6000,0x10000);
         require(context.initialize_commands().status==NativeServiceStatus::returned && control.sub_address()==0xce00);
         require(context.initialize_commands().status==NativeServiceStatus::returned && control.sub_flags()==0x10000);
+        {
+            nt::ee::NativeSifReceive receiver;
+            nt::ee::NativeSifLink reset_link(receiver);
+            reset_link.publish_peer(0x1000,0x70000);
+            reset_link.begin_peer_reset();
+            require(!reset_link.reset_teardown_complete() && !reset_link.peer_flags() &&
+                    reset_link.service(0x7a,2,0).value==0);
+            reset_link.service(0x79,4,0x10000);
+            require(!reset_link.reset_teardown_complete());
+            reset_link.service(0x79,4,0x20000);
+            require(reset_link.reset_teardown_complete());
+            reset_link.replace_peer(0xce00,0x50000);
+            reset_link.service(0x79,4,0x40000);
+            require(reset_link.peer_flags()==0x10000 && reset_link.service(0x7a,2,0).value==0xce00);
+        }
         require(commands.invoke({8,{0xcc00,4},NativeServiceKind::sifcmd},iop_ram).status==NativeServiceStatus::returned);
         NativeServices& iop_services=context;
         Cpu registration; registration.pc=0x2480; registration.registers[31]=0x5000;

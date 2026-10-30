@@ -10,6 +10,10 @@ public:
     NativeSifLink(const NativeSifLink&)=delete;
     NativeSifLink& operator=(const NativeSifLink&)=delete;
     void publish_peer(std::uint32_t address,std::uint32_t flags) { peer_address_=address; peer_flags_|=flags; }
+    void replace_peer(std::uint32_t address,std::uint32_t flags) { peer_address_=address; peer_flags_=flags; }
+    void begin_peer_reset() { peer_address_=0; peer_flags_=0; reset_clear_pending_=0x30000; }
+    bool reset_teardown_complete() const { return reset_clear_pending_==0; }
+    std::uint32_t peer_flags() const { return peer_flags_; }
     void acknowledge_main(std::uint32_t flags) { main_flags_&=~flags; }
     std::uint32_t main_address() const { return main_address_; }
     std::uint32_t main_flags() const { return main_flags_; }
@@ -36,12 +40,13 @@ public:
         if (id==1) main_address_=value;
         else if (id==2) return {Stop::unsupported_system};
         else if (id==3) main_flags_|=value;
-        else peer_flags_&=~value;
+        else { peer_flags_&=~value; reset_clear_pending_&=~value; }
         return {Stop::budget};
     }
 private:
     NativeSifReceive& receiver_;
     std::array<std::uint32_t,3> system_{};
     std::uint32_t main_address_=0,peer_address_=0,main_flags_=0,peer_flags_=0;
+    std::uint32_t reset_clear_pending_=0;
 };
 }

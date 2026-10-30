@@ -17,6 +17,7 @@ public:
     bool ready() const { return initialized_ && !stopped_; }
     std::uint32_t sub_address() const { return sub_address_; }
     std::uint32_t sub_flags() const { return sub_flags_; }
+    std::uint32_t main_flags() const { return main_flags_; }
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
         if (request.kind!=NativeServiceKind::sifman) return {};
         const auto returned=[](std::uint32_t value=0) { return NativeServiceReply{NativeServiceStatus::returned,value}; };

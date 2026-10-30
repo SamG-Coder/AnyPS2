@@ -1906,7 +1906,19 @@ selected bundle, not automatic reset-archive resolution: it does not verify that
 the bundle implements the requested reset image, acknowledge reset, or publish
 BOOTEND on behalf of missing services. Completing startup entries alone does not
 establish an operational reset session. The normal path remains unchanged when
-the probe option is absent; generated output still undergoes dependency auditing.
+both IOP options are absent; generated output still undergoes dependency auditing.
+
+`--iop-reset-session <module.data> --disc <image.iso>` explicitly executes that
+selected bundle as a persistent reset session. It accepts mode-zero UDNL disc
+archive requests only after verifying that each linked source module belongs to
+the requested archive. This membership check does not prove complete archive
+coverage: unselected services are not silently implemented. The prepared reset
+job waits for EE teardown of the old SIFINIT/CMDINIT announcements before running
+startup and publishing flags produced by the new services. Compiled workers,
+incoming packets, outgoing replies and EE interrupt completion then share the
+native transport. Missing RPC servers still return an unsuccessful bind; the
+last requested server is reported to distinguish retry loops from useful work.
+Repeated reset and automatic selection of all archive services remain unfinished.
 
 Bundle conversion accepts `romdrv@<base>` in place of a relocation base to
 explicitly select the native read-only archive service for a ROMDRV 2.x module.

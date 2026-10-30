@@ -23,7 +23,12 @@ void project(const std::filesystem::path& input,const std::filesystem::path& out
 void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::path& output) {
     if (inputs.empty()) throw std::runtime_error("IOP conversion: empty module bundle");
     std::vector<elf::IopModule> modules;
-    for (const auto& input : inputs) modules.push_back(elf::load_iop_module(read_file(input.path),input.base));
+    std::vector<std::uint64_t> source_hashes;
+    for (const auto& input : inputs) {
+        const auto bytes=read_file(input.path);
+        source_hashes.push_back(fingerprint(bytes));
+        modules.push_back(elf::load_iop_module(bytes,input.base));
+    }
     std::vector<elf::IopModule> compiled;
     for (std::size_t index=0;index<modules.size();++index) {
         if (inputs[index].native_romdrv) {
@@ -56,6 +61,9 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
     detail::llvm(llvm,program);
     code<<"#include <nt/iop_native.hpp>\nusing namespace nt::iop;\n";
     code<<"std::uint64_t nt_iop_generated_data_hash() { return "<<fingerprint(module.memory)<<"ULL; }\n";
+    code<<"#include <vector>\nstd::vector<std::uint64_t> nt_iop_generated_source_hashes() { return {";
+    for (const auto hash:source_hashes) code<<hash<<"ULL,";
+    code<<"}; }\n";
     code<<"NativeModule nt_iop_generated_module() { return {"<<module.base<<"U,"<<module.entry<<"U,"
         <<module.initialized_size<<"U,"<<memory_end-first<<"U,"
         <<(module.info ? module.info->global_pointer : 0)<<"U}; }\n";

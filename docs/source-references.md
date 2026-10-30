@@ -385,6 +385,10 @@ Native ROMDRV replacement selection uses the pinned `romdrv.h` 2.x import ABI
 and `exports.tab` six-entry layout. Mount/unmount use its documented error
 numbers; startup activates an empty native service rather than probing firmware.
 The explicit conversion choice is recorded in the local module manifest.
+Native reset-session teardown ordering follows the pinned PS2SDK
+`ee/kernel/src/iopcontrol.c` reset protocol: submission precedes clearing the
+old SIFINIT/CMDINIT announcements. New native startup is scheduled after those
+acknowledgements, without instruction-count delays or invented readiness flags.
 
 The thread-yield syscall number, saved-frame layout and callback contract use
 the pinned PS2SDK intrman and threadman public interfaces (intrman.c, thcommon.c
