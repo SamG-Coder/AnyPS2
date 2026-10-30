@@ -91,7 +91,7 @@ native executable, and runs through semaphore creation, callback registration an
 compiled handler execution. A guest-readable view of native registrations lets startup find those handlers.
 With a private copied-payload mapping, the latest bounded run executes the
 ahead-of-time compiled payload and registers its syscall handlers, then reaches
-an unsupported VU control read after 5,968,957 operations, past
+an unsupported VU microprogram upload in a VIF0 batch after 6,363,631 operations, past
 Timer 2 interrupt configuration, thread creation, priority change, native
 application settings, further copied-handler registrations and native SIF receiver
 initialization and interrupt-safe receive rearm. A native bootstrap command peer now accepts command-buffer and
@@ -104,7 +104,10 @@ completion pass synthetic disc tests; GT4 has not opened or read a file yet.
 ELF constructor/destructor tables now supply additional compilation entries.
 Native scratchpad storage, Vulkan-backed GS reset and GS mask access are available.
 SetGsCrt and nominal display deadlines use a host monotonic clock. Native VIF/GIF
-reset and configuration are available; packet execution, VU control integration,
+reset and configuration and native VU control setup are available. VIF/GIF submission
+configuration validates normal and bounded chain transfers. A native consumer
+applies supported VIF configuration batches atomically; VU microprogram conversion,
+remaining packet commands,
 drawing translation/presentation, further indirect-target discovery
 and game-supplied IOP module integration remain unfinished. DMA completion delivery now shares the native interrupt
 dispatcher and is verified with a compiled packet-to-handler test. Address-translation
@@ -383,3 +386,85 @@ cannot determine copyright ownership of arbitrary text.
 See [AGENTS.md](AGENTS.md) for engineering and contribution rules,
 [architecture](docs/architecture.md) for implementation boundaries, and
 [source references](docs/source-references.md) for upstream provenance and notices.
+
+
+For offline VU conversion investigation, the native probe accepts
+`--capture-vu work/new-private-directory`. It saves the first rejected, complete
+MPG payload and its unit/destination metadata without accepting the upload.
+The destination directory must not already exist. Keep captures private and ignored.
+The capture also saves `packet.bin`, the complete rejected submission. Use
+`ps2-vu-extract packet.bin work/new-extraction 0` to extract its ordered uploads and
+assemble contiguous image regions offline. The extractor stops before launches,
+interrupt commands and unknown formats; it never executes uploaded code. Its manifest
+records destinations and the extraction boundary. Later writes replace earlier bytes,
+and gaps remain separate files.
+Run `ps2-vu-inspect work/new-private-directory/upload.bin 0 0` using the captured
+unit and destination values to inventory paired instructions. This tool currently
+frames input, decodes typed upper arithmetic and supported lower operations, counts encoding families and discovers control-flow candidates from
+the supplied destination as an assumed entry; it does not generate LLVM or execute VU
+microprograms. EE macro-vector LLVM support does not imply microprogram support.
+
+
+`ps2-vu-recompile input.bin output.ll unit destination` now emits LLVM for a bounded
+VU basic block ending in a branch or E-bit delay pair. Initial native lowering
+covers finite add/subtract/multiply and multiply-add/subtract (including accumulator destinations), NOP/ABS,
+min/max and scaled conversions above, plus integer arithmetic, literals and bit-preserving
+vector transfers below. Synchronized finite Q operations include DIV, SQRT, RSQRT,
+WAITQ and upper Q operands. Q reads requiring unsynchronized latency handling stop
+explicitly; automatic pipeline visibility is not implemented. Unsupported operation
+families are reported together. Native upload/launch binding remains unfinished.
+
+An optional final comma-separated entry list enables multi-block conversion:
+`ps2-vu-recompile input.bin output.ll 0 0 0,32`. This emits reachable native functions
+and block-table/count accessors in one LLVM module. Entries must come from conversion
+analysis; the upload destination is not proof of a launch entry. Indirect targets
+need explicit entries, and missing code is reported without emitting a partial module.
+The first private GT4 submission contains two adjacent uploads. Its currently
+identified structural entries produce 30 native blocks that compile to x86-64.
+Quadword loads/stores, including pre-decrement and post-increment forms, now lower
+to native memory operations. VU0 accesses to the VU1 register window stop explicitly.
+Neither runtime target coverage nor execution of this game upload is proven.
+
+Generated VU modules also expose their source-image identity and native block table.
+A reusable binding accepts matching upload batches atomically and permits native
+launch only after the complete image has arrived. This path is tested with synthetic
+compiled programs. Newly generated EE projects can link separate unit modules with
+`ps2-build <project> <source-root> --vu <vu0.ll> --vu1 <vu1.ll>`.
+Each unit tracks upload coverage independently. The private startup accepts both
+compiled uploads and reaches a later unsupported-system stop. VU launch/state
+handoff and selection among multiple images for one unit remain unfinished.
+
+VU integer-memory operations (`ILW`, `ISW`, `ILWR`, `ISWR`) also lower to native
+loads/stores. VU1 conversion remains bounded by the supported operation and
+scheduling semantics.
+`XTOP`/`XITOP` read explicitly supplied native launch inputs; missing inputs stop
+execution. `OPMULA`/`OPMSUB` use the shared finite arithmetic path for xyz products.
+VU1 also supports synchronized `ERLENG`, `WAITP` and masked `MFP`. Pending P reads
+without supported synchronization stop explicitly; automatic P latency remains unfinished.
+MAC comparisons and bitwise reads (`FMEQ`, `FMAND`, `FMOR`) are supported when flag
+visibility is established. Reads that require additional stall/flag timing stop.
+Ordinary VU1 `XGKICK` lowers to a native graphics request boundary with bounded
+packet framing. A missing consumer stops execution; Vulkan packet rendering,
+and asynchronous transfer behavior remain unfinished. Kick-plus-E supports a final
+delay pair without data stores and reports completion only after packet acceptance.
+CLIP and its flag operations now lower to native code with conservative visibility
+checks. The identified structural entries in the captured VU1 image compile into
+392 native blocks. Both unit artifacts link and bind during private startup;
+game VU launch execution and visible rendering remain unverified.
+
+VIF1 `MSCAL` can invoke a bound native VU1 program, with TOP/ITOP inputs and
+buffer selection. Launches commit only on completion. The initial path accepts
+one launch at the end of a configuration batch; mixed uploads/launches, VU0 shared
+state handoff, continuation commands and graphics-request completion remain unsupported.
+Compiled synthetic programs verify this path; GT4 still stops earlier at a
+performance measurement request with no supported native provider.
+
+Unmasked, contiguous V4-32 data uploads can populate native VU1 storage, including
+wrapped and TOPS-relative destinations. Data and a final MSCAL commit together
+only when execution completes. Other unpack formats, masked writes and row/cycle
+transformations remain unsupported.
+
+The native VU runtime can route between registered ahead-of-time compiled blocks,
+with bounded execution and explicit stops for missing targets or unsupported numeric
+inputs. It has no instruction decoder or interpreter fallback. This is validated
+with original synthetic programs; it is not yet connected to GT4's VU launches.

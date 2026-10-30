@@ -1855,3 +1855,249 @@ Native VIF/GIF initialization milestone:
 - `ee-llvm-project` passes generated LLVM compilation and execution.
 - The private GT4 executable passes VIF0 reset and stops at an unsupported VU
   control read after 5,968,957 operations. This is startup progress, not boot.
+
+
+Native vector-owner milestone:
+
+- Compiled CTC2/CFC2 transfers use the production platform owner, including masked
+  control readback, active-work backpressure, retry and idle reset.
+- The same milestone checks shared status/MAC storage, integer widths, read-only
+  controls, constant integer zero and unsupported selectors.
+- Private GT4 execution passes vector-control setup and reaches VIF0 DMA access
+  after 5,969,004 operations. No boot or rendered frame is claimed.
+
+
+Native packet-submission milestone:
+
+- Compiled SW/LW accesses configure all three channels and verify consumer
+  delivery, source/count updates and completion only after successful consumption.
+- Missing/rejecting consumers, unsupported chains, unaligned/out-of-range sources
+  and scratchpad boundaries reject without consuming a packet or raising completion.
+- Synthetic consumers verify the interface; they do not establish a production
+  VIF/GIF packet implementation. The private GT4 run stops at global DMA priority
+  access after 5,969,128 operations, before packet submission.
+
+
+Submission-policy coverage uses compiled accesses to verify cold control state,
+enable/suspend readback, disabled and suspended starts without consumer calls,
+rejected arbitration/mode changes without mutation, rejecting-consumer retry,
+and zero-only channel initialization. The private rebuilt executable reaches a
+VIF0 chain submission after 6,363,631 operations with submission enabled; no packet
+consumption, boot or game frame is established by this result.
+
+
+Native chain/configuration milestone:
+
+- Synthetic compiled submissions cover REFE/CNT/NEXT/REF/END, upper-tag commands,
+  payload commands, tag interrupt termination and successful native configuration.
+- Cyclic chains, invalid source extents and unsupported descriptors fail without
+  completion. A later unsupported MPG command rolls back an earlier MARK in the
+  same batch; truncated row configuration also preserves prior configuration.
+- Private GT4 execution identifies MPG (0x4a) as the first unsupported command in
+  the resolved chain, at 6,363,631 operations. No VU upload, launch or game frame is
+  reported as successful.
+
+
+VU input milestone:
+
+- `vu-program-framing` uses original synthetic words to test pair order, immediate
+  versus lower-instruction selection, flags, operands and VU0/VU1 extent validation.
+- The compiled packet milestone checks that complete MPG input reaches the optional
+  observer, truncated input does not, and neither case commits packet configuration.
+- `ee-llvm-project` continues to compile and execute generated code independently
+  of the offline VU library. Framing tests do not validate VU execution semantics.
+- The opt-in private capture was inspected with ps2-vu-inspect. The capture remains
+  under ignored work/ and is not a repository fixture.
+
+
+The VU frontend milestone also covers synthetic conditional/direct/call/return
+control flow, separate delay-slot visitation, E-bit termination, signed target
+wrapping, loops, missing slots, branch-like immediate data and duplicate-address
+rejection. Branches inside delay slots are reported as unresolved complex ordering.
+Only `vu-program-framing` is required for this offline-only change; no generated
+runtime behavior changed. Private inspection is a candidate inventory, not a boot
+or native VU execution test.
+
+
+Upper arithmetic frontend coverage extends the VU milestone with original synthetic
+encodings for vector destinations, masked operands, all broadcast lanes, accumulator
+forms, I/Q selection, conversion scales and Ft destinations, outer products, ABS,
+CLIP, NOP and reserved cases. These tests verify typed decoding only; they do not
+compare numerical execution or timing. Only the offline VU tests are rerun for this
+change because generated runtime dependencies are unchanged.
+
+
+Lower frontend tests extend the VU milestone across integer register/result
+selection, signed five-bit and unsigned fifteen-bit immediates, vector masks,
+rotation, scalar lane selection, I/Q destinations, WAITQ dependencies, register-bank
+transfers and shared branch decoding. Reserved encodings stay unsupported. All
+fixtures are original synthetic encodings; numeric execution remains untested
+because this stage only constructs typed conversion records.
+
+
+`vu-llvm-execution` compiles original synthetic VU pairs to LLVM, compiles the IR
+with clang and links only the generated object plus a C++ state-checking driver.
+It exercises integer wrapping, same-pair old-vector reads, in-place rotation,
+signed integer broadcasting, constant VF0, I literal publication and E delay-pair
+execution. Its fixture emitter also verifies that an unsupported arithmetic family
+fails without partial LLVM output. No interpreter or frontend library is linked
+into the execution test. Numeric/branch/Q families remain outside this milestone.
+
+
+The compiled VU arithmetic milestone now exercises ITOF4/FTOI4 across signed
+values and conversion saturation, bit-ordered min/max including signed zero and
+exponent-255 inputs, a masked broadcast with preserved destination lanes, and an
+upper I operand paired with a lower replacement literal. It links the existing
+numeric helper source rather than an interpreter or a second numeric implementation.
+Only vu-llvm-execution and repository content checks are needed for this lowering
+extension; shared helper implementation and unrelated runtime code are unchanged.
+
+
+Finite VU native arithmetic extends vu-llvm-execution with ADD, masked broadcast
+SUB, masked accumulator MUL with I, and MUL to constant VF0. Checks cover results,
+preserved accumulator lanes, zero/sign/underflow MAC flags and sticky status.
+Nonfinite and overflowing operands must reject the whole native region without
+changing any input State fields, even after earlier pairs would have changed them.
+The EE LLVM execution milestone also passes after factoring the shared flag policy.
+These checks establish finite arithmetic and atomic failure, not branch/Q pipelines
+or GT4 upload execution.
+
+
+The VU native milestone additionally executes masked MADD/MSUB vector results,
+broadcast MADDA and immediate MSUBA accumulator updates. A cancellation fixture
+checks separate product rounding rather than fused arithmetic. Intermediate
+product underflow is rejected both by the shared helper and by a compiled region,
+with every input State field unchanged. The EE native milestone also passes with
+the extended shared numeric source.
+
+
+The VU compiled milestone now includes separate conditional and indirect-call
+objects. It verifies taken/untaken paths, unconditional delay-pair execution,
+previous integer writes seen by branch operands, incoming delayed operands across
+block boundaries, same-register JALR target/link ordering and atomic rollback when
+upper arithmetic fails in a branch pair. The native driver links generated objects,
+not a decoder. Private first-block LLVM generation and x64 object compilation also
+succeeded, without executing the commercial block or claiming boot progress.
+# Native VU routing milestone
+
+`vu-llvm-execution` compiles original branch and E-bit continuation fixtures through
+LLVM and executes them through the native block registry. It covers both branch
+outcomes, delay-slot effects, bounded pause/resume, zero budget, missing indirect
+targets, numeric failure rollback and malformed registries. This executable links
+the generated objects and native numeric helpers, without the offline decoder or
+an instruction interpreter. These synthetic results do not establish game boot.
+
+The quotient milestone extends this same compiled execution test with a DIV result
+carried across a branch, paired WAITQ/MULq, SQRT and RSQRT, pending-state resumption,
+numeric and schedule rollback, invalid/sticky status and signed zero exceptions.
+The shared native numeric translation unit also builds and passes `ee-llvm-execution`.
+The private whole-upload conversion probe now reaches the single-block-boundary
+diagnostic rather than the missing-Q-family diagnostic. This does not execute the
+upload or establish GT4 boot progress.
+
+The multi-block milestone generates one LLVM module from an original conditional
+program, compiles its native functions and table, and executes both branch outcomes
+using the generated table through `Program`. It checks delay-slot side effects and
+completion counts. Generation also rejects a late unsupported block, a missing
+delay pair and complex delayed control flow without emitting partial output.
+Private candidate-block compilation is separate evidence; no commercial code or
+capture is a committed fixture, and compilation does not establish execution.
+
+Upload extraction extends `vu-program-framing` with multiple MPG chunks, count-zero
+encoding, payload words resembling commands, launch boundaries, truncated packets,
+unit limits, interrupts, overlapping writes and sparse image assembly. The native
+packet integration test checks the full-packet observer receives the rejected batch
+without committing MARK, publishing completion or observing truncated MPG data.
+The private capture/extraction run confirms two adjacent chunks; it does not accept
+or execute their upload in the runtime.
+
+The quadword-memory milestone compiles original load/store programs for both VU
+units. Native execution checks masked stores, pre-decrement/post-increment, VF0
+constant stores, ignored loads to VF0, signed displacements, the differing memory
+wrap sizes and whole-block rollback after a late VU0 register-window access. The
+private 30-block object is compilation evidence only; it is not a test fixture.
+
+The binding milestone links a generated module's identity accessors and native
+table into `vu-llvm-execution`. It verifies that partial coverage cannot launch,
+wrong content or unit cannot commit, a later unsupported packet command prevents
+binding, a complete matching upload commits configuration and launches native code,
+and reset blocks resumption. The affected EE packet regression also passes. The
+native test links no instruction decoder, offline frontend, or interpreter.
+
+Generated-project integration passes `ee-llvm-project` with the optional module
+disabled and the native binding milestone with the shared packet adapter. The
+opt-in private regenerated project links its 30-block VU0 module, verifies the full
+upload identity, and stops on the next VU1 upload. Its generated build source list
+contains native services and LLVM objects, not an interpreter or offline decoder.
+This establishes startup upload progress only, not VU execution or visible boot.
+
+The integer-memory milestone extends both native unit fixtures with ILW/ISW and
+ILWR/ISWR, checking zero extension, lane masks and last-selected-lane priority.
+A separate generated load/branch block checks low-16-bit truncation and immediate
+branch visibility. Both VU milestone tests pass. Private inventory counts describe
+decoder coverage only; the next unlowered VU1 block remains an explicit stop.
+
+The launch-input/outer-product milestone compiles XTOP, XITOP, OPMULA and OPMSUB
+together. It verifies supplied offsets, missing-input rollback, xyz cross-product
+results, preserved w values and flags, and unsupported numeric rollback. Both VU
+milestone tests pass. Private conversion advances to an extended-function gap at
+pair 533; no execution or boot claim follows from that diagnostic.
+
+The P-register milestone generates a multi-block VU1 module with ERLENG, a branch,
+WAITP and masked MFP, plus an unsynchronized read entry. Native execution checks
+pending-state transfer, reciprocal length, zero length, unaffected flags, numeric
+rollback and schedule rollback. Related VU tests and shared EE numeric execution
+pass. VU fixture compilation now uses one reusable CMake loop instead of repeated
+per-fixture compiler commands.
+
+The MAC-read milestone generates an arithmetic writer, branch, settling pair and
+FMAND/FMOR/FMEQ readers, with an alternate early-read entry. Native execution
+checks guard preservation across blocks, correct masks/comparisons, low-16-bit
+flag selection and atomic rejection of unproven visibility. Both VU milestone
+tests pass. Private conversion now stops on XGKICK rather than the MAC-read family.
+
+The graphics-boundary milestone generates a VU1 program split at XGKICK and verifies
+pending requests prevent continuation. A synthetic accepting consumer receives an
+immutable wrapped packet before the continuation modifies its source data. Missing
+or rejecting consumers and malformed packets preserve the pending request. Packet
+tests cover multi-tag register-list/image framing and missing end tags. This is a
+native interface test, not Vulkan rendering or asynchronous PS2 transfer validation.
+
+The combined graphics/E milestone compiles a kick with an integer-modifying delay
+pair. It verifies source-address capture, exactly-once delay execution, rejection
+without completion, acceptance followed by completion without another native block,
+and stable repeated completion checks. A delay-pair data store is rejected before
+module emission. Both VU milestone tests pass; private conversion reaches clip flags.
+
+The clip milestone compiles CLIP with FCAND/FCOR/FCEQ/FCSET/FCGET across a branch.
+Native execution checks history rollover, masks, comparisons, low-twelve-bit reads,
+unchanged MAC/status, four-pair visibility and early-read rollback. Numeric edge
+checks cover signed zero, equal thresholds and denormals. Related VU and shared EE
+tests pass. The private VU1 module compiles to a 392-block x86-64 object, without
+claiming that those blocks have executed or that all possible targets were found.
+
+The dual-unit binding milestone compiles separate synthetic VU0/VU1 modules and
+links both into the execution test. It checks independent partial upload coverage,
+duplicate rejection, failed-upload isolation and native execution of the VU1
+artifact. Related Release gates are `vu-llvm-execution`, `vu-program-framing` and
+`ee-llvm-project`. Private startup confirms both uploads bind but stops before
+game VU execution; this is not visible boot evidence.
+
+The native metric boundary is covered by `ee-llvm-execution`: generated code
+performs control and both counter transfers through a synthetic provider, passes
+execution mode, preserves signed readback, and leaves state and retirement
+unchanged after rejection. Existing disabled-counter and absent-provider cases
+remain covered. `ee-llvm-project` verifies linkage of the emitted calls through
+the generated build. The synthetic provider does not establish a production
+measurement source or console timing equivalence.
+
+The VIF1 launch milestone in `vu-llvm-execution` submits configuration and MSCAL
+packets to an actual LLVM-compiled synthetic program. It checks native results,
+TOP/ITOP inputs, alternating buffers, rejection of trailing commands, missing
+entry rollback, bounded-execution rollback and rejection of VU0 without shared
+state ownership. `ee-llvm-execution` covers affected packet integrations.
+
+The V4-32 milestone uploads vectors and launches an LLVM-compiled load program in
+one submission. It checks wraparound, TOPS-relative writes and atomic rollback for
+truncated input, unknown trailing commands, unsupported cycles and missing native
+entries. This proves synthetic native data consumption, not game rendering.

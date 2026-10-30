@@ -12,6 +12,15 @@ struct PerformanceState { std::uint32_t control=0; std::uint32_t counters[2]{}; 
 // preserve service state and remain retryable. No callback receives guest code.
 struct IoRead { Stop status; std::uint32_t value=0; };
 struct IoRead64 { Stop status; std::uint64_t value=0; };
+enum class PerformanceOperation : std::uint32_t { read_control, write_control, read_counter, write_counter };
+// Providers own measurement semantics and must reject unsupported event/mode
+// combinations atomically. They receive typed requests, never guest instructions.
+struct NativePerformance {
+    void* context=nullptr;
+    IoRead (*request)(void*,PerformanceState&,PerformanceOperation,unsigned,std::uint32_t,std::uint32_t)=nullptr;
+    bool rejected=false;
+    std::uint32_t rejected_control=0;
+};
 struct NativeIo {
     void* context=nullptr;
     IoRead (*read32)(void*,std::uint32_t)=nullptr;
@@ -55,6 +64,7 @@ struct Memory {
     std::uint8_t* scratchpad=nullptr;
     std::uint64_t scratchpad_bytes=0;
     NativeGraphics* graphics=nullptr;
+    NativePerformance metrics;
 };
 // Syscall boundaries retain PC and do not retire until a native service handles them.
 using Entry = Stop (*)(runtime::State*,Memory*,std::uint64_t);

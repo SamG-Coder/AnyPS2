@@ -1,4 +1,8 @@
 #include <nt/ee_float.hpp>
+#include <nt/ee_vector_math.hpp>
+#include <nt/vu_quotient.hpp>
+#include <nt/vu_extended.hpp>
+#include <nt/vu_clip.hpp>
 namespace {
 std::uint64_t pack(nt::numeric::FiniteFloatResult result) {
     return result.bits | (std::uint64_t(result.underflow)<<32) | (std::uint64_t(!result.supported)<<33);
@@ -8,6 +12,21 @@ std::uint64_t pack_flags(nt::numeric::ScalarFlagResult result) {
 }
 }
 // Fixed-width C ABI keeps the LLVM caller independent of C++ struct-return rules.
+extern "C" std::uint32_t nt_vu_clip_flags(std::uint32_t x,std::uint32_t y,std::uint32_t z,std::uint32_t w) {
+    return nt::numeric::clip_flags(x,y,z,w);
+}
+extern "C" std::uint64_t nt_vu_reciprocal_length_finite(std::uint32_t x,std::uint32_t y,std::uint32_t z) {
+    return pack(nt::numeric::reciprocal_length_finite(x,y,z));
+}
+extern "C" std::uint64_t nt_vu_divide_finite(std::uint32_t left,std::uint32_t right) {
+    return pack_flags(nt::numeric::vu_divide_finite(left,right));
+}
+extern "C" std::uint64_t nt_vu_square_root_finite(std::uint32_t right) {
+    return pack_flags(nt::numeric::vu_square_root_finite(right));
+}
+extern "C" std::uint64_t nt_vu_reciprocal_square_root_finite(std::uint32_t left,std::uint32_t right) {
+    return pack_flags(nt::numeric::vu_reciprocal_square_root_finite(left,right));
+}
 extern "C" std::uint64_t nt_ee_add_finite(std::uint32_t left,std::uint32_t right,std::uint32_t subtract) {
     return pack(nt::numeric::add_subtract_finite(left,right,subtract!=0));
 }
@@ -38,4 +57,16 @@ extern "C" std::uint32_t nt_ee_scaled_scalar_to_integer(std::uint32_t value,std:
 
 extern "C" std::uint64_t nt_ee_square_root_finite(std::uint32_t value) {
     return pack_flags(nt::numeric::square_root_finite(value));
+}
+
+extern "C" std::uint32_t nt_ee_vector_lane_flags(std::uint64_t packed,std::uint32_t lane) {
+    return lane<4 ? nt::numeric::vector_lane_flags(static_cast<std::uint32_t>(packed),((packed>>32)&1)!=0,lane) : 0;
+}
+extern "C" std::uint32_t nt_ee_vector_status_flags(std::uint32_t mac,std::uint32_t previous) {
+    return nt::numeric::vector_status_flags(mac,previous);
+}
+
+extern "C" std::uint64_t nt_ee_multiply_accumulate_finite(std::uint32_t accumulator,std::uint32_t left,
+                                                       std::uint32_t right,std::uint32_t subtract) {
+    return pack(nt::numeric::multiply_accumulate_finite(accumulator,left,right,subtract!=0));
 }

@@ -5,6 +5,15 @@
 namespace nt::numeric {
 using Vector=std::array<std::uint32_t,4>;
 struct VectorResult { Vector value; std::uint32_t mac,status; bool supported=true; };
+inline std::uint32_t vector_lane_flags(std::uint32_t bits,bool underflow,unsigned lane) {
+    const auto bit=1U<<(3-lane);
+    return (!(bits&0x7fffffff) ? bit : 0U)|((bits>>31) ? bit<<4 : 0U)|(underflow ? bit<<8 : 0U);
+}
+inline std::uint32_t vector_status_flags(std::uint32_t mac,std::uint32_t previous) {
+    const auto current=((mac&15) ? 1U : 0U)|((mac&0xf0) ? 2U : 0U)|((mac&0xf00) ? 4U : 0U);
+    return (previous&0xff0)|current|(current<<6);
+}
+
 template<class Arithmetic>
 inline VectorResult binary_vector(Vector original,Vector left,Vector right,unsigned mask,
                                   unsigned broadcast,std::uint32_t previous_status,Arithmetic arithmetic) {
@@ -16,12 +25,9 @@ inline VectorResult binary_vector(Vector original,Vector left,Vector right,unsig
         const auto value=arithmetic(left[lane],right[broadcast<4 ? broadcast : lane]);
         if (!value.supported) { result.supported=false; return result; }
         result.value[lane]=value.bits;
-        if (!(value.bits&0x7fffffff)) result.mac|=bit;
-        if (value.bits>>31) result.mac|=bit<<4;
-        if (value.underflow) result.mac|=bit<<8;
+        result.mac|=vector_lane_flags(value.bits,value.underflow,lane);
     }
-    const auto current=((result.mac&15) ? 1U : 0U)|((result.mac&0xf0) ? 2U : 0U)|((result.mac&0xf00) ? 4U : 0U);
-    result.status=(previous_status&0xff0)|current|(current<<6);
+    result.status=vector_status_flags(result.mac,previous_status);
     return result;
 }
 inline VectorResult add_subtract_vector(Vector original,Vector left,Vector right,unsigned mask,

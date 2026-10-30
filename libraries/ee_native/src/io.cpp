@@ -1,6 +1,31 @@
 #include <nt/ee_native.hpp>
 #include <nt/ee_interrupts.hpp>
 #include <nt/ee_completions.hpp>
+extern "C" std::uint64_t nt_ee_performance(nt::ee::Memory* memory,std::uint32_t operation,
+    std::uint32_t counter,std::uint32_t value,std::uint32_t execution_mode) {
+    using namespace nt::ee;
+    if (operation>static_cast<unsigned>(PerformanceOperation::write_counter) || counter>1)
+        return std::uint64_t(Stop::invalid_state)<<32;
+    const auto request=static_cast<PerformanceOperation>(operation);
+    auto candidate=memory->performance;
+    IoRead result{Stop::unsupported_system};
+    if (memory->metrics.request) {
+        result=memory->metrics.request(memory->metrics.context,candidate,request,counter,value,execution_mode);
+    } else if (!(candidate.control&0x80000000U) &&
+               !(request==PerformanceOperation::write_control && (value&0x80000000U))) {
+        result.status=Stop::budget;
+        switch (request) {
+        case PerformanceOperation::read_control: result.value=candidate.control; break;
+        case PerformanceOperation::write_control: candidate.control=value; break;
+        case PerformanceOperation::read_counter: result.value=candidate.counters[counter]; break;
+        case PerformanceOperation::write_counter: candidate.counters[counter]=value; break;
+        }
+    }
+    memory->metrics.rejected=result.status!=Stop::budget;
+    memory->metrics.rejected_control=request==PerformanceOperation::write_control ? value : memory->performance.control;
+    if (result.status==Stop::budget) memory->performance=candidate;
+    return (std::uint64_t(result.status)<<32)|result.value;
+}
 namespace {
 void publish(nt::ee::Memory& memory,nt::ee::Stop status,std::uint32_t address) {
     if (memory.io.poll) memory.io.poll(memory.io.context);

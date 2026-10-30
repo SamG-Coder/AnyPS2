@@ -833,6 +833,28 @@ int main() {
             }
         }
         {
+            nt::ee::NativePlatform platform; nt::ee::Memory memory; platform.attach(memory);
+            auto& owner=platform.vector_owner;
+            check(memory.vectors==&owner.storage);
+            nt::runtime::State state; state.pc=0x143c; state.gpr[8].lo=0x0c0c;
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall);
+            state={}; state.pc=0x1414;
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall && state.gpr[8].lo==0x0c0c);
+            owner.storage.active=true;
+            state={}; state.pc=0x143c; state.gpr[8].lo=0x202;
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::vector_pending && !state.executed);
+            check(owner.read(29,false).value==1 && owner.read(29,true).status==nt::ee::VectorStatus::pending);
+            owner.storage.active=false;
+            check(owner.read(28,false).value==0x0c0c);
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall && owner.read(28,false).value==0);
+            owner.storage.mac=0x1234; owner.storage.status=0x5678;
+            check(owner.read(17,false).value==0x1234 && owner.read(16,false).value==0x5678);
+            check(owner.write(17,false,0)==nt::ee::VectorStatus::ready && owner.storage.mac==0x1234);
+            check(owner.write(1,false,0xffff1234)==nt::ee::VectorStatus::ready && owner.read(1,false).value==0x1234);
+            check(owner.write(0,false,42)==nt::ee::VectorStatus::ready && owner.read(0,false).value==0);
+            check(owner.write(31,false,0)==nt::ee::VectorStatus::unsupported && owner.read(31,false).status==nt::ee::VectorStatus::unsupported);
+        }
+        {
             struct Owner {
                 nt::ee::VectorReadResult response{nt::ee::VectorStatus::pending};
                 unsigned calls=0,selector=0; bool wait=false;
@@ -935,6 +957,31 @@ int main() {
             memory.performance.control=0x80000000; state={}; state.pc=0x1488; state.gpr[11].lo=123;
             check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::unsupported_system &&
                   !state.executed && state.gpr[11].lo==123);
+            struct Metrics { bool reject=true; unsigned calls=0; std::uint32_t mode=0; } metrics;
+            memory.metrics={&metrics,+[](void* raw,nt::ee::PerformanceState& next,
+                nt::ee::PerformanceOperation operation,unsigned counter,std::uint32_t value,std::uint32_t mode) {
+                auto& metrics=*static_cast<Metrics*>(raw);
+                ++metrics.calls; metrics.mode=mode;
+                next.control=0x80000000U;
+                if (metrics.reject) return nt::ee::IoRead{nt::ee::Stop::unsupported_system};
+                using Operation=nt::ee::PerformanceOperation;
+                switch (operation) {
+                case Operation::write_control: next.control=value; return nt::ee::IoRead{nt::ee::Stop::budget};
+                case Operation::read_control: return nt::ee::IoRead{nt::ee::Stop::budget,next.control};
+                case Operation::write_counter: next.counters[counter]=value; return nt::ee::IoRead{nt::ee::Stop::budget};
+                case Operation::read_counter: return nt::ee::IoRead{nt::ee::Stop::budget,next.counters[counter]};
+                }
+                return nt::ee::IoRead{nt::ee::Stop::invalid_state};
+            }};
+            memory.performance.control=0x12340; state={}; state.pc=0x147c;
+            state.gpr[8].lo=0x80000000U; state.cop0_status=0xc01;
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::unsupported_system &&
+                  !state.executed && memory.performance.control==0x12340 && metrics.mode==0xc01);
+            metrics.reject=false;
+            state.gpr[9].lo=0x80000005U; state.gpr[10].lo=321;
+            check(nt_ee_generated_run(&state,&memory,16)==nt::ee::Stop::syscall && state.executed==6 &&
+                  state.gpr[11].lo==0xffffffff80000000ULL && state.gpr[12].lo==0xffffffff80000005ULL &&
+                  state.gpr[13].lo==321 && memory.performance.counters[1]==321 && metrics.calls==7);
         }
         for (const bool secondary : {false,true}) for (unsigned variant=0;variant<4;++variant) {
             for (const auto a : {0U,1U,7U,0x80000000U,0x80000001U,0xffffffffU}) {
@@ -1765,6 +1812,134 @@ int main() {
                 check(write(address,0)==nt::ee::Stop::unsupported_system && state.executed==retired && state.pc==0x360000);
             }
             check(!memory.pending_interrupts && !platform.completions.status());
+        }
+        {
+            std::array<std::uint8_t,64> ram{}; ram[0]=17; ram[16]=42;
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.attach(memory);
+            struct Sink { unsigned calls=0,channel=99; std::size_t bytes=0; unsigned first=0; nt::ee::Stop result=nt::ee::Stop::unsupported_system; } sink;
+            nt::runtime::State state;
+            const auto write=[&](unsigned address,unsigned value) {
+                state.pc=0x360000; state.set(4,address); state.set(8,value);
+                return nt_ee_generated_run(&state,&memory,1);
+            };
+            const auto read=[&](unsigned address) {
+                state.pc=0x360008; state.set(4,address);
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+                return static_cast<unsigned>(state.gpr[8].lo);
+            };
+            check(write(0x10008020,1)==nt::ee::Stop::budget);
+            check(write(0x10008000,0x101)==nt::ee::Stop::unsupported_system && !platform.completions.status());
+            platform.packet_submission.consumer={&sink,[](void* context,unsigned channel,std::span<const std::uint8_t> bytes) {
+                auto& sink=*static_cast<Sink*>(context); ++sink.calls;
+                if (sink.result==nt::ee::Stop::budget) {
+                    sink.channel=channel; sink.bytes=bytes.size(); sink.first=bytes.empty() ? 0 : bytes.front();
+                }
+                return sink.result;
+            }};
+            check(write(0x10008000,0x101)==nt::ee::Stop::unsupported_system && read(0x10008020)==1 && !platform.completions.status());
+            sink.result=nt::ee::Stop::budget;
+            check(read(0x1000e000)==0 && read(0x1000f520)==0x1201);
+            check(write(0x10008000,0x101)==nt::ee::Stop::unsupported_system && !platform.completions.status());
+            check(write(0x1000e000,1)==nt::ee::Stop::budget);
+            sink.result=nt::ee::Stop::unsupported_system;
+            const auto rejected_calls=sink.calls;
+            check(write(0x10008000,0x101)==nt::ee::Stop::unsupported_system && sink.calls==rejected_calls+1 && read(0x10008020)==1 && !platform.completions.status());
+            sink.result=nt::ee::Stop::budget;
+            check(write(0x1000e000,3)==nt::ee::Stop::unsupported_system && read(0x1000e000)==1);
+            check(write(0x1000e020,0x7fffffff)==nt::ee::Stop::budget && read(0x1000e020)==0x03ff03ff);
+            check(write(0x1000e020,0x80000000)==nt::ee::Stop::unsupported_system && read(0x1000e020)==0x03ff03ff);
+            check(write(0x1000f590,0x11201)==nt::ee::Stop::budget && read(0x1000f520)==0x11201);
+            const auto suspended_calls=sink.calls;
+            check(write(0x10008000,0x101)==nt::ee::Stop::unsupported_system && sink.calls==suspended_calls);
+            check(write(0x1000f590,0x1201)==nt::ee::Stop::budget && read(0x1000f590)==0x1201);
+            check(write(0x1000f520,0)==nt::ee::Stop::unsupported_system && read(0x1000f520)==0x1201);
+            for (unsigned channel=0;channel<3;++channel) {
+                const auto base=0x10008000+channel*0x1000;
+                check(write(base+0x80,0)==nt::ee::Stop::budget && read(base+0x80)==0);
+                check(write(base+0x80,1)==nt::ee::Stop::unsupported_system && read(base+0x80)==0);
+                check(write(base+0x10,16)==nt::ee::Stop::budget && write(base+0x20,1)==nt::ee::Stop::budget);
+                check(write(base,0x101)==nt::ee::Stop::budget);
+                check(sink.channel==channel && sink.bytes==16 && sink.first==42);
+                check(read(base)==1 && read(base+0x10)==32 && read(base+0x20)==0);
+                check(platform.completions.status()&(1U<<channel));
+            }
+            platform.completions.acknowledge(7);
+            check(write(0x10008020,1)==nt::ee::Stop::budget);
+            const auto calls=sink.calls;
+            check(write(0x10008000,0x105)==nt::ee::Stop::unsupported_system && sink.calls==calls);
+            check(write(0x10008010,63)==nt::ee::Stop::budget);
+            check(write(0x10008000,0x101)==nt::ee::Stop::memory_fault && sink.calls==calls && !platform.completions.status());
+            memory.scratchpad[0]=77;
+            check(write(0x10008010,0x80000000)==nt::ee::Stop::budget);
+            check(write(0x10008000,0x101)==nt::ee::Stop::budget && sink.first==77);
+            platform.completions.acknowledge(7);
+            check(write(0x10008010,0x80003ff0)==nt::ee::Stop::budget && write(0x10008020,2)==nt::ee::Stop::budget);
+            check(write(0x10008000,0x101)==nt::ee::Stop::memory_fault && !platform.completions.status());
+        }
+        {
+            std::array<std::uint8_t,1024> ram{};
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::runtime::State state;
+            const auto put=[&](unsigned at,std::uint32_t value) { std::memcpy(ram.data()+at,&value,4); };
+            const auto write=[&](unsigned address,unsigned value) {
+                state.pc=0x360000; state.set(4,address); state.set(8,value);
+                return nt_ee_generated_run(&state,&memory,1);
+            };
+            const auto submit=[&](unsigned control=0x145) {
+                check(write(0x10008030,0)==nt::ee::Stop::budget);
+                return write(0x10008000,control);
+            };
+            check(write(0x1000e000,1)==nt::ee::Stop::budget);
+            for (const unsigned kind:{0U,1U,2U,3U,7U}) {
+                ram.fill(0); platform.completions.acknowledge(1);
+                const auto external=kind==0 || kind==3;
+                put(0,(kind<<28)|1); put(4,kind==2 ? 64 : 128);
+                put(8,0x01000404); put(12,0x0700002a);
+                put(external ? 128 : 16,0x05000002);
+                if (kind==1) put(32,0x70000000);
+                if (kind==2) put(64,0x70000000);
+                if (kind==3) put(16,0x70000000);
+                check(submit()==nt::ee::Stop::budget);
+                check(platform.packet_setup.read(0x10003840).value==0x404 && platform.packet_setup.read(0x10003830).value==42);
+                check(platform.packet_setup.read(0x10003850).value==2 && (platform.completions.status()&1));
+                check(!(platform.packet_submission.read(0x10008000).value&0x100));
+            }
+            // Whole-batch validation: a later unsupported upload cannot commit a
+            // preceding MARK, and rejected batches publish no completion.
+            ram.fill(0); platform.completions.acknowledge(1);
+            put(0,0x70000001); put(8,0x07000063); put(16,0x4a010000);
+            struct Capture { unsigned calls=0,unit=9,destination=9,packets=0; std::size_t size=0,packet_size=0; } capture;
+            platform.packet_setup.upload_context=&capture;
+            platform.packet_setup.uncompiled_packet=[](void* context,unsigned,std::span<const std::uint8_t> bytes) {
+                auto& result=*static_cast<Capture*>(context); ++result.packets; result.packet_size=bytes.size();
+            };
+            platform.packet_setup.uncompiled_upload=[](void* context,unsigned unit,unsigned destination,std::span<const std::uint8_t> bytes) {
+                auto& result=*static_cast<Capture*>(context); ++result.calls;
+                result.unit=unit; result.destination=destination; result.size=bytes.size();
+            };
+            const auto previous_source=platform.packet_submission.read(0x10008010).value;
+            check(submit()==nt::ee::Stop::unsupported_system && platform.packet_setup.rejected_command()==0x4a);
+            check(platform.packet_setup.read(0x10003830).value==42 && !platform.completions.status());
+            check(capture.calls==1 && capture.unit==0 && capture.destination==0 && capture.size==8);
+            check(capture.packets==1 && capture.packet_size==24);
+            put(16,0x4a000000);
+            check(submit()==nt::ee::Stop::invalid_state && capture.calls==1 && !platform.completions.status());
+            check(capture.packets==1);
+            check(platform.packet_submission.read(0x10008010).value==previous_source);
+            // Cyclic chains and bad extents are rejected before any consumer call.
+            ram.fill(0); put(0,0x20000000);
+            check(submit()==nt::ee::Stop::invalid_state && !platform.completions.status());
+            put(0,0x00000001); put(4,1024);
+            check(submit()==nt::ee::Stop::memory_fault && !platform.completions.status());
+            put(0,0x50000000);
+            check(submit()==nt::ee::Stop::unsupported_system && !platform.completions.status());
+            // IRQ termination excludes the following bad descriptor.
+            put(0,0x90000000); put(8,0x07000033); put(16,0x50000000);
+            check(submit(0x1c5)==nt::ee::Stop::budget && platform.packet_setup.read(0x10003830).value==51);
+            // Truncated multiword configuration is atomic too.
+            const std::array<std::uint32_t,2> incomplete{0x07000044,0x30000000};
+            check(platform.packet_setup.consume(0,{reinterpret_cast<const std::uint8_t*>(incomplete.data()),sizeof(incomplete)},false)==nt::ee::Stop::invalid_state);
+            check(platform.packet_setup.read(0x10003830).value==51);
         }
         run_ee_batch_tests();
         run_ee_file_rpc_tests();

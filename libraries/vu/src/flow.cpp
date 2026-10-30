@@ -1,0 +1,77 @@
+#include <nt/vu_program.hpp>
+#include <deque>
+#include <map>
+#include <stdexcept>
+
+namespace nt::vu {
+Control control(const Pair& pair,unsigned unit) {
+    if (unit>1) throw std::invalid_argument("Invalid VU unit");
+    Control result;
+    if (!pair.lower) return result;
+    const auto& lower=*pair.lower;
+    switch (lower.primary) {
+    case 32: result.branch=Branch::jump; break;
+    case 33: result.branch=Branch::call; break;
+    case 36: result.branch=Branch::register_jump; break;
+    case 37: result.branch=Branch::register_call; break;
+    case 40: result.branch=Branch::equal; break;
+    case 41: result.branch=Branch::not_equal; break;
+    case 44: result.branch=Branch::less_zero; break;
+    case 45: result.branch=Branch::greater_zero; break;
+    case 46: result.branch=Branch::less_equal_zero; break;
+    case 47: result.branch=Branch::greater_equal_zero; break;
+    default: return result;
+    }
+    result.source=lower.source&15U;
+    result.target_register=lower.target&15U;
+    if (result.branch==Branch::call || result.branch==Branch::register_call)
+        result.link_register=lower.target&15U;
+    if (result.branch!=Branch::register_jump && result.branch!=Branch::register_call) {
+        const auto encoded=lower.encoding&0x7ffU;
+        const auto displacement=static_cast<int>(encoded)-(encoded&0x400U ? 2048 : 0);
+        const auto mask=unit ? 2047U : 511U;
+        result.target=static_cast<unsigned>(static_cast<int>(pair.address)+1+displacement)&mask;
+    }
+    return result;
+}
+Flow discover(std::span<const Pair> pairs,unsigned unit,std::span<const unsigned> entries) {
+    if (unit>1 || entries.empty()) throw std::invalid_argument("VU flow needs a unit and entry points");
+    const auto mask=unit ? 2047U : 511U;
+    std::map<unsigned,const Pair*> code;
+    for (const auto& pair:pairs)
+        if (pair.address>mask || !code.emplace(pair.address,&pair).second)
+            throw std::invalid_argument("Invalid or duplicate VU instruction address");
+    for (const auto entry:entries) if (entry>mask) throw std::invalid_argument("Invalid VU entry point");
+    std::deque<unsigned> pending(entries.begin(),entries.end());
+    std::set<unsigned> visited;
+    Flow result;
+    const auto find=[&](unsigned address)->const Pair* {
+        const auto found=code.find(address);
+        if (found==code.end()) { result.missing.insert(address); return nullptr; }
+        result.reachable.insert(address); return found->second;
+    };
+    while (!pending.empty()) {
+        const auto address=pending.front(); pending.pop_front();
+        if (!visited.insert(address).second) continue;
+        const auto* pair=find(address);
+        if (!pair) continue;
+        const auto branch=control(*pair,unit);
+        const auto next=(address+1)&mask;
+        if (branch.branch==Branch::none && !pair->end) { pending.push_back(next); continue; }
+        result.transfers.push_back({address,next,branch,pair->end});
+        const auto* slot=find(next);
+        if (!slot) continue;
+        // These combinations need explicit hardware ordering semantics before
+        // lowering. Do not guess which delayed transfer wins.
+        if (slot->end || control(*slot,unit).branch!=Branch::none || (pair->end && branch.branch!=Branch::none)) {
+            result.complex_delay.insert(address); continue;
+        }
+        if (pair->end) continue;
+        if (branch.target) pending.push_back(*branch.target);
+        else result.indirect.insert(address);
+        if (branch.branch!=Branch::jump && branch.branch!=Branch::register_jump)
+            pending.push_back((address+2)&mask);
+    }
+    return result;
+}
+}

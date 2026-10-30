@@ -55,6 +55,15 @@ inline FiniteFloatResult multiply_finite(std::uint32_t a,std::uint32_t b) {
     return {sign|(std::uint32_t(exponent)<<23)|(std::uint32_t(product>>(high-23))&0x7fffff)};
 }
 
+// Separate product and accumulation rounding; never use a host fused operation.
+// Intermediate underflow needs additional VU pipeline semantics and is rejected.
+inline FiniteFloatResult multiply_accumulate_finite(std::uint32_t accumulator,std::uint32_t left,
+                                                   std::uint32_t right,bool subtract) {
+    const auto product=multiply_finite(left,right);
+    if (!product.supported || product.underflow) return {0,false,false};
+    return add_subtract_finite(accumulator,product.bits,subtract);
+}
+
 inline std::uint32_t integer_to_scalar(std::uint32_t bits) {
     const auto sign = bits & 0x80000000U;
     const auto magnitude = sign ? 0U-bits : bits;

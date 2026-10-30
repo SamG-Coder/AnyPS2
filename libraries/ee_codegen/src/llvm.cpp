@@ -289,6 +289,7 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
     const auto overlap=code_overlap(w,address,end,ranges);
     w.out<<"  ret i1 "<<overlap<<"\n}\n";
     w.out<<"declare i64 @nt_ee_address_space(ptr, i32, i32, i32)\n";
+    w.out<<"declare i64 @nt_ee_performance(ptr, i32, i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_io_read32(ptr, i32)\ndeclare i32 @nt_ee_io_write32(ptr, i32, i32)\n";
     w.out<<"declare i32 @nt_ee_io_read64(ptr, ptr, i32, i32)\ndeclare i32 @nt_ee_io_write64(ptr, i32, i64)\n";
     declare_packed_intrinsics(w.out);

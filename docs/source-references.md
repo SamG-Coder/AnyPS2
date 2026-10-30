@@ -1111,3 +1111,36 @@ Native display deadlines reuse the project's public NTSC/PAL phase convention,
 with original rational monotonic-time arithmetic replacing diagnostic cycle
 stepping. No firmware register tables or initialization sequence are supplied.
 Tests use an injected host clock and original compiled interrupt fixtures.
+
+
+The offline VU framing work consulted the already pinned PCSX2 public VIF command
+and microVU encoding references for MPG count and paired instruction field layout.
+The framing library and synthetic tests are original implementations; no upstream
+execution or dispatch code is included. Private observed MPG data is kept only
+under ignored work/ and must never become a committed test fixture.
+
+
+## God of War static recompilation reference
+
+- Repository: https://github.com/KIexster/god-of-war-recomp
+- Inspected revision: `2d3c91dc173727058073c267bbfb27b3dab703a1`.
+- Repository license: GPL-3.0; preserve applicable licensing and attribution before
+  adapting implementation. No implementation from this reference has been added.
+- Local reference checkout: ignored `third_party/god-of-war-recomp/`.
+- Useful sources: `tools/vu1/vu1n_gen.py`, `docs/ARQUITECTURA.md`, native runtime
+  patches, and synthetic tests. The VU generator documents block identity,
+  branch/delay boundaries, delayed integer branch operands and cross-block flag
+  visibility. Its comments identify interpreter fallback and differential checking.
+- Architectural differences: generated C++ rather than LLVM; VU1 focus rather than
+  the current VU0 upload; game-specific overrides; OpenGL rather than Vulkan;
+  optional native IOP with interpreter paths. Do not import those fallback paths
+  or game-specific addresses into AnyPS2's production runtime.
+- Next application: use its observed hazards and validation structure to guide
+  original VU branch/Q lowering, upload identity checks and synthetic regression
+  cases. A reference project's reported gameplay is not AnyPS2 compatibility proof.
+
+Native VIF launch framing also references the pinned PCSX2 `Vif_Codes.cpp`
+MSCAL, BASE, OFFSET and ITOP handlers and `Vif.h` public field layout. These
+establish entry masking and launch-input/buffer-selection transitions. The new
+implementation calls compiled functions transactionally; it does not adopt the
+reference's execution queue, instruction executor or game-specific timing paths.

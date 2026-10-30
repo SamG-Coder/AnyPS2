@@ -151,6 +151,8 @@ add_executable(ps2-native "${ANYPS2_ROOT}/programs/ee-native-probe/main.cpp"
 include("${ANYPS2_ROOT}/libraries/graphics/vulkan.cmake")
 anyps2_add_vulkan(nt_vulkan)
 target_link_libraries(ps2-native PRIVATE nt_vulkan)
+include("${ANYPS2_ROOT}/libraries/vu/native.cmake")
+anyps2_bind_vu(ps2-native)
 target_compile_features(ps2-native PRIVATE cxx_std_20)
 target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codegen/include"
   "${ANYPS2_ROOT}/libraries/runtime/include" "${ANYPS2_ROOT}/libraries/binary/include"

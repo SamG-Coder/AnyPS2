@@ -28,21 +28,21 @@ inline void emit_performance_transfer(Writer& w,const r5900::Instruction& i) {
     const auto selector=i.word&63U;
     // Public MTPS encodings with nonzero register field have no effect.
     if (write && !(selector&1) && (selector&62)) return;
-    const auto base=offsetof(ee::Memory,performance);
-    const auto control=w.load("i32",base+offsetof(ee::PerformanceState,control),"%memory");
-    const auto active=w.value("icmp uge i32 "+control+", 2147483648");
-    std::string source;
-    auto unsupported=active;
-    if (write) {
-        source=w.narrow(w.reg(i.rt));
-        if (!(selector&1)) unsupported=w.binary("or","i1",active,w.value("icmp uge i32 "+source+", 2147483648"));
-    }
+    using ee::PerformanceOperation;
+    const auto operation=(selector&1) ?
+        (write ? PerformanceOperation::write_counter : PerformanceOperation::read_counter) :
+        (write ? PerformanceOperation::write_control : PerformanceOperation::read_control);
+    const auto source=write ? w.narrow(w.reg(i.rt)) : std::string("0");
+    const auto mode=w.load("i32",offsetof(runtime::State,cop0_status));
+    const auto packed=w.value("call i64 @nt_ee_performance(ptr %memory, i32 "+
+        std::to_string(static_cast<unsigned>(operation))+", i32 "+std::to_string((selector>>1)&1)+
+        ", i32 "+source+", i32 "+mode+")");
+    const auto status=w.narrow(w.binary("lshr","i64",packed,"32"));
+    const auto ready=w.value("icmp eq i32 "+status+", 0");
     const auto suffix=std::to_string(i.pc);
-    w.out<<"  br i1 "<<unsupported<<", label %system_stop"<<suffix<<", label %system_ready"<<suffix
-         <<"\nsystem_stop"<<suffix<<":\n  ret i32 10\nsystem_ready"<<suffix<<":\n";
-    const auto offset=base+((selector&1) ? offsetof(ee::PerformanceState,counters)+((selector>>1)&1)*sizeof(std::uint32_t) : offsetof(ee::PerformanceState,control));
-    if (write) w.store("i32",source,offset,"%memory");
-    else if (i.rt) w.store("i64",w.extend(w.load("i32",offset,"%memory")),offsetof(runtime::State,gpr)+i.rt*sizeof(runtime::Register));
+    w.out<<"  br i1 "<<ready<<", label %metric_ready"<<suffix<<", label %metric_stop"<<suffix
+         <<"\nmetric_stop"<<suffix<<":\n  ret i32 "<<status<<"\nmetric_ready"<<suffix<<":\n";
+    if (!write && i.rt) w.store("i64",w.extend(w.narrow(packed)),offsetof(runtime::State,gpr)+i.rt*sizeof(runtime::Register));
 }
 inline void emit_system_transfer(Writer& w,const r5900::Instruction& i) {
     if (i.rd==0 || i.rd==2 || i.rd==3 || i.rd==5 || i.rd==10) { emit_address_space(w,i); return; }
