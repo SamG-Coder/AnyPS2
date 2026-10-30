@@ -665,6 +665,17 @@ int main(int argc,char** argv) {
             factory_word(0xb280+i*8,0x03e00008); factory_word(0xb284+i*8,0x24020060+i);
         }
         bundle_roots.insert(bundle_roots.end(),{0xb200,0xb240});
+        constexpr std::uint32_t stack_callback[]{0x03e08021,0x27bdfff0,0x3408b580,0xafa80000,
+            0x0c002d25,0,0x8fa80000,0,0x11000003,0,0x0100f809,0,
+            0x27bd0010,0x0200f821,0x03e00008,0};
+        for (unsigned i=0;i<std::size(stack_callback);++i) factory_word(0xb500+i*4,stack_callback[i]);
+        factory_word(0xb580,0x03e00008); factory_word(0xb584,0x24020073);
+        bundle_roots.push_back(0xb500);
+        constexpr std::uint32_t delay_callback[]{0x03e08021,0x3409b588,0x0c002d25,0xafa90004,
+            0x0200f821,0x03e00008,0};
+        for (unsigned i=0;i<std::size(delay_callback);++i) factory_word(0xb540+i*4,delay_callback[i]);
+        factory_word(0xb588,0x03e00008); factory_word(0xb58c,0x24020074);
+        bundle_roots.push_back(0xb540);
         {
             auto unknown=factories; fixture::put32(unknown.memory,0x84,0x8c820000);
             const auto analyzed=nt::iop_codegen::ir::discover(unknown);

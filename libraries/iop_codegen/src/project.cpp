@@ -94,14 +94,18 @@ target_compile_definitions(iop-native PRIVATE ANYPS2_IOP_LLVM=1)
     layout<<"AnyPS2 explicit module startup order (base, entry, memory size)\n";
     for (const auto& item : modules) layout<<hex32(item.base)<<' '<<hex32(item.entry)<<' '<<hex32(static_cast<std::uint32_t>(item.memory.size()))<<'\n';
     save(output/"modules.txt",layout.str());
-    save(output/"conversion.txt","AnyPS2 standalone IOP native conversion\n"
+    std::ostringstream diagnostics;
+    for (const auto pc : program.guarded_callback_sites)
+        diagnostics<<"Guarded stack callback at "<<hex32(pc)<<": "<<program.instructions.at(pc).targets.size()
+                   <<" compiled address-taken candidates; other runtime targets stop as unmapped code.\n";
+    save(output/"conversion.txt",std::string("AnyPS2 standalone IOP native conversion\n"
         "Compile the emitted code with the supplied CMake project.\n"
         "module.data holds initialized program data; it is never decoded as instructions.\n"
         "Startup entries run in input order with shared native services; see modules.txt.\n"
         "This is not automatic disc boot orchestration.\n"
         "This initial converter supports a bounded integer/control-flow subset.\n"
         "Imports, native service bindings and complete game conversion are unfinished.\n"
-        "Unresolved indirect calls/jumps are rejected during conversion; return destinations are checked at runtime.\n"
-        "Keep commercial converted code and data local and out of source control.\n");
+        "Indirect calls/jumps without bounded AOT candidates are rejected; actual destinations are checked at runtime.\n"
+        "Keep commercial converted code and data local and out of source control.\n")+diagnostics.str());
 }
 }

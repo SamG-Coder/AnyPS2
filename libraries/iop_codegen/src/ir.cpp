@@ -2,6 +2,7 @@
 #include "constants.hpp"
 #include "jump_tables.hpp"
 #include "returned_addresses.hpp"
+#include "stack_callbacks.hpp"
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -174,6 +175,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         pending.insert(table.functions.begin(),table.functions.end());
     std::map<std::uint32_t,Constants> states;
     std::set<std::uint32_t> table_transfers;
+    std::map<std::uint32_t,std::set<std::uint32_t>> stack_transfers;
     for (const auto root : pending) states.emplace(root,Constants{});
     const auto enqueue=[&](std::uint32_t target,const Constants& state) {
         const auto [at,inserted]=states.emplace(target,state);
@@ -310,6 +312,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                 else if (const auto table=initial_jump_table(module,data_modules,pc,decode)) {
                     physical=*table; table_transfers.insert(pc);
                 }
+                else if (const auto callbacks=stack_transfers.find(pc);callbacks!=stack_transfers.end()) physical=callbacks->second;
                 instruction.targets.assign(physical.begin(),physical.end());
                 program.instructions.at(pc).targets=instruction.targets;
             }
@@ -350,13 +353,23 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                 }
             }
         }
+        const auto candidates=stored_code_candidates(program,states,data_modules);
+        if (!candidates.empty()) for (const auto& [pc,instruction] : program.instructions) {
+            if (states.contains(pc) && !states.at(pc).registers[instruction.source] && stack_callback_call(program,instruction)) {
+                auto& targets=stack_transfers[pc];
+                const auto before=targets.size(); targets.insert(candidates.begin(),candidates.end());
+                if (targets.size()>256) throw std::runtime_error("IOP conversion: callback candidate limit exceeded at "+hex32(pc));
+                if (targets.size()!=before) pending.insert(pc);
+            }
+        }
     } while (!pending.empty());
     std::ostringstream indirect_errors;
     for (const auto& [pc,i] : program.instructions)
-        if ((i.flow==Flow::indirect || i.flow==Flow::indirect_call) && !states.at(pc).registers[i.source] && !table_transfers.contains(pc))
+        if ((i.flow==Flow::indirect || i.flow==Flow::indirect_call) && !states.at(pc).registers[i.source] && !table_transfers.contains(pc) && !stack_transfers.contains(pc))
             indirect_errors<<"\n  unresolved indirect transfer at "<<hex32(pc)<<" through r"<<i.source;
     if (!indirect_errors.str().empty())
         throw std::runtime_error("IOP conversion: indirect target sets are unknown or exceed the 16-value analysis bound:"+indirect_errors.str());
+    for (const auto& [pc,targets] : stack_transfers) program.guarded_callback_sites.insert(pc);
     return program;
 }
 Program discover(const elf::IopModule& module,std::span<const std::uint32_t> entries) {
@@ -420,6 +433,7 @@ Program discover_bundle(std::span<const elf::IopModule> modules,std::span<const 
         result.instructions.insert(program.instructions.begin(),program.instructions.end());
         result.protected_words.insert(program.protected_words.begin(),program.protected_words.end());
         result.library_imports.insert(result.library_imports.end(),program.library_imports.begin(),program.library_imports.end());
+        result.guarded_callback_sites.insert(program.guarded_callback_sites.begin(),program.guarded_callback_sites.end());
     }
     return result;
 }

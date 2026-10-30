@@ -91,6 +91,20 @@ int main() {
             }
             check(call(0xb494).pc==0x5000 && call(0xb49c).pc==0x5000,
                   "Native cache publication did not return to compiled code");
+            auto callback=initial(); callback.pc=0xb500; callback.registers[29]=0xc100;
+            check(run_native(nt_iop_generated_run,callback,data,128,&loader).reason==NativeStop::unmapped_code &&
+                  callback.pc==0x5000 && callback.registers[2]==0x73 && callback.registers[29]==0xc100,
+                  "Stack callback lost its native target across a helper call");
+            callback=initial(); callback.pc=0xb500; callback.registers[29]=0xc100;
+            check(run_native(nt_iop_generated_run,callback,data,7,&loader).reason==NativeStop::budget,
+                  "Stack callback fixture did not stop after publication");
+            store_native_word(data,0xc0f0,0xb000);
+            check(run_native(nt_iop_generated_run,callback,data,128,&loader).reason==NativeStop::unmapped_code &&
+                  callback.pc==0xb528,"Stack callback accepted an unlisted compiled target");
+            callback=initial(); callback.pc=0xb588;
+            check(nt_iop_generated_run(callback,data,8).reason==NativeStop::unmapped_code &&
+                  callback.pc==0x5000 && callback.registers[2]==0x74,
+                  "Callback stored in a call delay slot was not compiled");
         }
         {
             std::vector<std::uint8_t> data(0x10000);

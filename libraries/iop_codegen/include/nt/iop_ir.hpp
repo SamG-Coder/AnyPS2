@@ -25,7 +25,7 @@ struct Instruction {
     Operation operation{};
     Flow flow=Flow::sequential;
     std::uint32_t address=0, immediate=0, target=0;
-    std::vector<std::uint32_t> targets; // Proven destinations for an indirect transfer.
+    std::vector<std::uint32_t> targets; // AOT destinations, checked against the actual indirect target.
     unsigned source=0, operand=0, destination=0, shift=0, width=0;
 };
 struct Program {
@@ -33,6 +33,7 @@ struct Program {
     std::map<std::uint32_t,Instruction> instructions;
     std::set<std::uint32_t> protected_words;
     std::vector<elf::IopImport> library_imports; // Absolute stub/table addresses after analysis.
+    std::set<std::uint32_t> guarded_callback_sites; // Bounded address-taken candidates, not exhaustive proofs.
 };
 Program discover(const elf::IopModule& module,std::span<const std::uint32_t> entries={});
 Program discover_bundle(std::span<const elf::IopModule> modules,std::span<const std::uint32_t> entries={});

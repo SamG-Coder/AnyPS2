@@ -1888,3 +1888,11 @@ entries and a deferred callback, including zero-budget and repeated-finish calls
 
 See [EE native architecture](ee-native.md) for conversion, execution, memory,
 startup services and native vector-control boundaries.
+
+IOP stack-loaded callback calls can use a bounded set of code addresses that the
+module stores or passes, including stores in call delay slots. These candidates
+are compiled ahead of time and listed in the private conversion diagnostics.
+They are not exhaustive target proofs: the native call checks its actual target
+and stops if it is outside the compiled candidate set, even if some other native
+function exists at that address. Unknown executable content is never interpreted
+or compiled at runtime. Calls without a bounded candidate set still fail conversion.
