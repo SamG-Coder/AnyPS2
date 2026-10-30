@@ -158,7 +158,9 @@ stays unresolved, and a known-address store in another bundle module poisons
 that slot, opens it, or widens its executable targets. A callee reached only
 through that proof is removed once the slot is open. A fill, copy, or move
 with one constant destination and byte count poisons only that span. An
-unknown-address store in the same module leaves a single-slot load open. The local startup regression requires both
+unknown-address store leaves every single-slot load in the bundle open unless
+a stack-relative address, a known address, or a constant span excludes that
+slot. A store reached only through that pointer still leaves the call open. The local startup regression requires both
 native registration markers; it does not claim completed transfers or a boot.
 The heaplib milestone executes linked guest calls for fixed and expandable
 heaps. It checks alignment and non-overlap, free-size accounting, coalescing,

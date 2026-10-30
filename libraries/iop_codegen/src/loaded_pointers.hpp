@@ -33,10 +33,11 @@ struct LoadedPointerResult {
 // no new callees. A delayed load that another path skips does not keep the
 // slot. Return edges discard register cells; a callee entry still sees the
 // caller's cells until it writes them. The delay slot of a jump is not a
-// fallthrough into the next instruction. An unknown absolute address or a
-// memory fill, copy, or move with an unknown destination makes every
-// single-slot load in that same module open. It does not change another
-// module. A constant destination and byte count poison only that span. A
+// fallthrough into the next instruction. An unknown absolute address, or a
+// memory fill, copy, or move with an unknown destination, can name a slot in
+// any module. Every single-slot load in the bundle stays open unless a
+// stack-relative address, a known address, or a constant span excludes that
+// write. A constant destination and byte count poison only that span. A
 // known-address store decoded in another module poisons, opens, or widens
 // that same slot. A stack-relative store is not an absolute slot.
 // Partial overlaps leave the site unresolved.
@@ -307,6 +308,14 @@ inline LoadedPointerResult recoverable_loaded_pointers(
             relax(edge.to,out);
         }
     }
+    // Module ownership of an unknown store is not a non-alias proof. A stack
+    // spill, a known address, or a constant span never sets this flag.
+    bool alias_unknown=false;
+    for (const auto flag : module_wild) if (flag) alias_unknown=true;
+    if (foreign) {
+        if (foreign->wild_all) alias_unknown=true;
+        for (const auto flag : foreign->module_wild) if (flag) alias_unknown=true;
+    }
     for (const auto& [pc,instruction] : program.instructions) {
         if (instruction.flow!=Flow::indirect && instruction.flow!=Flow::indirect_call) continue;
         const auto state=states.find(pc);
@@ -317,7 +326,7 @@ inline LoadedPointerResult recoverable_loaded_pointers(
         if (cell.kind!=Cell::Kind::slot || !owner || poisoned.contains(cell.slot)) continue;
         // An unknown store can overwrite this slot. The load address remains
         // one word, so the call is open rather than left unresolved.
-        if (module_wild[*owner] || open_slots.contains(cell.slot)) { result.open.insert(pc); continue; }
+        if (alias_unknown || open_slots.contains(cell.slot)) { result.open.insert(pc); continue; }
         std::set<std::uint32_t> targets;
         if (const auto found=stored.find(cell.slot); found!=stored.end()) targets=found->second;
         const auto initial=image_word(cell.slot);

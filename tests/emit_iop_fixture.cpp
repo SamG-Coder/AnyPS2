@@ -345,6 +345,53 @@ int main(int argc,char** argv) {
                 retracted_text.substr(retracted_at,retracted_next==std::string::npos ? std::string::npos : retracted_next-retracted_at);
             if (retracted_block.find("call i1 @is_instruction")==std::string::npos || retracted_text.find("code"+std::to_string(0x61020)+":")!=std::string::npos)
                 throw std::runtime_error("Retracted writer leaf remained a compiled indirect target");
+            // The writer's destination is an argument, so it can be the caller's slot.
+            // The containing module is not a proof that the slot stays unchanged.
+            nt::elf::IopModule alias_writer{0x61000,0x61000,nt::Bytes(0x20),0x20,{}};
+            fixture::put32(alias_writer.memory,0,0xac850000);
+            fixture::put32(alias_writer.memory,4,0x03e00008);
+            const std::array<nt::elf::IopModule,2> alias_modules{caller_image(),std::move(alias_writer)};
+            const auto aliased=nt::iop_codegen::ir::discover_bundle(alias_modules,std::array<std::uint32_t,2>{0x60000U,0x61000U});
+            if (!aliased.open_indirect_sites.contains(0x6000c) || aliased.instructions.contains(0x60020) ||
+                !aliased.instructions.contains(0x61000) || !aliased.instructions.at(0x6000c).targets.empty())
+                throw std::runtime_error("Unknown store in another module left a loaded pointer proved");
+            std::ostringstream alias_ir; nt::iop_codegen::emit_program(alias_ir,aliased);
+            const auto alias_text=alias_ir.str();
+            const auto alias_at=alias_text.find("code"+std::to_string(0x6000c)+":");
+            const auto alias_next=alias_at==std::string::npos ? std::string::npos : alias_text.find("\ncode",alias_at+1);
+            const auto alias_block=alias_at==std::string::npos ? std::string{} :
+                alias_text.substr(alias_at,alias_next==std::string::npos ? std::string::npos : alias_next-alias_at);
+            if (alias_block.find("call i1 @is_instruction")==std::string::npos || alias_text.find("code"+std::to_string(0x60020)+":")!=std::string::npos)
+                throw std::runtime_error("Cross-module unknown store kept a proved loaded pointer");
+            // A stack spill has an address range that cannot name the absolute slot.
+            nt::elf::IopModule stack_writer{0x61000,0x61000,nt::Bytes(0x20),0x20,{}};
+            fixture::put32(stack_writer.memory,0,0x27bdfff0);
+            fixture::put32(stack_writer.memory,4,0xafa40000);
+            fixture::put32(stack_writer.memory,8,0x27bd0010);
+            fixture::put32(stack_writer.memory,12,0x03e00008);
+            const std::array<nt::elf::IopModule,2> stack_modules{caller_image(),std::move(stack_writer)};
+            const auto stacked=nt::iop_codegen::ir::discover_bundle(stack_modules,std::array<std::uint32_t,2>{0x60000U,0x61000U});
+            if (stacked.open_indirect_sites.contains(0x6000c) || !stacked.instructions.contains(0x60020) ||
+                stacked.instructions.at(0x6000c).targets.size()!=1 || stacked.instructions.at(0x6000c).targets.front()!=0x60020)
+                throw std::runtime_error("Stack spill in another module dropped a proved loaded pointer");
+            // The unknown store is only inside the proved leaf. Removing that leaf
+            // must not bring the proof back.
+            nt::elf::IopModule oscillating_caller{0x60000,0x60000,nt::Bytes(0x100),0x100,{}};
+            const auto put_oscillating=[&](unsigned pc,std::uint32_t word) {
+                fixture::put32(oscillating_caller.memory,pc-oscillating_caller.base,word);
+            };
+            put_oscillating(0x60000,0x3c010006); put_oscillating(0x60004,0x8c220080); put_oscillating(0x60008,0);
+            put_oscillating(0x6000c,0x0040f809); put_oscillating(0x60010,0); put_oscillating(0x60014,0x03e00008);
+            put_oscillating(0x60018,0); put_oscillating(0x60080,0x00061020);
+            nt::elf::IopModule oscillating_writer{0x61000,0x61000,nt::Bytes(0x40),0x40,{}};
+            fixture::put32(oscillating_writer.memory,0,0x03e00008);
+            fixture::put32(oscillating_writer.memory,0x20,0xac850000);
+            fixture::put32(oscillating_writer.memory,0x24,0x03e00008);
+            const std::array<nt::elf::IopModule,2> oscillating_modules{std::move(oscillating_caller),std::move(oscillating_writer)};
+            const auto settled=nt::iop_codegen::ir::discover_bundle(oscillating_modules,std::array<std::uint32_t,2>{0x60000U,0x61000U});
+            if (!settled.open_indirect_sites.contains(0x6000c) || settled.instructions.contains(0x61020) ||
+                !settled.instructions.contains(0x61000) || !settled.instructions.at(0x6000c).targets.empty())
+                throw std::runtime_error("Retracted unknown store let the loaded pointer become proved again");
         }
         // The only unbounded store is inside the initial-word leaf. Opening the
         // slot must remove that leaf instead of leaving the first proof compiled.

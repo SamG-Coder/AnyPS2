@@ -246,8 +246,11 @@ another path's delayed pointer, and a known-address store decoded in another
 bundle module uses that same classification. A callee discovered only from a
 loaded pointer is discarded once that slot is open. A constant-bounded memory
 fill, copy, or move poisons the addressed span rather than every slot in its
-module. An unknown-address store in that module leaves a later single-slot
-load open to any instruction already compiled into the program.
+module. An unknown-address store can name a slot in any module, so every
+single-slot load in the bundle stays open unless a stack-relative address, a
+known address, or a constant span excludes that write. A store reached only
+through that pointer still leaves the call open. The call may use any
+instruction already compiled into the program.
 The startup-call ABI follows the public module entry interface and Play!
 `IopBios.cpp` argument preparation: argc/argv, a terminated pointer table, GP,
 and an argument save area on the stack. AnyPS2 independently constructs bounded

@@ -2393,10 +2393,18 @@ int main() {
             do { stop=nt_iop_generated_run(pointers,dma_ram,1); } while (stop.reason==NativeStop::budget);
             check(stop.reason==NativeStop::unmapped_code && pointers.pc==0x5000 && pointers.executed==13 && pointers.registers[2]==0x21,
                   "Constant-address loaded pointer did not reach its compiled callee");
-            auto guarded=initial(); guarded.pc=0x10040; guarded.registers[2]=0x1000;
-            stop=nt_iop_generated_run(guarded,dma_ram,1);
-            check(stop.reason==NativeStop::unmapped_code && !guarded.executed && stop.address==0x1000 && guarded.pc==0x10040,
-                  "Loaded pointer accepted a destination outside its proved set");
+            // A reached unknown store in another module of this bundle can name the
+            // slot, so the call is open: any compiled instruction is allowed.
+            auto open_pointer=initial(); open_pointer.pc=0x10040; open_pointer.registers[2]=0x1000;
+            stop=nt_iop_generated_run(open_pointer,dma_ram,1);
+            check(stop.reason==NativeStop::budget && open_pointer.executed==1 && open_pointer.delay_slot &&
+                  open_pointer.branch_target==0x1000 && open_pointer.registers[31]==0x10048,
+                  "Open loaded pointer rejected a compiled instruction");
+            open_pointer=initial(); open_pointer.pc=0x10040; open_pointer.registers[2]=0x5000;
+            stop=nt_iop_generated_run(open_pointer,dma_ram,1);
+            check(stop.reason==NativeStop::unmapped_code && !open_pointer.executed && !open_pointer.delay_slot &&
+                  open_pointer.pc==0x10040 && stop.address==0x5000 && open_pointer.registers[31]==0x5000,
+                  "Open loaded pointer accepted an uncompiled address");
             for (const auto leaf : {0x10100U,0x80010100U,0xa0010100U}) {
                 auto open=initial(); open.pc=0x100d0; open.registers[4]=leaf;
                 do { stop=nt_iop_generated_run(open,dma_ram,1); } while (stop.reason==NativeStop::budget);
@@ -2422,8 +2430,9 @@ int main() {
                   "Constant pointer store did not reach its slot");
             pointers=initial(); pointers.pc=0x10060;
             do { stop=nt_iop_generated_run(pointers,dma_ram,1); } while (stop.reason==NativeStop::budget);
-            check(stop.reason==NativeStop::unmapped_code && pointers.pc==0x5000 && pointers.executed==13 && pointers.registers[2]==0x22,
-                  "Stored loaded pointer did not reach its compiled callee");
+            check(stop.reason==NativeStop::unmapped_code && pointers.pc==0x10080 && pointers.executed==6 &&
+                  pointers.registers[2]==99 && stop.address==0x10008 && load_native_word(dma_ram,0x10184)==0x10008,
+                  "Retracted stored leaf was called or the slot was not written");
         }
 #ifdef ANYPS2_TEST_LARGE_LLVM
         for (const auto alias : {0U,0x80000000U,0xa0000000U}) for (const auto budget : {1U,255U,256U,257U,2048U}) {

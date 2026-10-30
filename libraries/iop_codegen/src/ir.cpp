@@ -157,6 +157,30 @@ static bool note_gap(std::vector<Gap>* gaps,Gap gap) {
     gaps->push_back(std::move(gap));
     return false;
 }
+static void combine_effect(SlotEffect& combined,const SlotEffect& effect) {
+    if (combined.kind==SlotEffect::Kind::poison || effect.kind==SlotEffect::Kind::poison) {
+        combined=SlotEffect{}; return;
+    }
+    if (combined.kind==SlotEffect::Kind::open || effect.kind==SlotEffect::Kind::open) {
+        combined.kind=SlotEffect::Kind::open; combined.codes.clear(); return;
+    }
+    combined.codes.insert(effect.codes.begin(),effect.codes.end());
+    if (combined.codes.size()>value_limit) { combined.kind=SlotEffect::Kind::open; combined.codes.clear(); }
+}
+// A later pass can drop the only copy of an aliasing store. Keep every flag
+// and effect already published so that pass cannot prove the slot again.
+static void accumulate_scan(SlotScan& accumulated,const SlotScan& latest) {
+    if (latest.wild_all) accumulated.wild_all=true;
+    if (accumulated.module_wild.size()<latest.module_wild.size())
+        accumulated.module_wild.resize(latest.module_wild.size());
+    for (std::size_t module=0;module<latest.module_wild.size();++module)
+        if (latest.module_wild[module]) accumulated.module_wild[module]=1;
+    for (const auto& [address,effect] : latest.effects) {
+        const auto found=accumulated.effects.find(address);
+        if (found==accumulated.effects.end()) { accumulated.effects.emplace(address,effect); continue; }
+        combine_effect(found->second,effect);
+    }
+}
 SlotScan merge_foreign_slots(const std::vector<SlotScan>& scans,std::size_t skip) {
     SlotScan foreign;
     foreign.module_wild.assign(scans.size(),0);
@@ -169,15 +193,7 @@ SlotScan merge_foreign_slots(const std::vector<SlotScan>& scans,std::size_t skip
         for (const auto& [address,effect] : scan.effects) {
             const auto found=foreign.effects.find(address);
             if (found==foreign.effects.end()) { foreign.effects.emplace(address,effect); continue; }
-            auto& combined=found->second;
-            if (combined.kind==SlotEffect::Kind::poison || effect.kind==SlotEffect::Kind::poison) {
-                combined=SlotEffect{}; continue;
-            }
-            if (combined.kind==SlotEffect::Kind::open || effect.kind==SlotEffect::Kind::open) {
-                combined.kind=SlotEffect::Kind::open; combined.codes.clear(); continue;
-            }
-            combined.codes.insert(effect.codes.begin(),effect.codes.end());
-            if (combined.codes.size()>value_limit) { combined.kind=SlotEffect::Kind::open; combined.codes.clear(); }
+            combine_effect(found->second,effect);
         }
     }
     return foreign;
@@ -566,7 +582,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         if (!halt) {
             const auto recovered=recoverable_loaded_pointers(program,states,data_modules,foreign_slots);
             last_scan=recovered.scan;
-            if (slot_scan) *slot_scan=last_scan;
+            if (slot_scan) accumulate_scan(*slot_scan,last_scan);
             std::vector<std::uint32_t> stale;
             for (const auto& [site,targets] : pointer_transfers)
                 if (const auto found=recovered.proved.find(site); found==recovered.proved.end() || found->second!=targets) stale.push_back(site);
