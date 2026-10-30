@@ -3,14 +3,16 @@
 #include <nt/iop_native_code.hpp>
 #include <nt/disc_files.hpp>
 #include <nt/iop_native_file_descriptors.hpp>
+#include <nt/iop_native_events.hpp>
 #include <algorithm>
 #include <bit>
 
 namespace nt::iop {
 class NativeDiscServices final : public NativeServices {
 public:
-    explicit NativeDiscServices(const std::filesystem::path& image,NativeFileDescriptors* descriptors=nullptr)
-        : files_(image),descriptors_(descriptors ? *descriptors : owned_descriptors_) {}
+    explicit NativeDiscServices(const std::filesystem::path& image,NativeFileDescriptors* descriptors=nullptr,
+                                NativeEventServices* events=nullptr)
+        : files_(image),descriptors_(descriptors ? *descriptors : owned_descriptors_),events_(events) {}
     NativeServiceReply invoke(const NativeServiceRequest& incoming,std::span<std::uint8_t> ram) override {
         if (incoming.kind!=NativeServiceKind::ioman) return {};
         auto request=incoming;
@@ -52,7 +54,7 @@ public:
             }
         }
         const bool mutation=(request.selector>=10 && request.selector<=12) || request.selector==17 || request.selector==18;
-        if (request.selector==4 || request.selector==13 || request.selector==16 || mutation) {
+        if (request.selector==4 || request.selector==13 || request.selector==16 || request.selector==31 || mutation) {
             const auto source=ram_offset(args[0],1,ram.size());
             if (!source) return {NativeServiceStatus::address_fault,0,args[0]};
             const auto available=std::min<std::size_t>({256,ram.size()-*source,0x200000-*source});
@@ -60,6 +62,7 @@ public:
             const auto end=std::find(bytes.begin(),bytes.end(),0);
             if (end==bytes.end()) return available==256 ? returned(-36) : NativeServiceReply{NativeServiceStatus::address_fault,0,args[0]};
             const std::string path(bytes.begin(),end);
+            if (request.selector==31) return device_control(request,ram,path);
             if (mutation) return returned(disc::Files::mutation_error(path));
             if (request.selector==4) return returned(publish(files_.open(path,args[1]),false));
             if (request.selector==13) return returned(publish(files_.open_directory(path),true));
@@ -121,6 +124,32 @@ public:
         return returned(result.result);
     }
 private:
+    NativeServiceReply device_control(const NativeServiceRequest& request,std::span<std::uint8_t> ram,
+                                      const std::string& path) {
+        // CDVD's event-handle query has no input and one O32 stack output.
+        // The native event belongs to this mounted disc's IOP service lifetime.
+        if (path!="cdrom0:" || request.arguments[1]!=0x4391 || !events_) return {};
+        if (request.arguments[3]!=0) return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-22)};
+        if (request.stack_pointer>0xffffffffU-23) return {NativeServiceStatus::address_fault,0,request.stack_pointer};
+        const auto stack=ram_offset(request.stack_pointer+16,4,ram.size());
+        if (!stack || ram.size()-*stack<8 || 0x200000-*stack<8)
+            return {NativeServiceStatus::address_fault,0,request.stack_pointer};
+        const auto address=load_native_word(ram,*stack);
+        if (load_native_word(ram,*stack+4)!=4) return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-22)};
+        const auto output=ram_offset(address,4,ram.size());
+        if (!output || ram.size()-*output<4 || 0x200000-*output<4)
+            return {NativeServiceStatus::address_fault,0,address};
+        if (nt_iop_native_code_word(*output)) return {NativeServiceStatus::code_write,0,address};
+        if (!disc_event_) {
+            // Merely obtaining a handle does not complete a disc command or
+            // assert reset readiness. Completion producers must signal it.
+            const auto created=events_->create(2,0,0);
+            if (created<0) return {NativeServiceStatus::returned,static_cast<std::uint32_t>(created)};
+            disc_event_=static_cast<std::uint32_t>(created);
+        }
+        store_native_word(ram,*output,disc_event_);
+        return {NativeServiceStatus::returned,0};
+    }
     static void encode_stat(std::span<std::uint8_t> record,const disc::Entry& entry) {
         store_native_word(record,0,entry.directory ? 0x25 : 0x14);
         store_native_word(record,8,entry.size);
@@ -144,5 +173,7 @@ private:
     disc::Files files_;
     NativeFileDescriptors owned_descriptors_;
     NativeFileDescriptors& descriptors_;
+    NativeEventServices* events_;
+    std::uint32_t disc_event_=0;
 };
 }

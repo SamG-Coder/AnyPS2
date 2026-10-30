@@ -40,7 +40,7 @@ public:
           interrupts(layout.interrupt_stack,&callbacks),sif_control(interrupts,&sif),threads(interrupts,&heap),
           rpc_servers(peer_.get(),&threads),rpc_data(peer_.get()),events(&threads),semaphores(&threads),mailboxes(&threads),
           system(events,boot,ram),command_session(events,system,sif_control,peer_.get()),stdio(std::move(output)),
-          disc_service(disc.empty() ? nullptr : std::make_unique<NativeDiscServices>(disc,&descriptors)),router(providers()),arena_(ram) {
+          disc_service(disc.empty() ? nullptr : std::make_unique<NativeDiscServices>(disc,&descriptors,&events)),router(providers()),arena_(ram) {
         inbound.connect(commands,command_session,sif_control,&rpc_servers);
     }
     NativeServiceContext(const NativeServiceContext&)=delete;

@@ -624,6 +624,14 @@ identifiers, and iop/cdvd/cdvdman/src/cdvdman.c ordinary-file ioctl2 failure and
 unknown ioctl failure contracts. The implementation is original native dispatch;
 no upstream driver code is copied. Known hardware controls remain unsupported.
 
+The native disc event-handle query uses the same pinned cdvdman.c's devctl
+`0x4391` output contract and `sceCdSC(0xFFFFFFF5)` event identity, plus
+iomanX.h's six-argument O32 devctl signature. The event is allocated through the
+existing native event service after output validation. Querying it does not
+signal completion or assert device readiness; asynchronous disc notifications
+still require native producers. No CDVD register model or upstream driver code
+is imported.
+
 Native AddDrv/DelDrv use the pinned public PS2SDK ioman.h descriptor/operation
 layout and ioman.c legacy 16-slot, initialization-failure and teardown-result
 contracts. iomanX.c documents rejection of concurrent lifecycle calls. Original
@@ -1121,6 +1129,33 @@ The framing library and synthetic tests are original implementations; no upstrea
 execution or dispatch code is included. Private observed MPG data is kept only
 under ignored work/ and must never become a committed test fixture.
 
+
+## GT4 recompilation research reference
+
+- Repository: https://github.com/moesuito/gt4-staticrecomp
+- Inspected revision: `795cdc086464b003d49c0b44d0911dc761f58f5c`.
+- Inspected documents: `docs/ARCHITECTURE.md`, `docs/IOP-MAP.md`, and
+  `native/THIRD_PARTY.md`. The repository reports MIT for its own implementation;
+  its dependencies have separate terms. No implementation was imported.
+- Useful lead: the IOP map distinguishes native system-library replacements from
+  disc-loaded game modules. Use this to investigate service boundaries rather
+  than attempting to compile console kernel internals indiscriminately. Validate
+  every proposed replacement against actual initialization and completion state.
+- The inspected architecture and IOP map describe older interpreted subsystem
+  paths; the newer README reports further AOT coverage. These documents do not
+  establish an interpreter-free build. Reported gameplay and performance have
+  not been verified locally.
+- Architectural differences: generated C++, hardware models, game-specific
+  integration, and a separate PCSX2-derived GS renderer. These are not a substitute
+  for AnyPS2's LLVM-only, generic, BIOS-free native runtime and Vulkan renderer.
+- Referenced donor: https://github.com/snuri00/ps2-web-recomp at
+  `1b4808793a12c45125262fd2d5f50a9ec9f7c020` (MIT as recorded by the reference).
+  Inspected `runtime/src/iop/sif.cpp` and `runtime/src/iop/io.cpp` for service
+  organization. Its SIF reset assigns status flags directly; do not transplant
+  that assignment as evidence of completed native startup.
+- Next useful comparisons: reset service ownership, RPC server installation,
+  disc resource loading, and offline discovery of VU uploads. Keep game-specific
+  addresses, proprietary content and generated commercial code out of AnyPS2.
 
 ## God of War static recompilation reference
 

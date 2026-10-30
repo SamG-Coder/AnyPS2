@@ -2719,10 +2719,41 @@ int main() {
             fixture::record(disc_image,directory_offset,"EMPTY",empty_sector,2048,true);
             nt::write_file(image.path,disc_image);
             NativeFileDescriptors descriptors;
-            NativeDiscServices files(image.path,&descriptors);
+            NativeEventServices disc_events;
+            NativeDiscServices files(image.path,&descriptors,&disc_events);
             const auto path=[&](const std::string& name) {
                 std::copy(name.begin(),name.end(),ram.begin()+0x2000); ram[0x2000+name.size()]=0;
             };
+            path("cdrom0:");
+            const auto disc_event_query=[&](std::uint32_t output,std::uint32_t size=4,
+                                           std::uint32_t command=0x4391) {
+                auto cpu=initial(); cpu.pc=0x282c; cpu.registers[4]=0x80002000;
+                cpu.registers[5]=command; cpu.registers[6]=0; cpu.registers[7]=0;
+                cpu.registers[29]=0x8000c460;
+                store_native_word(ram,0xc470,output); store_native_word(ram,0xc474,size);
+                const auto before=ram;
+                const auto stop=run_native(nt_iop_generated_run,cpu,ram,1,&files);
+                if (stop.reason!=NativeStop::budget)
+                    check(ram==before && !cpu.executed,"Rejected disc event query changed state");
+                return std::pair{stop.reason,cpu.registers[2]};
+            };
+            check(disc_event_query(0x1000).first==NativeStop::code_write &&
+                  disc_event_query(0x10000).first==NativeStop::address_fault &&
+                  disc_event_query(0x4000,3).second==static_cast<std::uint32_t>(-22) &&
+                  disc_event_query(0x4000,4,0x4392).first==NativeStop::import_request,
+                  "Disc event query accepted invalid output or unsupported command");
+            check(disc_event_query(0xa0004000)==std::pair{NativeStop::budget,0U},
+                  "Compiled disc event query failed");
+            const auto disc_event=load_native_word(ram,0x4000);
+            check(disc_event && disc_event_query(0x4004).second==0 && load_native_word(ram,0x4004)==disc_event,
+                  "Disc event query did not preserve handle identity");
+            check(disc_events.invoke({11,{disc_event,1,0,0},NativeServiceKind::thevent},ram).value==
+                  static_cast<std::uint32_t>(-421),"Disc event query invented completion");
+            check(disc_events.invoke({6,{disc_event,1},NativeServiceKind::thevent},ram).value==0 &&
+                  disc_events.invoke({11,{disc_event,1,0x10,0x4010},NativeServiceKind::thevent},ram).value==0 &&
+                  load_native_word(ram,0x4010)==1 &&
+                  disc_events.invoke({11,{disc_event,1,0,0},NativeServiceKind::thevent},ram).value==
+                  static_cast<std::uint32_t>(-421),"Disc handle is not backed by a consumable native event");
             const auto file_call=[&](unsigned ordinal,std::uint32_t a=0,std::uint32_t b=0,std::uint32_t c=0) {
                 auto cpu=initial();
                 const std::map<unsigned,std::uint32_t> entries{{4,0x1614},{5,0x161c},{6,0x1624},{8,0x162c},
