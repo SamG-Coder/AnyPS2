@@ -91,7 +91,20 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
         in_range(runtime::accelerated_ram_begin,runtime::accelerated_ram_end));
     physical=w.value("select i1 "+user_alias+", i32 "+w.binary("and","i32",address,"268435455")+", i32 "+physical);
     const auto scratchpad=in_range(ee::scratchpad_begin,ee::scratchpad_begin+ee::scratchpad_size);
-    const auto main_memory=w.value("xor i1 "+scratchpad+", true");
+    const auto vector_range=[&](unsigned begin,unsigned end) {
+        return w.binary("and","i1",w.value("icmp uge i32 "+physical+", "+std::to_string(begin)),
+            w.value("icmp ult i32 "+physical+", "+std::to_string(end)));
+    };
+    const auto vu0=vector_range(0x11004000U,0x11008000U),vu1=vector_range(0x1100c000U,0x11010000U);
+    const auto vu_data=w.binary("or","i1",vu0,vu1);
+    const auto main_memory=w.value("xor i1 "+w.binary("or","i1",scratchpad,vu_data)+", true");
+    w.out<<"  br i1 "<<vu_data<<", label %vu_access"<<suffix<<", label %region_ready"<<suffix<<"\nvu_access"<<suffix<<":\n";
+    const auto unit=w.value("select i1 "+vu1+", i32 1, i32 0");
+    const auto ownership=w.value("call i32 @nt_ee_vector_memory(ptr %memory, i32 "+unit+")");
+    const auto available=w.value("icmp eq i32 "+ownership+", 0");
+    w.out<<"  br i1 "<<available<<", label %region_ready"<<suffix<<", label %vu_stop"<<suffix<<"\nvu_stop"<<suffix<<":\n";
+    w.store("i32",address,offsetof(ee::Memory,fault_address),"%memory");
+    w.out<<"  ret i32 "<<ownership<<"\nregion_ready"<<suffix<<":\n";
     const bool native_io=(access.bytes==4 || access.bytes==8) && access.bank==RegisterBank::integer && access.merge==Merge::none;
     if (native_io) {
         const auto device_address=w.value("icmp uge i32 "+physical+", 268435456");
@@ -124,13 +137,24 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
     if (access.bytes==16 && access.bank!=RegisterBank::vector) physical=w.binary("and","i32",physical,"4294967280");
     if (access.merge!=Merge::none) physical=w.binary("and","i32",physical,std::to_string(~std::uint32_t(access.bytes-1)));
     physical=w.value("select i1 "+scratchpad+", i32 "+w.binary("and","i32",physical,std::to_string(ee::scratchpad_size-1))+", i32 "+physical);
+    const auto vector_limit=w.value("select i1 "+vu1+", i64 16384, i64 4096");
+    const auto vector_mask=w.value("select i1 "+vu1+", i32 16383, i32 4095");
+    physical=w.value("select i1 "+vu_data+", i32 "+w.binary("and","i32",physical,vector_mask)+", i32 "+physical);
     const auto offset=w.value("zext i32 "+physical+" to i64");
     const auto end=w.binary("add","i64",offset,std::to_string(access.bytes));
-    const auto size=w.value("select i1 "+scratchpad+", i64 "+w.load("i64",offsetof(ee::Memory,scratchpad_bytes),"%memory")+", i64 "+w.load("i64",offsetof(ee::Memory,size),"%memory"));
-    const auto data=w.value("select i1 "+scratchpad+", ptr "+w.load("ptr",offsetof(ee::Memory,scratchpad),"%memory")+", ptr "+w.load("ptr",offsetof(ee::Memory,data),"%memory"));
+    const auto vector_field=[&](const char* type,std::size_t field) {
+        const auto base=offsetof(ee::Memory,vector_data)+field;
+        return w.value("select i1 "+vu1+", "+type+" "+w.load(type,base+sizeof(ee::NativeVectorMemory),"%memory")+
+            ", "+type+" "+w.load(type,base,"%memory"));
+    };
+    auto size=w.value("select i1 "+scratchpad+", i64 "+w.load("i64",offsetof(ee::Memory,scratchpad_bytes),"%memory")+", i64 "+w.load("i64",offsetof(ee::Memory,size),"%memory"));
+    auto data=w.value("select i1 "+scratchpad+", ptr "+w.load("ptr",offsetof(ee::Memory,scratchpad),"%memory")+", ptr "+w.load("ptr",offsetof(ee::Memory,data),"%memory"));
+    size=w.value("select i1 "+vu_data+", i64 "+vector_field("i64",offsetof(ee::NativeVectorMemory,bytes))+", i64 "+size);
+    data=w.value("select i1 "+vu_data+", ptr "+vector_field("ptr",offsetof(ee::NativeVectorMemory,data))+", ptr "+data);
     const auto null=w.value("icmp eq ptr "+data+", null");
     const auto outside=w.value("icmp ugt i64 "+end+", "+size);
-    const auto limit=w.value("select i1 "+scratchpad+", i64 "+std::to_string(ee::scratchpad_size)+", i64 33554432");
+    auto limit=w.value("select i1 "+scratchpad+", i64 "+std::to_string(ee::scratchpad_size)+", i64 33554432");
+    limit=w.value("select i1 "+vu_data+", i64 "+vector_limit+", i64 "+limit);
     const auto device=w.value("icmp ugt i64 "+end+", "+limit);
     const auto low=w.binary("and","i32",address,std::to_string((access.bytes==16 && access.bank!=RegisterBank::vector) || access.merge!=Merge::none ? 0 : access.bytes-1));
     const auto unaligned=w.value("icmp ne i32 "+low+", 0");

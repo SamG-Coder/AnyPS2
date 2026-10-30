@@ -182,6 +182,15 @@ int main(int argc,char** argv) {
     const auto graphics_text=graphics_module.str();
     nt::write_file(std::string(argv[1])+".graphics",nt::ByteView(reinterpret_cast<const std::uint8_t*>(graphics_text.data()),graphics_text.size()));
     bytes.clear();
+    pair(0x80000000|(1U<<11)|(27U<<6)|60);
+    pair((1U<<25)|(15U<<21)|(1U<<11)); // Change data between two graphics requests.
+    pair(0x80000000|(1U<<11)|(27U<<6)|60,0x400002ff);
+    pair(0x80000335);
+    std::ostringstream graphics_batch;
+    nt::vu::emit_program_llvm(graphics_batch,nt::vu::frame(bytes,1,0),1,entries,"nt_vu_graphics_batch");
+    const auto batch_text=graphics_batch.str();
+    nt::write_file(std::string(argv[1])+".graphics_batch",nt::ByteView(reinterpret_cast<const std::uint8_t*>(batch_text.data()),batch_text.size()));
+    bytes.clear();
     pair(0x80000000|(1U<<11)|(27U<<6)|60,0x400002ff);
     pair(0x80000000|(1U<<11)|(1U<<16)|(1U<<6)|50); // E delay pair increments once.
     const auto end_graphics=nt::vu::frame(bytes,1,0);
@@ -224,5 +233,13 @@ int main(int argc,char** argv) {
     nt::vu::emit_program_llvm(data_module,nt::vu::frame(bytes,1,0),1,entries,"nt_vu_data");
     const auto data_text=data_module.str();
     nt::write_file(std::string(argv[1])+".data",nt::ByteView(reinterpret_cast<const std::uint8_t*>(data_text.data()),data_text.size()));
+    bytes.clear();
+    pair(0x80000000|(1U<<11)|(1U<<16)|(1U<<6)|50,
+        0x40000000|(15U<<21)|(2U<<16)|(1U<<11)|(3U<<6)|40);
+    pair(0x80000335);
+    std::ostringstream shared_module;
+    nt::vu::emit_program_llvm(shared_module,nt::vu::frame(bytes,0,0),0,entries,"nt_vu_shared");
+    const auto shared_text=shared_module.str();
+    nt::write_file(std::string(argv[1])+".shared",nt::ByteView(reinterpret_cast<const std::uint8_t*>(shared_text.data()),shared_text.size()));
     nt::write_file(argv[1],nt::ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));
 }

@@ -1144,3 +1144,40 @@ MSCAL, BASE, OFFSET and ITOP handlers and `Vif.h` public field layout. These
 establish entry masking and launch-input/buffer-selection transitions. The new
 implementation calls compiled functions transactionally; it does not adopt the
 reference's execution queue, instruction executor or game-specific timing paths.
+
+The V4 data conversion family uses the pinned PCSX2 `Vif_Unpack.cpp` as a behavior
+reference for signed/unsigned lane widening and packed 5:5:5:1 colour expansion,
+including the packed format's MODE independence. The native implementation uses
+original bounded byte reads and synthetic payloads; no upstream unpack routine
+or game payload is copied.
+
+VCALL entry selection follows the pinned PCSX2 `COP2.cpp` and `VU.h` public
+behavior: immediate microprogram entries and CMSAR0-selected entries. AnyPS2
+lowers these operations to native launch callbacks and compiled functions; no
+reference interpreter implementation is incorporated.
+
+The pinned PCSX2 `Memory.cpp` public mappings identify the VU0 data window and
+its 4 KiB mirrors, and the separate 16 KiB VU1 data window. AnyPS2 maps those data
+accesses to native owner buffers during LLVM lowering. It does not expose the
+reference's instruction-memory handlers or virtual-TLB implementation.
+
+The native GIF adapter follows the already recorded public packet/register
+interfaces. Sprite bounds and clipping were factored from AnyPS2's existing
+original `gs_sprite.cpp` into a shared planner. The adapter supplies native draw
+commands to the existing Vulkan renderer; it does not import a reference GS
+machine or any commercial packet payload. GPU fixtures are original synthetic data.
+
+DIRECT/DIRECTHL payload lengths follow the pinned PCSX2 `Vif_Codes.cpp` public
+command behavior, including the zero-immediate 65,536-quadword case. AnyPS2 frames
+bounded data and submits it synchronously to its native graphics consumer; it does
+not adopt the reference's transfer queues, DMA stalls or timing model.
+
+Native image upload planning uses the public transfer fields already implemented
+in AnyPS2's original graphics code. The 32-bit destination address calculation is
+shared between native planning and diagnostic graphics. Tests use original small
+RGBA/RGB payloads; no game images or extracted texture data are included.
+
+Sprite texture setup is factored from AnyPS2's existing original renderer into a
+shared planner. The native packet adapter supplies fixed-UV endpoint/configuration
+data to that planner and uses the existing Vulkan sampler. Synthetic tests contain
+only original texels and commands.

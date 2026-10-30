@@ -4,6 +4,7 @@
 namespace nt::ee_codegen {
 inline bool vector_operation(Op op) {
     switch (op) {
+    case Op::vcallms: case Op::vcallmsr: return true;
     case Op::vadd: case Op::vsub: case Op::vadd_bc: case Op::vsub_bc:
     case Op::vmul: case Op::vmul_bc: case Op::vmax: case Op::vmax_bc: case Op::vmini: case Op::vmini_bc:
     case Op::vmove: case Op::vmr32: case Op::vabs: case Op::vnop:
@@ -14,6 +15,14 @@ inline bool vector_operation(Op op) {
 }
 inline void emit_vector(Writer& w,const r5900::Instruction& i) {
     const auto suffix=std::to_string(i.pc);
+    if (i.op==Op::vcallms || i.op==Op::vcallmsr) {
+        const auto result=w.value("call i32 @nt_ee_vector_launch(ptr %memory, i32 "+
+            std::string(i.op==Op::vcallmsr ? "1" : "0")+", i32 "+std::to_string((i.word>>6)&0x7fffU)+")");
+        const auto ready=w.value("icmp eq i32 "+result+", 0");
+        w.out<<"  br i1 "<<ready<<", label %launch_ready"<<suffix<<", label %launch_stop"<<suffix
+             <<"\nlaunch_stop"<<suffix<<":\n  ret i32 "<<result<<"\nlaunch_ready"<<suffix<<":\n";
+        return;
+    }
     if (i.op==Op::vadd || i.op==Op::vsub || i.op==Op::vadd_bc || i.op==Op::vsub_bc || i.op==Op::vmul || i.op==Op::vmul_bc) {
         const bool multiply=i.op==Op::vmul || i.op==Op::vmul_bc;
         const bool subtract=i.op==Op::vsub || i.op==Op::vsub_bc;

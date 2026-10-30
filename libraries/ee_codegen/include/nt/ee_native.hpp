@@ -45,6 +45,11 @@ class NativeSifLink;
 class NativeSifOutbound;
 inline constexpr std::uint32_t scratchpad_begin=0x70000000U;
 inline constexpr std::uint32_t scratchpad_size=0x4000U;
+struct NativeVectorMemory {
+    std::uint8_t* data=nullptr;
+    std::uint64_t bytes=0;
+    const bool* active=nullptr;
+};
 struct Memory {
     std::uint8_t* data=nullptr;
     std::uint64_t size=0;
@@ -65,6 +70,9 @@ struct Memory {
     std::uint64_t scratchpad_bytes=0;
     NativeGraphics* graphics=nullptr;
     NativePerformance metrics;
+    void* vector_launch_context=nullptr;
+    Stop (*launch_vector)(void*,bool,unsigned)=nullptr;
+    NativeVectorMemory vector_data[2];
 };
 // Syscall boundaries retain PC and do not retire until a native service handles them.
 using Entry = Stop (*)(runtime::State*,Memory*,std::uint64_t);

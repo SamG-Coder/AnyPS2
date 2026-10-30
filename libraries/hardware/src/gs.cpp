@@ -1,4 +1,5 @@
 #include <nt/gs.hpp>
+#include <nt/image_upload.hpp>
 #include <algorithm>
 
 namespace nt::hardware {
@@ -6,12 +7,7 @@ void Gs::writable_local() {
     if (local_.use_count() != 1) local_ = std::make_shared<std::vector<std::uint32_t>>(*local_);
 }
 unsigned Gs::pixel_word(unsigned base, unsigned pitch, unsigned x, unsigned y) {
-    x &= 2047; y &= 2047;
-    const auto page = (y/32)*pitch+x/64;
-    const auto block = ((x>>3)&1) | (((y>>3)&1)<<1) | (((x>>4)&1)<<2) |
-                       (((y>>4)&1)<<3) | (((x>>5)&1)<<4);
-    const auto word = (x&1) | ((y&1)<<1) | ((x&6)<<1) | ((y&6)<<3);
-    return (base*64 + page*2048 + block*64 + word) & 0xfffff;
+    return graphics::rgba_word(base,pitch,x,y);
 }
 void Gs::upload(runtime::Register value) {
     if (!upload_.bits || upload_.pixel >= upload_.width*upload_.height)

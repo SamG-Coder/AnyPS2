@@ -1395,3 +1395,122 @@ are supported. Equal cycle lengths and normal row mode are required; unsupported
 formats, masked writes and cycle/row transforms stop. Data writes and an optional
 final launch share one candidate state, so a failed launch commits neither.
 Mixed program-image and data uploads remain unsupported in one submission.
+
+V4-16 and V4-8 now share a bounded data conversion helper with V4-32. Narrow lanes
+are explicitly sign- or zero-extended without host signed-conversion dependence.
+V4-5 expands packed 5:5:5:1 colour into 32-bit lanes and ignores MODE, as required
+by that format. Transport padding is consumed separately from data, including odd
+packed-colour counts. A zero encoded count means 256 vectors. Masked formats,
+unequal cycle lengths and nonzero row modes for ordinary V4 formats still stop.
+These are data conversions into native storage, not executable-code decoding.
+
+## VU0 shared-state launch ownership
+
+The native launch owner now supports VU0 with an explicit shared EE vector-storage
+reference. Integer-register storage belongs to that same owner, so control
+transfers and compiled microprograms see the same values. Launch imports current
+vectors, integers, MAC and status flags; completion publishes those fields back.
+Active ownership returns pending and failed native execution publishes nothing.
+VU0 data uploads wrap within 256 vectors and its launch supplies ITOP without
+VU1 TOP or double-buffer state. Unit routing selects independent native owners.
+
+This is a cooperative serialized execution model. Reset of active work remains unsupported. Private GT4 startup
+still stops earlier at the unresolved native performance measurement request.
+
+VCALLMS and VCALLMSR now lower to explicit native VU0 launch calls. Immediate
+entries and CMSAR0-selected entries use the VU0 address mask; CMSAR0 is shared
+with native EE control transfers. Launch completion retires the EE operation.
+Missing bindings/entries and active ownership preserve the EE instruction and
+delay-slot continuation for a retry. Macro launches preserve existing VIF inputs
+without performing VIF buffer-selection transitions. No runtime instruction
+decoder is linked by this path.
+
+## Direct EE access to native vector data
+
+LLVM memory lowering recognizes the VU0 and VU1 data windows after normal kernel
+alias normalization. VU0's four 4 KiB mirrors select the same owner buffer; VU1
+uses its 16 KiB buffer. The existing scalar, merged, floating and vector access
+lowering operates on the selected pointer, with the existing alignment rules.
+Owner extents and active VU0 work are checked before memory accesses. A missing
+owner reports unsupported vector behavior. Instruction windows remain outside
+these mappings and cannot become runtime executable-code storage.
+
+The direct buffers belong to the same launch owners used by VIF uploads and
+compiled VU execution. This is coherent native data sharing, not a separate
+hardware-memory copy or an instruction executor. Concurrent host access is not
+supported; the existing execution model remains cooperative and serialized.
+
+## Atomic native graphics batches
+
+The launch owner can continue across compiled graphics-request boundaries while
+staging immutable packet snapshots. The same native-block budget covers every
+continuation. Only complete execution submits the ordered batch to a native
+consumer; rejected delivery, malformed packets or incomplete execution leave
+owner state unchanged. Staging is limited to 65,536 quadwords per launch.
+
+The batch consumer contract requires all-or-nothing external acceptance. This
+permits a renderer adapter to validate a complete command plan before effects.
+The production probe uses the native packet adapter described below. A
+graphics request without a consumer remains an explicit unsupported stop.
+Serialization and snapshots do not establish asynchronous console-transfer timing.
+
+## Native solid-sprite packet adapter
+
+`NativeDrawing` plans supported GIF packets into existing Vulkan sprite commands.
+It accepts packed PRIM/RGBAQ/XYZ2/XYZ3, address/data configuration, and register-list
+forms. Typed drawing contexts retain surface, clipping, offset and supported test
+configuration; unsupported registers and rasterization features fail explicitly.
+The production probe connects this adapter to compiled VU1 graphics batches.
+
+Every packet is validated before GPU calls. Rendering uses a candidate pixel
+buffer and publishes drawing state and pixels only after success. Packet size,
+framing and end tags are bounded and validated. Sprite coverage planning is shared
+with the existing diagnostic renderer, avoiding duplicate clipping rules. No
+hardware machine, CPU interpreter or VU decoder is linked into this native path.
+
+The implemented rasterization is untextured solid sprites with supported clipping,
+frame masks and alpha-bit handling. Texture and image-upload support are described below. Other primitives,
+unsupported alpha/depth tests and window presentation remain unfinished. GPU tests
+establish synthetic compiled-VU rendering, not a GT4 frame or timing equivalence.
+
+## Native direct graphics submissions
+
+VIF1 DIRECT and DIRECTHL payloads are framed into the same immutable graphics
+batches as VU output. Direct GIF submissions use the same framing and consumer.
+Packet extent, end tags and total batch size are checked before acceptance; a
+paused GIF owner rejects work. Configuration changes commit only after accepted
+drawing. Mixed program uploads/vector-data/launches and direct graphics in one
+submission remain unsupported, as do packets split across submission boundaries.
+
+The execution model is serialized, with no outstanding competing graphics path;
+DIRECTHL therefore uses the same ordered native consumer as DIRECT. This does not
+implement console path arbitration, stalls or transfer timing. The adapter supports the sprite and image-upload subsets documented here.
+
+## Native image uploads
+
+The graphics plan now includes ordered image writes alongside Vulkan draw
+commands. Host-to-local RGBA32 and RGB24 uploads support the public destination
+layout and forward traversal. RGB24 retains destination alpha and carries partial
+pixels across image packets. Upload configuration and progress are transactional
+with drawing state; a rejected continuation can be retried without losing bytes.
+The address helper is shared with the existing diagnostic graphics path.
+
+All operations are validated before the candidate pixel buffer is updated.
+Upload writes are data conversion, while sprite rasterization remains Vulkan.
+Unsupported pixel formats, reverse traversal, other transfer directions, empty
+surfaces and data beyond an active upload stop explicitly. Final-quadword padding
+is consumed without writing extra pixels. Textured draw planning is described below; presentation
+through this native adapter remains unfinished.
+
+## Native textured sprites
+
+The adapter now tracks UV endpoints and supported texture, filter, clamp and
+alpha configuration for fixed-UV sprites. RGBA32/RGB24 surfaces use the existing
+Vulkan sampler, including its supported nearest/bilinear, modulation/decal and
+clamp modes. Texture setup is factored into a shared planner used by the existing
+diagnostic drawing path; native packets do not duplicate sampling logic.
+
+Native palette-backed textures and perspective coordinates remain unsupported.
+Unsupported modes fail before publishing drawing or pixels. Texture flush is a
+coherent-storage boundary, with no stale native texture cache to invalidate.
+The synthetic upload-to-sampling test does not establish game rendering.

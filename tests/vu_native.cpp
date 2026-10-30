@@ -4,6 +4,7 @@
 #include <nt/ee_packet_setup.hpp>
 #include <nt/ee_vu_upload.hpp>
 #include <nt/ee_vu_launch.hpp>
+#include <nt/ee_vector_owner.hpp>
 #include <nt/vu_artifact.hpp>
 #include <nt/vu_graphics.hpp>
 #include <nt/vu_clip.hpp>
@@ -13,10 +14,19 @@
 
 extern "C" std::uint64_t nt_ee_multiply_accumulate_finite(std::uint32_t,std::uint32_t,std::uint32_t,std::uint32_t);
 extern "C" nt::vu::Result nt_vu_generated(nt::vu::State*);
+extern "C" nt::ee::Stop nt_ee_generated_run(nt::runtime::State*,nt::ee::Memory*,std::uint64_t);
 extern "C" const nt::vu::Block* nt_vu_data_blocks();
 extern "C" std::uint32_t nt_vu_data_count();
 extern "C" const std::uint8_t* nt_vu_data_image();
 extern "C" std::uint32_t nt_vu_data_size();
+extern "C" const nt::vu::Block* nt_vu_shared_blocks();
+extern "C" std::uint32_t nt_vu_shared_count();
+extern "C" const std::uint8_t* nt_vu_shared_image();
+extern "C" std::uint32_t nt_vu_shared_size();
+extern "C" const nt::vu::Block* nt_vu_graphics_batch_blocks();
+extern "C" std::uint32_t nt_vu_graphics_batch_count();
+extern "C" const std::uint8_t* nt_vu_graphics_batch_image();
+extern "C" std::uint32_t nt_vu_graphics_batch_size();
 extern "C" nt::vu::Result nt_vu_branch(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_call(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_end_false(nt::vu::State*);
@@ -342,8 +352,125 @@ int main() {
         upload_packet.insert(upload_packet.end(),data_packet.begin(),data_packet.end());
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_vector || packets.read(0x10003c40).value)
             throw std::runtime_error("Unsupported cycle mode committed configuration");
+        const auto unpack_and_launch=[&](std::uint32_t code,std::initializer_list<std::uint32_t> payload,
+                                        std::array<std::uint32_t,4> expected,unsigned mode=0) {
+            upload_packet.clear(); packet_word(0x05000000U|mode); packet_word(code);
+            for (const auto word:payload) packet_word(word);
+            packet_word(0x14000000);
+            if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
+                data_owner.state.vectors[0]!=expected || data_owner.state.data[0]!=expected)
+                throw std::runtime_error("Packed V4 upload failed native consumption");
+        };
+        unpack_and_launch(0x6d010000,{0xffff0000,0x80007fff},{0,0xffffffff,0x7fff,0xffff8000});
+        unpack_and_launch(0x6d014000,{0xffff0000,0x80007fff},{0,0xffff,0x7fff,0x8000});
+        unpack_and_launch(0x6e010000,{0x807fff00},{0,0xffffffff,0x7f,0xffffff80});
+        unpack_and_launch(0x6e014000,{0x807fff00},{0,0xff,0x7f,0x80});
+        // High halfword is transport padding, deliberately not zero.
+        unpack_and_launch(0x6f010000,{0xdeadfc1f},{248,0,248,128},3);
+        unpack_and_launch(0x6f014000,{0xffff03e0},{0,248,0,0},2);
+        const auto before_bad_format=data_owner.state;
+        upload_packet.clear(); packet_word(0x7d010000); packet_word(0); packet_word(0);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_system || data_owner.state!=before_bad_format)
+            throw std::runtime_error("Masked unpack silently used unmasked semantics");
+        upload_packet.clear(); packet_word(0x05000000); packet_word(0x6d010000); packet_word(0);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::invalid_state || data_owner.state!=before_bad_format)
+            throw std::runtime_error("Truncated packed upload changed native state");
+        upload_packet.clear(); packet_word(0x05000000); packet_word(0x6e004000);
+        for (unsigned vector=0;vector<256;++vector) packet_word(0x01010101U*vector);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
+            data_owner.state.data[255]!=std::array<std::uint32_t,4>{255,255,255,255})
+            throw std::runtime_error("Zero encoded count did not upload 256 packed vectors");
         nt::vu::State integer_branch;
+        nt::vu::Binding shared_binding(nt::vu::Program(0,{nt_vu_shared_blocks(),nt_vu_shared_count()}),0,
+            {nt_vu_shared_image(),nt_vu_shared_size()});
+        if (!shared_binding.upload(0,std::array{nt::vu::UploadView{0,{nt_vu_shared_image(),nt_vu_shared_size()}}}))
+            throw std::runtime_error("Shared-state fixture binding failed");
+        nt::ee::NativeVectorOwner macro_owner;
+        macro_owner.storage.values[0].fill(0x3f800000);
+        macro_owner.storage.values[1].fill(0xbf800000);
+        macro_owner.write(1,false,65535);
+        nt::ee::NativeVuLaunch shared_launch(shared_binding,10,&macro_owner.storage);
+        nt::ee::NativeVuSubmissions submissions;
+        submissions.add(shared_launch); submissions.add(data_owner); submissions.connect(packets);
+        upload_packet.clear(); packet_word(0x040000ab); packet_word(0x14000000);
+        if (packets.consume(0,upload_packet,false)!=nt::ee::Stop::budget || macro_owner.read(1,false).value!=0 ||
+            macro_owner.storage.values[2]!=std::array<std::uint32_t,4>{} || macro_owner.read(17,false).value!=15 ||
+            !(macro_owner.read(16,false).value&1) || shared_launch.state.input_itop!=0xab ||
+            shared_launch.state.input_valid!=2 || (packets.read(0x10003800).value&0x80))
+            throw std::runtime_error("Compiled VU0 failed shared vector, integer or flag handoff");
+        macro_owner.storage.values[1].fill(0x40000000);
+        if (packets.consume(0,upload_packet,false)!=nt::ee::Stop::budget || macro_owner.read(1,false).value!=1 ||
+            macro_owner.storage.values[2]!=std::array<std::uint32_t,4>{0x40400000,0x40400000,0x40400000,0x40400000})
+            throw std::runtime_error("Compiled VU0 ignored newer macro state");
+        const auto saved_vectors=macro_owner.storage.values;
+        const auto saved_state=shared_launch.state;
+        macro_owner.storage.active=true;
+        if (packets.consume(0,upload_packet,false)!=nt::ee::Stop::vector_pending ||
+            shared_launch.state!=saved_state || macro_owner.storage.values!=saved_vectors)
+            throw std::runtime_error("Active vector ownership was bypassed");
+        macro_owner.storage.active=false;
+        upload_packet.clear(); packet_word(0x14000001);
+        if (packets.consume(0,upload_packet,false)!=nt::ee::Stop::unsupported_vector ||
+            shared_launch.state!=saved_state || macro_owner.storage.values!=saved_vectors || macro_owner.read(1,false).value!=1)
+            throw std::runtime_error("Rejected VU0 launch published partial state");
         integer_branch.integers[0]=5; integer_branch.integers[1]=7; integer_branch.data[0][2]=0xabcd0007;
+        nt::ee::Memory macro_memory;
+        nt::runtime::State macro_state; macro_state.pc=0x3f0000;
+        if (nt_ee_generated_run(&macro_state,&macro_memory,8)!=nt::ee::Stop::unsupported_vector || macro_state.executed)
+            throw std::runtime_error("Unbound compiled VCALL retired");
+        shared_launch.connect_macro(macro_memory);
+        if (nt_ee_generated_run(&macro_state,&macro_memory,8)!=nt::ee::Stop::syscall ||
+            macro_state.pc!=0x3f0004 || macro_state.executed!=1 || macro_owner.read(1,false).value!=2)
+            throw std::runtime_error("Compiled EE VCALL did not execute native VU code");
+        macro_owner.write(27,false,0x201); // Address masks to missing entry 1.
+        macro_state={}; macro_state.pc=0x3f0010;
+        if (nt_ee_generated_run(&macro_state,&macro_memory,8)!=nt::ee::Stop::unsupported_vector ||
+            macro_state.executed || macro_owner.read(1,false).value!=2)
+            throw std::runtime_error("Failed register launch retired or changed shared state");
+        macro_owner.write(27,false,0x200);
+        if (nt_ee_generated_run(&macro_state,&macro_memory,8)!=nt::ee::Stop::syscall ||
+            macro_state.executed!=1 || macro_owner.read(1,false).value!=3)
+            throw std::runtime_error("Compiled VCALLMSR address selection failed");
+        macro_owner.storage.active=true;
+        macro_state={}; macro_state.pc=0x3f0020;
+        if (nt_ee_generated_run(&macro_state,&macro_memory,8)!=nt::ee::Stop::vector_pending ||
+            macro_state.executed!=1 || macro_state.pc!=0x3f0024 || !macro_state.delay_slot)
+            throw std::runtime_error("Pending VCALL lost EE delay-slot state");
+        macro_owner.storage.active=false;
+        if (nt_ee_generated_run(&macro_state,&macro_memory,8)!=nt::ee::Stop::syscall ||
+            macro_state.executed!=2 || macro_state.pc!=0x3f002c || macro_state.delay_slot || macro_owner.read(1,false).value!=4)
+            throw std::runtime_error("Retried compiled launch did not retire exactly once");
+        shared_launch.connect_data(macro_memory); data_owner.connect_data(macro_memory);
+        for (const auto address:{0x11004000U,0x11005000U,0xb1004000U,0x1100c000U}) {
+            macro_state={}; macro_state.pc=0x400000; macro_state.gpr[4].lo=address;
+            macro_state.gpr[8].lo=0x2222222211111111ULL; macro_state.gpr[8].hi=0x4444444433333333ULL;
+            macro_state.gpr[10].lo=0x80000001; macro_state.gpr[12].lo=0xab;
+            if (nt_ee_generated_run(&macro_state,&macro_memory,20)!=nt::ee::Stop::syscall ||
+                macro_state.gpr[9].lo!=macro_state.gpr[8].lo || macro_state.gpr[9].hi!=macro_state.gpr[8].hi ||
+                macro_state.gpr[11].lo!=0xffffffff80000001ULL || macro_state.gpr[13].lo!=0xab)
+                throw std::runtime_error("Compiled EE VU data access failed");
+            const auto& vectors=address==0x1100c000U ? data_owner.state.data : shared_launch.state.data;
+            if (vectors[0]!=std::array<std::uint32_t,4>{0x11111111,0x22222222,0x33333333,0x44444444} ||
+                vectors[1][0]!=0x80000001 || (vectors[1][1]&255)!=0xab)
+                throw std::runtime_error("EE data accesses did not reach native VU storage");
+        }
+        const nt::ee::NativeLaunchView load_request{0,0,0};
+        if (data_owner.submit(1,{},&load_request)!=nt::ee::Stop::budget || data_owner.state.vectors[0]!=data_owner.state.data[0])
+            throw std::runtime_error("Compiled VU could not consume EE-written vectors");
+        macro_state={}; macro_state.pc=0x400000; macro_state.gpr[4].lo=0x11004000;
+        const auto before_busy_data=shared_launch.state;
+        macro_owner.storage.active=true;
+        if (nt_ee_generated_run(&macro_state,&macro_memory,20)!=nt::ee::Stop::vector_pending ||
+            macro_state.executed || shared_launch.state!=before_busy_data)
+            throw std::runtime_error("EE bypassed active VU data ownership");
+        macro_owner.storage.active=false;
+        macro_memory.vector_data[0].bytes=16;
+        macro_state.pc=0x40000c;
+        if (nt_ee_generated_run(&macro_state,&macro_memory,1)!=nt::ee::Stop::memory_fault || macro_state.executed)
+            throw std::runtime_error("EE VU data access ignored supplied extent");
+        macro_state.pc=0x400000; macro_state.gpr[4].lo=0x11000000;
+        if (nt_ee_generated_run(&macro_state,&macro_memory,1)!=nt::ee::Stop::memory_fault || macro_state.executed)
+            throw std::runtime_error("VU executable storage was exposed as writable native data");
         if (nt_vu_integer_branch(&integer_branch)!=nt::vu::Result::transfer || integer_branch.next_pair!=5 || integer_branch.integers[0]!=7)
             throw std::runtime_error("Native VU integer load branch visibility failed");
         nt::vu::State geometry;
@@ -410,6 +537,36 @@ int main() {
             graphics_state.next_pair!=1 || graphics_state.graphics_address!=1023 || graphics_state.data[0][0]!=11)
             throw std::runtime_error("Native graphics boundary did not stop before continuation");
         const auto pending_graphics=graphics_state;
+        nt::vu::Binding graphics_binding(nt::vu::Program(1,{nt_vu_graphics_batch_blocks(),nt_vu_graphics_batch_count()}),0,
+            {nt_vu_graphics_batch_image(),nt_vu_graphics_batch_size()});
+        if (!graphics_binding.upload(1,std::array{nt::vu::UploadView{0,{nt_vu_graphics_batch_image(),nt_vu_graphics_batch_size()}}}))
+            throw std::runtime_error("Graphics batch fixture did not bind");
+        nt::ee::NativeVuLaunch batch_owner(graphics_binding);
+        batch_owner.state=graphics_state; batch_owner.state.graphics_pending=0;
+        const auto before_batch=batch_owner.state;
+        struct BatchSink { bool accept=false; unsigned calls=0; std::vector<nt::vu::GraphicsPacket> packets; } sink;
+        const nt::vu::GraphicsBatchConsumer batch_consumer{&sink,[](void* raw,std::span<const nt::vu::GraphicsPacket> packets) {
+            auto& sink=*static_cast<BatchSink*>(raw); ++sink.calls;
+            if (!sink.accept) return false;
+            sink.packets.assign(packets.begin(),packets.end()); return true;
+        }};
+        if (batch_owner.submit(1,{},&load_request)!=nt::ee::Stop::unsupported_vector || batch_owner.state!=before_batch)
+            throw std::runtime_error("Graphics launch without consumer committed state");
+        batch_owner.graphics=batch_consumer;
+        if (batch_owner.submit(1,{},&load_request)!=nt::ee::Stop::unsupported_vector ||
+            batch_owner.state!=before_batch || sink.calls!=1 || !sink.packets.empty())
+            throw std::runtime_error("Rejected graphics batch committed execution");
+        sink.accept=true;
+        if (batch_owner.submit(1,{},&load_request)!=nt::ee::Stop::budget || sink.calls!=2 || sink.packets.size()!=2 ||
+            sink.packets[0][1]!=std::array<std::uint32_t,4>{11,22,33,44} ||
+            sink.packets[1][1]!=std::array<std::uint32_t,4>{55,66,77,88} || batch_owner.state.graphics_pending ||
+            batch_owner.last_result.blocks!=2)
+            throw std::runtime_error("Native graphics batch lost packet ordering or snapshots");
+        nt::ee::NativeVuLaunch limited_graphics(graphics_binding,1);
+        limited_graphics.state=before_batch; limited_graphics.graphics=batch_consumer;
+        if (limited_graphics.submit(1,{},&load_request)!=nt::ee::Stop::unsupported_vector || sink.calls!=2 ||
+            limited_graphics.state!=before_batch || limited_graphics.last_result.status!=nt::vu::RunStatus::budget_exhausted)
+            throw std::runtime_error("Incomplete native launch delivered partial graphics");
         if (graphics_program.run(graphics_state,10).blocks!=0 ||
             nt::vu::submit_graphics(graphics_state,{})!=nt::vu::GraphicsResult::unavailable || graphics_state!=pending_graphics)
             throw std::runtime_error("Unconsumed graphics request advanced native execution");

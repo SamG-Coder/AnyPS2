@@ -2101,3 +2101,61 @@ The V4-32 milestone uploads vectors and launches an LLVM-compiled load program i
 one submission. It checks wraparound, TOPS-relative writes and atomic rollback for
 truncated input, unknown trailing commands, unsupported cycles and missing native
 entries. This proves synthetic native data consumption, not game rendering.
+
+The packed V4 milestone extends that same compiled-load integration to signed and
+unsigned 16-bit/8-bit lanes and packed 5:5:5:1 colour. Cases cover negative limits,
+nonzero padding, packed-colour MODE independence, 256-vector encoded-zero counts,
+masked-format rejection and truncated payload rollback. Related Release gates
+are `vu-llvm-execution` and `ee-llvm-execution`.
+
+The shared-state milestone compiles a VU0 program that adds vector lanes and
+increments an integer register. Packet launches verify EE-to-VU input visibility,
+VU-to-EE vector and flag publication, integer wraparound, repeated launches using
+new macro state, ITOP metadata, active-owner rejection and missing-entry rollback.
+It runs with both VU submission owners registered and uses the same related
+Release gates. This is synthetic coverage, not a claim of game VU execution.
+
+The VCALL milestone links generated EE and VU objects into the same execution
+test. It verifies immediate launch, CMSAR0 address masking, missing binding and
+entry failures without retirement, and a pending launch inside an EE branch delay
+slot followed by exactly-once retry and continuation. Both native execution gates
+and generated-project integration cover the affected call ABI.
+
+The vector-memory milestone executes compiled EE quadword, word and byte loads
+and stores against both native VU owners, VU0 mirrors and a kernel alias. It then
+runs compiled VU code against EE-written data. It checks signed readback, active
+ownership rejection without retirement, supplied-buffer bounds and rejection of
+instruction-window writes. The related gates are the two native execution tests
+and generated-project integration.
+
+The graphics-batch milestone compiles a program with two XGKICK boundaries and
+a data write between them. The native launch test verifies ordered immutable
+snapshots, a single whole-batch acceptance call, rejection without state commit,
+and no delivery when the shared execution budget expires. The affected gate is
+`vu-llvm-execution`; no Vulkan rendering claim follows from this consumer test.
+
+`vu-vulkan-rendering` closes the synthetic compiled-VU-to-GPU path: it binds and
+executes an LLVM-generated XGKICK/E program, accepts its native graphics batch,
+and verifies Vulkan pixels, exactly-once completion and zero validation errors.
+`vulkan-rendering` covers packed/address-data and register-list sprite packets,
+pixel coverage, and atomic rejection of malformed/truncated batches. The shared
+sprite planner is also covered by `hardware-registers`. GPU gates require a
+working Vulkan device and validation layers; none establishes game boot.
+
+The direct-submission milestone extends `vu-vulkan-rendering` to VIF1 DIRECT,
+DIRECTHL and direct GIF batches using the shared renderer. It verifies pixels,
+paused-GIF rejection, encoded-zero transfer truncation and atomic configuration/
+pixel rollback after an unsupported trailing command. Related packet integrations
+remain covered by the EE/VU execution and generated-project gates.
+
+The image-upload milestone adds RGBA32 upload/draw ordering and RGB24 continuation
+across packets to `vulkan-rendering`. It checks destination alpha preservation,
+ignored final-beat padding, failed-continuation rollback and retry, and rejection
+after upload completion. `vu-vulkan-rendering` covers the connected consumer and
+`hardware-registers` covers the shared pixel-address helper.
+
+The native textured-sprite milestone uploads an original RGBA texture through GIF
+image packets, configures UV sampling through drawing packets, and verifies the
+Vulkan destination pixels. Perspective and palette requests must reject without
+pixel changes. Existing Vulkan sampler and diagnostic graphics tests cover the
+shared texture planner after extraction; the connected VU graphics test also runs.

@@ -9,6 +9,8 @@ struct GraphicsConsumer {
     // Must accept the entire immutable packet or leave external state unchanged.
     bool (*submit)(void*,std::span<const graphics::Quadword>)=nullptr;
 };
+using GraphicsPacket=graphics::Packet;
+using GraphicsBatchConsumer=graphics::BatchConsumer;
 inline GraphicsResult submit_graphics(State& state,GraphicsConsumer consumer) {
     if (!state.graphics_pending) return GraphicsResult::no_request;
     if (!consumer.submit) return GraphicsResult::unavailable;

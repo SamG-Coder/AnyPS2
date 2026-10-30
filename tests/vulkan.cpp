@@ -1,4 +1,5 @@
 #include <nt/vulkan_renderer.hpp>
+#include <nt/native_drawing.hpp>
 #include <iostream>
 #include <array>
 #include <vector>
@@ -8,6 +9,97 @@ int main() {
     try {
         nt::graphics::VulkanRenderer gpu(nullptr,true);
         gpu.synchronize();
+        nt::graphics::NativeDrawing native;
+        nt::graphics::NativeDrawing::Packet packet{{0x8007,0x10000000,14,0}};
+        const auto ad=[&](unsigned reg,std::uint64_t value) {
+            packet.push_back({std::uint32_t(value),std::uint32_t(value>>32),reg,0});
+        };
+        ad(0x1a,1); ad(0,6); ad(0x4c,1ULL<<16);
+        ad(0x40,(3ULL<<16)|(3ULL<<48)); ad(1,0x80604020);
+        ad(5,0); ad(5,32ULL|(32ULL<<16));
+        native.submit(gpu,std::array{packet});
+        for (unsigned pixel=0;pixel<4;++pixel)
+            if (native.pixels()[pixel]!=0x80604020) throw std::runtime_error("Native GIF batch did not render Vulkan sprite");
+        if (native.pixels()[4]) throw std::runtime_error("Native GIF sprite exceeded its coverage");
+        const nt::graphics::NativeDrawing::Packet packed{
+            {0x8001,0x30000000,0x551,0}, {0x11,0x22,0x33,0x80}, {32,0,0,0}, {64,32,0,0}};
+        native.submit(gpu,std::array{packed});
+        for (unsigned pixel=4;pixel<8;++pixel)
+            if (native.pixels()[pixel]!=0x80332211) throw std::runtime_error("Packed GIF attributes failed");
+        const nt::graphics::NativeDrawing::Packet reglist{
+            {0x8001,0x34000000,0x551,0}, {0x80776655,0,32U<<16,0}, {32U|(64U<<16),0,0xdeadbeef,0}};
+        native.submit(gpu,std::array{reglist});
+        for (unsigned pixel=16;pixel<20;++pixel)
+            if (native.pixels()[pixel]!=0x80776655) throw std::runtime_error("Register-list GIF attributes failed");
+        const auto snapshot=native.pixels();
+        auto invalid=packet; invalid[1][2]=0x70;
+        auto changed=packet; changed[5][0]=0x12345678;
+        bool rejected=false;
+        try { native.submit(gpu,std::array{changed,invalid}); }
+        catch (const std::invalid_argument&) { rejected=true; }
+        if (!rejected || native.pixels()!=snapshot) throw std::runtime_error("Invalid graphics batch changed pixels");
+        auto truncated=packet; truncated.pop_back(); rejected=false;
+        try { native.submit(gpu,std::array{truncated}); }
+        catch (const std::invalid_argument&) { rejected=true; }
+        if (!rejected || native.pixels()!=snapshot) throw std::runtime_error("Truncated graphics batch changed pixels");
+        const auto transfer_setup=[](unsigned format,unsigned width,unsigned height) {
+            nt::graphics::Packet setup{{0x8004,0x10000000,14,0}};
+            const auto put=[&](unsigned reg,std::uint64_t value) {
+                setup.push_back({std::uint32_t(value),std::uint32_t(value>>32),reg,0});
+            };
+            put(0x50,(1ULL<<48)|(std::uint64_t(format)<<56)); put(0x51,0);
+            put(0x52,width|(std::uint64_t(height)<<32)); put(0x53,0);
+            return setup;
+        };
+        const nt::graphics::Packet rgba{{0x8001,0x08000000,0,0},{0x11223344,0x55667788,0x99aabbcc,0xddeeff00}};
+        const auto setup32=transfer_setup(0,2,2);
+        native.submit(gpu,std::array{packet,setup32,rgba});
+        for (unsigned pixel=0;pixel<4;++pixel)
+            if (native.pixels()[pixel]!=rgba[1][pixel]) throw std::runtime_error("RGBA image upload ordering failed");
+        native.submit(gpu,std::array{setup32,rgba,packet});
+        for (unsigned pixel=0;pixel<4;++pixel)
+            if (native.pixels()[pixel]!=0x80604020) throw std::runtime_error("Draw after image upload lost ordering");
+        const auto before_rgb=native.pixels();
+        const auto setup24=transfer_setup(1,6,1);
+        const nt::graphics::Packet rgb_first{{0x8001,0x08000000,0,0},{0x04030201,0x08070605,0x0c0b0a09,0x100f0e0d}};
+        const nt::graphics::Packet rgb_last{{0x8001,0x08000000,0,0},{0xdead1211,0xffffffff,0xffffffff,0xffffffff}};
+        native.submit(gpu,std::array{setup24,rgb_first});
+        const auto partial_rgb=native.pixels(); rejected=false;
+        try { native.submit(gpu,std::array{rgb_last,invalid}); }
+        catch (const std::invalid_argument&) { rejected=true; }
+        if (!rejected || native.pixels()!=partial_rgb) throw std::runtime_error("Failed image continuation changed state");
+        native.submit(gpu,std::array{rgb_last});
+        const std::array<unsigned,6> addresses{0,1,4,5,8,9};
+        for (unsigned pixel=0;pixel<6;++pixel) {
+            const auto value=(pixel*3+1)|((pixel*3+2)<<8)|((pixel*3+3)<<16);
+            if (native.pixels()[addresses[pixel]]!=((before_rgb[addresses[pixel]]&0xff000000U)|value))
+                throw std::runtime_error("RGB image continuation or alpha preservation failed");
+        }
+        const auto complete_rgb=native.pixels(); rejected=false;
+        try { native.submit(gpu,std::array{rgb_last}); }
+        catch (const std::invalid_argument&) { rejected=true; }
+        if (!rejected || native.pixels()!=complete_rgb) throw std::runtime_error("Image overrun was accepted");
+        nt::graphics::Packet textured_packet{{0x800a,0x10000000,14,0}};
+        const auto texture_ad=[&](unsigned reg,std::uint64_t value) {
+            textured_packet.push_back({std::uint32_t(value),std::uint32_t(value>>32),reg,0});
+        };
+        const auto texture_description=(1ULL<<14)|(1ULL<<26)|(1ULL<<30)|(1ULL<<34)|(1ULL<<35);
+        texture_ad(0x1a,1); texture_ad(0,0x116); texture_ad(0x4c,(1ULL<<16)|1);
+        texture_ad(0x40,(3ULL<<16)|(3ULL<<48)); texture_ad(1,0x80808080);
+        texture_ad(6,texture_description); texture_ad(3,0); texture_ad(5,0);
+        texture_ad(3,32ULL|(32ULL<<16)); texture_ad(5,32ULL|(32ULL<<16));
+        native.submit(gpu,std::array{setup32,rgba,textured_packet});
+        for (unsigned pixel=0;pixel<4;++pixel)
+            if (native.pixels()[2048+pixel]!=rgba[1][pixel]) throw std::runtime_error("Native uploaded texture did not reach Vulkan sampling");
+        const auto before_bad_texture=native.pixels();
+        auto perspective=textured_packet; perspective[2][0]=0x16; rejected=false;
+        try { native.submit(gpu,std::array{perspective}); }
+        catch (const std::invalid_argument&) { rejected=true; }
+        if (!rejected || native.pixels()!=before_bad_texture) throw std::runtime_error("Unsupported perspective sprite changed pixels");
+        auto indexed=textured_packet; indexed[6][0]|=20U<<20; rejected=false;
+        try { native.submit(gpu,std::array{indexed}); }
+        catch (const std::invalid_argument&) { rejected=true; }
+        if (!rejected || native.pixels()!=before_bad_texture) throw std::runtime_error("Unsupported native palette texture was accepted");
         std::vector<std::uint32_t> memory(1024*1024,0x12345678), expected=memory;
         // Independent block/column lookup, including page crossing and VRAM wrap.
         constexpr unsigned blocks[4][8]={{0,1,4,5,16,17,20,21},{2,3,6,7,18,19,22,23},

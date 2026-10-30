@@ -5,6 +5,7 @@
 #include <nt/ee_file_rpc.hpp>
 #include <memory>
 #include <nt/vulkan_renderer.hpp>
+#include <nt/native_drawing.hpp>
 #include <charconv>
 #include <iostream>
 #include <fstream>
@@ -43,7 +44,14 @@ struct VuCapture {
 };
 struct NativeGpu {
     std::unique_ptr<nt::graphics::VulkanRenderer> renderer;
+    nt::graphics::NativeDrawing drawing;
     std::string error;
+    static bool submit(void* raw,std::span<const nt::graphics::NativeDrawing::Packet> packets) {
+        auto& self=*static_cast<NativeGpu*>(raw);
+        if (synchronize(raw)!=nt::ee::Stop::budget) return false;
+        try { self.drawing.submit(*self.renderer,packets); return true; }
+        catch (const std::exception& error) { self.error=error.what(); return false; }
+    }
     static nt::ee::Stop synchronize(void* context) {
         auto& self=*static_cast<NativeGpu*>(context);
         try {
@@ -99,22 +107,31 @@ int main(int argc,char** argv) {
         nt::ee::Memory memory{ram.data(),ram.size()};
         NativeGpu gpu;
         nt::ee::NativePlatform platform; platform.attach(memory);
+        platform.packet_setup.graphics={&gpu,NativeGpu::submit};
         VuCapture capture;
 #if defined(ANYPS2_NATIVE_VU) || defined(ANYPS2_NATIVE_VU1)
         nt::ee::NativeVuUploads compiled_uploads;
+        nt::ee::NativeVuSubmissions compiled_submissions;
 #endif
 #ifdef ANYPS2_NATIVE_VU
         auto compiled_vu=nt::vu::linked_binding();
         compiled_uploads.add(compiled_vu);
+        nt::ee::NativeVuLaunch compiled_vu_launch(compiled_vu,100000,&platform.vector_owner.storage);
+        compiled_submissions.add(compiled_vu_launch);
+        compiled_vu_launch.connect_macro(memory);
+        compiled_vu_launch.connect_data(memory);
 #endif
 #ifdef ANYPS2_NATIVE_VU1
         auto compiled_vu1=nt::vu::linked_binding1();
         compiled_uploads.add(compiled_vu1);
         nt::ee::NativeVuLaunch compiled_vu1_launch(compiled_vu1);
-        compiled_vu1_launch.connect(platform.packet_setup);
+        compiled_submissions.add(compiled_vu1_launch);
+        compiled_vu1_launch.connect_data(memory);
+        compiled_vu1_launch.graphics={&gpu,NativeGpu::submit};
 #endif
 #if defined(ANYPS2_NATIVE_VU) || defined(ANYPS2_NATIVE_VU1)
         compiled_uploads.connect(platform.packet_setup);
+        compiled_submissions.connect(platform.packet_setup);
 #endif
         if (!capture_directory.empty()) {
             platform.packet_setup.upload_context=&capture;

@@ -1,5 +1,7 @@
 #pragma once
 #include <nt/ee_native.hpp>
+#include <nt/ee_vector_data.hpp>
+#include <nt/graphics_packet.hpp>
 #include <array>
 #include <span>
 #include <cstring>
@@ -8,10 +10,10 @@
 namespace nt::ee {
 struct NativeUploadView { unsigned destination; std::span<const std::uint8_t> bytes; };
 struct NativeLaunchView { unsigned entry,top,itop; };
-struct NativeVectorDataView { unsigned destination; std::span<const std::uint8_t> bytes; };
 // Native packet configuration. Unsupported work is rejected as a whole batch.
 class NativePacketSetup {
 public:
+    graphics::BatchConsumer graphics;
     // Atomic batch acceptance by a precompiled-program owner. A failed callback
     // must leave that owner unchanged; packet configuration commits only after it.
     void* compiled_context=nullptr;
@@ -87,11 +89,20 @@ public:
     }
     unsigned rejected_command() const { return rejected_command_; }
     Stop consume(unsigned channel,std::span<const std::uint8_t> bytes,bool vector_active) {
+        if (channel==2) {
+            if (gif_paused_ || !graphics.submit) return Stop::unsupported_system;
+            std::vector<graphics::Packet> packets;
+            try { graphics::append_packets(packets,bytes); }
+            catch (const std::invalid_argument&) { return Stop::unsupported_system; }
+            return graphics.submit(graphics.context,packets) ? Stop::budget : Stop::unsupported_system;
+        }
         if (channel>=2 || bytes.size()%4) return Stop::unsupported_system;
         if (units_[channel].stopped || units_[channel].broken || vector_active) return Stop::unsupported_system;
         auto next=units_[channel];
         std::vector<NativeUploadView> uploads;
         std::vector<NativeVectorDataView> data;
+        std::vector<graphics::Packet> drawing;
+        std::size_t drawing_bytes=0;
         bool launch=false;
         unsigned entry=0;
         std::size_t offset=0;
@@ -118,19 +129,21 @@ public:
             case 7: next.mark=code&0xffffU; break;
             case 0x10: break; // FLUSHE: no outstanding compiled vector work.
             case 0x14:
-                if (!submit_compiled || !uploads.empty()) return Stop::unsupported_vector;
+                if (!submit_compiled || !uploads.empty() || !drawing.empty()) return Stop::unsupported_vector;
                 entry=code&(channel ? 2047U : 511U);
                 next.itop=next.itops;
-                next.top=next.tops&1023U;
-                next.tops=next.base+(next.double_buffer ? 0 : next.offset);
-                next.double_buffer=!next.double_buffer;
+                if (channel) {
+                    next.top=next.tops&1023U;
+                    next.tops=next.base+(next.double_buffer ? 0 : next.offset);
+                    next.double_buffer=!next.double_buffer;
+                }
                 launch=true;
                 break;
             case 0x20:
                 if (bytes.size()-offset<4) return Stop::invalid_state;
                 next.mask=word(); break;
             case 0x4a: {
-                if (!data.empty()) return Stop::unsupported_vector;
+                if (!data.empty() || !drawing.empty()) return Stop::unsupported_vector;
                 const auto encoded=(code>>16)&255U,count=encoded ? encoded : 256U;
                 const auto size=count*8U;
                 if (bytes.size()-offset<size) return Stop::invalid_state;
@@ -147,17 +160,29 @@ public:
                 if (bytes.size()-offset<16) return Stop::invalid_state;
                 for (unsigned lane=0;lane<4;++lane) next.row_column[(command==0x31 ? 4 : 0)+lane]=word();
                 break;
-            case 0x6c: {
-                // Unmasked V4-32, contiguous writes without row arithmetic.
-                if (!submit_compiled || !uploads.empty() || next.mode ||
+            case 0x6c: case 0x6d: case 0x6e: case 0x6f: {
+                // Unmasked V4 data, contiguous writes. Packed colour ignores MODE.
+                const auto format=static_cast<NativeVectorFormat>(command-0x6c);
+                if (!submit_compiled || !uploads.empty() || !drawing.empty() || (next.mode && format!=NativeVectorFormat::packed5551) ||
                     (next.cycle&255U)!=((next.cycle>>8)&255U)) return Stop::unsupported_vector;
                 const auto count=(code>>16)&255U;
-                const auto size=(count ? count : 256U)*16U;
-                if (bytes.size()-offset<size) return Stop::invalid_state;
+                const auto size=(count ? count : 256U)*vector_data_stride(format);
+                const auto padded=(size+3U)&~3U;
+                if (bytes.size()-offset<padded) return Stop::invalid_state;
                 const auto destination=((code&1023U)+((channel && (code&0x8000U)) ? next.tops : 0U))&
                     (channel ? 1023U : 255U);
-                data.push_back({destination,bytes.subspan(offset,size)});
-                offset+=size;
+                data.push_back({destination,bytes.subspan(offset,size),format,(code&0x4000U)!=0});
+                offset+=padded;
+                break;
+            }
+            case 0x50: case 0x51: {
+                if (!channel || gif_paused_ || !graphics.submit || !uploads.empty() || !data.empty()) return Stop::unsupported_system;
+                const auto count=code&65535U,size=(count ? count : 65536U)*16U;
+                if (size>bytes.size()-offset) return Stop::invalid_state;
+                if (size>65536U*16U-drawing_bytes) return Stop::unsupported_system;
+                try { graphics::append_packets(drawing,bytes.subspan(offset,size)); }
+                catch (const std::invalid_argument&) { return Stop::unsupported_system; }
+                drawing_bytes+=size; offset+=size;
                 break;
             }
             default: return Stop::unsupported_system;
@@ -178,6 +203,7 @@ public:
             const auto result=submit_compiled(launch_context,channel,data,launch ? &request : nullptr);
             if (result!=Stop::budget) { rejected_command_=launch ? 0x14 : 0x6c; return result; }
         }
+        if (!drawing.empty() && !graphics.submit(graphics.context,drawing)) return Stop::unsupported_system;
         units_[channel]=next; rejected_command_=0;
         return Stop::budget;
     }
@@ -186,7 +212,7 @@ private:
     static bool decode(std::uint32_t address,unsigned& channel,unsigned& field) {
         if (address<0x10003800 || address>=0x10004000 || address%16) return false;
         channel=(address-0x10003800)/0x400; field=(address&0x3ff)/16;
-        return field<24 && field!=15 && (channel || (field!=10 && field!=11 && field!=12 && field!=14));
+        return field<24 && field!=15 && (channel || (field!=9 && field!=10 && field!=11 && field!=13 && field!=14));
     }
     struct Unit {
         bool stopped=false,broken=false;

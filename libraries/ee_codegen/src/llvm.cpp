@@ -299,6 +299,8 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
          <<"declare i32 @nt_ee_scaled_scalar_to_integer(i32, i32)\n";
     w.out<<"declare i64 @nt_ee_add_finite(i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_vector_read(ptr, i32, i32)\n";
+    w.out<<"declare i32 @nt_ee_vector_launch(ptr, i32, i32)\n";
+    w.out<<"declare i32 @nt_ee_vector_memory(ptr, i32)\n";
     w.out<<"declare i64 @nt_ee_vector_write(ptr, i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_multiply_finite(i32, i32)\n";
     w.out<<"declare i64 @nt_ee_divide_finite(i32, i32)\n"

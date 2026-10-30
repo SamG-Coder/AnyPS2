@@ -7,6 +7,12 @@
 
 namespace nt::graphics {
 using Quadword=std::array<std::uint32_t,4>;
+using Packet=std::vector<Quadword>;
+struct BatchConsumer {
+    void* context=nullptr;
+    // Accept the complete ordered batch or leave external state unchanged.
+    bool (*submit)(void*,std::span<const Packet>)=nullptr;
+};
 // Frame data packets for a native consumer. This is not an instruction decoder.
 // Bound extraction to one traversal of the source ring; oversized packets stop.
 inline std::vector<Quadword> collect_packet(std::span<const Quadword> ring,unsigned start) {
@@ -27,5 +33,17 @@ inline std::vector<Quadword> collect_packet(std::span<const Quadword> ring,unsig
         if (low&0x8000U) return packet;
     }
     throw std::invalid_argument("Graphics packet has no end tag within bound");
+}
+inline void append_packets(std::vector<Packet>& packets,std::span<const std::uint8_t> bytes) {
+    if (bytes.empty() || bytes.size()%16 || bytes.size()>65536U*16U)
+        throw std::invalid_argument("Invalid native graphics transfer extent");
+    std::vector<Quadword> words(bytes.size()/16);
+    for (std::size_t index=0;index<bytes.size();++index)
+        words[index/16][(index%16)/4]|=std::uint32_t(bytes[index])<<((index%4)*8);
+    std::size_t cursor=0;
+    while (cursor<words.size()) {
+        auto packet=collect_packet(std::span(words).subspan(cursor),0);
+        cursor+=packet.size(); packets.push_back(std::move(packet));
+    }
 }
 }

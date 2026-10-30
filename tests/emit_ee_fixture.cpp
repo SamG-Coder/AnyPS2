@@ -259,6 +259,20 @@ int main(int argc,char** argv) {
     code.push_back(nt::r5900::decode(0x3e0004,0x03e00008));
     code.push_back(nt::r5900::decode(0x3e0008,0));
     const std::array payloads{payload};
+    code.push_back(nt::r5900::decode(0x3f0000,0x4a000038)); // VCALLMS entry zero.
+    code.push_back(nt::r5900::decode(0x3f0004,12));
+    code.push_back(nt::r5900::decode(0x3f0010,0x4a000039)); // VCALLMSR via CMSAR0.
+    code.push_back(nt::r5900::decode(0x3f0014,12));
+    code.push_back(nt::r5900::decode(0x3f0020,0x10000002)); // Launch in an EE delay slot.
+    code.push_back(nt::r5900::decode(0x3f0024,0x4a000038));
+    code.push_back(nt::r5900::decode(0x3f0028,12));
+    code.push_back(nt::r5900::decode(0x3f002c,12));
+    {
+        unsigned pc=0x400000;
+        for (const auto word:{0x7c880000U,0x78890000U,0xac8a0010U,0x8c8b0010U,0xa08c0014U,0x908d0014U,12U}) {
+            code.push_back(nt::r5900::decode(pc,word)); pc+=4;
+        }
+    }
     std::ostringstream generated; nt::ee_codegen::emit_llvm(generated,code,{},payloads);
     if (generated.str().find("fence seq_cst")==std::string::npos) throw std::runtime_error("Native SYNC ordering was omitted");
     const auto text=generated.str();

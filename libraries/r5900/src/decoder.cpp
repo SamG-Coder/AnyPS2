@@ -75,6 +75,8 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
             if (i.rs == 5) i.op = Op::qmtc2;
         }
         if (i.rs >= 16) {
+            if (fn==56) i.op=Op::vcallms;
+            if (fn==57) i.op=Op::vcallmsr;
             if (fn==42) i.op=Op::vmul;
             if (fn>=24 && fn<28) i.op=Op::vmul_bc;
             if (fn==43) i.op=Op::vmax;
@@ -213,7 +215,7 @@ std::string_view name(Op op) {
     N(mfhi1); N(mthi1); N(mflo1); N(mtlo1); N(mfsa); N(mtsa);
     N(mtsab); N(mtsah);
     N(mfc1); N(mtc1); N(cfc1); N(ctc1); N(adda_s);
-    N(cfc2); N(ctc2);
+    N(cfc2); N(ctc2); N(vcallms); N(vcallmsr);
     N(lwc1); N(swc1);
     N(qmfc2); N(qmtc2); N(lqc2); N(sqc2); N(vsub);
     N(vmove);

@@ -454,15 +454,37 @@ game VU launch execution and visible rendering remain unverified.
 
 VIF1 `MSCAL` can invoke a bound native VU1 program, with TOP/ITOP inputs and
 buffer selection. Launches commit only on completion. The initial path accepts
-one launch at the end of a configuration batch; mixed uploads/launches, VU0 shared
-state handoff, continuation commands and graphics-request completion remain unsupported.
+one launch at the end of a configuration batch; mixed program uploads/launches,
+continuation commands remain unsupported.
 Compiled synthetic programs verify this path; GT4 still stops earlier at a
 performance measurement request with no supported native provider.
 
-Unmasked, contiguous V4-32 data uploads can populate native VU1 storage, including
-wrapped and TOPS-relative destinations. Data and a final MSCAL commit together
-only when execution completes. Other unpack formats, masked writes and row/cycle
-transformations remain unsupported.
+Unmasked, contiguous V4-32, V4-16, V4-8 and packed V4-5 data uploads can populate
+native VU1 storage, including wrapped and TOPS-relative destinations. Narrow lanes
+support signed/unsigned widening; packed colour lanes expand independently of MODE.
+Data and a final MSCAL commit together only when execution completes. Other unpack
+formats, masked writes and row/cycle transformations remain unsupported.
+
+VIF0 launches can share completed vector, integer-register and flag state with
+native EE vector operations. An active owner prevents a new launch; failed work
+does not publish state. Both units use compiled functions through independent
+submission owners. VCALLMS and VCALLMSR lower through LLVM to the same native VU0
+owner, including CMSAR0 entry selection. Compiled EE loads/stores access the same
+native VU data storage, with extent and ownership checks. VU instruction storage
+is not exposed as writable data.
+
+Compiled VU graphics requests can be staged as an ordered immutable batch and
+accepted by a native consumer only after the whole launch completes. A missing
+or rejecting consumer leaves execution uncommitted. A native adapter now translates
+supported packed/address-data and register-list packets into Vulkan solid-sprite
+commands. RGBA32/RGB24 host image uploads preserve ordering with draws, and fixed-UV
+sprites can sample those textures through Vulkan. Palette/perspective textures, other primitive types and display
+presentation through this path remain unfinished. Synthetic compiled VU-to-GPU
+tests pass; game rendering is not established.
+
+VIF1 DIRECT/DIRECTHL and direct GIF submissions share that same Vulkan adapter.
+They require complete bounded packets and serialized execution. Unsupported mixed
+vector/graphics batches and split packets stop without partial drawing.
 
 The native VU runtime can route between registered ahead-of-time compiled blocks,
 with bounded execution and explicit stops for missing targets or unsupported numeric

@@ -1,6 +1,22 @@
 #include <nt/ee_native.hpp>
 #include <nt/ee_vector_math.hpp>
 
+extern "C" std::uint32_t nt_ee_vector_memory(nt::ee::Memory* memory,std::uint32_t unit) {
+    using nt::ee::Stop;
+    if (unit>1) return static_cast<std::uint32_t>(Stop::invalid_state);
+    const auto& region=memory->vector_data[unit];
+    const auto result=!region.data ? Stop::unsupported_vector :
+        region.active && *region.active ? Stop::vector_pending : Stop::budget;
+    return static_cast<std::uint32_t>(result);
+}
+
+extern "C" std::uint32_t nt_ee_vector_launch(nt::ee::Memory* memory,std::uint32_t indirect,std::uint32_t entry) {
+    if (indirect>1) return static_cast<std::uint32_t>(nt::ee::Stop::invalid_state);
+    const auto result=memory->launch_vector ? memory->launch_vector(memory->vector_launch_context,indirect!=0,entry) :
+        nt::ee::Stop::unsupported_vector;
+    return static_cast<std::uint32_t>(result);
+}
+
 extern "C" std::uint64_t nt_ee_vector_read(nt::ee::Memory* memory,std::uint32_t selector,std::uint32_t wait) {
     using nt::ee::VectorStatus;
     auto result=nt::ee::VectorReadResult{VectorStatus::unsupported};
