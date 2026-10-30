@@ -85,6 +85,8 @@ inline Constants transfer(const Instruction& i,Constants state) {
     case Operation::bit_or: write(i.destination,combine(a,b,[](auto x,auto y) { return x|y; })); break;
     case Operation::bit_and: write(i.destination,combine(a,b,[](auto x,auto y) { return x&y; })); break;
     case Operation::bit_xor: write(i.destination,combine(a,b,[](auto x,auto y) { return x^y; })); break;
+    case Operation::store_word_left: case Operation::store_word_right:
+        state.stack_words.clear(); break;
     case Operation::store_byte: case Operation::store_half: case Operation::store_word: {
         const auto address=offset(source_stack,i.immediate);
         if (!address) { state.stack_words.clear(); break; }
@@ -121,6 +123,7 @@ inline Constants transfer(const Instruction& i,Constants state) {
     case Operation::less_immediate_signed: case Operation::less_immediate_unsigned: write(i.operand); break;
     case Operation::load_byte: case Operation::load_half: case Operation::load_word:
     case Operation::load_byte_unsigned: case Operation::load_half_unsigned:
+    case Operation::load_word_left: case Operation::load_word_right:
         // Forget immediately rather than assume a memory value or load timing.
         // This sacrifices some proofs but never turns mutable data into code.
         write(i.operand); break;

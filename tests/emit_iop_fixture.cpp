@@ -580,8 +580,68 @@ int main(int argc,char** argv) {
             if (thread_ordinals[index]!=4 && thread_ordinals[index]!=35) bundle_roots.push_back(0x1914+index*8);
         for (unsigned index=0;index<std::size(event_ordinals);++index) bundle_roots.push_back(0x1814+index*8);
         for (unsigned index=0;index<std::size(sif_ordinals);++index) bundle_roots.push_back(0x2214+index*8);
-        const std::array bundle{module,provider};
+        nt::elf::IopModule dispatch{0xa100,0xa100,nt::Bytes(0x600),0x600,{}};
+        const auto dispatch_word=[&](unsigned pc,std::uint32_t word) { fixture::put32(dispatch.memory,pc-dispatch.base,word); };
+        dispatch_word(0xa100,0x03e00008);
+        for (unsigned variant=0;variant<4;++variant) {
+            const auto base=0xa140+variant*0x80;
+            const bool delay_shift=variant&1,call=variant&2;
+            dispatch_word(base,0x03e08021); // Preserve caller for the call-table variants.
+            dispatch_word(base+4,0x2c820003);
+            dispatch_word(base+8,0x1040000b);
+            const auto shift=base+(delay_shift ? 12 : 16);
+            dispatch_word(shift,0x00041080);
+            dispatch_word(shift+8,0x00220821); dispatch_word(shift+12,0x8c22a580);
+            // Signed displacement requires the high half to include its carry.
+            dispatch_word(shift+4,0x3c010001);
+            dispatch_word(shift+20,call ? 0x0040f809 : 0x00400008);
+            dispatch_word(shift+24,0x24070011);
+            if (call) {
+                dispatch_word(shift+28,0x0200f821);
+                dispatch_word(shift+32,0x03e00008);
+            }
+            dispatch_word(base+0x38,0x0200f821);
+            dispatch_word(base+0x3c,0x03e00008); dispatch_word(base+0x40,0x24020063);
+            bundle_roots.push_back(base);
+        }
+        for (unsigned index=0;index<3;++index) {
+            dispatch_word(0xa580+index*4,0xa500+index*8);
+            dispatch_word(0xa500+index*8,0x03e00008); dispatch_word(0xa504+index*8,0x24020000|(11*(index+1)));
+        }
+        for (unsigned index=0;index<4;++index) {
+            constexpr unsigned operations[]{34,38,42,46};
+            const auto base=0xa380+index*16;
+            dispatch_word(base,(operations[index]<<26)|(4U<<21)|(2U<<16));
+            dispatch_word(base+4,0x03e00008); bundle_roots.push_back(base);
+        }
+        // Paired partial loads across adjacent words, including reversed order.
+        for (unsigned reverse=0;reverse<2;++reverse) {
+            const auto base=0xa3c0+reverse*0x20;
+            dispatch_word(base,reverse ? 0x98820000 : 0x88820003);
+            dispatch_word(base+4,reverse ? 0x88820003 : 0x98820000);
+            dispatch_word(base+8,0x00401821); // Still sees the old architectural value.
+            dispatch_word(base+12,0x03e00008); bundle_roots.push_back(base);
+        }
+        const std::array bundle{module,provider,dispatch};
         code.str(""); code.clear(); nt::iop_codegen::emit_bundle(code,bundle,bundle_roots);
+        {
+            auto broken=bundle;
+            fixture::put32(broken[0].memory,0,0xfc000000);
+            fixture::put32(broken[1].memory,0,0xfc000000);
+            std::ostringstream partial; std::string diagnostic;
+            try { nt::iop_codegen::emit_bundle(partial,broken); }
+            catch (const std::runtime_error& error) { diagnostic=error.what(); }
+            if (!partial.str().empty() || diagnostic.find("module 0 base=0x00001000")==std::string::npos ||
+                diagnostic.find("module 1 base=0x0000a000")==std::string::npos)
+                throw std::runtime_error("Bundle conversion concealed another module failure or emitted partial output");
+        }
+        for (const auto target : {0U,0xa501U,0xb000U}) {
+            auto broken=bundle; fixture::put32(broken[2].memory,0x480,target);
+            std::ostringstream partial; bool failed=false;
+            try { nt::iop_codegen::emit_bundle(partial,broken,bundle_roots); }
+            catch (const std::runtime_error&) { failed=true; }
+            if (!failed || !partial.str().empty()) throw std::runtime_error("Invalid dispatch table emitted native code");
+        }
         for (unsigned invalid=0;invalid<3;++invalid) {
             auto broken=bundle;
             if (invalid==0) broken[1]=module;
@@ -593,7 +653,7 @@ int main(int argc,char** argv) {
             if (!failed_bundle || !partial.str().empty()) throw std::runtime_error("Invalid bundle emitted partial native code");
         }
         // Earlier owners must be revisited when a later module discovers a callback.
-        const std::array reversed{provider,module};
+        const std::array reversed{provider,module,dispatch};
         std::ostringstream reverse_code;
         nt::iop_codegen::emit_bundle(reverse_code,reversed,bundle_roots);
         for (const auto target : {0xa061U,0xa080U,0xb000U}) {
@@ -629,7 +689,7 @@ int main(int argc,char** argv) {
             put(0x8800,0x00401821);
             put(first+(count-2)*4,0x03e00008); put(first+(count-1)*4,0);
             std::vector<std::uint32_t> roots=bundle_roots; roots.push_back(first);
-            const std::array large_bundle{large,provider};
+            const std::array large_bundle{large,provider,dispatch};
             std::ostringstream llvm; nt::iop_codegen::emit_bundle(llvm,large_bundle,roots);
             const auto text=llvm.str();
             nt::write_file(argv[3],nt::ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));

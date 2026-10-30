@@ -240,8 +240,12 @@ void instruction(Writer& w,const ir::Instruction& i,bool has_successor) {
     }
     default: {
         if (!i.width) throw std::runtime_error("LLVM backend: unsupported operation");
-        const auto address=w.binary("add",a,immediate), offset=w.physical(address);
-        const auto aligned=w.binary("icmp eq",w.binary("and",address,std::to_string(i.width-1)),"0");
+        const bool merge_load=i.operation==Operation::load_word_left || i.operation==Operation::load_word_right;
+        const bool merge_store=i.operation==Operation::store_word_left || i.operation==Operation::store_word_right;
+        const bool merge=merge_load || merge_store;
+        const auto address=w.binary("add",a,immediate), physical_address=w.physical(address);
+        const auto offset=merge ? w.binary("and",physical_address,"4294967292") : physical_address;
+        const auto aligned=merge ? "true" : w.binary("icmp eq",w.binary("and",address,std::to_string(i.width-1)),"0");
         const auto end=w.binary("add",offset,std::to_string(i.width));
         const auto physical=w.binary("icmp ule",offset,std::to_string(0x200000-i.width));
         const auto within=w.binary("icmp ule",end,"%ram_size");
@@ -250,18 +254,34 @@ void instruction(Writer& w,const ir::Instruction& i,bool has_successor) {
         w.store(37,address); w.text<<"  ret i32 2\nmemory"<<label<<":\n";
         const auto ptr=w.value("getelementptr i8, ptr %ram, i32 "+offset);
         const auto type="i"+std::to_string(i.width*8);
-        if (i.operation<=Operation::load_half_unsigned) {
+        const auto merge_word=[&](const std::string& memory,const std::string& original) {
+            const bool left=i.operation==Operation::load_word_left || i.operation==Operation::store_word_left;
+            const auto lane=w.binary("and",address,"3");
+            const auto shift=w.binary("shl",left ? w.binary("sub","3",lane) : lane,"3");
+            const std::string direction=(left==merge_load) ? "shl" : "lshr";
+            const auto mask=w.binary(direction,"4294967295",shift);
+            const auto retained=w.binary("and",merge_load ? original : memory,w.binary("xor",mask,"4294967295"));
+            return w.binary("or",retained,w.binary(direction,merge_load ? memory : original,shift));
+        };
+        if (i.operation<=Operation::load_half_unsigned || merge_load) {
             loaded=w.value("load "+type+", ptr "+ptr+", align 1");
             if (i.width<4) {
                 const bool sign=i.operation==Operation::load_byte || i.operation==Operation::load_half;
                 loaded=w.value(std::string(sign ? "sext " : "zext ")+type+" "+loaded+" to i32");
+            }
+            if (merge_load) {
+                // Adjacent LWL/LWR forward the pending value for the same
+                // destination; ordinary instructions still see the old register.
+                const auto original=i.operand ? w.select(w.binary("icmp eq",w.load(35),std::to_string(i.operand)),w.load(36),b) : "0";
+                loaded=merge_word(loaded,original);
             }
             load_register=i.operand;
         } else {
             const auto code=w.value("call i1 @is_code(i32 "+w.binary("and",offset,"4294967292")+")");
             w.text<<"  br i1 "<<code<<", label %write_fault"<<label<<", label %store"<<label<<"\nwrite_fault"<<label<<":\n";
             w.store(37,address); w.text<<"  ret i32 4\nstore"<<label<<":\n";
-            const auto narrowed=i.width==4 ? b : w.value("trunc i32 "+b+" to "+type);
+            const auto narrowed=merge_store ? merge_word(w.value("load i32, ptr "+ptr+", align 1"),b) :
+                i.width==4 ? b : w.value("trunc i32 "+b+" to "+type);
             w.text<<"  store "<<type<<' '<<narrowed<<", ptr "<<ptr<<", align 1\n";
         }
         break;

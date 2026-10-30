@@ -10,13 +10,22 @@ namespace nt::iop_codegen::ir {
 template<class Decode>
 std::optional<std::set<std::uint32_t>> initial_jump_table(const elf::IopModule& module,
     std::span<const elf::IopModule> data,std::uint32_t pc,Decode decode) {
-    if (pc<module.base || pc-module.base<32 || pc-module.base+4>module.initialized_size) return {};
-    std::array<Instruction,9> code;
+    if (pc<module.base || pc-module.base<28 || pc-module.base+4>module.initialized_size) return {};
+    std::array<Instruction,8> code;
+    Instruction guard,branch;
     try {
-        for (unsigned i=0;i<code.size();++i) code[i]=decode(pc-32+i*4,le32(module.memory,pc-module.base-32+i*4));
+        for (unsigned i=0;i<code.size();++i) code[i]=decode(pc-28+i*4,le32(module.memory,pc-module.base-28+i*4));
+        if (code[0].operation==Operation::less_immediate_unsigned) {
+            guard=code[0]; branch=code[1]; // Index shift is the branch's delay slot.
+        } else {
+            if (pc-module.base<32) return {};
+            guard=decode(pc-32,le32(module.memory,pc-module.base-32));
+            branch=code[0];
+            if (code[1].flow!=Flow::sequential) return {};
+        }
     } catch (const std::runtime_error&) { return {}; }
-    const auto& guard=code[0]; const auto& branch=code[1]; const auto& shift=code[3];
-    const auto& upper=code[4]; const auto& add=code[5]; const auto& load=code[6]; const auto& jump=code[8];
+    const auto& shift=code[2]; const auto& upper=code[3]; const auto& add=code[4];
+    const auto& load=code[5]; const auto& jump=code[7];
     if (guard.operation!=Operation::less_immediate_unsigned || !guard.immediate || guard.immediate>256 ||
         branch.operation!=Operation::equal || branch.source!=guard.operand || branch.operand!=0 ||
         (branch.target>=pc-20 && branch.target<=pc+4) ||
@@ -25,7 +34,7 @@ std::optional<std::set<std::uint32_t>> initial_jump_table(const elf::IopModule& 
         !((add.source==upper.operand && add.operand==shift.destination) ||
           (add.operand==upper.operand && add.source==shift.destination)) ||
         load.operation!=Operation::load_word || load.source!=add.destination ||
-        jump.flow!=Flow::indirect || jump.source!=load.operand ||
+        (jump.flow!=Flow::indirect && jump.flow!=Flow::indirect_call) || jump.source!=load.operand ||
         le32(module.memory,pc-module.base-4)!=0) return {};
     const auto raw=(upper.immediate<<16)+load.immediate;
     const auto segment=raw&0xe0000000U;

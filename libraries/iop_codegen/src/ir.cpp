@@ -115,12 +115,16 @@ Instruction decode(std::uint32_t pc,std::uint32_t word) {
         case 15: i.operation=Operation::upper_immediate; break;
         case 32: i.operation=Operation::load_byte; i.width=1; break;
         case 33: i.operation=Operation::load_half; i.width=2; break;
+        case 34: i.operation=Operation::load_word_left; i.width=4; break;
         case 35: i.operation=Operation::load_word; i.width=4; break;
         case 36: i.operation=Operation::load_byte_unsigned; i.width=1; break;
         case 37: i.operation=Operation::load_half_unsigned; i.width=2; break;
+        case 38: i.operation=Operation::load_word_right; i.width=4; break;
         case 40: i.operation=Operation::store_byte; i.width=1; break;
         case 41: i.operation=Operation::store_half; i.width=2; break;
+        case 42: i.operation=Operation::store_word_left; i.width=4; break;
         case 43: i.operation=Operation::store_word; i.width=4; break;
+        case 46: i.operation=Operation::store_word_right; i.width=4; break;
         default: throw std::runtime_error("unsupported instruction class");
         }
     }
@@ -351,13 +355,30 @@ Program discover_bundle(std::span<const elf::IopModule> modules,std::span<const 
     // Callback registration may discover code in an already analyzed module.
     // Revisit only owners with new roots until the bundle reaches a fixed point.
     std::vector<Program> programs(modules.size());
+    std::vector<std::string> failures(modules.size());
     while (!pending.empty()) {
         const auto index=*pending.begin(); pending.erase(pending.begin());
         const std::vector<std::uint32_t> module_roots(roots[index].begin(),roots[index].end());
         std::set<std::uint32_t> callbacks;
-        programs[index]=discover_module(modules[index],module_roots,libraries,modules,&callbacks);
+        try {
+            programs[index]=discover_module(modules[index],module_roots,libraries,modules,&callbacks);
+            failures[index].clear();
+        } catch (const std::runtime_error& error) {
+            // Analyze the other owners as well: a reboot archive is one native
+            // program, and its conversion diagnostics must expose the whole
+            // missing operation/service batch before any output is emitted.
+            failures[index]=error.what();
+        }
         for (const auto callback : callbacks) add_root(callback);
     }
+    std::ostringstream diagnostics;
+    for (std::size_t index=0;index<modules.size();++index) if (!failures[index].empty()) {
+        diagnostics<<"\nmodule "<<index<<" base="<<hex32(modules[index].base);
+        if (modules[index].info) diagnostics<<" name="<<modules[index].info->name;
+        diagnostics<<": "<<failures[index]<<'\n';
+    }
+    if (!diagnostics.str().empty())
+        throw std::runtime_error("IOP bundle conversion failed:"+diagnostics.str());
     Program result; result.entry=modules.front().entry;
     for (const auto& program : programs) {
         result.instructions.insert(program.instructions.begin(),program.instructions.end());

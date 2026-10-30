@@ -141,7 +141,10 @@ An initial standalone IOP converter also generates a CMake project for a support
 IRX module or an explicitly ordered module bundle. LLVM IR is the only output backend.
 It compiles ahead of time and links no instruction interpreter,
 decoder, JIT or device library. Its current scope is bounded integer/control flow
-and aligned byte, halfword and word RAM access. The `sysclib` major-version-1 `memcpy`,
+and byte, halfword and word RAM access, including paired unaligned word loads/stores.
+Bounded switch tables support register jumps and calls, including an index shift
+in the guard's delay slot. Bundle failures identify each failing module before
+emitting output. The `sysclib` major-version-1 `memcpy`,
 `memmove` and `memset` imports become checked native memory operations. `sysmem`
 major-version-1 allocation, release and memory-query imports use a host-owned
 allocator with reserved module/stack regions. Native heaplib reuses that allocator

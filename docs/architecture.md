@@ -1819,12 +1819,28 @@ compilation candidates only: runtime creation still requires a compiled entry,
 and mutable loads are never promoted into indirect-call proofs.
 
 The converter recognizes bounded unsigned switch dispatch through a scaled
-index, constant upper address, word table load and register jump. It validates
+index, constant upper address, word table load and register jump or call. The
+index shift may occupy the guard branch's delay slot. Calls retain their link
+register, delay slot and return continuation. It validates
 the instruction pattern and initialized table extent, then compiles up to 256
 listed destinations. These are initial-data candidates, not immutable-table
 proofs. The runtime load and per-transfer destination guard remain: changing a
 table to an unlisted destination stops, even if that code is compiled elsewhere.
 The ordinary 16-value constant-set analysis remains unchanged.
+
+IOP LLVM lowering supports LWL/LWR/SWL/SWR through bounded aligned-word accesses
+and byte masks. Paired loads forward a pending result only to a partial load of
+the same register; ordinary consumers retain the architectural load delay. Stores
+use the old register operand, preserve untouched bytes, and reject writes to
+compiled code. Address and code-write faults preserve pending loads and branch
+delay state without retiring the faulting operation. Synthetic native execution
+tests cover both load orders, every byte lane, RAM aliases and truncated memory.
+
+Bundle analysis collects per-module conversion failures before emission, allowing
+related missing operations to be addressed together. A failed module never yields
+partial LLVM output. Disc-reset archive analysis still encounters unresolved
+callbacks, privileged startup operations and unsupported native imports; these
+changes do not implement the native SIF reset lifecycle or establish a game boot.
 
 After startup callbacks, the standalone probe runs ready worker continuations
 within a bounded operation budget and reports worker import failures separately

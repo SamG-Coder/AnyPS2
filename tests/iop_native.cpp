@@ -153,6 +153,59 @@ int main() {
         changed_switch=initial(); changed_switch.pc=0x1fc0; changed_switch.registers[4]=0;
         check(nt_iop_generated_run(changed_switch,ram,64).reason==NativeStop::unmapped_code && changed_switch.pc==0x5000 &&
               changed_switch.registers[2]==11,"Aliased switch target did not reach its compiled branch");
+        for (unsigned index=0;index<3;++index) store_native_word(ram,0xa580+index*4,0xa500+index*8);
+        for (unsigned variant=0;variant<4;++variant) {
+            const auto entry=0xa140+variant*0x80;
+            for (const auto index : {0U,1U,2U,3U,0xffffffffU}) {
+                auto selected=initial(); selected.pc=entry; selected.registers[4]=index;
+                check(nt_iop_generated_run(selected,ram,64).reason==NativeStop::unmapped_code && selected.pc==0x5000 &&
+                      selected.registers[2]==(index<3 ? (index+1)*11 : 99) && (index>=3 || selected.registers[7]==17),
+                      "Compiled call/switch dispatch lost its delay slot, default or return continuation");
+            }
+            store_native_word(ram,0xa580,0xa100); // Valid compiled entry, outside this table's candidates.
+            auto changed=initial(); changed.pc=entry; changed.registers[4]=0;
+            const auto transfer=entry+((variant&1) ? 32 : 36);
+            check(nt_iop_generated_run(changed,ram,64).reason==NativeStop::unmapped_code && changed.pc==transfer &&
+                  changed.registers[31]==0x5000 && changed.registers[7]==0,
+                  "Changed call table ran an unapproved destination or retired its delay slot");
+            store_native_word(ram,0xa580,0xa500);
+        }
+        for (unsigned operation=0;operation<4;++operation) for (unsigned lane=0;lane<4;++lane)
+            for (const auto alias : {0U,0x80000000U,0xa0000000U}) {
+                const bool load=operation<2,left=(operation&1)==0;
+                constexpr std::uint32_t original=0xaabbccdd,pending=0x11223344,contents=0x76543210;
+                store_native_word(ram,0xb800,contents);
+                auto state=initial(); state.pc=0xa380+operation*16; state.registers[4]=alias|0xb800|lane;
+                state.registers[2]=original; state.load_register=2; state.load_value=pending;
+                auto expected=load ? pending : contents;
+                const auto source=load ? contents : original;
+                for (unsigned byte=0;byte<(left ? lane+1 : 4-lane);++byte) {
+                    const auto source_byte=load ? (left ? byte : lane+byte) : (left ? 3-lane+byte : byte);
+                    const auto destination_byte=load ? (left ? 3-lane+byte : byte) : (left ? byte : lane+byte);
+                    expected=(expected&~(255U<<(destination_byte*8)))|(((source>>(source_byte*8))&255U)<<(destination_byte*8));
+                }
+                check(nt_iop_generated_run(state,ram,1).reason==NativeStop::budget && state.executed==1 &&
+                      (load ? state.load_register==2 && state.load_value==expected && state.registers[2]==original :
+                              load_native_word(ram,0xb800)==expected && state.registers[2]==pending),
+                      "Partial word access lost byte lanes, load forwarding or alias semantics");
+                auto fault=initial(); fault.pc=0xa380+operation*16; fault.registers[4]=0xb803;
+                fault.delay_slot=true; fault.branch_target=0x5000; fault.load_register=2; fault.load_value=pending;
+                check(nt_iop_generated_run(fault,std::span(ram).first(0xb803),1).reason==NativeStop::address_fault &&
+                      fault.executed==0 && fault.delay_slot && fault.load_register==2,
+                      "Truncated partial word access retired state on fault");
+                if (!load) {
+                    fault=initial(); fault.pc=0xa380+operation*16; fault.registers[4]=0xa381;
+                    check(nt_iop_generated_run(fault,ram,1).reason==NativeStop::code_write && !fault.executed,
+                          "Partial word store overwrote compiled code");
+                }
+            }
+        for (unsigned reverse=0;reverse<2;++reverse) for (unsigned lane=0;lane<4;++lane) {
+            for (unsigned byte=0;byte<8;++byte) ram[0xb800+byte]=static_cast<std::uint8_t>(byte+1);
+            auto state=initial(); state.pc=0xa3c0+reverse*0x20; state.registers[4]=0xb800+lane;
+            check(nt_iop_generated_run(state,ram,32).reason==NativeStop::unmapped_code && state.pc==0x5000 &&
+                  state.registers[2]==load_native_word(ram,0xb800+lane) && state.registers[3]==99,
+                  "Paired partial loads lost merge forwarding or architectural load delay");
+        }
         const NativeLibrarySpec declared{0x1214,0x100,"fixture",{0x10f0,0x1108,0x1140}};
         const NativeLibrarySpec upgraded{0x1440,0x102,"fixture",{0x1360}};
         const auto declaration=[&](const NativeLibrarySpec& library) {
