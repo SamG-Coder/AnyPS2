@@ -55,6 +55,25 @@ public:
 int main() {
     try {
         using namespace nt::iop;
+        {
+            std::vector<std::uint8_t> data(0x10000);
+            for (unsigned i=0;i<3;++i) store_native_word(data,0xb300+i*4,0xb080+i*16);
+            for (const auto entry : {0xb000U,0xb180U}) for (unsigned selector=0;selector<4;++selector) {
+                auto cpu=initial(); cpu.pc=entry; cpu.registers[4]=selector;
+                check(nt_iop_generated_run(cpu,data,128).reason==NativeStop::unmapped_code && cpu.pc==0x5000,
+                      "Compiled callback selector did not return");
+                if (selector==3) { check(cpu.registers[2]==0,"Selector default did not return null"); continue; }
+                check(cpu.registers[2]==0xb100+selector*8,"Selector returned the wrong callback");
+                cpu.pc=cpu.registers[2];
+                check(nt_iop_generated_run(cpu,data,16).reason==NativeStop::unmapped_code &&
+                      cpu.pc==0x5000 && cpu.registers[2]==0x50+selector,
+                      "Returned callback was not discovered and executed as LLVM code");
+            }
+            store_native_word(data,0xb300,0xb100); // Compiled, but not an allowed table destination.
+            auto changed=initial(); changed.pc=0xb180; changed.registers[4]=0;
+            check(nt_iop_generated_run(changed,data,128).reason==NativeStop::unmapped_code && changed.pc!=0x5000,
+                  "Hoisted table accepted a mutated destination outside its candidate set");
+        }
         // No guest instruction bytes are present in RAM. Only LLVM-compiled code runs.
         for (const auto alias : {0U,0x80000000U,0xa0000000U}) for (const auto budget : {1U,2U,7U,100U}) {
             std::vector<std::uint8_t> ram(0x10000);

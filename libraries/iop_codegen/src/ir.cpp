@@ -1,6 +1,7 @@
 #include <nt/iop_ir.hpp>
 #include "constants.hpp"
 #include "jump_tables.hpp"
+#include "returned_addresses.hpp"
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -212,109 +213,132 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         program.protected_words.insert(pc);
         return instruction;
     };
-    while (!pending.empty()) {
-        const auto pc=*pending.begin(); pending.erase(pending.begin());
-        auto instruction=append(pc);
-        const auto input=states.at(pc);
-        const auto after=transfer(instruction,input);
-        if (instruction.flow==Flow::trap) continue;
-        if (instruction.flow==Flow::native_return) {
-            if (instruction.operation==Operation::native_import && instruction.immediate==0x90011 && input.registers[6])
-                for (const auto address : *input.registers[6]) if (address) discover_callback(address);
-            if (instruction.operation==Operation::native_import && instruction.immediate==0x9000a && input.registers[5])
-                for (const auto address : *input.registers[5]) if (address) discover_callback(address);
-            if (instruction.operation==Operation::native_import && instruction.immediate==0x40004 && input.registers[6])
-                for (const auto address : *input.registers[6]) discover_callback(address);
-            if (instruction.operation==Operation::native_import &&
-                (instruction.immediate==0x60023 || instruction.immediate==0x60024) && input.registers[5])
-                for (const auto address : *input.registers[5]) discover_callback(address);
-            if (instruction.operation==Operation::native_import && instruction.immediate==0x7001e && input.registers[4])
-                for (const auto address : *input.registers[4]) if (address) discover_callback(address);
-            if (instruction.operation==Operation::native_import && instruction.immediate==0x70020 && input.registers[6])
-                for (const auto address : *input.registers[6]) if (address) discover_callback(address);
-            if (instruction.operation==Operation::native_import && (instruction.immediate==0xc0012 || instruction.immediate==0x4000e || instruction.immediate==0x10014) && input.registers[4])
-                for (const auto address : *input.registers[4]) if (address) discover_callback(address);
-            if (instruction.operation==Operation::native_import && instruction.immediate==0x30014 && input.registers[4]) {
-                const auto initial_word=[&](std::uint32_t address)->std::optional<std::uint32_t> {
-                    const auto physical=physical_address(address);
-                    if (physical%4) return {};
-                    for (const auto& owner : data_modules) {
-                        if (physical<owner.base) continue;
-                        const auto offset=physical-owner.base;
-                        if (offset>owner.initialized_size || owner.initialized_size-offset<4 ||
-                            offset>owner.memory.size() || owner.memory.size()-offset<4) continue;
-                        return le32(owner.memory,offset);
-                    }
-                    return {};
-                };
-                for (const auto descriptor : *input.registers[4]) {
-                    if (descriptor>0xffffffffU-16) continue;
-                    const auto operations=initial_word(descriptor+16);
-                    if (!operations || *operations>0xffffffffU-56) continue;
-                    for (const auto offset : {0U,4U,12U,16U,20U,24U,28U,32U,36U,40U,44U,48U,52U,56U}) {
-                        const auto function=initial_word(*operations+offset);
-                        if (function && *function) discover_callback(*function);
-                    }
-                    const auto type=initial_word(descriptor+4);
-                    if (type && (*type&0xf0000000U)==0x10000000U && *operations<=0xffffffffU-104) {
-                        for (const auto offset : {68U,72U,76U,80U,84U,88U,92U,96U,100U,104U}) {
+    std::set<std::uint32_t> inspected_selectors;
+    do {
+        while (!pending.empty()) {
+            const auto pc=*pending.begin(); pending.erase(pending.begin());
+            auto instruction=append(pc);
+            const auto input=states.at(pc);
+            const auto after=transfer(instruction,input);
+            if (instruction.flow==Flow::trap) continue;
+            if (instruction.flow==Flow::native_return) {
+                if (instruction.operation==Operation::native_import && instruction.immediate==0x90011 && input.registers[6])
+                    for (const auto address : *input.registers[6]) if (address) discover_callback(address);
+                if (instruction.operation==Operation::native_import && instruction.immediate==0x9000a && input.registers[5])
+                    for (const auto address : *input.registers[5]) if (address) discover_callback(address);
+                if (instruction.operation==Operation::native_import && instruction.immediate==0x40004 && input.registers[6])
+                    for (const auto address : *input.registers[6]) discover_callback(address);
+                if (instruction.operation==Operation::native_import &&
+                    (instruction.immediate==0x60023 || instruction.immediate==0x60024) && input.registers[5])
+                    for (const auto address : *input.registers[5]) discover_callback(address);
+                if (instruction.operation==Operation::native_import && instruction.immediate==0x7001e && input.registers[4])
+                    for (const auto address : *input.registers[4]) if (address) discover_callback(address);
+                if (instruction.operation==Operation::native_import && instruction.immediate==0x70020 && input.registers[6])
+                    for (const auto address : *input.registers[6]) if (address) discover_callback(address);
+                if (instruction.operation==Operation::native_import && (instruction.immediate==0xc0012 || instruction.immediate==0x4000e || instruction.immediate==0x10014) && input.registers[4])
+                    for (const auto address : *input.registers[4]) if (address) discover_callback(address);
+                if (instruction.operation==Operation::native_import && instruction.immediate==0x30014 && input.registers[4]) {
+                    const auto initial_word=[&](std::uint32_t address)->std::optional<std::uint32_t> {
+                        const auto physical=physical_address(address);
+                        if (physical%4) return {};
+                        for (const auto& owner : data_modules) {
+                            if (physical<owner.base) continue;
+                            const auto offset=physical-owner.base;
+                            if (offset>owner.initialized_size || owner.initialized_size-offset<4 ||
+                                offset>owner.memory.size() || owner.memory.size()-offset<4) continue;
+                            return le32(owner.memory,offset);
+                        }
+                        return {};
+                    };
+                    for (const auto descriptor : *input.registers[4]) {
+                        if (descriptor>0xffffffffU-16) continue;
+                        const auto operations=initial_word(descriptor+16);
+                        if (!operations || *operations>0xffffffffU-56) continue;
+                        for (const auto offset : {0U,4U,12U,16U,20U,24U,28U,32U,36U,40U,44U,48U,52U,56U}) {
                             const auto function=initial_word(*operations+offset);
                             if (function && *function) discover_callback(*function);
                         }
+                        const auto type=initial_word(descriptor+4);
+                        if (type && (*type&0xf0000000U)==0x10000000U && *operations<=0xffffffffU-104) {
+                            for (const auto offset : {68U,72U,76U,80U,84U,88U,92U,96U,100U,104U}) {
+                                const auto function=initial_word(*operations+offset);
+                                if (function && *function) discover_callback(*function);
+                            }
+                        }
                     }
                 }
-            }
-            if (instruction.operation==Operation::native_import && instruction.immediate==0x60004) discover_stack_thread(input);
-            if (instruction.operation==Operation::native_import && instruction.immediate==0x60004 && input.registers[4]) {
-                for (const auto address : *input.registers[4]) {
-                    const auto descriptor=physical_address(address);
-                    if (descriptor%4) continue;
-                    for (const auto& owner : data_modules) {
-                        if (descriptor<owner.base) continue;
-                        const auto offset=descriptor-owner.base;
-                        if (offset>owner.initialized_size || owner.initialized_size-offset<20 ||
-                            offset>owner.memory.size() || owner.memory.size()-offset<20) continue;
-                        // Initial data supplies a candidate, never a promise that the
-                        // descriptor stays immutable. Runtime creation still checks it.
-                        const auto entry=le32(owner.memory,offset+8);
-                        if (entry) discover_callback(entry);
-                        break;
+                if (instruction.operation==Operation::native_import && instruction.immediate==0x60004) discover_stack_thread(input);
+                if (instruction.operation==Operation::native_import && instruction.immediate==0x60004 && input.registers[4]) {
+                    for (const auto address : *input.registers[4]) {
+                        const auto descriptor=physical_address(address);
+                        if (descriptor%4) continue;
+                        for (const auto& owner : data_modules) {
+                            if (descriptor<owner.base) continue;
+                            const auto offset=descriptor-owner.base;
+                            if (offset>owner.initialized_size || owner.initialized_size-offset<20 ||
+                                offset>owner.memory.size() || owner.memory.size()-offset<20) continue;
+                            // Initial data supplies a candidate, never a promise that the
+                            // descriptor stays immutable. Runtime creation still checks it.
+                            const auto entry=le32(owner.memory,offset+8);
+                            if (entry) discover_callback(entry);
+                            break;
+                        }
                     }
                 }
+                continue;
             }
-            continue;
-        }
-        if (instruction.flow==Flow::sequential || instruction.flow==Flow::service) { enqueue(pc+4,after); continue; }
-        const bool indirect=instruction.flow==Flow::indirect || instruction.flow==Flow::indirect_call;
-        if (indirect) {
-            const auto& targets=input.registers[instruction.source];
-            // An unknown destination must not hide the delay slot or a call's
-            // return continuation. Analyse those edges, then reject all remaining
-            // unresolved transfers before either backend emits any output.
-            std::set<std::uint32_t> physical;
-            if (targets) for (const auto target : *targets) physical.insert(physical_address(target));
-            else if (const auto table=initial_jump_table(module,data_modules,pc,decode)) {
-                physical=*table; table_transfers.insert(pc);
+            if (instruction.flow==Flow::sequential || instruction.flow==Flow::service) { enqueue(pc+4,after); continue; }
+            const bool indirect=instruction.flow==Flow::indirect || instruction.flow==Flow::indirect_call;
+            if (indirect) {
+                const auto& targets=input.registers[instruction.source];
+                // An unknown destination must not hide the delay slot or a call's
+                // return continuation. Analyse those edges, then reject all remaining
+                // unresolved transfers before either backend emits any output.
+                std::set<std::uint32_t> physical;
+                if (targets) for (const auto target : *targets) physical.insert(physical_address(target));
+                else if (const auto table=initial_jump_table(module,data_modules,pc,decode)) {
+                    physical=*table; table_transfers.insert(pc);
+                }
+                instruction.targets.assign(physical.begin(),physical.end());
+                program.instructions.at(pc).targets=instruction.targets;
             }
-            instruction.targets.assign(physical.begin(),physical.end());
-            program.instructions.at(pc).targets=instruction.targets;
+            const auto delay=append(pc+4);
+            if (delay.flow==Flow::trap) continue;
+            if (delay.flow!=Flow::sequential)
+                throw std::runtime_error("IOP conversion: branch in delay slot at "+hex32(pc+4));
+            const auto successor=transfer(delay,after);
+            // Inspect each direct call before unrelated callers merge at the import.
+            if (instruction.flow==Flow::call || instruction.flow==Flow::direct) {
+                const auto target=native_imports.find(instruction.target);
+                if (target!=native_imports.end() && target->second.immediate==0x60004) discover_stack_thread(successor);
+            }
+            if (indirect) {
+                for (const auto target : instruction.targets) enqueue(target,successor);
+            } else if (instruction.flow!=Flow::return_register) enqueue(instruction.target,successor);
+            if (instruction.flow==Flow::conditional) enqueue(pc+8,successor);
+            if (instruction.flow==Flow::call || instruction.flow==Flow::indirect_call) enqueue(pc+8,Constants{});
         }
-        const auto delay=append(pc+4);
-        if (delay.flow==Flow::trap) continue;
-        if (delay.flow!=Flow::sequential)
-            throw std::runtime_error("IOP conversion: branch in delay slot at "+hex32(pc+4));
-        const auto successor=transfer(delay,after);
-        // Inspect each direct call before unrelated callers merge at the import.
-        if (instruction.flow==Flow::call || instruction.flow==Flow::direct) {
-            const auto target=native_imports.find(instruction.target);
-            if (target!=native_imports.end() && target->second.immediate==0x60004) discover_stack_thread(successor);
+        // A helper can return a callback which its caller stores in a thread
+        // descriptor. The ordinary call-clobber analysis intentionally loses v0;
+        // retain all bounded constant return candidates as additional AOT roots.
+        std::set<std::uint32_t> selectors;
+        for (const auto& [address,instruction] : program.instructions) {
+            if (instruction.flow==Flow::call) selectors.insert(instruction.target);
+            if (instruction.flow==Flow::indirect_call)
+                selectors.insert(instruction.targets.begin(),instruction.targets.end());
         }
-        if (indirect) {
-            for (const auto target : instruction.targets) enqueue(target,successor);
-        } else if (instruction.flow!=Flow::return_register) enqueue(instruction.target,successor);
-        if (instruction.flow==Flow::conditional) enqueue(pc+8,successor);
-        if (instruction.flow==Flow::call || instruction.flow==Flow::indirect_call) enqueue(pc+8,Constants{});
-    }
+        for (const auto selector : selectors) {
+            if (!inspected_selectors.insert(selector).second) continue;
+            for (const auto value : returned_constants(program,selector)) {
+                const auto target=physical_address(value);
+                if (target%4 || program.instructions.contains(target)) continue;
+                for (const auto& owner : data_modules) {
+                    const auto text=owner.info ? owner.info->text_size : owner.initialized_size;
+                    if (target>=owner.base && target-owner.base<text) { discover_callback(target); break; }
+                }
+            }
+        }
+    } while (!pending.empty());
     std::ostringstream indirect_errors;
     for (const auto& [pc,i] : program.instructions)
         if ((i.flow==Flow::indirect || i.flow==Flow::indirect_call) && !states.at(pc).registers[i.source] && !table_transfers.contains(pc))

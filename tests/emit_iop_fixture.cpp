@@ -622,7 +622,39 @@ int main(int argc,char** argv) {
             dispatch_word(base+8,0x00401821); // Still sees the old architectural value.
             dispatch_word(base+12,0x03e00008); bundle_roots.push_back(base);
         }
-        const std::array bundle{module,provider,dispatch};
+        nt::elf::IopModule factories{0xb000,0xb000,nt::Bytes(0x400),0x400,{}};
+        const auto factory_word=[&](unsigned pc,std::uint32_t word) { fixture::put32(factories.memory,pc-factories.base,word); };
+        constexpr std::uint32_t factory_caller[]{0x03e08021,0x0c002c10,0,0x0200f821,0x03e00008,0};
+        for (unsigned i=0;i<std::size(factory_caller);++i) factory_word(0xb000+i*4,factory_caller[i]);
+        constexpr std::uint32_t factory_selector[]{0x2c820003,0x1040000a,0,0x00041080,0x3c010001,
+            0x00220821,0x8c22b300,0,0x00400008,0};
+        for (unsigned i=0;i<std::size(factory_selector);++i) factory_word(0xb040+i*4,factory_selector[i]);
+        factory_word(0xb070,0x03e00008); factory_word(0xb074,0x00001021);
+        for (unsigned i=0;i<3;++i) {
+            factory_word(0xb300+i*4,0xb080+i*16);
+            factory_word(0xb080+i*16,0x03e00008);
+            factory_word(0xb084+i*16,0x3402b100+i*8); // Pointer defined in return delay slot.
+            factory_word(0xb100+i*8,0x03e00008); factory_word(0xb104+i*8,0x24020050+i);
+        }
+        // Table address is hoisted in s2, outside the dispatch pattern.
+        constexpr std::uint32_t hoisted[]{0x3c120001,0x2652b300,0,0,0x2c820003,0x10400008,
+            0x00041080,0x00521021,0x8c420000,0,0x00400008,0,0,0,0x03e00008,0x00001021};
+        for (unsigned i=0;i<std::size(hoisted);++i) factory_word(0xb180+i*4,hoisted[i]);
+        bundle_roots.push_back(0xb180);
+        {
+            auto unknown=factories; fixture::put32(unknown.memory,0x84,0x8c820000);
+            const auto analyzed=nt::iop_codegen::ir::discover(unknown);
+            if (analyzed.instructions.contains(0xb100))
+                throw std::runtime_error("Unknown return value was treated as a callback address");
+        }
+        const std::array bundle{module,provider,dispatch,factories};
+        {
+            auto broken=bundle; fixture::put32(broken[3].memory,0x300,0);
+            std::ostringstream partial; bool rejected=false;
+            try { nt::iop_codegen::emit_bundle(partial,broken,bundle_roots); }
+            catch (const std::runtime_error&) { rejected=true; }
+            if (!rejected || !partial.str().empty()) throw std::runtime_error("Malformed hoisted table emitted native code");
+        }
         code.str(""); code.clear(); nt::iop_codegen::emit_bundle(code,bundle,bundle_roots);
         {
             auto broken=bundle;
@@ -635,7 +667,7 @@ int main(int argc,char** argv) {
                 diagnostic.find("module 1 base=0x0000a000")==std::string::npos)
                 throw std::runtime_error("Bundle conversion concealed another module failure or emitted partial output");
         }
-        for (const auto target : {0U,0xa501U,0xb000U}) {
+        for (const auto target : {0U,0xa501U,0xb800U}) {
             auto broken=bundle; fixture::put32(broken[2].memory,0x480,target);
             std::ostringstream partial; bool failed=false;
             try { nt::iop_codegen::emit_bundle(partial,broken,bundle_roots); }
@@ -653,10 +685,10 @@ int main(int argc,char** argv) {
             if (!failed_bundle || !partial.str().empty()) throw std::runtime_error("Invalid bundle emitted partial native code");
         }
         // Earlier owners must be revisited when a later module discovers a callback.
-        const std::array reversed{provider,module,dispatch};
+        const std::array reversed{provider,module,dispatch,factories};
         std::ostringstream reverse_code;
         nt::iop_codegen::emit_bundle(reverse_code,reversed,bundle_roots);
-        for (const auto target : {0xa061U,0xa080U,0xb000U}) {
+        for (const auto target : {0xa061U,0xa080U,0xb800U}) {
             auto broken=bundle;
             fixture::put32(broken[0].memory,0xb4c,0x34060000U|target);
             std::ostringstream partial; bool rejected=false;
@@ -689,7 +721,7 @@ int main(int argc,char** argv) {
             put(0x8800,0x00401821);
             put(first+(count-2)*4,0x03e00008); put(first+(count-1)*4,0);
             std::vector<std::uint32_t> roots=bundle_roots; roots.push_back(first);
-            const std::array large_bundle{large,provider,dispatch};
+            const std::array large_bundle{large,provider,dispatch,factories};
             std::ostringstream llvm; nt::iop_codegen::emit_bundle(llvm,large_bundle,roots);
             const auto text=llvm.str();
             nt::write_file(argv[3],nt::ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));
