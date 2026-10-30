@@ -8,12 +8,18 @@
 
 namespace nt::ee_codegen {
 namespace {
+struct Prepared {
+    elf::Executable executable;
+    analysis::Program discovered;
+    std::vector<CodeRange> ranges;
+    std::vector<CodePayload> payloads;
+    Bytes image;
+    std::uint32_t syscall_table=0;
+};
 void save(const std::filesystem::path& path,const std::string& text) {
     write_file(path,ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));
 }
-}
-void project(const std::filesystem::path& input,const std::filesystem::path& output,std::span<const PayloadMapping> mappings) {
-    const auto bytes=read_file(input);
+Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
     auto executable=elf::parse(bytes);
     std::vector<CodeRange> ranges;
     std::vector<std::pair<std::uint32_t,std::uint32_t>> extents;
@@ -130,15 +136,30 @@ void project(const std::filesystem::path& input,const std::filesystem::path& out
         added|=registered_calls.size()!=previous_calls;
         if (!added) break;
     }
-    if (!discovered.unresolved.empty())
-        throw std::runtime_error("EE discovery reached unmapped code at "+hex32(*discovered.unresolved.begin()));
-    std::vector<r5900::Instruction> instructions;
-    for (const auto& [pc,instruction]:discovered.instructions) instructions.push_back(instruction);
-    std::ostringstream llvm;
-    emit_llvm(llvm,instructions,ranges,payloads);
-    Bytes image(end,0);
+    Prepared result;
+    result.executable=std::move(executable);
+    result.discovered=std::move(discovered);
+    result.ranges=std::move(ranges);
+    result.payloads=std::move(payloads);
+    result.syscall_table=syscall_table;
+    result.image.assign(end,0);
     for (const auto& segment:initial_executable.segments)
-        std::copy_n(bytes.begin()+segment.offset,segment.file_size,image.begin()+segment.address);
+        std::copy_n(bytes.begin()+segment.offset,segment.file_size,result.image.begin()+segment.address);
+    return result;
+}
+}
+void project(const std::filesystem::path& input,const std::filesystem::path& output,std::span<const PayloadMapping> mappings) {
+    const auto bytes=read_file(input);
+    const auto prepared=prepare(bytes,mappings);
+    if (!prepared.discovered.unresolved.empty())
+        throw std::runtime_error("EE discovery reached unmapped code at "+hex32(*prepared.discovered.unresolved.begin()));
+    std::vector<r5900::Instruction> instructions;
+    for (const auto& [pc,instruction]:prepared.discovered.instructions) instructions.push_back(instruction);
+    std::ostringstream llvm;
+    emit_llvm(llvm,instructions,prepared.ranges,prepared.payloads);
+    const auto& executable=prepared.executable;
+    const auto& image=prepared.image;
+    const auto syscall_table=prepared.syscall_table;
     std::ostringstream cmake;
     cmake<<R"cmake(cmake_minimum_required(VERSION 3.24)
 project(AnyPS2ConvertedEe LANGUAGES CXX)
@@ -192,5 +213,46 @@ target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codeg
          "Indirect destinations must already belong to the discovered code set; other targets stop.\n"
          "Build with ps2-build, then run ps2-native <program.data> [operation-budget].\n"
          "Data contains private input material and must remain local. This is not game boot.\n");
+}
+EeAssessment assess(ByteView bytes,std::span<const PayloadMapping> mappings) {
+    EeAssessment result;
+    try {
+        const auto prepared=prepare(bytes,mappings);
+        result.instructions=prepared.discovered.instructions.size();
+        for (const auto& segment:prepared.executable.segments)
+            if (segment.flags&1) result.declared_executable_words+=segment.memory_size/4;
+        result.unresolved_count=prepared.discovered.unresolved.size();
+        for (const auto address:prepared.discovered.unresolved) {
+            if (result.unresolved_sample.size()==16) break;
+            result.unresolved_sample.push_back(address);
+        }
+        std::vector<r5900::Instruction> instructions;
+        instructions.reserve(prepared.discovered.instructions.size());
+        for (const auto& [pc,instruction]:prepared.discovered.instructions) {
+            instructions.push_back(instruction);
+            if (!instruction.indirect()) continue;
+            if (!result.indirect_sites) result.first_indirect=instruction.pc;
+            ++result.indirect_sites;
+        }
+        for (const auto& instruction:instructions) {
+            if (instruction.op!=r5900::Op::syscall) continue;
+            const auto previous=prepared.discovered.instructions.find(instruction.pc-4);
+            const auto& setup=previous==prepared.discovered.instructions.end() ? instruction : previous->second;
+            if (previous==prepared.discovered.instructions.end() || setup.rs || setup.rt!=3 ||
+                (setup.op!=r5900::Op::addiu && setup.op!=r5900::Op::daddiu && setup.op!=r5900::Op::ori)) {
+                ++result.unknown_syscall_sites;
+                continue;
+            }
+            ++result.known_syscalls[static_cast<std::uint32_t>(setup.immediate)];
+        }
+        if (!instructions.empty() && instructions.size()<=program_instruction_limit)
+            result.rejection=reject_unsupported(instructions);
+        result.convertible=result.unresolved_count==0 && result.rejection.empty() && !instructions.empty() &&
+            instructions.size()<=program_instruction_limit;
+    } catch (const std::exception& error) {
+        result.layout_error=error.what();
+        result.convertible=false;
+    }
+    return result;
 }
 }

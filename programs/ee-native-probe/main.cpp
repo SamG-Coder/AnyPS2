@@ -212,7 +212,16 @@ int main(int argc,char** argv) {
                      <<" address="<<nt::hex32(result.address)<<" trap="<<nt::hex32(result.trap_code)
                      <<" last_bind="<<nt::hex32(iop_reset->last_server())
                      <<" session_cdvd_initialized="<<iop_reset->cdvd_initialized()
-                     <<" cdvd_command="<<iop_reset->cdvd_command()<<'\n';
+                     <<" cdvd_command="<<iop_reset->cdvd_command()
+                     <<" cdvd_media="<<iop_reset->cdvd_media()
+                     <<" cdvd_argument="<<iop_reset->cdvd_argument()
+                     <<" cdvd_ready_calls="<<iop_reset->cdvd_ready_calls()
+                     <<" cdvd_ready_mode="<<iop_reset->cdvd_ready_mode()
+                     <<" cdvd_ready_result="<<iop_reset->cdvd_ready_result()
+                     <<" boot_device_queries="<<iop_reset->boot_device_queries()
+                     <<" boot_device="<<iop_reset->boot_device()
+                     <<" boot_device_decision="<<iop_reset->boot_device_decision()
+                     <<" boot_device_path="<<iop_reset->boot_device_path()<<'\n';
         }
 #endif
         if (!capture_directory.empty()) capture.save(capture_directory);

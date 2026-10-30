@@ -25,7 +25,13 @@ ctest --test-dir build -C Release --output-on-failure
 Default suites cover synthetic ISO/ELF parsing, control-flow discovery, compiled
 generated instructions, kernel behavior, hardware registers, process arguments,
 repository content, and rejection fixtures for the repository policy. They need
-no commercial game or BIOS. A generated native fixture is compiled by the normal
+no commercial game or BIOS. `conversion-inventory` builds a synthetic disc with
+one convertible IOP module, one unsupported sibling, an EE executable and an
+unrecognized file. It checks that the sibling still converts, unrecognized bytes
+are not decoded, and the report keeps linked and executed coverage at zero.
+Names that differ only by a separator, and long names that share a 48-character
+prefix, keep distinct artifact directories and distinct IR. Each generated unit
+records its source identity beside that IR. A generated native fixture is compiled by the normal
 build so tests execute the generator's output.
 
 The `iop-native-execution` milestone compiles generated IOP C++ without linking the
@@ -464,6 +470,10 @@ Shift coverage includes arithmetic-right immediate shifts and all three variable
 shift forms. Zero, sign-bit, signed-limit and negative inputs are combined with
 counts at and beyond the word width, checking five-bit count masking and sign
 extension while suspending between instructions. All fixtures are original.
+The same process invokes the native modload boot-device query on a private RAM
+image: `cdrom:`, `cdrom0:`, and `rom:` through `rom3:` are legal; other
+well-formed paths are illegal; a null or unterminated pointer does not return
+success. The query does not create loader callback state or start a module.
 HI/LO coverage verifies initial state, signed/unsigned 64-bit products, explicit
 HI/LO writes and readback across one-instruction and larger slices. The LLVM
 adapter uses ABI entry version 2 for the enlarged state buffer; rebuild generated
@@ -2342,5 +2352,9 @@ The Release `ee-llvm-execution` RPC milestone covers CD/DVD initialization with
 an original synthetic ISO: binding, completion through a compiled interrupt
 handler, initialization/reinitialization/shutdown, legacy version fields,
 malformed output bounds, executable protection, unsupported requests, missing
-media and a volume with a truncated root extent. Failed calls preserve session
-ownership and output bytes. The tests share the FILEIO transport harness.
+media and a volume with a truncated root extent. The same milestone covers
+ReadClock BCD/JST conversion, media-mode selection for CD and DVD, and
+disk-ready results for an open session and a closed session. Rejected media
+values, protected writes, and mode cleared by shutdown keep the previous
+session state. Failed calls preserve session ownership and output bytes. The
+tests share the FILEIO transport harness.

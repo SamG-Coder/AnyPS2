@@ -1,5 +1,6 @@
 #pragma once
 #include <nt/iop_module.hpp>
+#include <nt/iop_ir.hpp>
 #include <iosfwd>
 
 namespace nt::iop_codegen {
@@ -7,6 +8,8 @@ namespace nt::iop_codegen {
 // Unsupported reachable instructions fail before any generated text is emitted.
 void emit_llvm(std::ostream& output,const elf::IopModule& module,
                std::span<const std::uint32_t> additional_entries={});
+// Emit an already diagnosed program. The caller must not pass a partial program.
+void emit_program(std::ostream& output,const ir::Program& program);
 // Modules must already be relocated into disjoint data-arena ranges.
 void emit_bundle(std::ostream& output,std::span<const elf::IopModule> modules,
                  std::span<const std::uint32_t> additional_entries={});

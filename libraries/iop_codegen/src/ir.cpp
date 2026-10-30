@@ -139,8 +139,18 @@ Instruction decode(std::uint32_t pc,std::uint32_t word) {
     return i;
 }
 }
+static bool note_gap(std::vector<Gap>* gaps,Gap gap) {
+    if (!gaps) return false;
+    if (gaps->size()>=64) {
+        if (gaps->empty() || gaps->back().kind!=Gap::Kind::limit)
+            gaps->push_back(Gap{Gap::Kind::limit,{},0,0,0,0,"additional diagnostic gaps omitted"});
+        return true;
+    }
+    gaps->push_back(std::move(gap));
+    return false;
+}
 static Program discover_module(const elf::IopModule& module,std::span<const std::uint32_t> entries,std::span<const elf::IopExports> libraries,
-    std::span<const elf::IopModule> data_modules,std::set<std::uint32_t>* external_callbacks=nullptr) {
+    std::span<const elf::IopModule> data_modules,std::set<std::uint32_t>* external_callbacks=nullptr,std::vector<Gap>* gaps=nullptr) {
     const auto extent=module.info ? module.info->text_size : module.initialized_size;
     if (module.base%4 || extent%4 || extent>module.memory.size() || extent>module.initialized_size ||
         module.base>=0x200000 || extent>0x200000-module.base)
@@ -159,6 +169,11 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                 operation=Operation::native_import; break;
             }
         if (!operation) {
+            if (gaps) {
+                if (note_gap(gaps,Gap{Gap::Kind::import_missing,import.library,import.version,import.ordinal,
+                        module.base+import.offset,0,{}})) return program;
+                continue;
+            }
             unresolved<<"\n  "<<import.library<<" version="<<unsigned(import.version>>8)<<'.'<<unsigned(import.version&255)
                 <<" ordinal="<<import.ordinal<<" at "<<hex32(module.base+import.offset);
             continue;
@@ -174,6 +189,8 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
     }
     if (!unresolved.str().empty())
         throw std::runtime_error("IOP conversion: unsupported native imports:"+unresolved.str());
+    bool halt=false;
+    std::set<std::uint32_t> abandoned;
     std::set<std::uint32_t> pending(entries.begin(),entries.end());
     pending.insert(module.entry);
     for (const auto& table : elf::iop_exports(module))
@@ -209,11 +226,28 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         for (unsigned index=0;index<count;++index) if (input.registers[4+index])
             for (const auto target : *input.registers[4+index]) if (target) discover_callback(target);
     };
+    const auto trapped=[&](std::uint32_t pc) {
+        Instruction stop; stop.address=pc; stop.flow=Flow::trap; stop.operation=Operation::breakpoint; return stop;
+    };
     const auto append=[&](std::uint32_t pc) {
-        if (pc%4 || pc<module.base || pc-module.base>=extent)
+        if (abandoned.contains(pc)) return trapped(pc);
+        if (gaps) if (const auto found=program.instructions.find(pc); found!=program.instructions.end()) return found->second;
+        if (pc%4 || pc<module.base || pc-module.base>=extent) {
+            if (gaps) {
+                abandoned.insert(pc);
+                if (note_gap(gaps,Gap{Gap::Kind::unresolved_target,{},0,0,pc,0,"unresolved code target"})) halt=true;
+                return trapped(pc);
+            }
             throw std::runtime_error("IOP conversion: unresolved code target "+hex32(pc));
-        if (!program.instructions.contains(pc) && program.instructions.size()>=65536)
+        }
+        if (!program.instructions.contains(pc) && program.instructions.size()>=65536) {
+            if (gaps) {
+                abandoned.insert(pc);
+                if (note_gap(gaps,Gap{Gap::Kind::limit,{},0,0,pc,0,"65536-instruction module analysis limit exceeded"})) halt=true;
+                return trapped(pc);
+            }
             throw std::runtime_error("IOP conversion: 65536-instruction module analysis limit exceeded");
+        }
         if (const auto native=native_imports.find(pc);native!=native_imports.end()) {
             program.instructions.emplace(pc,native->second);
             program.protected_words.insert(pc);
@@ -224,6 +258,16 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         Instruction instruction;
         try { instruction=decode(pc,word); }
         catch (const std::exception& error) {
+            if (gaps) {
+                abandoned.insert(pc);
+                std::ostringstream why;
+                why<<error.what()<<" primary="<<(word>>26);
+                if ((word>>26)==0 || (word>>26)==1) why<<" function="<<(word&63);
+                if (note_gap(gaps,Gap{Gap::Kind::instruction,{},0,0,pc,word,why.str()})) halt=true;
+                auto stop=trapped(pc);
+                program.instructions.emplace(pc,stop);
+                return stop;
+            }
             throw std::runtime_error("IOP conversion at "+hex32(pc)+" word="+hex32(word)+": "+error.what());
         }
         program.instructions.emplace(pc,instruction);
@@ -233,8 +277,10 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
     std::set<std::uint32_t> inspected_selectors;
     do {
         while (!pending.empty()) {
+            if (halt) break;
             const auto pc=*pending.begin(); pending.erase(pending.begin());
             auto instruction=append(pc);
+            if (halt || instruction.flow==Flow::trap) continue;
             const auto input=states.at(pc);
             const auto after=transfer(instruction,input);
             if (instruction.flow==Flow::trap) continue;
@@ -322,9 +368,14 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                 program.instructions.at(pc).targets=instruction.targets;
             }
             const auto delay=append(pc+4);
-            if (delay.flow==Flow::trap) continue;
-            if (delay.flow!=Flow::sequential)
+            if (halt || delay.flow==Flow::trap) continue;
+            if (delay.flow!=Flow::sequential) {
+                if (gaps) {
+                    if (note_gap(gaps,Gap{Gap::Kind::control,{},0,0,pc+4,0,"branch in delay slot"})) halt=true;
+                    continue;
+                }
                 throw std::runtime_error("IOP conversion: branch in delay slot at "+hex32(pc+4));
+            }
             const auto successor=transfer(delay,after);
             // Inspect each direct call before unrelated callers merge at the import.
             if (instruction.flow==Flow::call || instruction.flow==Flow::direct) {
@@ -363,17 +414,30 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
             if (states.contains(pc) && !states.at(pc).registers[instruction.source] && stack_callback_call(program,instruction)) {
                 auto& targets=stack_transfers[pc];
                 const auto before=targets.size(); targets.insert(candidates.begin(),candidates.end());
-                if (targets.size()>256) throw std::runtime_error("IOP conversion: callback candidate limit exceeded at "+hex32(pc));
+                if (targets.size()>256) {
+                    if (gaps) {
+                        if (note_gap(gaps,Gap{Gap::Kind::limit,{},0,0,pc,0,"callback candidate limit exceeded"})) halt=true;
+                        break;
+                    }
+                    throw std::runtime_error("IOP conversion: callback candidate limit exceeded at "+hex32(pc));
+                }
                 if (targets.size()!=before) pending.insert(pc);
             }
         }
+        if (halt) break;
     } while (!pending.empty());
+    if (halt) return program;
     std::ostringstream indirect_errors;
     for (const auto& [pc,i] : program.instructions)
         if ((i.flow==Flow::indirect || i.flow==Flow::indirect_call) && !states.at(pc).registers[i.source] && !table_transfers.contains(pc) && !stack_transfers.contains(pc))
             indirect_errors<<"\n  unresolved indirect transfer at "<<hex32(pc)<<" through r"<<i.source;
-    if (!indirect_errors.str().empty())
-        throw std::runtime_error("IOP conversion: indirect target sets are unknown or exceed the 16-value analysis bound:"+indirect_errors.str());
+    if (!indirect_errors.str().empty()) {
+        if (gaps) {
+            for (const auto& [pc,i] : program.instructions)
+                if ((i.flow==Flow::indirect || i.flow==Flow::indirect_call) && !states.at(pc).registers[i.source] && !table_transfers.contains(pc) && !stack_transfers.contains(pc))
+                    if (note_gap(gaps,Gap{Gap::Kind::indirect,{},0,0,pc,0,"r"+std::to_string(i.source)})) break;
+        } else throw std::runtime_error("IOP conversion: indirect target sets are unknown or exceed the 16-value analysis bound:"+indirect_errors.str());
+    }
     for (const auto& [pc,targets] : stack_transfers) program.guarded_callback_sites.insert(pc);
     return program;
 }
@@ -441,5 +505,64 @@ Program discover_bundle(std::span<const elf::IopModule> modules,std::span<const 
         result.guarded_callback_sites.insert(program.guarded_callback_sites.begin(),program.guarded_callback_sites.end());
     }
     return result;
+}
+std::vector<ModuleDiagnosis> diagnose_bundle(std::span<const elf::IopModule> modules,std::span<const std::uint32_t> entries) {
+    if (modules.empty()) throw std::runtime_error("IOP conversion: empty module bundle");
+    std::vector<ModuleDiagnosis> results(modules.size());
+    std::vector<elf::IopExports> libraries;
+    std::vector<std::string> blocked(modules.size());
+    for (std::size_t index=0;index<modules.size();++index) {
+        const auto& module=modules[index];
+        const auto end=std::uint64_t(module.base)+module.memory.size();
+        if (end>0x200000) throw std::runtime_error("IOP conversion: bundle module exceeds data arena");
+        for (std::size_t other=0;other<index;++other)
+            if (module.base<std::uint64_t(modules[other].base)+modules[other].memory.size() && modules[other].base<end)
+                throw std::runtime_error("IOP conversion: overlapping bundle modules");
+        try {
+            auto exports=elf::iop_exports(module);
+            libraries.insert(libraries.end(),exports.begin(),exports.end());
+        } catch (const std::exception& error) { blocked[index]=error.what(); }
+    }
+    std::vector<std::set<std::uint32_t>> roots(modules.size());
+    std::set<std::size_t> pending;
+    for (std::size_t index=0;index<modules.size();++index) {
+        if (blocked[index].empty()) pending.insert(index);
+        else results[index].unexpected=blocked[index];
+    }
+    const auto add_root=[&](std::uint32_t address) {
+        for (std::size_t index=0;index<modules.size();++index) {
+            const auto& module=modules[index];
+            const auto extent=module.info ? module.info->text_size : module.initialized_size;
+            if (address%4 || address<module.base || address-module.base>=extent) continue;
+            if (roots[index].insert(address).second) pending.insert(index);
+            return true;
+        }
+        return false;
+    };
+    for (const auto entry : entries) if (!add_root(entry))
+        results.front().gaps.push_back(Gap{Gap::Kind::unresolved_target,{},0,0,entry,0,"bundle code root has no executable owner"});
+    unsigned steps=0;
+    while (!pending.empty()) {
+        if (++steps>4096) {
+            results.front().gaps.push_back(Gap{Gap::Kind::limit,{},0,0,0,0,"module reanalysis step limit exceeded"});
+            break;
+        }
+        const auto index=*pending.begin(); pending.erase(pending.begin());
+        if (!results[index].unexpected.empty()) continue;
+        const std::vector<std::uint32_t> module_roots(roots[index].begin(),roots[index].end());
+        std::set<std::uint32_t> callbacks;
+        std::vector<Gap> gaps;
+        try {
+            results[index].program=discover_module(modules[index],module_roots,libraries,modules,&callbacks,&gaps);
+            results[index].gaps=std::move(gaps);
+        } catch (const std::exception& error) {
+            results[index].unexpected=error.what();
+            results[index].gaps=std::move(gaps);
+        }
+        if (!results[index].unexpected.empty()) continue;
+        for (const auto callback : callbacks) if (!add_root(callback))
+            results[index].gaps.push_back(Gap{Gap::Kind::unresolved_target,{},0,0,callback,0,"callback has no executable owner"});
+    }
+    return results;
 }
 }

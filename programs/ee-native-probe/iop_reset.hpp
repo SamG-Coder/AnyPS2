@@ -42,9 +42,13 @@ public:
         if (!disc.empty()) {
             cdvd_=std::make_unique<nt::ee::NativeCdvdInitRpc>(disc,0x1ee000,0x1ee010);
             scmd_=std::make_unique<nt::ee::NativeCdvdScmdRpc>(*cdvd_,0x1ed000,0x1ed010);
+            ready_=std::make_unique<nt::ee::NativeCdvdReadyRpc>(*cdvd_,0x8000059AU,0x1ef000,0x1ef010);
+            ready_alternate_=std::make_unique<nt::ee::NativeCdvdReadyRpc>(*cdvd_,0x8000059CU,0x1ef800,0x1ef810);
             native_rpc_=std::make_unique<nt::ee::NativeSifCommandPeer>(platform.sif_link,ee,protection,0x1f0000,&platform.sif_receive);
             if (!native_rpc_->register_service(*cdvd_)) throw std::runtime_error("Cannot register reset-session CD/DVD service");
             if (!native_rpc_->register_service(*scmd_)) throw std::runtime_error("Cannot register reset-session CD/DVD command service");
+            if (!native_rpc_->register_service(*ready_) || !native_rpc_->register_service(*ready_alternate_))
+                throw std::runtime_error("Cannot register reset-session CD/DVD ready service");
         }
     }
     nt::ee::NativeSifResetOwner owner() { return {this,reset,{this,commands}}; }
@@ -57,6 +61,23 @@ public:
     std::uint32_t last_server() const { return last_server_; }
     bool cdvd_initialized() const { return cdvd_ && cdvd_->initialized(); }
     std::uint32_t cdvd_command() const { return scmd_ ? scmd_->last_method() : 0; }
+    std::uint32_t cdvd_media() const { return cdvd_ ? cdvd_->media_mode() : 0; }
+    std::uint32_t cdvd_argument() const { return scmd_ ? scmd_->last_argument() : 0; }
+    std::uint32_t cdvd_ready_calls() const {
+        return (ready_ ? ready_->calls() : 0)+(ready_alternate_ ? ready_alternate_->calls() : 0);
+    }
+    std::uint32_t cdvd_ready_mode() const {
+        if (ready_alternate_ && ready_alternate_->calls()) return ready_alternate_->last_mode();
+        return ready_ ? ready_->last_mode() : 0;
+    }
+    std::uint32_t cdvd_ready_result() const {
+        if (ready_alternate_ && ready_alternate_->calls()) return ready_alternate_->last_result();
+        return ready_ ? ready_->last_result() : 0;
+    }
+    std::uint32_t boot_device_queries() const { return services_->modload.boot_device_queries(); }
+    const std::string& boot_device() const { return services_->modload.boot_device(); }
+    const std::string& boot_device_path() const { return services_->modload.boot_device_path(); }
+    int boot_device_decision() const { return services_->modload.boot_device_decision(); }
     nt::ee::Stop pump() {
         if (!accepted_) return nt::ee::Stop::budget;
         if (!platform_.sif_link.reset_teardown_complete()) return nt::ee::Stop::budget;
@@ -150,6 +171,7 @@ private:
     std::unique_ptr<nt::ee::NativeIopCommands> incoming_;
     std::unique_ptr<nt::ee::NativeCdvdInitRpc> cdvd_;
     std::unique_ptr<nt::ee::NativeCdvdScmdRpc> scmd_;
+    std::unique_ptr<nt::ee::NativeCdvdReadyRpc> ready_,ready_alternate_;
     std::unique_ptr<nt::ee::NativeSifCommandPeer> native_rpc_;
     nt::iop::NativeResult result_{nt::iop::NativeStop::budget,0};
     bool invoked_=false,started_=false;

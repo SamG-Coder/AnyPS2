@@ -310,6 +310,10 @@ void instruction(Writer& w,const ir::Instruction& i,bool has_successor) {
 void emit_llvm(std::ostream& output,const elf::IopModule& module,std::span<const std::uint32_t> entries) {
     detail::llvm(output,ir::discover(module,entries));
 }
+void emit_program(std::ostream& output,const ir::Program& program) {
+    if (program.instructions.empty()) throw std::runtime_error("IOP conversion: empty program");
+    detail::llvm(output,program);
+}
 void detail::llvm(std::ostream& output,const ir::Program& program) {
     // Fixed address pages bound execution functions to at most 256 instructions.
     std::map<std::uint32_t,std::map<std::uint32_t,ir::Instruction>> pages;

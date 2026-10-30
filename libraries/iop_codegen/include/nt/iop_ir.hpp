@@ -2,6 +2,7 @@
 #include <nt/iop_module.hpp>
 #include <map>
 #include <set>
+#include <string>
 #include <vector>
 
 namespace nt::iop_codegen::ir {
@@ -37,4 +38,25 @@ struct Program {
 };
 Program discover(const elf::IopModule& module,std::span<const std::uint32_t> entries={});
 Program discover_bundle(std::span<const elf::IopModule> modules,std::span<const std::uint32_t> entries={});
+// Collected conversion gaps. Kind distinguishes a missing service from an
+// untranslated instruction so later batches can be chosen by subsystem.
+struct Gap {
+    enum class Kind { import_missing, instruction, indirect, unresolved_target, limit, control };
+    Kind kind=Kind::control;
+    std::string library;
+    std::uint16_t version=0;
+    std::uint16_t ordinal=0;
+    std::uint32_t address=0;
+    std::uint32_t word=0;
+    std::string detail;
+};
+struct ModuleDiagnosis {
+    Program program;
+    std::vector<Gap> gaps;
+    std::string unexpected;
+    bool convertible() const { return gaps.empty() && unexpected.empty() && !program.instructions.empty(); }
+};
+// Analyze every module. A failure is stored on that module and does not cancel
+// the others. Sibling export tables still bind imports of modules that convert.
+std::vector<ModuleDiagnosis> diagnose_bundle(std::span<const elf::IopModule> modules,std::span<const std::uint32_t> entries={});
 }

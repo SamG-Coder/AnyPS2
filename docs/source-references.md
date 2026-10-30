@@ -1154,8 +1154,14 @@ Native modload ABI binding and callback ownership use the pinned PS2SDK
 `iop/system/modload/include/modload.h`, `src/exports.tab`, and
 `src/modload.c` registration/query contracts. The native owner stores only
 validated AOT callback addresses; absent registrations remain null. It performs
-no authentication or module loading. Recognized lifecycle imports stop at their
-native service boundary until an implementation owns them. The pinned loadcore
+no authentication or module loading. Selector 15 answers whether a path names a
+device the native disc or archive opener can use: `cdrom:` and `cdrom0:`, or
+`rom:` through `rom3:` without requiring a mounted image. Every other
+well-formed path is illegal. A null or unterminated guest pointer stops without
+success. The pinned SDK function returns success for every path and is marked
+unofficial, so that stub is not used. Recognized lifecycle imports, including
+LoadStartModule, stop at their native service boundary until an implementation
+owns them. The pinned loadcore
 `exports.tab` identifies FlushIcache/FlushDcache; immutable AOT code and coherent
 native data replace cache banks, with a host publication fence at these calls.
 No firmware cache routine or upstream implementation is copied.
@@ -1171,9 +1177,26 @@ conversion; it does not reproduce firmware clock access. Dates outside
 2000–2099 and unimplemented commands stop explicitly. The endpoint shares the
 existing initialized ISO-session lifetime. No upstream implementation is copied.
 
-The selected compiled IOP reset-session integration now binds this endpoint.
-Actual GT4 execution next requests media-mode selection (SCMD method 34), which
-remains unsupported. This is startup progress, not a rendered frame or boot.
+Method 34 follows `sceCdMmode` in the same public sources, including
+`iop/cdvd/cdvdman/src/cdvdman.c`. The native service stores media mode 1 (CD)
+or 2 (DVD) on the initialized ISO session and returns success. Shutdown clears
+the stored mode. Any other value, a missing session, or an invalid buffer stops
+without a result write and without replacing a stored mode. Sector reads are
+still required to honor the stored mode. No upstream implementation is copied.
+
+Disk-ready servers `0x8000059A` and `0x8000059C` use the same public
+`sceCdDiskReady` callback. With an open ISO and no transfer in progress, the
+blocking mode and a ready poll return command-complete (2), and the status
+query returns the idle-ready byte `0x40`. A poll against a closed session
+returns not-ready (6), and its status byte is shell-open. No drive register
+or busy-wait is reproduced.
+
+The selected compiled IOP reset-session integration binds these endpoints.
+Media-mode selection and one disk-ready poll are startup progress, not a
+rendered frame or boot. The compiled IOP session then accepts a `cdrom` path
+from the boot-device query above. The next stop is modload `LoadStartModule`
+(ordinal 7). That call does not open, relocate, or start a module. No frame
+was rendered.
 
 - Repository: https://github.com/moesuito/gt4-staticrecomp
 - Inspected revision: `795cdc086464b003d49c0b44d0911dc761f58f5c`.

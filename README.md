@@ -284,6 +284,19 @@ unsupported operation; entry return values are reported without interpreting the
 as PS2 module residency status. This is explicit native startup orchestration,
 not automatic GT4 boot discovery.
 
+To inventory recognizable executables on a disc without stopping at the first
+unsupported module:
+
+```powershell
+.\build\Release\ps2-convert-inventory.exe D:\path\to\disc.iso work\conversion-inventory
+```
+
+The tool writes `report.txt` plus LLVM IR for modules the current converter
+accepts. Optional `--payloads` uses the same mapping file as `ps2-recompile`.
+`--no-compile` skips Clang. Unrecognized files are counted and not decoded.
+Machine-code objects are not linked or executed. A completed inventory is not a
+boot, a frame, or gameplay. Keep the output under ignored `work/`.
+
 LLVM output contains `generated.ll`, metadata in `module_metadata.cpp`, and initialized
 `module.data`. The initial LLVM build requires Clang on PATH and Windows x86-64
 with MSVC. CMake compiles the IR with Clang at `-O2` and links the native object.
@@ -301,6 +314,7 @@ the data as instructions. Keep all converted commercial content under `work/`.
 | `ps2-inspect` | Inspect ELF metadata and discovered control flow |
 | `ps2-recompile` | Generate an experimental EE LLVM entry-flow project from a boot ELF |
 | `ps2-iop-recompile`, `nt_iop_codegen` | Convert supported IOP modules into LLVM projects |
+| `ps2-convert-inventory` | Inventory recognizable disc executables, convert independent modules, and group missing APIs |
 | `ps2-build` | Invoke CMake and compiler with explicit process arguments |
 | `nt_binary`, `nt_disc`, `nt_elf` | Bounded input parsing |
 | `nt_r5900`, `nt_analysis` | Decode and discover EE code |

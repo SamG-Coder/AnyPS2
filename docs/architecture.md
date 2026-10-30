@@ -12,6 +12,20 @@ operations, lowers to LLVM and compiles ahead of time. Native C++ services provi
 Vulkan rendering and other PC facilities. There is no production interpreter/JIT
 fallback. LLVM is the only supported game-code backend.
 
+`ps2-convert-inventory` walks an ISO9660 image for ELF executables, relocatable
+IRX modules and disc module archives. Each module is analyzed and, when the
+existing converter accepts it, lowered to LLVM and optionally compiled with
+Clang. A failure is recorded on that unit and the walk continues. The report
+separates discovered, parsed, analyzed, LLVM-generated and machine-compiled
+coverage. It does not link or execute, and it does not decode unrecognized
+bytes. Each generated unit is written under a deterministic identity of its
+source path: letters, digits and '-' are copied, every other byte is escaped,
+and a length prefix plus fixed directory chunks keep distinct paths from sharing
+an artifact directory. The original source identity is stored beside the IR.
+The encoding is not a hash and does not select runtime behavior. Declared
+executable words that discovery did not reach stay a coverage gap, as do framed
+VU upload packets that were not supplied to the walk.
+
 The initial IOP IR separates decoding and reachable-code discovery (`ir.cpp`)
 from LLVM emission (`llvm.cpp`). It records semantic operations, register
 operands, widths, immediates and control-flow targets without source strings or

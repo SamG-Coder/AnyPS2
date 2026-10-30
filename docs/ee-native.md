@@ -1943,8 +1943,19 @@ metadata, without claiming Sony module identities.
 
 Response bounds and executable-write protection are shared with FILEIO and are
 checked before any lifecycle change. Media failures preserve the previous session
-and response bytes and expose a diagnostic. Other CD/DVD RPC endpoints, physical
-media control and IOP reset are not implemented by this endpoint. The native
-integration now passes this initialization and reaches an unsupported SIF IOP-reset
-command; this is startup progress, not visible boot. Active counter measurements
-remain unresolved independently.
+and response bytes and expose a diagnostic. Other CD/DVD RPC endpoints and physical
+media control are not implemented by this endpoint. Passing initialization is
+startup progress, not visible boot. Active counter measurements remain unresolved
+independently.
+
+Synchronous command endpoint `0x80000593` shares that session. Method 1 returns
+the native clock in the public BCD layout. Method 34 stores media mode 1 (CD) or
+2 (DVD) and returns success. The mode remains available to later sector reads and
+is cleared when initialization shuts the session down. Other command numbers and
+media values stop without writing a result.
+
+Disk-ready endpoints `0x8000059A` and `0x8000059C` share the session. An open
+ISO with no transfer returns command-complete for the blocking and polling
+modes, and status byte `0x40` for the status query. A closed session polls as
+not ready. The blocking mode does not wait, because there is no transfer to
+finish.

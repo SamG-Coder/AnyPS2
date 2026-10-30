@@ -172,6 +172,64 @@ void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::s
 }
 
 }
+namespace {
+void add_constraint(EeRejection& rejection,std::string message) {
+    if (rejection.constraints.size()<32) rejection.constraints.push_back(std::move(message));
+    else ++rejection.omitted_constraints;
+}
+}
+std::string EeRejection::text() const {
+    std::ostringstream diagnostic;
+    if (!families.empty()) {
+        diagnostic<<"EE LLVM unsupported operation families ("<<families.size()<<"):\n";
+        for (const auto& family:families)
+            diagnostic<<"  "<<family.name<<": "<<family.count<<" occurrence(s), first at 0x"<<std::hex<<family.first<<std::dec<<'\n';
+    }
+    if (!constraints.empty() || omitted_constraints) {
+        diagnostic<<"EE LLVM encoding constraints ("<<(constraints.size()+omitted_constraints)<<"):\n";
+        for (const auto& constraint:constraints) diagnostic<<"  "<<constraint<<'\n';
+        if (omitted_constraints) diagnostic<<"  "<<omitted_constraints<<" additional encoding constraint(s) omitted\n";
+    }
+    return diagnostic.str();
+}
+EeRejection reject_unsupported(std::span<const r5900::Instruction> instructions) {
+    EeRejection rejection;
+    std::map<std::string,std::size_t> index;
+    for (std::size_t n=0;n<instructions.size();++n) {
+        const auto& i=instructions[n];
+        if (!supported(i.op)) {
+            std::ostringstream family;
+            family<<r5900::name(i.op);
+            if (i.op==r5900::Op::unsupported) {
+                const auto primary=i.word>>26;
+                family<<" (primary="<<primary;
+                if (primary==0 || primary==28 || primary==17 || primary==18) family<<", function="<<(i.word&63);
+                if (primary==28) family<<", subgroup="<<i.sa;
+                if (primary==16 || primary==17 || primary==18) family<<", format="<<i.rs;
+                family<<")";
+            }
+            const auto key=family.str();
+            const auto found=index.find(key);
+            if (found==index.end()) {
+                index.emplace(key,rejection.families.size());
+                rejection.families.push_back({key,i.pc,1});
+            } else ++rejection.families[found->second].count;
+        }
+        std::ostringstream where;
+        where<<"0x"<<std::hex<<i.pc;
+        if ((i.op==r5900::Op::mfc0 || i.op==r5900::Op::mtc0) && i.rd!=0 && i.rd!=2 && i.rd!=3 && i.rd!=5 && i.rd!=10 && i.rd!=25 && i.rd!=12 && i.rd!=14 && i.rd!=30 && i.rd!=6 && !(i.rd==28 && i.op==r5900::Op::mfc0))
+            add_constraint(rejection,"EE system transfer selector is not supported at "+where.str());
+        if (i.op==r5900::Op::cfc2 && i.rd==20)
+            add_constraint(rejection,"EE vector random-register transfer is not implemented at "+where.str());
+        if ((i.op==r5900::Op::ctc1 || i.op==r5900::Op::cfc1) && i.rd!=31)
+            add_constraint(rejection,"EE floating control transfer supports FCR31 only at "+where.str());
+        if (i.op==r5900::Op::sync && (i.rs || i.rt || i.rd || (i.sa!=0 && i.sa!=16)))
+            add_constraint(rejection,"Unsupported EE SYNC encoding at "+where.str());
+        if (i.branch() && (n+1==instructions.size() || instructions[n+1].pc!=i.pc+4 || instructions[n+1].branch() || instructions[n+1].op==r5900::Op::syscall || instructions[n+1].op==r5900::Op::eret))
+            add_constraint(rejection,"EE branch requires a supported scalar delay slot at "+where.str());
+    }
+    return rejection;
+}
 void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> protected_code,std::span<const CodePayload> payloads) {
     static_assert(std::is_standard_layout_v<runtime::State> && std::is_standard_layout_v<ee::Memory>);
     static_assert(sizeof(void*)==8 && std::endian::native==std::endian::little,
@@ -189,45 +247,20 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
             if (payload.address<std::uint64_t(range.address)+range.size && range.address<end)
                 throw std::invalid_argument("Copied-code payload overlaps protected ELF code");
     }
-    std::map<std::string,std::pair<std::uint32_t,std::size_t>> missing;
     for (std::size_t n=0;n<instructions.size();++n) {
         const auto& i=instructions[n];
         const auto decoded=r5900::decode(i.pc,i.word);
         if (i.pc%4 || (n && i.pc<=instructions[n-1].pc) ||
             i.op!=decoded.op || i.rs!=decoded.rs || i.rt!=decoded.rt || i.rd!=decoded.rd || i.sa!=decoded.sa || i.immediate!=decoded.immediate)
             throw std::invalid_argument("EE region contains inconsistent decoded instructions");
-        if (!supported(i.op)) {
-            std::ostringstream family;
-            family<<r5900::name(i.op);
-            if (i.op==Op::unsupported) {
-                const auto primary=i.word>>26;
-                family<<" (primary="<<primary;
-                if (primary==0 || primary==28 || primary==17 || primary==18) family<<", function="<<(i.word&63);
-                if (primary==28) family<<", subgroup="<<i.sa;
-                if (primary==16 || primary==17 || primary==18) family<<", format="<<i.rs;
-                family<<")";
-            }
-            const auto entry=missing.try_emplace(family.str(),std::pair{i.pc,std::size_t(0)}).first;
-            ++entry->second.second;
-        }
-        if ((i.op==Op::mfc0 || i.op==Op::mtc0) && i.rd!=0 && i.rd!=2 && i.rd!=3 && i.rd!=5 && i.rd!=10 && i.rd!=25 && i.rd!=12 && i.rd!=14 && i.rd!=30 && i.rd!=6 && !(i.rd==28 && i.op==Op::mfc0))
-            throw std::invalid_argument("EE system transfer selector is not supported");
-        if (i.op==Op::cfc2 && i.rd==20)
-            throw std::invalid_argument("EE vector random-register transfer is not implemented");
-        if ((i.op==Op::ctc1 || i.op==Op::cfc1) && i.rd!=31)
-            throw std::invalid_argument("EE floating control transfer supports FCR31 only");
-        if (i.op==Op::sync && (i.rs || i.rt || i.rd || (i.sa!=0 && i.sa!=16)))
-            throw std::invalid_argument("Unsupported EE SYNC encoding");
-        if (i.branch() && (n+1==instructions.size() || instructions[n+1].pc!=i.pc+4 || instructions[n+1].branch() || instructions[n+1].op==Op::syscall || instructions[n+1].op==Op::eret))
-            throw std::invalid_argument("EE branch requires a supported scalar delay slot");
     }
-    if (!missing.empty()) {
-        std::ostringstream diagnostic;
-        diagnostic<<"EE LLVM unsupported operation families ("<<missing.size()<<"):\n";
-        for (const auto& [family,locations]:missing)
-            diagnostic<<"  "<<family<<": "<<locations.second<<" occurrence(s), first at 0x"<<std::hex<<locations.first<<std::dec<<'\n';
-        throw std::runtime_error(diagnostic.str());
-    }
+    const auto rejection=reject_unsupported(instructions);
+    // Unsupported opcodes stay a conversion diagnostic. Encoding mistakes stay
+    // argument errors so callers can distinguish a bad instruction from a
+    // missing operation family. A family diagnostic still includes constraints.
+    if (!rejection.families.empty()) throw std::runtime_error(rejection.text());
+    if (!rejection.constraints.empty() || rejection.omitted_constraints)
+        throw std::invalid_argument(rejection.constraints.empty() ? std::string("EE LLVM encoding constraints") : rejection.constraints.front());
     std::vector<CodeRange> ranges(protected_code.begin(),protected_code.end());
     for (const auto& range:ranges)
         if (!range.size || std::uint64_t(range.address)+range.size>0x100000000ULL)

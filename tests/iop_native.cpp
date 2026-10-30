@@ -29,6 +29,7 @@
 #include "reboot_fixture.hpp"
 #include "disc_fixture.hpp"
 #include <chrono>
+#include <string>
 #include <vector>
 #include <iostream>
 #include <stdexcept>
@@ -85,6 +86,74 @@ int main() {
                   "Invalid loader callback partially changed registration");
             check(call(0xb42c).reason==NativeStop::import_request,
                   "Unimplemented module loading invented success");
+            {
+                NativeModloadServices boot;
+                std::vector<std::uint8_t> paths(0x10000,0);
+                const auto place=[&](std::uint32_t address,std::string_view text) {
+                    check(static_cast<std::size_t>(address)+text.size()<paths.size(),"Boot-device fixture does not fit");
+                    std::copy(text.begin(),text.end(),paths.begin()+address);
+                };
+                place(0x3000,"cdrom0:\\MODULE.IRX");
+                place(0x3100,"cdrom:\\MODULE.IRX");
+                place(0x3200,"rom0:MODULE");
+                place(0x3300,"rom:MODULE");
+                place(0x3400,"rom3:MODULE");
+                place(0x3500,"cdrom1:\\MODULE.IRX");
+                place(0x3600,"host:\\MODULE.IRX");
+                place(0x3700,"mc0:FILE");
+                place(0x3800,"MODULE.IRX");
+                place(0x3900," cdrom0:\\MODULE.IRX");
+                place(0x3a00,"cdrom00:\\MODULE.IRX");
+                place(0x3b00,"rom4:MODULE");
+                place(0x3c00,"CDROM0:\\MODULE.IRX");
+                place(0x3d00,"");
+                std::fill_n(paths.begin()+0x4000,256,'A');
+                NativeServiceRequest query;
+                query.kind=NativeServiceKind::modload;
+                query.selector=15;
+                const auto ask=[&](std::uint32_t address) {
+                    query.arguments[0]=address;
+                    query.interrupt_context=false;
+                    return boot.invoke(query,paths);
+                };
+                const auto before=paths;
+                check(ask(0).status==NativeServiceStatus::address_fault && ask(0x80000000).status==NativeServiceStatus::address_fault &&
+                      paths==before && boot.boot_device_decision()==-1,
+                      "Null boot-device path returned a decision");
+                check(ask(0x4000).status==NativeServiceStatus::returned && ask(0x4000).value==static_cast<std::uint32_t>(-36) &&
+                      boot.boot_device_decision()==-1,"Unterminated boot-device path returned legal");
+                std::vector<std::uint8_t> tail(32,'A');
+                query.arguments[0]=20;
+                check(boot.invoke(query,tail).status==NativeServiceStatus::address_fault,
+                      "Boot-device path running off RAM returned a decision");
+                const auto legal=[&](std::uint32_t address,const char* device) {
+                    const auto reply=ask(address);
+                    check(reply.status==NativeServiceStatus::returned && reply.value==0 &&
+                          boot.boot_device()==device && boot.boot_device_decision()==0,
+                          "Native boot device was rejected");
+                };
+                legal(0x3000,"cdrom");
+                check(boot.boot_device_path()=="cdrom0:\\MODULE.IRX","Boot-device query dropped the guest path");
+                legal(0x3100,"cdrom"); legal(0x3200,"rom"); legal(0x3300,"rom"); legal(0x3400,"rom");
+                const auto illegal=[&](std::uint32_t address) {
+                    const auto reply=ask(address);
+                    check(reply.status==NativeServiceStatus::returned && reply.value==1 && boot.boot_device_decision()==1,
+                          "Illegal boot device was accepted");
+                };
+                illegal(0x3500); illegal(0x3600); illegal(0x3700); illegal(0x3800); illegal(0x3900);
+                illegal(0x3a00); illegal(0x3b00); illegal(0x3c00); illegal(0x3d00);
+                check(boot.boot_device_queries()>=1,"Boot-device query was not counted");
+                query.interrupt_context=true;
+                const auto queries=boot.boot_device_queries();
+                check(boot.invoke(query,paths).status==NativeServiceStatus::unavailable && boot.boot_device_queries()==queries,
+                      "Interrupt boot-device query changed the decision");
+                query.interrupt_context=false;
+                query.selector=14;
+                query.arguments={0x5000,0x5004,0,0};
+                check(boot.invoke(query,paths).status==NativeServiceStatus::returned &&
+                      load_native_word(paths,0x5000)==0 && load_native_word(paths,0x5004)==0,
+                      "Boot-device query invented loader callback state");
+            }
             for (const auto callback : {0xb280U,0xb288U,0xb290U,0xb298U}) {
                 auto cpu=initial(); cpu.pc=callback;
                 check(nt_iop_generated_run(cpu,data,8).reason==NativeStop::unmapped_code &&
