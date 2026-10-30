@@ -6,17 +6,42 @@
 #include <vector>
 
 namespace nt::iop_codegen::ir {
-// A word loaded from one constant address is an indirect target only when every
-// store that can write that address puts a bounded executable pointer there and
-// the initial word is zero or one of those pointers. Caller-saved and
-// callee-saved registers are both discarded across a call. The delay slot of a
-// jump is not a fallthrough into the next instruction. An unknown absolute
-// address or a memory fill/copy/move drops every proof in the module that
-// contains that instruction. A stack-relative store is not an absolute slot.
-// Partial overlaps and non-executable stored values leave the site unresolved.
-// Runtime transfer still rejects a pointer outside this set.
-inline std::map<std::uint32_t,std::set<std::uint32_t>> recoverable_loaded_pointers(
-    const Program& program,const std::map<std::uint32_t,Constants>& states,std::span<const elf::IopModule> modules) {
+// Writes observed while scanning one module. A bundle merges every sibling
+// scan before accepting a proved or open indirect.
+struct SlotEffect {
+    enum class Kind : std::uint8_t { codes, open, poison };
+    Kind kind=Kind::poison;
+    std::set<std::uint32_t> codes;
+    bool operator==(const SlotEffect&) const=default;
+};
+struct SlotScan {
+    std::map<std::uint32_t,SlotEffect> effects;
+    std::vector<char> module_wild;
+    bool wild_all=false;
+    bool operator==(const SlotScan&) const=default;
+};
+struct LoadedPointerResult {
+    std::map<std::uint32_t,std::set<std::uint32_t>> proved;
+    std::set<std::uint32_t> open;
+    SlotScan scan;
+};
+// A word loaded from one constant address is a proved indirect target only when
+// every incoming path loaded that same slot and every store that can write it,
+// including a store decoded in another bundle module, puts a bounded executable
+// pointer there. The initial word must be zero or one of those pointers. One
+// full-word store of any other value leaves that slot open: no target list and
+// no new callees. A delayed load that another path skips does not keep the
+// slot. Return edges discard register cells; a callee entry still sees the
+// caller's cells until it writes them. The delay slot of a jump is not a
+// fallthrough into the next instruction. An unknown absolute address or a
+// memory fill/copy/move drops every proof in the module that contains that
+// instruction. A known-address store decoded in another module poisons, opens,
+// or widens that same slot. A stack-relative store is not an absolute slot.
+// Partial overlaps leave the site unresolved.
+// Runtime transfer still rejects a pointer outside a proved set.
+inline LoadedPointerResult recoverable_loaded_pointers(
+    const Program& program,const std::map<std::uint32_t,Constants>& states,std::span<const elf::IopModule> modules,
+    const SlotScan* foreign=nullptr) {
     const auto physical=[](std::uint32_t address) {
         const auto segment=address&0xe0000000U;
         return (segment==0x80000000U || segment==0xa0000000U) ? address&0x1fffffffU : address;
@@ -60,11 +85,15 @@ inline std::map<std::uint32_t,std::set<std::uint32_t>> recoverable_loaded_pointe
         if (!owner) { wild=true; return; }
         module_wild[*owner]=1;
     };
-    std::set<std::uint32_t> poisoned;
+    std::set<std::uint32_t> poisoned, open_slots;
     std::map<std::uint32_t,std::set<std::uint32_t>> stored;
     const auto poison_word=[&](std::uint32_t address) {
         const auto word=address&~3U;
-        poisoned.insert(word); stored.erase(word);
+        poisoned.insert(word); stored.erase(word); open_slots.erase(word);
+    };
+    const auto mark_open=[&](std::uint32_t address) {
+        if (poisoned.contains(address)) return;
+        stored.erase(address); open_slots.insert(address);
     };
     const auto poison_span=[&](std::uint32_t address,unsigned width) {
         if (!width || address>0xffffffffU-(width-1)) { wild=true; return; }
@@ -76,7 +105,7 @@ inline std::map<std::uint32_t,std::set<std::uint32_t>> recoverable_loaded_pointe
     };
     const auto add_code=[&](std::uint32_t value,std::set<std::uint32_t>& targets) {
         value=physical(value);
-        if (!value) return true;
+        if (!value || targets.contains(value)) return true;
         if (!executable(value) || targets.size()==value_limit) return false;
         targets.insert(value); return true;
     };
@@ -110,15 +139,39 @@ inline std::map<std::uint32_t,std::set<std::uint32_t>> recoverable_loaded_pointe
         for (const auto base : *addresses) {
             const auto address=physical(base+instruction.immediate);
             if (instruction.operation!=Operation::store_word || address%4) { poison_span(address,width); continue; }
-            if (poisoned.contains(address)) continue;
+            if (poisoned.contains(address) || open_slots.contains(address)) continue;
             const auto& values=state->registers[instruction.operand];
+            if (!values) { mark_open(address); continue; }
             auto& targets=stored[address];
-            if (!values) { poison_word(address); continue; }
-            for (const auto value : *values) if (!add_code(value,targets)) { poison_word(address); break; }
-            if (stored.contains(address) && stored[address].size()>value_limit) poison_word(address);
+            bool unbounded=false;
+            for (const auto value : *values) if (!add_code(value,targets)) { unbounded=true; break; }
+            if (unbounded) mark_open(address);
         }
     }
-    if (wild) return {};
+    const auto publish=[&](LoadedPointerResult& result) {
+        result.scan.module_wild=module_wild;
+        result.scan.wild_all=wild;
+        for (const auto address : poisoned) result.scan.effects.insert_or_assign(address,SlotEffect{SlotEffect::Kind::poison,{}});
+        for (const auto address : open_slots)
+            if (!poisoned.contains(address)) result.scan.effects.insert_or_assign(address,SlotEffect{SlotEffect::Kind::open,{}});
+        for (const auto& [address,codes] : stored)
+            if (!poisoned.contains(address) && !open_slots.contains(address))
+                result.scan.effects.insert_or_assign(address,SlotEffect{SlotEffect::Kind::codes,codes});
+    };
+    LoadedPointerResult result;
+    publish(result);
+    if (wild) return result;
+    if (foreign) for (const auto& [address,effect] : foreign->effects) {
+        if (effect.kind==SlotEffect::Kind::poison) poison_word(address);
+        else if (effect.kind==SlotEffect::Kind::open) mark_open(address);
+        else {
+            if (poisoned.contains(address) || open_slots.contains(address)) continue;
+            auto& targets=stored[address];
+            bool unbounded=false;
+            for (const auto value : effect.codes) if (!add_code(value,targets)) { unbounded=true; break; }
+            if (unbounded) mark_open(address);
+        }
+    }
     struct Cell {
         enum class Kind : std::uint8_t { none, slot, unknown };
         Kind kind=Kind::none; std::uint32_t slot=0;
@@ -132,17 +185,18 @@ inline std::map<std::uint32_t,std::set<std::uint32_t>> recoverable_loaded_pointe
         Id() { for (auto& reg : regs) reg=Cell::unknown_cell(); }
         bool operator==(const Id&) const=default;
     };
-    const auto merge_cell=[](Cell left,Cell right,bool delay) {
-        if (delay && left.kind==Cell::Kind::none) return right;
-        if (delay && right.kind==Cell::Kind::none) return left;
+    // Kind::none means this path has no pending delayed load. It must not adopt
+    // the other path's slot: a branch that skips the load would keep it.
+    const auto merge_cell=[](Cell left,Cell right) {
+        if (left.kind==Cell::Kind::none && right.kind==Cell::Kind::none) return left;
         if (left.kind==Cell::Kind::slot && right.kind==Cell::Kind::slot && left.slot==right.slot) return left;
         return Cell::unknown_cell();
     };
     const auto merge_id=[&](const Id& left,const Id& right) {
         Id merged;
         for (unsigned reg=0;reg<32;++reg) {
-            merged.regs[reg]=merge_cell(left.regs[reg],right.regs[reg],false);
-            merged.delayed[reg]=merge_cell(left.delayed[reg],right.delayed[reg],true);
+            merged.regs[reg]=merge_cell(left.regs[reg],right.regs[reg]);
+            merged.delayed[reg]=merge_cell(left.delayed[reg],right.delayed[reg]);
         }
         return merged;
     };
@@ -241,7 +295,6 @@ inline std::map<std::uint32_t,std::set<std::uint32_t>> recoverable_loaded_pointe
             relax(edge.to,out);
         }
     }
-    std::map<std::uint32_t,std::set<std::uint32_t>> recovered;
     for (const auto& [pc,instruction] : program.instructions) {
         if (instruction.flow!=Flow::indirect && instruction.flow!=Flow::indirect_call) continue;
         const auto state=states.find(pc);
@@ -250,11 +303,13 @@ inline std::map<std::uint32_t,std::set<std::uint32_t>> recoverable_loaded_pointe
         const auto& cell=identity->second.regs[instruction.source];
         const auto owner=cell.kind==Cell::Kind::slot ? module_of(cell.slot) : std::optional<std::size_t>{};
         if (cell.kind!=Cell::Kind::slot || !owner || module_wild[*owner] || poisoned.contains(cell.slot)) continue;
-        std::set<std::uint32_t> targets=stored[cell.slot];
+        if (open_slots.contains(cell.slot)) { result.open.insert(pc); continue; }
+        std::set<std::uint32_t> targets;
+        if (const auto found=stored.find(cell.slot); found!=stored.end()) targets=found->second;
         const auto initial=image_word(cell.slot);
         if (!initial || (*initial && !add_code(*initial,targets)) || targets.empty() || targets.size()>value_limit) continue;
-        recovered.emplace(pc,std::move(targets));
+        result.proved.emplace(pc,std::move(targets));
     }
-    return recovered;
+    return result;
 }
 }

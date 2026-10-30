@@ -35,6 +35,7 @@ struct Program {
     std::set<std::uint32_t> protected_words;
     std::vector<elf::IopImport> library_imports; // Absolute stub/table addresses after analysis.
     std::set<std::uint32_t> guarded_callback_sites; // Bounded address-taken candidates, not exhaustive proofs.
+    std::set<std::uint32_t> open_indirect_sites; // One fixed slot with an unbounded store, not a proved target list.
 };
 Program discover(const elf::IopModule& module,std::span<const std::uint32_t> entries={});
 Program discover_bundle(std::span<const elf::IopModule> modules,std::span<const std::uint32_t> entries={});

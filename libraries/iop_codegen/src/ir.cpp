@@ -157,8 +157,34 @@ static bool note_gap(std::vector<Gap>* gaps,Gap gap) {
     gaps->push_back(std::move(gap));
     return false;
 }
+SlotScan merge_foreign_slots(const std::vector<SlotScan>& scans,std::size_t skip) {
+    SlotScan foreign;
+    foreign.module_wild.assign(scans.size(),0);
+    for (std::size_t index=0;index<scans.size();++index) {
+        if (index==skip) continue;
+        const auto& scan=scans[index];
+        if (scan.wild_all) foreign.wild_all=true;
+        for (std::size_t module=0;module<scan.module_wild.size() && module<foreign.module_wild.size();++module)
+            if (scan.module_wild[module]) foreign.module_wild[module]=1;
+        for (const auto& [address,effect] : scan.effects) {
+            const auto found=foreign.effects.find(address);
+            if (found==foreign.effects.end()) { foreign.effects.emplace(address,effect); continue; }
+            auto& combined=found->second;
+            if (combined.kind==SlotEffect::Kind::poison || effect.kind==SlotEffect::Kind::poison) {
+                combined=SlotEffect{}; continue;
+            }
+            if (combined.kind==SlotEffect::Kind::open || effect.kind==SlotEffect::Kind::open) {
+                combined.kind=SlotEffect::Kind::open; combined.codes.clear(); continue;
+            }
+            combined.codes.insert(effect.codes.begin(),effect.codes.end());
+            if (combined.codes.size()>value_limit) { combined.kind=SlotEffect::Kind::open; combined.codes.clear(); }
+        }
+    }
+    return foreign;
+}
 static Program discover_module(const elf::IopModule& module,std::span<const std::uint32_t> entries,std::span<const elf::IopExports> libraries,
-    std::span<const elf::IopModule> data_modules,std::set<std::uint32_t>* external_callbacks=nullptr,std::vector<Gap>* gaps=nullptr) {
+    std::span<const elf::IopModule> data_modules,std::set<std::uint32_t>* external_callbacks=nullptr,std::vector<Gap>* gaps=nullptr,
+    const SlotScan* foreign_slots=nullptr,SlotScan* slot_scan=nullptr) {
     const auto extent=module.info ? module.info->text_size : module.initialized_size;
     if (module.base%4 || extent%4 || extent>module.memory.size() || extent>module.initialized_size ||
         module.base>=0x200000 || extent>0x200000-module.base)
@@ -207,6 +233,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
     std::set<std::uint32_t> table_transfers;
     std::map<std::uint32_t,std::set<std::uint32_t>> stack_transfers;
     std::map<std::uint32_t,std::set<std::uint32_t>> pointer_transfers;
+    SlotScan last_scan;
     for (const auto root : pending) states.emplace(root,Constants{});
     const auto enqueue=[&](std::uint32_t target,const Constants& state) {
         const auto [at,inserted]=states.emplace(target,state);
@@ -438,28 +465,39 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
             }
         }
         if (!halt) {
-            const auto recovered=recoverable_loaded_pointers(program,states,data_modules);
+            const auto recovered=recoverable_loaded_pointers(program,states,data_modules,foreign_slots);
+            last_scan=recovered.scan;
+            if (slot_scan) *slot_scan=last_scan;
             std::vector<std::uint32_t> stale;
             for (const auto& [site,targets] : pointer_transfers)
-                if (const auto found=recovered.find(site); found==recovered.end() || found->second!=targets) stale.push_back(site);
+                if (const auto found=recovered.proved.find(site); found==recovered.proved.end() || found->second!=targets) stale.push_back(site);
             for (const auto site : stale) {
                 pointer_transfers.erase(site);
                 if (const auto found=program.instructions.find(site); found!=program.instructions.end()) found->second.targets.clear();
             }
-            for (const auto& [site,targets] : recovered) {
+            for (const auto& [site,targets] : recovered.proved) {
                 if (const auto found=pointer_transfers.find(site); found!=pointer_transfers.end() && found->second==targets) continue;
                 pointer_transfers[site]=targets;
                 auto& recovered_instruction=program.instructions.at(site);
                 recovered_instruction.targets.assign(targets.begin(),targets.end());
                 for (const auto target : targets) discover_callback(target);
             }
+            // An unbounded store through one fixed slot is not a 16-value proof
+            // and must not enqueue callees from that edge.
+            std::set<std::uint32_t> open_sites;
+            for (const auto site : recovered.open)
+                if (!table_transfers.contains(site) && !stack_transfers.contains(site)) open_sites.insert(site);
+            for (const auto site : open_sites)
+                if (const auto found=program.instructions.find(site); found!=program.instructions.end()) found->second.targets.clear();
+            program.open_indirect_sites=std::move(open_sites);
         }
         if (halt) break;
     } while (!pending.empty());
     if (halt) return program;
     const auto unresolved_indirect=[&](std::uint32_t pc,const Instruction& i) {
         return (i.flow==Flow::indirect || i.flow==Flow::indirect_call) && !states.at(pc).registers[i.source] &&
-            !table_transfers.contains(pc) && !stack_transfers.contains(pc) && !pointer_transfers.contains(pc);
+            !table_transfers.contains(pc) && !stack_transfers.contains(pc) && !pointer_transfers.contains(pc) &&
+            !program.open_indirect_sites.contains(pc);
     };
     std::ostringstream indirect_errors;
     for (const auto& [pc,i] : program.instructions)
@@ -508,12 +546,16 @@ Program discover_bundle(std::span<const elf::IopModule> modules,std::span<const 
     // Revisit only owners with new roots until the bundle reaches a fixed point.
     std::vector<Program> programs(modules.size());
     std::vector<std::string> failures(modules.size());
+    std::vector<SlotScan> scans(modules.size()), applied(modules.size());
+    unsigned slot_rounds=0;
+    for (;;) {
     while (!pending.empty()) {
         const auto index=*pending.begin(); pending.erase(pending.begin());
         const std::vector<std::uint32_t> module_roots(roots[index].begin(),roots[index].end());
         std::set<std::uint32_t> callbacks;
+        applied[index]=merge_foreign_slots(scans,index);
         try {
-            programs[index]=discover_module(modules[index],module_roots,libraries,modules,&callbacks);
+            programs[index]=discover_module(modules[index],module_roots,libraries,modules,&callbacks,nullptr,&applied[index],&scans[index]);
             failures[index].clear();
         } catch (const std::runtime_error& error) {
             // Analyze the other owners as well: a reboot archive is one native
@@ -522,6 +564,15 @@ Program discover_bundle(std::span<const elf::IopModule> modules,std::span<const 
             failures[index]=error.what();
         }
         for (const auto callback : callbacks) add_root(callback);
+    }
+    bool failed=false;
+    for (const auto& item : failures) if (!item.empty()) failed=true;
+    if (failed) break;
+    bool again=false;
+    for (std::size_t index=0;index<modules.size();++index)
+        if (merge_foreign_slots(scans,index)!=applied[index]) { pending.insert(index); again=true; }
+    if (!again) break;
+    if (++slot_rounds>32) throw std::runtime_error("IOP conversion: bundle slot analysis did not converge");
     }
     std::ostringstream diagnostics;
     for (std::size_t index=0;index<modules.size();++index) if (!failures[index].empty()) {
@@ -537,6 +588,7 @@ Program discover_bundle(std::span<const elf::IopModule> modules,std::span<const 
         result.protected_words.insert(program.protected_words.begin(),program.protected_words.end());
         result.library_imports.insert(result.library_imports.end(),program.library_imports.begin(),program.library_imports.end());
         result.guarded_callback_sites.insert(program.guarded_callback_sites.begin(),program.guarded_callback_sites.end());
+        result.open_indirect_sites.insert(program.open_indirect_sites.begin(),program.open_indirect_sites.end());
     }
     return result;
 }
@@ -576,9 +628,14 @@ std::vector<ModuleDiagnosis> diagnose_bundle(std::span<const elf::IopModule> mod
     for (const auto entry : entries) if (!add_root(entry))
         results.front().gaps.push_back(Gap{Gap::Kind::unresolved_target,{},0,0,entry,0,"bundle code root has no executable owner"});
     unsigned steps=0;
+    std::vector<SlotScan> scans(modules.size()), applied(modules.size());
+    unsigned slot_rounds=0;
+    bool limited=false;
+    for (;;) {
     while (!pending.empty()) {
         if (++steps>4096) {
             results.front().gaps.push_back(Gap{Gap::Kind::limit,{},0,0,0,0,"module reanalysis step limit exceeded"});
+            limited=true;
             break;
         }
         const auto index=*pending.begin(); pending.erase(pending.begin());
@@ -586,8 +643,9 @@ std::vector<ModuleDiagnosis> diagnose_bundle(std::span<const elf::IopModule> mod
         const std::vector<std::uint32_t> module_roots(roots[index].begin(),roots[index].end());
         std::set<std::uint32_t> callbacks;
         std::vector<Gap> gaps;
+        applied[index]=merge_foreign_slots(scans,index);
         try {
-            results[index].program=discover_module(modules[index],module_roots,libraries,modules,&callbacks,&gaps);
+            results[index].program=discover_module(modules[index],module_roots,libraries,modules,&callbacks,&gaps,&applied[index],&scans[index]);
             results[index].gaps=std::move(gaps);
         } catch (const std::exception& error) {
             results[index].unexpected=error.what();
@@ -596,6 +654,19 @@ std::vector<ModuleDiagnosis> diagnose_bundle(std::span<const elf::IopModule> mod
         if (!results[index].unexpected.empty()) continue;
         for (const auto callback : callbacks) if (!add_root(callback))
             results[index].gaps.push_back(Gap{Gap::Kind::unresolved_target,{},0,0,callback,0,"callback has no executable owner"});
+    }
+    if (limited) break;
+    bool diagnosis_stopped=false;
+    for (const auto& item : results) if (!item.unexpected.empty()) diagnosis_stopped=true;
+    if (diagnosis_stopped) break;
+    bool again=false;
+    for (std::size_t index=0;index<modules.size();++index)
+        if (merge_foreign_slots(scans,index)!=applied[index]) { pending.insert(index); again=true; }
+    if (!again) break;
+    if (++slot_rounds>32) {
+        results.front().gaps.push_back(Gap{Gap::Kind::limit,{},0,0,0,0,"bundle slot analysis did not converge"});
+        break;
+    }
     }
     return results;
 }

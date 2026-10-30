@@ -131,6 +131,9 @@ target_compile_definitions(iop-native PRIVATE ANYPS2_IOP_LLVM=1)
     for (const auto pc : program.guarded_callback_sites)
         diagnostics<<"Guarded stack callback at "<<hex32(pc)<<": "<<program.instructions.at(pc).targets.size()
                    <<" compiled address-taken candidates; other runtime targets stop as unmapped code.\n";
+    for (const auto pc : program.open_indirect_sites)
+        diagnostics<<"Open indirect at "<<hex32(pc)
+                   <<": an unbounded fixed-slot store may call any instruction compiled into this program; every other address stops as unmapped code.\n";
     save(output/"conversion.txt",std::string("AnyPS2 standalone IOP native conversion\n"
         "Compile the emitted code with the supplied CMake project.\n"
         "module.data holds initialized program data; it is never decoded as instructions.\n"

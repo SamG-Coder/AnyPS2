@@ -239,6 +239,11 @@ The original diagnostic IOP integer core implements public MIPS-I encodings;
 PCSX2 `R3000AInterpreter.cpp` was consulted for conditional link and branch
 behavior. No upstream interpreter or firmware routine is copied or linked.
 Execution tests contain independently constructed instruction sequences.
+An unbounded store through a fixed slot may call any instruction compiled into
+that program, and every other address stops as unmapped code; proved loaded
+pointers stay on their smaller set. A path that skips the load does not keep
+another path's delayed pointer, and a known-address store decoded in another
+bundle module uses that same classification.
 The startup-call ABI follows the public module entry interface and Play!
 `IopBios.cpp` argument preparation: argc/argv, a terminated pointer table, GP,
 and an argument save area on the stack. AnyPS2 independently constructs bounded

@@ -107,7 +107,7 @@ void memory(Writer& w,const std::string& label,ir::Operation operation) {
     const auto executed=w.value("add i64 "+w.value("load i64, ptr %executed, align 8")+", 1");
     w.text<<"  store i64 "<<executed<<", ptr %executed, align 8\n  br label %loop\n";
 }
-void instruction(Writer& w,const ir::Instruction& i,bool has_successor) {
+void instruction(Writer& w,const ir::Instruction& i,bool has_successor,bool open_indirect=false) {
     using ir::Operation;
     const auto label=std::to_string(i.address);
     w.text<<"code"<<label<<":\n";
@@ -214,7 +214,10 @@ void instruction(Writer& w,const ir::Instruction& i,bool has_successor) {
     case Operation::jump_register: case Operation::call_register: {
         const auto physical=w.physical(a);
         std::string valid="false";
-        for (const auto destination : i.targets) {
+        // An open slot may reach any instruction already compiled into this
+        // program. It is not a proof that the stored register is one of them.
+        if (open_indirect) valid=w.value("call i1 @is_instruction(i32 "+physical+")");
+        else for (const auto destination : i.targets) {
             const auto matches=w.binary("icmp eq",physical,std::to_string(destination));
             valid=valid=="false" ? matches : w.value("or i1 "+valid+", "+matches);
         }
@@ -343,7 +346,8 @@ void detail::llvm(std::ostream& output,const ir::Program& program) {
         w.text<<"  switch i32 "<<pc<<", label %redispatch [\n";
         for (const auto& [address,i] : instructions) w.text<<"    i32 "<<address<<", label %code"<<address<<'\n';
         w.text<<"  ]\nbudget_stop:\n  ret i32 0\nredispatch:\n  ret i32 7\nbranch_fault:\n  ret i32 3\n";
-        for (const auto& [address,i] : instructions) instruction(w,i,instructions.contains(address+4));
+        for (const auto& [address,i] : instructions)
+            instruction(w,i,instructions.contains(address+4),program.open_indirect_sites.contains(address));
         w.text<<"}\n";
     }
     w.text<<"define i32 @nt_iop_llvm_run_v2(ptr %state, ptr %ram, i32 %ram_size, ptr %executed, i64 %budget) {\n"

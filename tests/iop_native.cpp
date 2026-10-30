@@ -2397,6 +2397,20 @@ int main() {
             stop=nt_iop_generated_run(guarded,dma_ram,1);
             check(stop.reason==NativeStop::unmapped_code && !guarded.executed && stop.address==0x1000 && guarded.pc==0x10040,
                   "Loaded pointer accepted a destination outside its proved set");
+            for (const auto leaf : {0x10100U,0x80010100U,0xa0010100U}) {
+                auto open=initial(); open.pc=0x100d0; open.registers[4]=leaf;
+                do { stop=nt_iop_generated_run(open,dma_ram,1); } while (stop.reason==NativeStop::budget);
+                check(stop.reason==NativeStop::unmapped_code && open.pc==0x5000 && open.executed==12 &&
+                      open.registers[2]==0x33 && open.registers[3]==1,
+                      "Open indirect did not call a compiled leaf and return");
+            }
+            for (const auto target : {0U,0x5000U,0x10101U}) {
+                auto missed=initial(); missed.pc=0x100e4; missed.registers[2]=target;
+                stop=nt_iop_generated_run(missed,dma_ram,1);
+                check(stop.reason==NativeStop::unmapped_code && !missed.executed && !missed.delay_slot &&
+                      missed.pc==0x100e4 && missed.registers[3]==0 && stop.address==target,
+                      "Open indirect ran its delay slot or accepted an uncompiled address");
+            }
             pointers=initial(); pointers.pc=0x10060;
             do { stop=nt_iop_generated_run(pointers,dma_ram,1); } while (stop.reason==NativeStop::budget);
             check(stop.reason==NativeStop::unmapped_code && pointers.executed==10 && pointers.registers[2]==1 &&

@@ -224,8 +224,8 @@ int main(int argc,char** argv) {
             catch (const std::runtime_error& error) { unknown=std::string(error.what()).find("unresolved indirect")!=std::string::npos; }
             if (!unknown || !rejected_shift.str().empty()) throw std::runtime_error("Shift inferred a target from mutable memory");
         }
-        // A non-constant store keeps a loaded pointer unresolved even when the
-        // initial word is an executable address.
+        // A non-constant store through one fixed slot is an open indirect.
+        // The executable initial word is not a proved target and is not enqueued.
         {
             nt::elf::IopModule unknown_slot{0x40000,0x40000,nt::Bytes(0x200),0x200,{}};
             const auto put=[&](unsigned pc,std::uint32_t word) { fixture::put32(unknown_slot.memory,pc-unknown_slot.base,word); };
@@ -236,10 +236,92 @@ int main(int argc,char** argv) {
             put(0x4003c,0x03e00008); put(0x40040,0);
             put(0x40100,0x03e00008); put(0x40104,0x24020021); put(0x40180,0x00040100);
             const std::array unknown_roots{0x40010U};
+            const auto program=nt::iop_codegen::ir::discover(unknown_slot,unknown_roots);
+            const auto site=program.instructions.find(0x4002c);
+            if (site==program.instructions.end() || !site->second.targets.empty() ||
+                !program.open_indirect_sites.contains(0x4002c) || program.guarded_callback_sites.contains(0x4002c) ||
+                program.instructions.contains(0x40100))
+                throw std::runtime_error("Non-constant pointer store was not an open indirect");
+            std::ostringstream generated;
+            nt::iop_codegen::emit_llvm(generated,unknown_slot,unknown_roots);
+            const auto ir=generated.str();
+            const auto at=ir.find("code262188:");
+            const auto next=at==std::string::npos ? std::string::npos : ir.find("\ncode",at+1);
+            const auto block=at==std::string::npos ? std::string{} : ir.substr(at,next==std::string::npos ? std::string::npos : next-at);
+            if (ir.empty() || block.find("call i1 @is_instruction")==std::string::npos || block.find("262400")!=std::string::npos)
+                throw std::runtime_error("Open indirect was not guarded by compiled instructions");
+        }
+        // A branch that skips the load must not keep the other path's delayed slot.
+        {
+            nt::elf::IopModule skipped{0x50000,0x50000,nt::Bytes(0x90),0x90,{}};
+            const auto put=[&](unsigned pc,std::uint32_t word) { fixture::put32(skipped.memory,pc-skipped.base,word); };
+            put(0x50000,0x3c010005); put(0x50004,0x15000002); put(0x50008,0); put(0x5000c,0x8c220080);
+            put(0x50010,0); put(0x50014,0x0040f809); put(0x50018,0); put(0x5001c,0x03e00008); put(0x50020,0);
+            put(0x50030,0x03e00008); put(0x50034,0x24020001); put(0x50080,0x00050030);
             std::ostringstream partial; bool unresolved=false;
-            try { nt::iop_codegen::emit_llvm(partial,unknown_slot,unknown_roots); }
-            catch (const std::runtime_error& error) { unresolved=std::string(error.what()).find("unresolved indirect")!=std::string::npos; }
-            if (!unresolved || !partial.str().empty()) throw std::runtime_error("Non-constant pointer store became a bounded indirect target");
+            try { nt::iop_codegen::emit_llvm(partial,skipped); }
+            catch (const std::runtime_error& error) {
+                const std::string message=error.what();
+                unresolved=message.find("unresolved indirect")!=std::string::npos && message.find("0x00050014")!=std::string::npos;
+            }
+            if (!unresolved || !partial.str().empty()) throw std::runtime_error("Skipped load kept another path's pointer");
+        }
+        // Stores decoded in another module poison, open, or widen the same slot.
+        {
+            const auto caller_image=[&] {
+                nt::elf::IopModule caller{0x60000,0x60000,nt::Bytes(0x100),0x100,{}};
+                const auto put=[&](unsigned pc,std::uint32_t word) { fixture::put32(caller.memory,pc-caller.base,word); };
+                put(0x60000,0x3c010006); put(0x60004,0x8c220080); put(0x60008,0); put(0x6000c,0x0040f809);
+                put(0x60010,0); put(0x60014,0x03e00008); put(0x60018,0);
+                put(0x60020,0x03e00008); put(0x60024,0x24020001); put(0x60080,0x00060020);
+                return caller;
+            };
+            const auto expect_unresolved=[&](nt::elf::IopModule writer,const char* failure) {
+                const std::array<nt::elf::IopModule,2> modules{caller_image(),std::move(writer)};
+                bool unresolved=false;
+                try { nt::iop_codegen::ir::discover_bundle(modules,std::array<std::uint32_t,2>{0x60000U,0x61000U}); }
+                catch (const std::runtime_error& error) {
+                    const std::string message=error.what();
+                    unresolved=message.find("unresolved indirect")!=std::string::npos && message.find("0x0006000c")!=std::string::npos;
+                }
+                if (!unresolved) throw std::runtime_error(failure);
+            };
+            nt::elf::IopModule partial_writer{0x61000,0x61000,nt::Bytes(0x20),0x20,{}};
+            fixture::put32(partial_writer.memory,0,0x3c010006); fixture::put32(partial_writer.memory,4,0xa0200080);
+            fixture::put32(partial_writer.memory,8,0x03e00008);
+            expect_unresolved(std::move(partial_writer),"Partial store in another module left a loaded pointer bounded");
+            nt::elf::IopModule open_writer{0x61000,0x61000,nt::Bytes(0x20),0x20,{}};
+            fixture::put32(open_writer.memory,0,0x3c010006); fixture::put32(open_writer.memory,4,0xac240080);
+            fixture::put32(open_writer.memory,8,0x03e00008);
+            const std::array<nt::elf::IopModule,2> open_modules{caller_image(),std::move(open_writer)};
+            const auto opened=nt::iop_codegen::ir::discover_bundle(open_modules,std::array<std::uint32_t,2>{0x60000U,0x61000U});
+            if (!opened.open_indirect_sites.contains(0x6000c) || opened.instructions.contains(0x60020) ||
+                !opened.instructions.at(0x6000c).targets.empty())
+                throw std::runtime_error("Cross-module unbounded store was not an open indirect");
+            std::ostringstream opened_ir; nt::iop_codegen::emit_program(opened_ir,opened);
+            const auto opened_text=opened_ir.str();
+            const auto opened_at=opened_text.find("code"+std::to_string(0x6000c)+":");
+            const auto opened_next=opened_at==std::string::npos ? std::string::npos : opened_text.find("\ncode",opened_at+1);
+            const auto opened_block=opened_at==std::string::npos ? std::string{} :
+                opened_text.substr(opened_at,opened_next==std::string::npos ? std::string::npos : opened_next-opened_at);
+            if (opened_block.find("call i1 @is_instruction")==std::string::npos || opened_block.find(std::to_string(0x60020))!=std::string::npos)
+                throw std::runtime_error("Cross-module open indirect kept a proved target");
+            nt::elf::IopModule wide_writer{0x61000,0x61000,nt::Bytes(0x40),0x40,{}};
+            fixture::put32(wide_writer.memory,0,0x3c010006); fixture::put32(wide_writer.memory,4,0x3c040006);
+            fixture::put32(wide_writer.memory,8,0x34841020); fixture::put32(wide_writer.memory,12,0xac240080);
+            fixture::put32(wide_writer.memory,16,0x03e00008); fixture::put32(wide_writer.memory,0x20,0x03e00008);
+            fixture::put32(wide_writer.memory,0x24,0x24020002);
+            const std::array<nt::elf::IopModule,2> wide_modules{caller_image(),std::move(wide_writer)};
+            const auto widened=nt::iop_codegen::ir::discover_bundle(wide_modules,std::array<std::uint32_t,2>{0x60000U,0x61000U});
+            const auto& widened_site=widened.instructions.at(0x6000c);
+            bool saw_caller=false,saw_writer=false;
+            for (const auto target : widened_site.targets) {
+                if (target==0x60020) saw_caller=true;
+                if (target==0x61020) saw_writer=true;
+            }
+            if (widened.open_indirect_sites.contains(0x6000c) || !saw_caller || !saw_writer ||
+                !widened.instructions.contains(0x60020) || !widened.instructions.contains(0x61020))
+                throw std::runtime_error("Cross-module executable store did not widen the proved set");
         }
         // A call between the load and the use discards the loaded register.
         {
@@ -761,8 +843,14 @@ int main(int argc,char** argv) {
         for (unsigned index=0;index<std::size(pointer_b);++index) pointer_word(0x10060+index*4,pointer_b[index]);
         constexpr std::uint32_t pointer_store[]{0x3c010001,0x3c030001,0x24630008,0xac230184,0x03e00008,0};
         for (unsigned index=0;index<std::size(pointer_store);++index) pointer_word(0x100b0+index*4,pointer_store[index]);
+        // An unknown word store keeps one fixed slot open. The leaf is a root, not a proved callee.
+        constexpr std::uint32_t open_slot[]{0x03e08021,0x3c010001,0xac240190,0x8c220190,0,0x0040f809,0x24030001,
+            0x0200f821,0x03e00008,0};
+        for (unsigned index=0;index<std::size(open_slot);++index) pointer_word(0x100d0+index*4,open_slot[index]);
+        pointer_word(0x10100,0x03e00008); pointer_word(0x10104,0x24020033);
         pointer_word(0x10180,0x00010000);
-        bundle_roots.insert(bundle_roots.end(),{0x4860U,0x48a0U,0x48b0U,0x48c0U,0x48d0U,0x10020U,0x10060U,0x100b0U});
+        pointer_word(0x10190,0x00010100);
+        bundle_roots.insert(bundle_roots.end(),{0x4860U,0x48a0U,0x48b0U,0x48c0U,0x48d0U,0x10020U,0x10060U,0x100b0U,0x100d0U,0x10100U});
         const std::array bundle{module,provider,dispatch,factories,pointers};
         {
             auto broken=bundle; fixture::put32(broken[3].memory,0x300,0);

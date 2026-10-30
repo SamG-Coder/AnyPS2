@@ -151,7 +151,11 @@ without changing channel state. Compiled dmacman imports use that same register,
 priority and enable behavior. Slice setup and transfer starts stop without a
 completed transfer or a register write. A constant-address loaded pointer calls
 only its proved targets, and a null pointer does not fall through the jump
-delay slot. The local startup regression requires both
+delay slot. An unbounded store through a fixed slot may call any instruction
+compiled into that program, and every other address stops as unmapped code;
+proved loaded pointers stay on their smaller set. A load skipped by a branch
+stays unresolved, and a known-address store in another bundle module poisons
+that slot, opens it, or widens its executable targets. The local startup regression requires both
 native registration markers; it does not claim completed transfers or a boot.
 The heaplib milestone executes linked guest calls for fixed and expandable
 heaps. It checks alignment and non-overlap, free-size accounting, coalescing,
