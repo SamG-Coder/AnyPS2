@@ -1952,3 +1952,11 @@ ordering. Initialization activates the archive service with no firmware mounts;
 ROMDRV imports 4/5 mount validated caller-supplied disc archives and unmount them.
 Unreplaced ROMDRV exports retain compiled ownership. Other export queries and
 unsupported ABI variants are not silently supplied by the native replacement.
+`sealed@<base>` compiles a module for a later LoadStartModule instead. That
+module stays in LLVM discovery, including its export descriptors, and is omitted
+from the startup image, startup entries, and source-hash catalog. Export
+registration still requires the live export table; descriptors alone do not
+make the library active. The relocated initialized bytes are `sealed.data`
+beside `module.data`. Reset copies them to the converted base and holds the
+span. A base that is unaligned, outside the native heap, or overlapping is
+refused and is not relocated. `sealed@` and `romdrv@` cannot be combined.

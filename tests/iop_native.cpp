@@ -3706,6 +3706,61 @@ int main() {
                   load_native_word(guest,0x7000)==0x60 && loader.load_decision()==13,
                   "Overlapping sealed image was started");
         }
+        {
+            // A held span stays out of ordinary allocation and is claimed only by
+            // mode 2 at that base. LoadStartModule then runs the compiled entry.
+            std::vector<std::uint8_t> arena(0x10000,0);
+            NativeHeapServices reserved(0x10000,0x6000,0x9000);
+            check(reserved.hold(0x6000,1) && !reserved.hold(0x6000,256) && !reserved.hold(0x5000,256),
+                  "Hold failed or overlapped a held or reserved span");
+            const auto mode0=reserved.invoke({4,{0,1,0},NativeServiceKind::sysmem},arena);
+            const auto mode1=reserved.invoke({4,{1,1,0},NativeServiceKind::sysmem},arena);
+            const auto mode2=reserved.invoke({4,{2,1,0x6000},NativeServiceKind::sysmem},arena);
+            const auto allocated=reserved.invoke({4,{2,256,0x6000},NativeServiceKind::sysmem},arena);
+            check(mode0.status==NativeServiceStatus::returned && mode0.value==0x6100 && mode1.value==0x8f00 &&
+                  mode2.value==0x6000 && allocated.value==0 && !reserved.hold(0x6100,1),
+                  "Mode 0 or mode 1 consumed a held span, or mode 2 did not return that base");
+            NativeHeapServices heap(0x10000,0xb000,0x10000);
+            NativeModloadServices loader;
+            loader.attach_heap(heap);
+            std::vector<std::uint8_t> guest(0x10000,0);
+            const auto place=[&](std::uint32_t address,std::string_view text) {
+                std::copy(text.begin(),text.end(),guest.begin()+address);
+                guest[address+text.size()]=0;
+            };
+            place(0x2000,"cdrom0:/MOD.IRX;1");
+            store_native_word(guest,0x7000,0x11111111);
+            const nt::Bytes image(16,0);
+            const nt::Bytes file{'s','e','a','l'};
+            std::copy(image.begin(),image.end(),guest.begin()+0xb000);
+            check(heap.hold(0xb000,0x600),"Sealed image hold failed");
+            struct TemporaryImage {
+                std::filesystem::path path=std::filesystem::temp_directory_path()/
+                    ("anyps2-sealed-hold-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".iso");
+                ~TemporaryImage() { std::error_code ignored; std::filesystem::remove(path,ignored); }
+            } image_file;
+            nt::write_file(image_file.path,fixture::single_file_iso("MOD.IRX;1",file));
+            loader.attach_disc(image_file.path);
+            loader.attach_catalog({nt::fingerprint(file)});
+            NativeServiceRequest request;
+            request.kind=NativeServiceKind::modload;
+            request.selector=7;
+            request.arguments={0x2000,0,0,0x7000};
+            const auto catalogued=loader.invoke(request,guest);
+            check(catalogued.status==NativeServiceStatus::unavailable && loader.load_decision()==2 &&
+                  load_native_word(guest,0x7000)==0x11111111,
+                  "Catalog hashes without attach_sealed did not stay at decision 2");
+            loader.attach_sealed({{nt::fingerprint(file),nt::fingerprint(image),0xb000,0xb288,16,0x600,0}});
+            auto cpu=initial(); cpu.pc=0xb42c;
+            cpu.registers[4]=0x2000; cpu.registers[5]=0; cpu.registers[6]=0; cpu.registers[7]=0x7000;
+            const auto called=run_native(nt_iop_generated_run,cpu,guest,1,&loader);
+            check(called.reason==NativeStop::budget && cpu.pc==0xb288 && loader.load_decision()==7,
+                  "Held LoadStartModule did not reach decision 7 at the compiled entry");
+            const auto finished=run_native(nt_iop_generated_run,cpu,guest,128,&loader);
+            check(finished.reason==NativeStop::unmapped_code && finished.pc==0x5000 && cpu.registers[2]==1 &&
+                  loader.load_decision()==8 && load_native_word(guest,0x7000)==0x61,
+                  "Held sealed entry did not run and finish through decision 8");
+        }
         std::cout<<"Compiled IOP LLVM execution passed; dmacman register checks use the diagnostic device library\n";
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

@@ -497,7 +497,11 @@ receives the entry value. Entry value 1 releases the image. Any other value
 stays resident, and a second start returns -206. StartModule returns -206 for
 that resident id and -202 for an unknown or released id, without reading the
 name or the result pointer and without calling an entry. A wrong installed image and an
-overlapping reservation do not start the entry.
+overlapping reservation do not start the entry. A held heap span is skipped by
+ordinary allocation. Mode 2 at that address and rounded size claims it and
+returns the base. A catalogued file with no sealed record stays unavailable.
+After the sealed record is attached, the same call reaches the compiled entry
+and finishes with the module id.
 HI/LO coverage verifies initial state, signed/unsigned 64-bit products, explicit
 HI/LO writes and readback across one-instruction and larger slices. The LLVM
 adapter uses ABI entry version 2 for the enlarged state buffer; rebuild generated
@@ -543,7 +547,11 @@ neighbours, returned pointers, zero lengths, atomic bounds failure and code-writ
 protection. An unsupported import ordinal must fail before emitting LLVM output.
 `iop-llvm-project` exercises the default CLI backend through
 IRX conversion, native object compilation, executable linking and execution after
-the original IRX is removed. The C++ pipeline remains covered with `--cpp`.
+the original IRX is removed. It also checks a `sealed@` module: the record stays
+out of the startup image, entries, and source catalog, and `sealed.data` holds
+the relocated initialized bytes. An unaligned base, a raw overlap, a gap inside
+the startup span, and `sealed@` combined with `romdrv@` fail before output is
+created. The C++ pipeline remains covered with `--cpp`.
 Run `ctest --test-dir build -C Release -R '^iop-(llvm|native)-' --output-on-failure`
 after building `iop-llvm-tests`, `iop-native-tests` and `ps2-iop-recompile`.
 These tests do not establish game booting, complete module support or performance.

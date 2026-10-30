@@ -278,8 +278,11 @@ To package multiple modules, specify each relocation base and path in startup or
 
 Use the same CMake commands with `work\iop-bundle` as the project directory.
 The bases must leave disjoint module ranges below the host invocation stack.
+Prefix a base with `sealed@` to compile that module for a later LoadStartModule
+without copying it into the startup image. Its relocated bytes are written to
+`sealed.data`. `sealed@` cannot be combined with `romdrv@`.
 `modules.txt` records the startup order, entry points and memory extents. All
-initialized data is loaded before the first entry runs. Startup stops at the first
+startup initialized data is loaded before the first entry runs. Startup stops at the first
 unsupported operation; entry return values are reported without interpreting them
 as PS2 module residency status. This is explicit native startup orchestration,
 not automatic GT4 boot discovery.

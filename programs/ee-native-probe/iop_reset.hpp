@@ -12,6 +12,7 @@
 nt::iop::NativeModule nt_iop_generated_module();
 std::uint64_t nt_iop_generated_data_hash();
 std::vector<std::uint64_t> nt_iop_generated_source_hashes();
+std::vector<nt::iop::SealedModule> nt_iop_generated_sealed();
 std::vector<nt::iop::NativeModule> nt_iop_generated_entries();
 std::vector<nt::iop::NativeLibrarySpec> nt_iop_generated_libraries();
 std::vector<nt::iop::NativeImportSpec> nt_iop_generated_imports();
@@ -38,6 +39,7 @@ public:
             nt_iop_generated_libraries(),nt_iop_generated_imports(),
             [](std::string_view) { return true; },disc,&destination_,0,delivery_);
         services_->modload.attach_catalog(nt_iop_generated_source_hashes());
+        install_sealed(data);
         startup_=std::make_unique<nt::iop::NativeModuleStartup>(nt::iop::run_llvm,*services_,ram_,module_,nt_iop_generated_entries(),0x1ff000);
         incoming_=std::make_unique<nt::ee::NativeIopCommands>(services_->sif_control,services_->inbound);
         if (!disc.empty()) {
@@ -102,6 +104,47 @@ public:
         return result_.reason==nt::iop::NativeStop::thread_wait ? nt::ee::Stop::budget : nt::ee::Stop::unsupported_system;
     }
 private:
+    // An empty record list does not read sealed.data. Records are installed at
+    // their converted bases; a base that does not already fit is refused.
+    void install_sealed(const std::filesystem::path& data) {
+        const auto sealed=nt_iop_generated_sealed();
+        if (sealed.empty()) return;
+        const auto sidecar=data.parent_path()/"sealed.data";
+        if (!std::filesystem::is_regular_file(sidecar)) throw std::runtime_error("Sealed module image is missing");
+        const auto bytes=nt::read_file(sidecar,0x200000);
+        const auto heap_begin=(module_.base+module_.memory_size+255U)&~255U;
+        constexpr std::uint32_t heap_limit=0x1ed000;
+        const auto image_begin=std::uint64_t(module_.base);
+        const auto image_end=image_begin+module_.memory_size;
+        std::size_t cursor=0;
+        for (std::size_t index=0;index<sealed.size();++index) {
+            const auto& record=sealed[index];
+            if (record.base&255U) throw std::runtime_error("Sealed module base is not 256-byte aligned");
+            const auto rounded=(std::uint64_t(record.memory_size)+255U)&~std::uint64_t{255};
+            const auto span_end=std::uint64_t(record.base)+rounded;
+            if (!record.memory_size || record.initialized_size>record.memory_size || record.base<heap_begin || span_end>heap_limit)
+                throw std::runtime_error("Sealed module is outside the native heap and was not relocated");
+            if (record.base<image_end && image_begin<span_end)
+                throw std::runtime_error("Sealed module intersects the startup image and was not relocated");
+            for (std::size_t prior=0;prior<index;++prior) {
+                const auto& other=sealed[prior];
+                const auto other_end=std::uint64_t(other.base)+((std::uint64_t(other.memory_size)+255U)&~std::uint64_t{255});
+                if (record.base<other_end && std::uint64_t(other.base)<span_end)
+                    throw std::runtime_error("Sealed modules overlap and were not relocated");
+            }
+            if (cursor>bytes.size() || record.initialized_size>bytes.size()-cursor)
+                throw std::runtime_error("Sealed module image is short");
+            const auto image=nt::ByteView(bytes).subspan(cursor,record.initialized_size);
+            if (nt::fingerprint(image)!=record.image_hash) throw std::runtime_error("Sealed module image hash mismatch");
+            if (std::uint64_t(record.base)+record.initialized_size>ram_.size())
+                throw std::runtime_error("Sealed module image exceeds IOP RAM");
+            std::copy(image.begin(),image.end(),ram_.begin()+record.base);
+            if (!services_->heap.hold(record.base,record.memory_size))
+                throw std::runtime_error("Sealed module overlaps a reserved heap span");
+            cursor+=record.initialized_size;
+        }
+        services_->modload.attach_sealed(sealed);
+    }
     void start() {
         started_=true;
         services_->sif_control.publish_main(platform_.sif_link.main_address(),platform_.sif_link.main_flags());

@@ -25,11 +25,16 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
     std::vector<elf::IopModule> modules;
     std::vector<std::uint64_t> source_hashes;
     for (const auto& input : inputs) {
+        if (input.native_romdrv && input.sealed)
+            throw std::runtime_error("IOP conversion: sealed@ cannot be combined with romdrv@");
+        if (input.sealed && (input.base&255U))
+            throw std::runtime_error("IOP conversion: sealed module base is not 256-byte aligned");
         const auto bytes=read_file(input.path);
         source_hashes.push_back(fingerprint(bytes));
         modules.push_back(elf::load_iop_module(bytes,input.base));
     }
     std::vector<elf::IopModule> compiled;
+    bool any_sealed=false;
     for (std::size_t index=0;index<modules.size();++index) {
         if (inputs[index].native_romdrv) {
             const auto exports=elf::iop_exports(modules[index]);
@@ -37,6 +42,7 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
                 exports.front().functions.size()!=6)
                 throw std::runtime_error("Native archive replacement requires the ROMDRV 2.x six-entry ABI");
         } else compiled.push_back(modules[index]);
+        if (inputs[index].sealed) any_sealed=true;
         // Native replacements reserve their original extents as well. Never
         // hide overlap by removing the executable from the discovery input.
         for (std::size_t other=0;other<index;++other)
@@ -44,25 +50,63 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
                 modules[other].base<std::uint64_t(modules[index].base)+modules[index].memory.size())
                 throw std::runtime_error("IOP conversion: overlapping bundle modules");
     }
-    const auto program=ir::discover_bundle(compiled);
+    // Sealed extents stay out of the startup image. A sealed module inside that
+    // image would sit in the reserved heap prefix and could not be held later.
+    bool startup=false;
     std::uint32_t first=0x200000, initialized_end=0, memory_end=0;
-    for (const auto& item : modules) {
+    for (std::size_t index=0;index<modules.size();++index) if (!inputs[index].sealed) {
+        startup=true;
+        const auto& item=modules[index];
         first=std::min(first,item.base);
         initialized_end=std::max(initialized_end,item.base+item.initialized_size);
         memory_end=std::max(memory_end,item.base+static_cast<std::uint32_t>(item.memory.size()));
     }
+    if (!startup) { first=0; initialized_end=0; memory_end=0; }
+    const auto rounded=[](std::uint32_t size) { return (std::uint64_t(size)+255U)&~std::uint64_t{255}; };
+    struct SealedSpan { std::uint32_t begin; std::uint64_t end; };
+    std::vector<SealedSpan> sealed_spans;
+    for (std::size_t index=0;index<modules.size();++index) if (inputs[index].sealed) {
+        const auto begin=modules[index].base;
+        const auto end=std::uint64_t(begin)+rounded(static_cast<std::uint32_t>(modules[index].memory.size()));
+        if (startup && begin<memory_end && std::uint64_t(first)<end)
+            throw std::runtime_error("IOP conversion: sealed module overlaps the startup image");
+        for (const auto& other : sealed_spans)
+            if (begin<other.end && std::uint64_t(other.begin)<end)
+                throw std::runtime_error("IOP conversion: overlapping sealed modules");
+        sealed_spans.push_back({begin,end});
+    }
+    const auto program=ir::discover_bundle(compiled);
     if (memory_end>0x1f0000) throw std::runtime_error("IOP conversion: bundle overlaps native invocation stack");
-    elf::IopModule module{first,modules.front().entry,Bytes(initialized_end-first),initialized_end-first,{}};
-    for (std::size_t index=0;index<modules.size();++index) if (!inputs[index].native_romdrv) {
+    std::uint32_t startup_entry=0;
+    if (!inputs.front().sealed) startup_entry=modules.front().entry;
+    else for (std::size_t index=0;index<modules.size();++index) if (!inputs[index].sealed) { startup_entry=modules[index].entry; break; }
+    elf::IopModule module{first,startup_entry,Bytes(initialized_end-first),initialized_end-first,{}};
+    for (std::size_t index=0;index<modules.size();++index) if (!inputs[index].native_romdrv && !inputs[index].sealed) {
         const auto& item=modules[index];
         std::copy_n(item.memory.begin(),item.initialized_size,module.memory.begin()+item.base-first);
     }
     std::ostringstream code, llvm;
     detail::llvm(llvm,program);
-    code<<"#include <nt/iop_native.hpp>\nusing namespace nt::iop;\n";
+    for (std::size_t index=0;index<modules.size();++index)
+        if (inputs[index].sealed && !program.instructions.contains(modules[index].entry))
+            throw std::runtime_error("IOP conversion: sealed entry is not a compiled instruction at "+hex32(modules[index].entry));
+    code<<"#include <nt/iop_native.hpp>\n#include <nt/iop_native_modload.hpp>\nusing namespace nt::iop;\n";
     code<<"std::uint64_t nt_iop_generated_data_hash() { return "<<fingerprint(module.memory)<<"ULL; }\n";
     code<<"#include <vector>\nstd::vector<std::uint64_t> nt_iop_generated_source_hashes() { return {";
-    for (const auto hash:source_hashes) code<<hash<<"ULL,";
+    for (std::size_t index=0;index<source_hashes.size();++index) if (!inputs[index].sealed) code<<source_hashes[index]<<"ULL,";
+    code<<"}; }\n";
+    Bytes sealed_image;
+    code<<"std::vector<nt::iop::SealedModule> nt_iop_generated_sealed() { return {";
+    if (any_sealed) {
+        code<<'\n';
+        for (std::size_t index=0;index<modules.size();++index) if (inputs[index].sealed) {
+            const auto& item=modules[index];
+            const auto image=ByteView(item.memory).first(item.initialized_size);
+            code<<"{"<<source_hashes[index]<<"ULL,"<<fingerprint(image)<<"ULL,"<<item.base<<"U,"<<item.entry<<"U,"
+                <<item.initialized_size<<"U,"<<item.memory.size()<<"U,"<<(item.info ? item.info->global_pointer : 0)<<"U},\n";
+            sealed_image.insert(sealed_image.end(),image.begin(),image.end());
+        }
+    }
     code<<"}; }\n";
     code<<"NativeModule nt_iop_generated_module() { return {"<<module.base<<"U,"<<module.entry<<"U,"
         <<module.initialized_size<<"U,"<<memory_end-first<<"U,"
@@ -75,7 +119,7 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
     }
     code<<"}; }\n";
     code<<"std::vector<NativeModule> nt_iop_generated_entries() { return {\n";
-    for (std::size_t index=0;index<modules.size();++index) {
+    for (std::size_t index=0;index<modules.size();++index) if (!inputs[index].sealed) {
         const auto& item=modules[index];
         code<<"{"<<item.base<<"U,"<<item.entry<<"U,"<<item.initialized_size<<"U,"<<item.memory.size()<<"U,"
             <<(item.info ? item.info->global_pointer : 0)<<"U,NativeModuleKind::"
@@ -91,6 +135,7 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
     save(output/"module_metadata.cpp",code.str());
     save(output/"generated.ll",llvm.str());
     write_file(output/"module.data",ByteView(module.memory).first(module.initialized_size));
+    if (any_sealed) write_file(output/"sealed.data",sealed_image);
     std::string cmake=R"cmake(cmake_minimum_required(VERSION 3.24)
 project(AnyPS2ConvertedIop LANGUAGES CXX)
 if(NOT ANYPS2_ROOT)
@@ -124,7 +169,7 @@ target_compile_definitions(iop-native PRIVATE ANYPS2_IOP_LLVM=1)
     for (std::size_t index=0;index<modules.size();++index) {
         const auto& item=modules[index];
         layout<<hex32(item.base)<<' '<<hex32(item.entry)<<' '<<hex32(static_cast<std::uint32_t>(item.memory.size()))
-              <<(inputs[index].native_romdrv ? " native-ROMDRV-archive" : " LLVM")<<'\n';
+              <<(inputs[index].sealed ? " sealed" : inputs[index].native_romdrv ? " native-ROMDRV-archive" : " LLVM")<<'\n';
     }
     save(output/"modules.txt",layout.str());
     std::ostringstream diagnostics;

@@ -1182,7 +1182,15 @@ file is fingerprinted against the linked AOT catalog. A miss, and a hit that
 has no sealed entry, stop without relocating the image, registering it, calling
 an entry, or writing a module result. A sealed entry runs only when its
 relocated image is already installed at the converted base and that entry is
-compiled code. The loader reserves that range, passes argc/argv and a module
+compiled code. Conversion can mark a module `sealed@` so its code is compiled
+and omitted from the startup image, startup entries, and source-hash catalog.
+The relocated initialized bytes are written to `sealed.data`. An empty sealed
+list does not read that file. A non-empty list is installed only at the
+converted 256-byte-aligned base inside the native heap: the image hash must
+match, the rounded span must not intersect the startup image or another sealed
+module, and the heap hold must succeed. A base that does not fit is refused
+and is not slid. The hold keeps ordinary allocation off that span until
+LoadStartModule claims it. The loader reserves that range, passes argc/argv and a module
 record, and transfers to the entry. After the entry returns, the caller's
 result is the module id and the guest result word receives the entry value.
 Entry value 1 releases the reservation. Any other value leaves the module
