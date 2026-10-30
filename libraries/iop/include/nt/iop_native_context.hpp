@@ -14,6 +14,7 @@
 #include <nt/iop_native_rpc_data.hpp>
 #include <nt/iop_native_stdio.hpp>
 #include <nt/iop_native_modload.hpp>
+#include <nt/iop_native_archive.hpp>
 #include <memory>
 
 namespace nt::iop {
@@ -35,7 +36,7 @@ public:
                          NativeSifDestination* destination=nullptr,std::uint32_t command_buffer=0,
                          NativeSifCommandEndpoint::Delivery delivery={})
         : heap(checked_size(ram,layout,destination || !delivery),layout.heap_begin,layout.heap_end),heaplib(heap),boot_callbacks(heap),
-          libraries(std::move(exports),std::move(imports)),driver_files(drivers,descriptors,heap),
+          libraries(std::move(exports),std::move(imports)),archives(descriptors),driver_files(drivers,descriptors,heap),
           sif(destination),peer_(destination ? std::make_unique<NativeSifCommandEndpoint>(*destination,command_buffer,sif,std::move(delivery)) : nullptr),
           commands(peer_.get()),inbound(ram,layout.packet_buffer),callbacks({&alarms,&sif,&inbound}),
           interrupts(layout.interrupt_stack,&callbacks),sif_control(interrupts,&sif),threads(interrupts,&heap),
@@ -73,6 +74,7 @@ public:
     NativePrntServices prnt;
     NativeDriverServices drivers;
     NativeFileDescriptors descriptors;
+    NativeArchiveServices archives;
     NativeDriverFiles driver_files;
     NativeBootServices boot; // Empty until the owner supplies real boot metadata.
     NativeModloadServices modload;
@@ -105,7 +107,7 @@ private:
         return static_cast<std::uint32_t>(ram.size());
     }
     std::vector<NativeServices*> providers() {
-        std::vector<NativeServices*> result{&boot_callbacks,&heaplib,&prnt,&sysclib,&drivers,&driver_files,&heap,&libraries,
+        std::vector<NativeServices*> result{&boot_callbacks,&heaplib,&prnt,&sysclib,&drivers,&driver_files,&archives,&heap,&libraries,
             &boot,&modload,&interrupts,&events,&semaphores,&mailboxes,&threads,&system,&alarms,&sif,&sif_control,&stdio,
             &commands,&command_session,&rpc_servers,&rpc_data};
         if (disc_service) result.push_back(disc_service.get());

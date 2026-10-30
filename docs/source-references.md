@@ -375,6 +375,13 @@ is original and reuses AnyPS2's archive validator. Default directory bytes are
 generated metadata only; no BIOS instructions, firmware files or ROMVER contents
 are included.
 
+The native read-only archive service uses the same pinned ROMDRV public
+open/read/seek/close contracts and unit/handle limits. It reuses the disc archive
+parser and shared native descriptor namespace. Original C++ owns the file data,
+cursors and lifetimes; no firmware image is mapped. Unsigned seek offsets clamp
+to EOF as specified by that interface; negative read lengths are rejected with
+EINVAL rather than relying on signed overflow or out-of-range copying.
+
 The thread-yield syscall number, saved-frame layout and callback contract use
 the pinned PS2SDK intrman and threadman public interfaces (intrman.c, thcommon.c
 and thcommon.h). AnyPS2 implements an original C++ state transition and executes

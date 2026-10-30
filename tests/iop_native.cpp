@@ -25,6 +25,8 @@
 #include <nt/iop_native_rpc_data.hpp>
 #include <nt/iop_native_stdio.hpp>
 #include <nt/iop_native_modload.hpp>
+#include <nt/iop_native_archive.hpp>
+#include "reboot_fixture.hpp"
 #include "disc_fixture.hpp"
 #include <chrono>
 #include <vector>
@@ -2770,6 +2772,54 @@ int main() {
             invalid.pc=0x281c; invalid.registers[4]=0xfffc;
             check(run_native(nt_iop_generated_run,invalid,ram,32,&drivers).reason==NativeStop::address_fault &&
                   !invalid.executed && !drivers.size(),"Truncated driver descriptor was accepted");
+        }
+        {
+            NativeFileDescriptors descriptors;
+            NativeArchiveServices archives(descriptors);
+            const auto image=fixture::reboot_image();
+            const auto path=[&](std::string_view value) {
+                std::copy(value.begin(),value.end(),ram.begin()+0xc000); ram[0xc000+value.size()]=0;
+            };
+            const auto call=[&](unsigned ordinal,std::uint32_t a,std::uint32_t b=0,std::uint32_t c=0) {
+                auto cpu=initial(); cpu.pc=0x1614+(ordinal-4)*8;
+                if (ordinal==8) cpu.pc=0x162c;
+                cpu.registers[4]=a; cpu.registers[5]=b; cpu.registers[6]=c;
+                const auto result=run_native(nt_iop_generated_run,cpu,ram,1,&archives);
+                return std::pair{result.reason,cpu.registers[2]};
+            };
+            path("rom0:EXAMPLE");
+            check(call(4,0xc000,1).second==static_cast<std::uint32_t>(-6),"Archive mount fabricated firmware files");
+            check(archives.mount(1,image) && !archives.mount(1,image),"Archive mount ownership failed");
+            path("rom1:MISSING");
+            check(call(4,0xc000,1).second==static_cast<std::uint32_t>(-2),"Missing archive member succeeded");
+            path("rom1:EXAMPLE");
+            check(call(4,0xc000,2).second==static_cast<std::uint32_t>(-13),"Archive allowed a write open");
+            const auto fd=call(4,0xc000,1);
+            check(fd==std::pair{NativeStop::budget,3U} && !archives.unmount(1),"Compiled archive open or live mount ownership failed");
+            const auto before=ram;
+            check(call(6,3,0x1000,19).first==NativeStop::code_write && ram==before &&
+                  call(6,3,0xffff,19).first==NativeStop::address_fault,"Archive read failed to protect output");
+            check(call(6,3,0xa000c100,100)==std::pair{NativeStop::budget,19U} &&
+                  std::equal(image.begin()+96,image.end(),ram.begin()+0xc100) && call(6,3,0xffffffff,1).second==0,
+                  "Compiled archive read/EOF or rejected-read cursor changed");
+            check(call(8,3,0xfffffffd,2).second==16 && call(6,3,0xc200,10).second==3 &&
+                  call(8,3,0xffffffff,0).second==19,"Archive seek did not retain ROM filesystem offset semantics");
+            check(call(5,3).second==0 && !descriptors.find(3) && archives.unmount(1),"Archive close leaked descriptor or mount");
+            check(archives.mount(1,image),"Archive could not remount after all files closed");
+            std::array<std::uint32_t,8> opened{};
+            for (auto& handle:opened) {
+                const auto result=call(4,0xc000,1); handle=result.second;
+                check(result.first==NativeStop::budget && handle>=3 && handle<=10,"Archive handle allocation failed");
+            }
+            check(call(4,0xc000,1).second==static_cast<std::uint32_t>(-12) &&
+                  call(6,opened[0],0xc100,1).second==1 && call(6,opened[1],0xc200,1).second==1 &&
+                  ram[0xc100]==ram[0xc200],"Archive handle limit or independent cursors failed");
+            for (const auto handle:opened) check(call(5,handle).second==0,"Archive descriptor close failed");
+            check(archives.unmount(1),"Closed archive still busy");
+            auto invalid=image; invalid[12]=1;
+            bool rejected=false;
+            try { archives.mount(0,std::move(invalid)); } catch (const std::exception&) { rejected=true; }
+            check(rejected,"Archive mount accepted a firmware RESET entry");
         }
         {
             struct TemporaryImage {
