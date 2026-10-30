@@ -2777,6 +2777,14 @@ int main() {
             NativeFileDescriptors descriptors;
             NativeArchiveServices archives(descriptors);
             const auto image=fixture::reboot_image();
+            std::copy(image.begin(),image.end(),ram.begin()+0xc400);
+            const auto mount_call=[&](std::uint32_t entry,unsigned unit) {
+                auto cpu=initial(); cpu.pc=entry; cpu.registers[4]=unit; cpu.registers[5]=0xc400;
+                const auto result=run_native(nt_iop_generated_run,cpu,ram,1,&archives);
+                return std::pair{result.reason,cpu.registers[2]};
+            };
+            check(mount_call(0xb4d4,1).first==NativeStop::import_request,"Uninitialized archive service accepted a compiled call");
+            check(archives.initialize() && !archives.initialize(),"Native archive initialization did not retain ownership");
             const auto path=[&](std::string_view value) {
                 std::copy(value.begin(),value.end(),ram.begin()+0xc000); ram[0xc000+value.size()]=0;
             };
@@ -2789,7 +2797,7 @@ int main() {
             };
             path("rom0:EXAMPLE");
             check(call(4,0xc000,1).second==static_cast<std::uint32_t>(-6),"Archive mount fabricated firmware files");
-            check(archives.mount(1,image) && !archives.mount(1,image),"Archive mount ownership failed");
+            check(mount_call(0xb4d4,1)==std::pair{NativeStop::budget,0U} && !archives.mount(1,image),"Compiled archive mount ownership failed");
             path("rom1:MISSING");
             check(call(4,0xc000,1).second==static_cast<std::uint32_t>(-2),"Missing archive member succeeded");
             path("rom1:EXAMPLE");
@@ -2804,7 +2812,7 @@ int main() {
                   "Compiled archive read/EOF or rejected-read cursor changed");
             check(call(8,3,0xfffffffd,2).second==16 && call(6,3,0xc200,10).second==3 &&
                   call(8,3,0xffffffff,0).second==19,"Archive seek did not retain ROM filesystem offset semantics");
-            check(call(5,3).second==0 && !descriptors.find(3) && archives.unmount(1),"Archive close leaked descriptor or mount");
+            check(call(5,3).second==0 && !descriptors.find(3) && mount_call(0xb4dc,1).second==0,"Archive close leaked descriptor or mount");
             check(archives.mount(1,image),"Archive could not remount after all files closed");
             std::array<std::uint32_t,8> opened{};
             for (auto& handle:opened) {

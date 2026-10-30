@@ -24,7 +24,22 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
     if (inputs.empty()) throw std::runtime_error("IOP conversion: empty module bundle");
     std::vector<elf::IopModule> modules;
     for (const auto& input : inputs) modules.push_back(elf::load_iop_module(read_file(input.path),input.base));
-    const auto program=ir::discover_bundle(modules);
+    std::vector<elf::IopModule> compiled;
+    for (std::size_t index=0;index<modules.size();++index) {
+        if (inputs[index].native_romdrv) {
+            const auto exports=elf::iop_exports(modules[index]);
+            if (exports.size()!=1 || exports.front().name!="romdrv" || exports.front().version>>8!=2 ||
+                exports.front().functions.size()!=6)
+                throw std::runtime_error("Native archive replacement requires the ROMDRV 2.x six-entry ABI");
+        } else compiled.push_back(modules[index]);
+        // Native replacements reserve their original extents as well. Never
+        // hide overlap by removing the executable from the discovery input.
+        for (std::size_t other=0;other<index;++other)
+            if (modules[index].base<std::uint64_t(modules[other].base)+modules[other].memory.size() &&
+                modules[other].base<std::uint64_t(modules[index].base)+modules[index].memory.size())
+                throw std::runtime_error("IOP conversion: overlapping bundle modules");
+    }
+    const auto program=ir::discover_bundle(compiled);
     std::uint32_t first=0x200000, initialized_end=0, memory_end=0;
     for (const auto& item : modules) {
         first=std::min(first,item.base);
@@ -33,8 +48,10 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
     }
     if (memory_end>0x1f0000) throw std::runtime_error("IOP conversion: bundle overlaps native invocation stack");
     elf::IopModule module{first,modules.front().entry,Bytes(initialized_end-first),initialized_end-first,{}};
-    for (const auto& item : modules)
+    for (std::size_t index=0;index<modules.size();++index) if (!inputs[index].native_romdrv) {
+        const auto& item=modules[index];
         std::copy_n(item.memory.begin(),item.initialized_size,module.memory.begin()+item.base-first);
+    }
     std::ostringstream code, llvm;
     detail::llvm(llvm,program);
     code<<"#include <nt/iop_native.hpp>\nusing namespace nt::iop;\n";
@@ -43,16 +60,19 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
         <<module.initialized_size<<"U,"<<memory_end-first<<"U,"
         <<(module.info ? module.info->global_pointer : 0)<<"U}; }\n";
     code<<"#include <nt/iop_native_libraries.hpp>\nstd::vector<NativeLibrarySpec> nt_iop_generated_libraries() { return {\n";
-    for (const auto& item : modules) for (const auto& library : elf::iop_exports(item)) {
+    for (const auto& item : compiled) for (const auto& library : elf::iop_exports(item)) {
         code<<"{"<<library.address<<"U,"<<library.version<<"U,"<<std::quoted(library.name)<<",{";
         for (const auto target : library.functions) code<<target<<"U,";
         code<<"}},\n";
     }
     code<<"}; }\n";
     code<<"std::vector<NativeModule> nt_iop_generated_entries() { return {\n";
-    for (const auto& item : modules)
+    for (std::size_t index=0;index<modules.size();++index) {
+        const auto& item=modules[index];
         code<<"{"<<item.base<<"U,"<<item.entry<<"U,"<<item.initialized_size<<"U,"<<item.memory.size()<<"U,"
-            <<(item.info ? item.info->global_pointer : 0)<<"U},\n";
+            <<(item.info ? item.info->global_pointer : 0)<<"U,NativeModuleKind::"
+            <<(inputs[index].native_romdrv ? "archive" : "compiled")<<"},\n";
+    }
     code<<"}; }\n";
     code<<"std::vector<NativeImportSpec> nt_iop_generated_imports() { return {\n";
     for (const auto& import : program.library_imports)
@@ -73,7 +93,7 @@ target_compile_features(iop-native PRIVATE cxx_std_20)
 target_include_directories(iop-native PRIVATE "${ANYPS2_ROOT}/libraries/iop/include"
   "${ANYPS2_ROOT}/libraries/disc/include" "${ANYPS2_ROOT}/libraries/binary/include")
 target_sources(iop-native PRIVATE "${ANYPS2_ROOT}/libraries/disc/src/disc_files.cpp"
-  "${ANYPS2_ROOT}/libraries/disc/src/iso9660.cpp" "${ANYPS2_ROOT}/libraries/binary/src/reader.cpp")
+  "${ANYPS2_ROOT}/libraries/disc/src/iso9660.cpp" "${ANYPS2_ROOT}/libraries/disc/src/reboot_image.cpp" "${ANYPS2_ROOT}/libraries/binary/src/reader.cpp")
 # Only native data services: no instruction interpreter, decoder, JIT or devices.
 add_custom_command(TARGET iop-native POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
   "${CMAKE_CURRENT_SOURCE_DIR}/module.data" "$<TARGET_FILE_DIR:iop-native>/module.data")
@@ -93,7 +113,11 @@ target_compile_definitions(iop-native PRIVATE ANYPS2_IOP_LLVM=1)
     save(output/"CMakeLists.txt",cmake);
     std::ostringstream layout;
     layout<<"AnyPS2 explicit module startup order (base, entry, memory size)\n";
-    for (const auto& item : modules) layout<<hex32(item.base)<<' '<<hex32(item.entry)<<' '<<hex32(static_cast<std::uint32_t>(item.memory.size()))<<'\n';
+    for (std::size_t index=0;index<modules.size();++index) {
+        const auto& item=modules[index];
+        layout<<hex32(item.base)<<' '<<hex32(item.entry)<<' '<<hex32(static_cast<std::uint32_t>(item.memory.size()))
+              <<(inputs[index].native_romdrv ? " native-ROMDRV-archive" : " LLVM")<<'\n';
+    }
     save(output/"modules.txt",layout.str());
     std::ostringstream diagnostics;
     for (const auto pc : program.guarded_callback_sites)

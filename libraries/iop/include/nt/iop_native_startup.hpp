@@ -18,7 +18,8 @@ public:
             if (entry.base<image.base || entry.base-image.base>image.memory_size ||
                 entry.memory_size>image.memory_size-(entry.base-image.base) || entry.initialized_size>entry.memory_size ||
                 entry.entry<entry.base || entry.entry-entry.base>=entry.initialized_size ||
-                entry.entry%4 || !nt_iop_native_instruction(entry.entry))
+                entry.entry%4 || (entry.kind!=NativeModuleKind::compiled && entry.kind!=NativeModuleKind::archive) ||
+                (entry.kind==NativeModuleKind::compiled && !nt_iop_native_instruction(entry.entry)))
                 throw std::invalid_argument("Invalid or uncompiled native startup entry");
         }
         returned_.reserve(entries_.size());
@@ -35,6 +36,11 @@ public:
         while (budget && !finished()) {
             const auto before=executed();
             if (returned_.size()<entries_.size()) {
+                if (entries_[returned_.size()].kind==NativeModuleKind::archive) {
+                    if (!services_.archives.initialize()) return {NativeStop::import_request,entries_[returned_.size()].entry};
+                    returned_.push_back({0,0});
+                    continue;
+                }
                 if (!active_) {
                     const auto& entry=entries_[returned_.size()];
                     Cpu cpu; cpu.pc=entry.entry; cpu.registers[28]=entry.global_pointer;

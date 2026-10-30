@@ -52,6 +52,12 @@ private:
             // Module entry execution does not require a completed EE handshake.
             // Its real services retain all initialization and callback state.
             self.result_=self.startup_->advance(1000000);
+            if (self.startup_->finished()) {
+                const auto initialized=self.services_->initialize_commands();
+                if (initialized.status==nt::iop::NativeServiceStatus::returned)
+                    self.result_=self.services_->threads.run(nt::iop::run_llvm,self.ram_,1000000,*self.services_);
+                else self.result_={nt::iop::NativeStop::import_request,0,0,0x70005};
+            }
         }
         return {nt::ee::Stop::unsupported_system};
     }

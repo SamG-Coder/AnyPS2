@@ -18,13 +18,19 @@ int main(int argc,char** argv) {
         if (argc>=5 && std::string_view(argv[1])=="--bundle" && (argc-3)%2==0) {
             output=argv[2];
             std::vector<nt::iop_codegen::ModuleSource> inputs;
-            for (int at=3;at<argc;at+=2) inputs.push_back({argv[at+1],parse_base(argv[at])});
+            for (int at=3;at<argc;at+=2) {
+                std::string_view base=argv[at];
+                const bool native=base.starts_with("romdrv@");
+                if (native) base.remove_prefix(7);
+                inputs.push_back({argv[at+1],parse_base(base),native});
+            }
             nt::iop_codegen::project_bundle(inputs,output);
         } else if (argc==4 && std::string_view(argv[1])!="--bundle") {
             output=argv[2];
             nt::iop_codegen::project(argv[1],output,parse_base(argv[3]));
         } else throw std::runtime_error("Usage: ps2-iop-recompile <module.irx> <new-output-directory> <base-hex>\n"
-            "   or: ps2-iop-recompile --bundle <new-output-directory> <base-hex> <module.irx> [<base-hex> <module.irx> ...]");
+            "   or: ps2-iop-recompile --bundle <new-output-directory> <base-hex> <module.irx> [<base-hex> <module.irx> ...]\n"
+            "Prefix a bundle base with romdrv@ to explicitly replace a compatible ROMDRV 2.x module with native archive services.");
         std::cout<<"Generated IOP LLVM project: "<<output.string()
             <<"\nConfigure with CMake and -DANYPS2_ROOT=<source directory>, then build iop-native.\n";
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }

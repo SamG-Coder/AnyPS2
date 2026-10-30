@@ -8,7 +8,8 @@ namespace nt::iop {
 enum class NativeStop : std::uint32_t { budget=0, unmapped_code=1, address_fault=2, branch_in_delay=3, code_write=4, guest_break=5, service_request=6, overflow=8, import_request=9, thread_yield=10, thread_wait=11 };
 struct NativeResult { NativeStop reason; std::uint32_t pc, address=0, trap_code=0; };
 using NativeEntry=NativeResult (*)(Cpu&,std::span<std::uint8_t>,std::uint64_t);
-struct NativeModule { std::uint32_t base, entry, initialized_size, memory_size, global_pointer; };
+enum class NativeModuleKind { compiled, archive };
+struct NativeModule { std::uint32_t base, entry, initialized_size, memory_size, global_pointer; NativeModuleKind kind=NativeModuleKind::compiled; };
 // These are data-memory helpers only. Generated programs have no code fetch,
 // instruction decoder, device interpreter or fallback execution entry point.
 inline std::uint32_t load_native_word(std::span<const std::uint8_t> ram,std::uint32_t offset) {

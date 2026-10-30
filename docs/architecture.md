@@ -1907,3 +1907,13 @@ the bundle implements the requested reset image, acknowledge reset, or publish
 BOOTEND on behalf of missing services. Completing startup entries alone does not
 establish an operational reset session. The normal path remains unchanged when
 the probe option is absent; generated output still undergoes dependency auditing.
+
+Bundle conversion accepts `romdrv@<base>` in place of a relocation base to
+explicitly select the native read-only archive service for a ROMDRV 2.x module.
+The converter validates its single six-entry export ABI, excludes its executable
+content and exports from LLVM discovery, and records a native initialization
+entry in `modules.txt`. Other modules retain their compiled startup entries and
+ordering. Initialization activates the archive service with no firmware mounts;
+ROMDRV imports 4/5 mount validated caller-supplied disc archives and unmount them.
+Unreplaced ROMDRV exports retain compiled ownership. Other export queries and
+unsupported ABI variants are not silently supplied by the native replacement.

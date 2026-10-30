@@ -624,6 +624,12 @@ int main(int argc,char** argv) {
         }
         nt::elf::IopModule factories{0xb000,0xb000,nt::Bytes(0x600),0x600,{}};
         const auto factory_word=[&](unsigned pc,std::uint32_t word) { fixture::put32(factories.memory,pc-factories.base,word); };
+        factory_word(0xb4c0,0x41e00000); factory_word(0xb4c8,0x201);
+        constexpr char archive_library[]="romdrv";
+        std::copy(std::begin(archive_library),std::end(archive_library),factories.memory.begin()+0x4cc);
+        factory_word(0xb4d4,0x03e00008); factory_word(0xb4d8,0x24000004);
+        factory_word(0xb4dc,0x03e00008); factory_word(0xb4e0,0x24000005);
+        bundle_roots.insert(bundle_roots.end(),{0xb4d4,0xb4dc});
         constexpr std::uint32_t factory_caller[]{0x03e08021,0x0c002c10,0,0x0200f821,0x03e00008,0};
         for (unsigned i=0;i<std::size(factory_caller);++i) factory_word(0xb000+i*4,factory_caller[i]);
         constexpr std::uint32_t factory_selector[]{0x2c820003,0x1040000a,0,0x00041080,0x3c010001,
@@ -792,6 +798,13 @@ int main(int argc,char** argv) {
             put(468,0x03e00008); put(472,0x24000006);
             put(512,0x24820001); put(516,0x03e00008);
             nt::write_file(argv[2],irx);
+            auto archive_irx=irx;
+            std::fill(archive_irx.begin()+128,archive_irx.end(),0);
+            fixture::put32(archive_irx,128,0xfc000000); // Must not execute a replaced system-module entry.
+            fixture::put32(archive_irx,384,0x41c00000); fixture::put32(archive_irx,392,0x201);
+            std::copy(std::begin(archive_library),std::end(archive_library),archive_irx.begin()+396);
+            for (unsigned i=0;i<6;++i) fixture::put32(archive_irx,404+i*4,0x7000);
+            nt::write_file(std::string(argv[2])+".romdrv.irx",archive_irx);
             // A separate client starts at 0x3000 and calls the first module's export.
             auto client_irx=nt::Bytes(256);
             std::copy_n(irx.begin(),128,client_irx.begin());

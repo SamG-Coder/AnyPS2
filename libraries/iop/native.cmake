@@ -14,6 +14,7 @@ function(anyps2_bind_iop target)
             -Werror -Wno-override-module -O2 -c "${ANYPS2_IOP_PROJECT}/generated.ll" -o "${object}"
         DEPENDS "${ANYPS2_IOP_PROJECT}/generated.ll" VERBATIM)
     target_sources(${target} PRIVATE "${object}" "${ANYPS2_IOP_PROJECT}/module_metadata.cpp")
+    target_sources(${target} PRIVATE "${ANYPS2_ROOT}/libraries/disc/src/reboot_image.cpp")
     target_include_directories(${target} PRIVATE "${ANYPS2_ROOT}/libraries/iop/include")
     target_compile_definitions(${target} PRIVATE ANYPS2_NATIVE_IOP=1)
 endfunction()

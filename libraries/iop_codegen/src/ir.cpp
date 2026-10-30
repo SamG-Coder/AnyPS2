@@ -10,6 +10,8 @@
 namespace nt::iop_codegen::ir {
 namespace {
 std::optional<Operation> native_operation(const elf::IopImport& import) {
+    if (import.library=="romdrv" && (import.version>>8)==2 && (import.ordinal==4 || import.ordinal==5))
+        return Operation::native_import;
     // Binding identifies the host ABI, not successful implementation. Module
     // lifecycle operations remain explicit runtime stops without a provider.
     if (import.library=="modload" && (import.version>>8)==1 && import.ordinal>=6 && import.ordinal<=23)
@@ -148,6 +150,9 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
     std::ostringstream unresolved;
     for (const auto& import : elf::iop_imports(module)) {
         auto operation=native_operation(import);
+        if (import.library=="romdrv" && std::any_of(libraries.begin(),libraries.end(),[&](const auto& library) {
+                return library.name==import.library && (library.version>>8)==(import.version>>8);
+            })) operation.reset(); // An unreplaced module retains its compiled export ownership.
         const bool host=operation.has_value();
         if (!host) for (const auto& library : libraries)
             if (library.name==import.library && (library.version>>8)==(import.version>>8) && import.ordinal<library.functions.size()) {
@@ -160,7 +165,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         }
         Instruction call; call.address=module.base+import.offset;
         call.operation=*operation; call.flow=Flow::native_return;
-        call.immediate=import.ordinal|(!host ? 0x20000U : import.library=="loadcore" ? 0x10000U : import.library=="ioman" ? 0x30000U : import.library=="intrman" ? 0x40000U : import.library=="thevent" ? 0x50000U : import.library=="thbase" ? 0x60000U : import.library=="sifman" ? 0x70000U : import.library=="stdio" ? 0x80000U : import.library=="sifcmd" ? 0x90000U : import.library=="thsemap" ? 0xa0000U : import.library=="thmsgbx" ? 0xb0000U : import.library=="sysclib" ? 0xc0000U : import.library=="heaplib" ? 0xd0000U : import.library=="modload" ? 0xe0000U : 0U);
+        call.immediate=import.ordinal|(!host ? 0x20000U : import.library=="loadcore" ? 0x10000U : import.library=="ioman" ? 0x30000U : import.library=="intrman" ? 0x40000U : import.library=="thevent" ? 0x50000U : import.library=="thbase" ? 0x60000U : import.library=="sifman" ? 0x70000U : import.library=="stdio" ? 0x80000U : import.library=="sifcmd" ? 0x90000U : import.library=="thsemap" ? 0xa0000U : import.library=="thmsgbx" ? 0xb0000U : import.library=="sysclib" ? 0xc0000U : import.library=="heaplib" ? 0xd0000U : import.library=="modload" ? 0xe0000U : import.library=="romdrv" ? 0xf0000U : 0U);
         native_imports.emplace(call.address,call);
         if (!host) {
             auto bound=import; bound.offset+=module.base; bound.table_offset+=module.base;

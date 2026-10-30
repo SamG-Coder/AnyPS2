@@ -16,8 +16,9 @@ public:
     }
     NativeArchiveServices(const NativeArchiveServices&)=delete;
     NativeArchiveServices& operator=(const NativeArchiveServices&)=delete;
+    bool initialize() { if (active_) return false; active_=true; return true; }
     bool mount(unsigned unit,Bytes image) {
-        if (unit>=images_.size() || images_[unit]) return false;
+        if (!active_ || unit>=images_.size() || images_[unit]) return false;
         auto files=disc::parse_reboot_image(image);
         images_[unit]=Image{std::move(image),std::move(files)};
         return true;
@@ -28,6 +29,23 @@ public:
         images_[unit].reset(); return true;
     }
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
+        if (!active_) return {};
+        if (request.kind==NativeServiceKind::romdrv) {
+            if (request.interrupt_context) return {NativeServiceStatus::unavailable};
+            const auto unit=request.arguments[0];
+            if (request.selector==5) return returned(unmount(unit) ? 0 : -161);
+            if (request.selector!=4) return {NativeServiceStatus::unavailable};
+            if (unit>=images_.size() || images_[unit]) return returned(-160);
+            const auto start=ram_offset(request.arguments[1],4,ram.size());
+            if (!start || !*start) return returned(-162);
+            try {
+                const auto bytes=std::span<const std::uint8_t>(ram).subspan(*start,std::min(ram.size()-*start,std::size_t(0x200000-*start)));
+                const auto files=disc::parse_reboot_image(bytes);
+                std::size_t size=0;
+                for (const auto& file:files) size=std::max(size,file.offset+file.size);
+                return returned(mount(unit,Bytes(bytes.begin(),bytes.begin()+size)) ? 0 : -160);
+            } catch (const std::runtime_error&) { return returned(-162); }
+        }
         if (request.kind!=NativeServiceKind::ioman) return {};
         const auto& a=request.arguments;
         if (request.selector==4) return open(a[0],a[1],ram);
@@ -98,5 +116,6 @@ private:
     NativeFileDescriptors& descriptors_;
     std::array<std::optional<Image>,4> images_;
     std::array<std::optional<Handle>,8> handles_;
+    bool active_=false;
 };
 }

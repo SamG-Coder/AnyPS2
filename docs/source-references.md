@@ -381,6 +381,10 @@ parser and shared native descriptor namespace. Original C++ owns the file data,
 cursors and lifetimes; no firmware image is mapped. Unsigned seek offsets clamp
 to EOF as specified by that interface; negative read lengths are rejected with
 EINVAL rather than relying on signed overflow or out-of-range copying.
+Native ROMDRV replacement selection uses the pinned `romdrv.h` 2.x import ABI
+and `exports.tab` six-entry layout. Mount/unmount use its documented error
+numbers; startup activates an empty native service rather than probing firmware.
+The explicit conversion choice is recorded in the local module manifest.
 
 The thread-yield syscall number, saved-frame layout and callback contract use
 the pinned PS2SDK intrman and threadman public interfaces (intrman.c, thcommon.c
