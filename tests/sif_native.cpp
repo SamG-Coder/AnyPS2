@@ -2,6 +2,7 @@
 #include <nt/ee_iop_commands.hpp>
 #include <nt/ee_platform.hpp>
 #include <nt/ee_services.hpp>
+#include <nt/ee_sif_command_peer.hpp>
 #include <nt/iop_native_sif_commands.hpp>
 #include <nt/iop_llvm.hpp>
 #include <nt/iop_native_context.hpp>
@@ -21,6 +22,58 @@ int main() {
     try {
         using namespace nt::iop;
         using nt::ee::Stop;
+        {
+            std::vector<std::uint8_t> reset_ram(0x10000);
+            nt::ee::Memory reset_memory{reset_ram.data(),reset_ram.size()};
+            nt::ee::NativePlatform reset_platform; reset_platform.attach(reset_memory);
+            struct Owner {
+                unsigned calls=0,commands=0;
+                bool ready=false;
+                bool fail=false;
+                std::string arguments;
+                std::uint32_t mode=0;
+                static nt::ee::IoRead reset(void* opaque,const nt::ee::NativeSifResetRequest& request) {
+                    auto& self=*static_cast<Owner*>(opaque); ++self.calls;
+                    self.arguments=request.arguments; self.mode=request.mode;
+                    if (self.fail) return {Stop::unsupported_system};
+                    return {Stop::budget,self.ready ? 1U : 0U};
+                }
+                static nt::ee::IoRead receive(void* opaque,std::span<const nt::ee::NativeSifPacket>) {
+                    ++static_cast<Owner*>(opaque)->commands; return {Stop::budget,1};
+                }
+            } owner;
+            nt::ee::NativeSifCommandPeer peer(reset_platform.sif_link,reset_memory,nt_ee_generated_code_overlap,0x1000);
+            require(peer.reset_owner({&owner,Owner::reset,{&owner,Owner::receive}}));
+            require(peer.connect(reset_platform.sif_outbound));
+            const auto submit=[&](unsigned count) {
+                store_native_word(reset_ram,0x3000,0x4000); store_native_word(reset_ram,0x3004,0x1000);
+                store_native_word(reset_ram,0x3008,32); store_native_word(reset_ram,0x300c,0x44);
+                store_native_word(reset_ram,0x4000,32); store_native_word(reset_ram,0x4008,0x80000003);
+                store_native_word(reset_ram,0x4010,count); store_native_word(reset_ram,0x4014,7);
+                reset_ram[0x4018]='x';
+                return reset_platform.sif_outbound.submit(reset_memory,0x3000,1);
+            };
+            require(submit(1).value==1);
+            require(reset_platform.sif_outbound.pump(reset_memory)==Stop::budget && owner.calls==1 &&
+                    owner.arguments=="x" && owner.mode==7 && reset_platform.sif_outbound.status(1)==1);
+            require(!reset_platform.completions.status());
+            owner.fail=true;
+            require(reset_platform.sif_outbound.pump(reset_memory)==Stop::unsupported_system && owner.calls==2 &&
+                    reset_platform.sif_outbound.status(1)==1 && !reset_platform.completions.status());
+            owner.fail=false;
+            owner.ready=true;
+            require(reset_platform.sif_outbound.pump(reset_memory)==Stop::budget && owner.calls==3 &&
+                    reset_platform.sif_outbound.status(1)==0xffffffff && reset_platform.completions.status()==0x40);
+            require(reset_platform.sif_link.service(0x7a,4,0).value==0x30000); // No fabricated BOOTEND.
+            require(submit(1).value==2 && reset_platform.sif_outbound.pump(reset_memory)==Stop::budget &&
+                    owner.calls==3 && owner.commands==1); // Old dispatcher is no longer active.
+            nt::ee::NativeSifOutbound malformed_outbound;
+            nt::ee::NativeSifCommandPeer malformed(reset_platform.sif_link,reset_memory,nt_ee_generated_code_overlap,0x1000);
+            require(malformed.reset_owner({&owner,Owner::reset,{&owner,Owner::receive}}) && malformed.connect(malformed_outbound));
+            store_native_word(reset_ram,0x4010,9); // Only eight argument bytes fit.
+            require(malformed_outbound.submit(reset_memory,0x3000,1).value==1 &&
+                    malformed_outbound.pump(reset_memory)==Stop::invalid_state && owner.calls==3);
+        }
         std::vector<std::uint8_t> ee_ram(0x10000,0xcc),iop_ram(0x10000,0);
         nt::ee::Memory memory{ee_ram.data(),ee_ram.size()};
         nt::ee::NativePlatform platform; platform.attach(memory);

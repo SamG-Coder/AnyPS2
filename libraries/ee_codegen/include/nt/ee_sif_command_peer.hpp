@@ -2,11 +2,25 @@
 #include <nt/ee_sif_link.hpp>
 #include <nt/ee_sif_outbound.hpp>
 #include <array>
+#include <algorithm>
+#include <string_view>
 #include <optional>
 #include <nt/sif_rpc_reply.hpp>
 #include <nt/ee_rpc_service.hpp>
 
 namespace nt::ee {
+struct NativeSifResetRequest {
+    std::uint32_t mode;
+    std::string_view arguments;
+};
+// The owner prepares a fresh compiled session before accepting reset. A zero
+// result retains the immutable request for retry; failure leaves the old peer
+// intact. Accepted requests switch subsequent traffic to the owner's sink.
+struct NativeSifResetOwner {
+    void* context=nullptr;
+    IoRead (*reset)(void*,const NativeSifResetRequest&)=nullptr;
+    NativeSifSink commands;
+};
 // Original native bootstrap command service. Its address is a configured message
 // port in the peer namespace, not a firmware address or executable module.
 class NativeSifCommandPeer {
@@ -15,6 +29,10 @@ public:
         : link_(link),memory_(memory),protection_(protection),port_(port),receiver_(receiver) {}
     NativeSifCommandPeer(const NativeSifCommandPeer&)=delete;
     NativeSifCommandPeer& operator=(const NativeSifCommandPeer&)=delete;
+    bool reset_owner(NativeSifResetOwner owner) {
+        if (connected_ || reset_owner_.reset || !owner.reset || !owner.commands.accept) return false;
+        reset_owner_=owner; return true;
+    }
     bool connect(NativeSifOutbound& outbound) {
         if (connected_ || !protection_ || !port_ || port_%16 || port_>0x200000-112) return false;
         if (!outbound.connect({this,accept})) return false;
@@ -49,6 +67,7 @@ private:
         return {delivered,delivered==Stop::budget ? 1U : 0U};
     }
     IoRead receive(std::span<const NativeSifPacket> packets) {
+        if (handed_off_) return reset_owner_.commands.accept(reset_owner_.commands.context,packets);
         if (!connected_ || packets.empty() || packets.size()>2) return {Stop::unsupported_system};
         const auto& packet=packets.back();
         if (packet.destination!=port_ || packet.bytes.size()<16) return {Stop::invalid_state};
@@ -83,6 +102,23 @@ private:
             return reply(response);
         }
         if ((header>>8) || packets.size()!=1) return {Stop::invalid_state};
+        if (command==0x80000003) {
+            if (!reset_owner_.reset) return {Stop::unsupported_system};
+            if (option || length<24) return {Stop::invalid_state};
+            const auto count=word(packet.bytes,16);
+            if (count>79 || count>length-24) return {Stop::invalid_state};
+            const auto bytes=std::span(packet.bytes).subspan(24,count);
+            if (std::find(bytes.begin(),bytes.end(),0)!=bytes.end()) return {Stop::invalid_state};
+            const NativeSifResetRequest request{word(packet.bytes,20),
+                {reinterpret_cast<const char*>(bytes.data()),bytes.size()}};
+            const auto accepted=reset_owner_.reset(reset_owner_.context,request);
+            if (accepted.status!=Stop::budget || !accepted.value) return accepted;
+            if (accepted.value!=1) return {Stop::invalid_state};
+            handed_off_=true;
+            rpc_ready_=false; receive_address_=0; registers_.fill(0); unavailable_server_.reset();
+            // New link addresses/flags are exclusively owned by the session.
+            return accepted;
+        }
         if (command==0x80000002 && option==1) {
             // Publishing register zero acknowledges the available RPC dispatcher,
             // not any particular RPC server or successful game module startup.
@@ -131,5 +167,7 @@ private:
     std::vector<NativeRpcService*> services_;
     bool connected_=false,rpc_ready_=false;
     std::optional<std::uint32_t> unavailable_server_;
+    NativeSifResetOwner reset_owner_;
+    bool handed_off_=false;
 };
 }
