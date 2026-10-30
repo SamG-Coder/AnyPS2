@@ -139,6 +139,9 @@ int main(int argc,char** argv) {
             platform.packet_setup.uncompiled_packet=VuCapture::observe_packet;
         }
         platform.graphics.context=&gpu; platform.graphics.synchronize=NativeGpu::synchronize;
+        platform.graphics.reset_drawing=[](void* context) {
+            static_cast<NativeGpu*>(context)->drawing.reset(); return nt::ee::Stop::budget;
+        };
         nt::ee::NativeSifCommandPeer command_peer(platform.sif_link,memory,nt_ee_generated_code_overlap,0x1000,&platform.sif_receive);
         std::unique_ptr<nt::ee::NativeFileRpc> files;
         if (!disc.empty()) {

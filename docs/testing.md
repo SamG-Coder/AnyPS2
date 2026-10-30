@@ -2159,3 +2159,88 @@ image packets, configures UV sampling through drawing packets, and verifies the
 Vulkan destination pixels. Perspective and palette requests must reject without
 pixel changes. Existing Vulkan sampler and diagnostic graphics tests cover the
 shared texture planner after extraction; the connected VU graphics test also runs.
+
+The indexed-sprite milestone extends `vulkan-rendering` with original image and
+palette uploads followed by PSMT4 sampling. It checks bank selection, conditional
+snapshot retention, reload after changed source data, rejected-batch rollback,
+and unsupported palette-format rejection. The shared planner is also exercised
+by `hardware-registers` (both palette layouts and remembered bases); the compiled
+VU integration remains covered by `vu-vulkan-rendering`.
+
+The offline metric-dependency milestone is covered by the Release `analysis`
+gate: synthetic ELF instructions propagate a counter value through arithmetic
+into a store, identify a known destination, report a dependent load address,
+and stop at return/delay-slot or unknown-operation boundaries. Tests also cover
+the analysis budget and malformed segment extents. These are analysis tests,
+not evidence that native performance measurements or game startup are complete.
+
+Metric memory-reference analysis extends the same `analysis` gate with constants
+established before measurement, overlapping byte consumers of stored words,
+constant invalidation after returns and at direct targets, and malformed later
+segments. Candidate-address reporting remains separate from proof of dead data.
+
+Pointer-handoff coverage uses a synthetic shared structure with a counter field:
+a call receives the base through its delay slot, a later call must not inherit
+stale constants, and separate paths store and return the base pointer. These
+cases run together in the existing `analysis` milestone gate.
+
+The PSMT4 upload milestone runs `vulkan-rendering`, `vu-vulkan-rendering` and
+`hardware-registers` in Release. Original one-index uploads test independently
+specified block/page addresses, neighbouring-nibble preservation, and Vulkan
+palette sampling of each uploaded point. A 33-index upload verifies continuation,
+odd final-nibble padding, rejected-batch rollback and successful retry.
+
+The native pixel-pipeline milestone runs the three graphics integration gates in
+Release. Synthetic packet batches verify alpha comparisons and failure actions,
+destination-alpha selection, source and fixed-alpha blending, negative rounding,
+clamp/wrap, per-pixel blend selection and rejection without published pixels.
+Existing texture and compiled-VU tests exercise the expanded Vulkan draw ABI.
+
+The drawing-reset milestone uses `ee-llvm-execution` for callback rejection and
+retry without premature instruction retirement. `vu-vulkan-rendering` verifies
+retained image storage, rejection of stale upload/draw requests, and rendering
+from compiled VU code after reconfiguration. `vulkan-rendering` additionally
+checks 24-bit destination-alpha rules and atomic rejection of aliased blending.
+Generated-project integration verifies the production lifecycle wiring builds.
+
+The scalar/V2 conversion milestone runs `vu-llvm-execution` and
+`ee-llvm-execution` in Release. Compiled VU loads verify every supported shape and
+component width with signed/unsigned boundaries, repeated lanes, odd packed
+transport padding, wraparound and encoded-zero count. Truncated V2 and unsupported
+V3/masked/packed shapes must leave state unchanged. Existing V4 coverage remains
+in the same test batch.
+
+The masked-upload milestone runs the EE/VU native execution gates and connected
+VU-to-Vulkan integration. Compiled loads verify all four lane selections, cycle
+restart, column-group saturation, packed-colour selection and rollback of data
+and configuration after truncated input. Older unsupported-command fixtures use
+an invalid format rather than a newly supported masked command.
+
+The skipped-cycle/fixed-row milestone runs the EE and VU LLVM execution gates.
+Compiled VU loads check destination wrap with preserved skipped slots, unsigned
+row-add overflow, unchanged row configuration and masked replacement semantics.
+An unsupported accumulating-row submission must roll back both data and cycle
+configuration. Existing scalar, V2, V4 and masked cases run in the same batch.
+
+The mutable-row milestone runs the EE/VU LLVM execution gates. A synthetic batch
+combines accumulating and replacement modes across multiple uploads before a
+compiled VU load, verifies row readback and masked non-updating lanes, and rejects
+a missing compiled entry without publishing either rows or vector data. Existing
+format, spacing, mask and padding cases run against the shared write planner.
+
+The masked filling-cycle milestone runs EE/VU LLVM execution tests. A compiled
+load verifies row and column fills, protected lanes, accumulation, wrapped output
+and a following MARK command after the reduced payload. Encoded-zero output count
+covers 256 outputs from 64 scalar inputs. Truncated payload and input-selected
+fill lanes must roll back data, mask and row configuration.
+
+The masked V3 milestone runs the EE/VU LLVM execution gates. Compiled loads verify
+all three component widths, signed/unsigned boundaries, nonzero padding and row
+accumulation with an explicit fourth-lane replacement. Tests reject unmasked W,
+a later input-selected W mask group, and truncated V3 payload without state changes.
+
+`ee-llvm-project` now verifies post-link map/audit artifacts for actual generated
+executables before running them. A negative case injects diagnostic-library link
+evidence and a stale success report, then requires the audit to reject and remove
+the report. This supplements the existing generated build-configuration check;
+it does not substitute for executing generated code or source/dependency review.

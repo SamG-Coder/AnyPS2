@@ -204,6 +204,12 @@ void VulkanRenderer::sprite(std::span<std::uint32_t> memory,const Sprite& draw,s
     if (memory.size_bytes()!=memory_bytes || draw.right>2048 || draw.bottom>2048 || draw.left>draw.right || draw.top>draw.bottom || !draw.pitch || draw.pitch>63 || draw.base>16383)
         throw std::runtime_error("Invalid Vulkan sprite bounds or GS memory");
     if (draw.left==draw.right || draw.top==draw.bottom) return;
+    if ((draw.flags&256) || (draw.test&0x4000)) {
+        if (draw.right>draw.pitch*64 || ((draw.bottom-1)/32-draw.top/32)*draw.pitch+(draw.right-1)/64-draw.left/64>=512)
+            throw std::runtime_error("Destination-dependent sprite requires non-aliased framebuffer");
+        if (draw.flags&256) for (unsigned shift=0;shift<8;shift+=2)
+            if (((draw.blend>>shift)&3)>2) throw std::runtime_error("Unsupported Vulkan blend selector");
+    }
     if ((draw.flags&1) && (!draw.dx || !draw.dy || !draw.texture_pitch || !draw.texture_width ||
         !draw.texture_height || draw.right>draw.pitch*64 || ((draw.bottom-1)/32-draw.top/32)*draw.pitch+(draw.right-1)/64-draw.left/64>=512))
         throw std::runtime_error("Unsupported textured sprite dimensions or aliased framebuffer");

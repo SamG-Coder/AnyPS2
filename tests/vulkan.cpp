@@ -96,10 +96,135 @@ int main() {
         try { native.submit(gpu,std::array{perspective}); }
         catch (const std::invalid_argument&) { rejected=true; }
         if (!rejected || native.pixels()!=before_bad_texture) throw std::runtime_error("Unsupported perspective sprite changed pixels");
-        auto indexed=textured_packet; indexed[6][0]|=20U<<20; rejected=false;
-        try { native.submit(gpu,std::array{indexed}); }
+        // Original index data and a 16-colour palette, uploaded in one batch.
+        // A one-pixel PSMT4 sprite selects the low nibble (4) of the first word.
+        auto palette_setup=transfer_setup(0,8,2); palette_setup[1][1]|=64;
+        nt::graphics::Packet palette_image{{0x8004,0x08000000,0,0}};
+        for (unsigned row=0;row<4;++row)
+            palette_image.push_back({0x80100000+row*4,0x80100001+row*4,0x80100002+row*4,0x80100003+row*4});
+        auto indexed=textured_packet;
+        const auto indexed_description=texture_description|(20ULL<<20)|(64ULL<<37)|(3ULL<<56);
+        const auto set_palette=[&](unsigned mode) {
+            const auto value=indexed_description|(std::uint64_t(mode)<<61);
+            indexed[6][0]=std::uint32_t(value); indexed[6][1]=std::uint32_t(value>>32);
+        };
+        indexed[9][0]=16U|(16U<<16); indexed[10][0]=16U|(16U<<16);
+        set_palette(2);
+        native.submit(gpu,std::array{setup32,rgba,palette_setup,palette_image,indexed});
+        if (native.pixels()[2048]!=0x80100004) throw std::runtime_error("Native indexed texture palette load failed");
+        for (std::size_t i=1;i<palette_image.size();++i) for (auto& lane:palette_image[i]) lane+=0x10000;
+        set_palette(4);
+        native.submit(gpu,std::array{palette_setup,palette_image,indexed});
+        if (native.pixels()[2048]!=0x80100004) throw std::runtime_error("Conditional palette load discarded its snapshot");
+        set_palette(1);
+        native.submit(gpu,std::array{indexed});
+        if (native.pixels()[2048]!=0x80110004) throw std::runtime_error("Native palette reload missed updated image data");
+        const auto palette_snapshot=native.pixels();
+        for (std::size_t i=1;i<palette_image.size();++i) for (auto& lane:palette_image[i]) lane+=0x10000;
+        rejected=false;
+        try { native.submit(gpu,std::array{palette_setup,palette_image,indexed,invalid}); }
         catch (const std::invalid_argument&) { rejected=true; }
-        if (!rejected || native.pixels()!=before_bad_texture) throw std::runtime_error("Unsupported native palette texture was accepted");
+        if (!rejected || native.pixels()!=palette_snapshot) throw std::runtime_error("Rejected palette batch published pixels");
+        set_palette(0);
+        native.submit(gpu,std::array{indexed});
+        if (native.pixels()[2048]!=0x80110004) throw std::runtime_error("Rejected palette batch published palette state");
+        auto bad_palette=indexed; bad_palette[6][1]|=(2U<<19)|(1U<<29); rejected=false;
+        try { native.submit(gpu,std::array{bad_palette}); }
+        catch (const std::invalid_argument&) { rejected=true; }
+        if (!rejected || native.pixels()!=palette_snapshot) throw std::runtime_error("Unsupported palette format changed pixels");
+        // Indexed uploads preserve neighbouring nibbles and feed the same GPU sampler.
+        auto upload_index=transfer_setup(20,1,1);
+        upload_index[1][1]|=4U<<16; // Odd pitch 5 maps to two 128-pixel pages.
+        struct IndexedPoint { unsigned x,y,nibble; };
+        const IndexedPoint points[]={{0,0,0},{1,0,8},{0,1,16},{0,2,65},{0,4,192},
+            {0,8,256},{32,0,1024},{0,16,512},{128,0,16384},{0,128,32768}};
+        for (const auto point:points) {
+            upload_index[2][1]=point.x|(point.y<<16);
+            const auto before=native.pixels();
+            const nt::graphics::Packet indices{{0x8001,0x08000000,0,0},{0xfffffff7,0xffffffff,0xffffffff,0xffffffff}};
+            native.submit(gpu,std::array{upload_index,indices});
+            const auto shift=(point.nibble%8)*4,address=point.nibble/8;
+            if (native.pixels()[address]!=((before[address]&~(15U<<shift))|(7U<<shift)))
+                throw std::runtime_error("Indexed upload changed adjacent nibbles or used wrong layout");
+            // Sample the uploaded point; the large destination avoids texture/palette storage.
+            auto sample=indexed;
+            sample[3][0]=(1U<<16)|16;
+            const auto description=(4ULL<<14)|(20ULL<<20)|(8ULL<<26)|(8ULL<<30)|
+                (1ULL<<34)|(1ULL<<35)|(64ULL<<37)|(3ULL<<56);
+            sample[6][0]=std::uint32_t(description); sample[6][1]=std::uint32_t(description>>32);
+            sample[7][0]=(point.x*16)|((point.y*16)<<16);
+            sample[9][0]=sample[7][0];
+            native.submit(gpu,std::array{sample});
+            if (native.pixels()[32768]!=0x80110007) throw std::runtime_error("Indexed upload did not reach Vulkan palette sampling");
+        }
+        auto split_index=transfer_setup(20,33,1);
+        const nt::graphics::Packet first_indices{{0x8001,0x08000000,0,0},{0x76543210,0xfedcba98,0x76543210,0xfedcba98}};
+        const nt::graphics::Packet last_index{{0x8001,0x08000000,0,0},{0xfffffffa,0xffffffff,0xffffffff,0xffffffff}};
+        native.submit(gpu,std::array{split_index,first_indices});
+        const auto split_snapshot=native.pixels(); rejected=false;
+        try { native.submit(gpu,std::array{last_index,invalid}); }
+        catch (const std::invalid_argument&) { rejected=true; }
+        if (!rejected || native.pixels()!=split_snapshot) throw std::runtime_error("Indexed continuation rollback failed");
+        native.submit(gpu,std::array{last_index}); // x=32 is nibble 1024, word 128.
+        if (native.pixels()[128]!=((split_snapshot[128]&~15U)|10U))
+            throw std::runtime_error("Indexed odd-length continuation consumed padding or lost final index");
+        const auto pixel_draw=[&](std::uint32_t color,unsigned attributes,unsigned test,
+            std::uint64_t alpha=0,bool clamp=true,bool per_pixel=false) {
+            auto draw=packet;
+            draw[2][0]=attributes; draw[5][0]=color;
+            draw.resize(draw.size()-2);
+            const auto put=[&](unsigned reg,std::uint64_t value) {
+                draw.push_back({std::uint32_t(value),std::uint32_t(value>>32),reg,0});
+            };
+            put(0x47,test); put(0x42,alpha); put(0x46,clamp); put(0x49,per_pixel);
+            put(5,0); put(5,32ULL|(32ULL<<16));
+            draw[0][0]=0x8000U|unsigned(draw.size()-1);
+            return draw;
+        };
+        const auto background=pixel_draw(0x80202020,6,0);
+        constexpr bool alpha_equal_pass[]{false,true,false,true,true,true,false,false};
+        for (unsigned mode=0;mode<8;++mode) {
+            native.submit(gpu,std::array{background,pixel_draw(0x40102030,6,1|(mode<<1)|(64<<4))});
+            if (native.pixels()[0]!=(alpha_equal_pass[mode] ? 0x40102030U : 0x80202020U))
+                throw std::runtime_error("Native alpha comparison differs");
+        }
+        for (unsigned failure=0;failure<4;++failure) {
+            native.submit(gpu,std::array{background,pixel_draw(0x40102030,6,1|(failure<<12))});
+            const unsigned expected=failure==1 ? 0x40102030 : failure==3 ? 0x80102030 : 0x80202020;
+            if (native.pixels()[0]!=expected) throw std::runtime_error("Native alpha failure action differs");
+        }
+        for (unsigned match=0;match<2;++match) {
+            native.submit(gpu,std::array{background,pixel_draw(0x40102030,6,0x4000|(match<<15))});
+            if (native.pixels()[0]!=(match ? 0x40102030U : 0x80202020U))
+                throw std::runtime_error("Native destination alpha test differs");
+        }
+        native.submit(gpu,std::array{background,pixel_draw(0x40808080,0x46,0,0x44)});
+        if (native.pixels()[0]!=0x40505050) throw std::runtime_error("Native source-alpha blend differs");
+        native.submit(gpu,std::array{background,pixel_draw(0x40808080,0x46,0,(64ULL<<32)|0x64)});
+        if (native.pixels()[0]!=0x40505050) throw std::runtime_error("Native fixed-alpha blend differs");
+        native.submit(gpu,std::array{pixel_draw(0x80010101,6,0),pixel_draw(0x40000000,0x46,0,0x44)});
+        if (native.pixels()[0]!=0x40000000) throw std::runtime_error("Negative blend rounding differs");
+        for (const bool clamp:{false,true}) {
+            native.submit(gpu,std::array{background,pixel_draw(0x80f0f0f0,0x46,0,(128ULL<<32)|0x68,clamp)});
+            if (native.pixels()[0]!=(clamp ? 0x80ffffffU : 0x80101010U))
+                throw std::runtime_error("Native blend clamp/wrap differs");
+        }
+        native.submit(gpu,std::array{background,pixel_draw(0x40808080,0x46,0,0x44,true,true)});
+        if (native.pixels()[0]!=0x40808080) throw std::runtime_error("Per-pixel blend selection differs");
+        const auto before_blend_failure=native.pixels(); rejected=false;
+        try { native.submit(gpu,std::array{background,pixel_draw(0,0x46,0,3)}); }
+        catch (const std::invalid_argument&) { rejected=true; }
+        if (!rejected || native.pixels()!=before_blend_failure) throw std::runtime_error("Invalid blend batch changed pixels");
+        auto frame24=pixel_draw(0x40808080,0x46,0x4000,0x54);
+        frame24[3][0]|=1U<<24;
+        native.submit(gpu,std::array{background,frame24});
+        if (native.pixels()[0]!=0x80808080) throw std::runtime_error("24-bit frame did not ignore DATE/use fixed destination alpha");
+        auto alias_draw=pixel_draw(0x40808080,0x46,0,0x44);
+        alias_draw[4][0]=127U<<16; alias_draw.back()[0]=2048U|(32U<<16);
+        const auto before_alias=native.pixels(); rejected=false;
+        try { native.submit(gpu,std::array{background,alias_draw}); }
+        catch (const std::runtime_error&) { rejected=true; }
+        if (!rejected || native.pixels()!=before_alias) throw std::runtime_error("Aliased destination blend was not atomic/rejected");
         std::vector<std::uint32_t> memory(1024*1024,0x12345678), expected=memory;
         // Independent block/column lookup, including page crossing and VRAM wrap.
         constexpr unsigned blocks[4][8]={{0,1,4,5,16,17,20,21},{2,3,6,7,18,19,22,23},

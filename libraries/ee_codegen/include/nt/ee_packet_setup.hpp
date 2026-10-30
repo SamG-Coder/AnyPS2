@@ -101,6 +101,7 @@ public:
         auto next=units_[channel];
         std::vector<NativeUploadView> uploads;
         std::vector<NativeVectorDataView> data;
+        std::vector<NativeVectorPlan> data_plans;
         std::vector<graphics::Packet> drawing;
         std::size_t drawing_bytes=0;
         bool launch=false;
@@ -160,18 +161,44 @@ public:
                 if (bytes.size()-offset<16) return Stop::invalid_state;
                 for (unsigned lane=0;lane<4;++lane) next.row_column[(command==0x31 ? 4 : 0)+lane]=word();
                 break;
+            case 0x60: case 0x61: case 0x62:
+            case 0x64: case 0x65: case 0x66:
+            case 0x68: case 0x69: case 0x6a:
+            case 0x70: case 0x71: case 0x72:
+            case 0x74: case 0x75: case 0x76:
+            case 0x78: case 0x79: case 0x7a:
+            case 0x7c: case 0x7d: case 0x7e: case 0x7f:
             case 0x6c: case 0x6d: case 0x6e: case 0x6f: {
-                // Unmasked V4 data, contiguous writes. Packed colour ignores MODE.
-                const auto format=static_cast<NativeVectorFormat>(command-0x6c);
-                if (!submit_compiled || !uploads.empty() || !drawing.empty() || (next.mode && format!=NativeVectorFormat::packed5551) ||
-                    (next.cycle&255U)!=((next.cycle>>8)&255U)) return Stop::unsupported_vector;
-                const auto count=(code>>16)&255U;
-                const auto size=(count ? count : 256U)*vector_data_stride(format);
+                // Typed vector data. V3 requires an explicit fourth-lane mask.
+                const auto format=static_cast<NativeVectorFormat>(command&3U);
+                const auto components=((command>>2)&3U)+1;
+                const auto raw_span=next.cycle&255U,raw_writes=(next.cycle>>8)&255U;
+                if (!submit_compiled || !uploads.empty() || !drawing.empty() ||
+                    (!raw_span && raw_writes) || (!raw_writes && raw_span)) return Stop::unsupported_vector;
+                const auto encoded_count=(code>>16)&255U,count=encoded_count ? encoded_count : 256U;
+                const auto span=raw_span ? raw_span : 256U,writes=raw_writes ? raw_writes : 256U;
+                const auto inputs=writes>span ? (count/writes)*span+std::min(count%writes,span) : count;
+                const auto size=inputs*vector_data_stride(format,components);
                 const auto padded=(size+3U)&~3U;
                 if (bytes.size()-offset<padded) return Stop::invalid_state;
                 const auto destination=((code&1023U)+((channel && (code&0x8000U)) ? next.tops : 0U))&
                     (channel ? 1023U : 255U);
-                data.push_back({destination,bytes.subspan(offset,size),format,(code&0x4000U)!=0});
+                data.push_back({destination,bytes.subspan(offset,size),format,(code&0x4000U)!=0,components});
+                auto& view=data.back();
+                view.destination_cycle=span;
+                view.writes_per_cycle=writes;
+                view.output_count=count;
+                view.mode=next.mode;
+                std::copy_n(next.row_column.begin(),4,view.rows.begin());
+                if (command&16U) {
+                    const auto cycle=(next.cycle>>8)&255U;
+                    data.back().mask=NativeVectorMask{next.mask,next.row_column,cycle ? cycle : 256U};
+                }
+                auto plan=plan_vector_data(channel ? 1024 : 256,view);
+                if (!plan) return Stop::unsupported_vector;
+                std::copy(plan->rows.begin(),plan->rows.end(),next.row_column.begin());
+                data_plans.push_back(std::move(*plan));
+                view.planned=data_plans.back().writes;
                 offset+=padded;
                 break;
             }

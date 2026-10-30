@@ -1470,7 +1470,7 @@ hardware machine, CPU interpreter or VU decoder is linked into this native path.
 
 The implemented rasterization is untextured solid sprites with supported clipping,
 frame masks and alpha-bit handling. Texture and image-upload support are described below. Other primitives,
-unsupported alpha/depth tests and window presentation remain unfinished. GPU tests
+unsupported depth tests and window presentation remain unfinished. GPU tests
 establish synthetic compiled-VU rendering, not a GT4 frame or timing equivalence.
 
 ## Native direct graphics submissions
@@ -1510,7 +1510,194 @@ Vulkan sampler, including its supported nearest/bilinear, modulation/decal and
 clamp modes. Texture setup is factored into a shared planner used by the existing
 diagnostic drawing path; native packets do not duplicate sampling logic.
 
-Native palette-backed textures and perspective coordinates remain unsupported.
+Perspective coordinates remain unsupported; indexed palette support is described below.
 Unsupported modes fail before publishing drawing or pixels. Texture flush is a
 coherent-storage boundary, with no stale native texture cache to invalidate.
 The synthetic upload-to-sampling test does not establish game rendering.
+
+## Native indexed sprite palettes
+
+PSMT4 sprites can use sixteen-entry RGBA32/RGB24 palettes. A shared planner
+converts texture configuration into bounded palette reads, including CSM1/CSM2
+layout, bank selection and conditional load bases. The diagnostic path reuses
+this planner; the native path has no dependency on the diagnostic GS model.
+
+Palette reads are ordered operations in the same transaction as image uploads
+and Vulkan draws. Draws consume the palette snapshot at their position in that
+sequence. The final palette and remembered load bases publish only after the
+whole batch succeeds. Unsupported palette formats stop explicitly. Other indexed texture formats and display presentation remain unfinished.
+PSMT4 image uploads are supported as described below.
+
+## Offline performance measurement dependency inspection
+
+`ps2-inspect --metrics` scans executable ELF segments for performance transfers
+and follows counter-read register dependencies through a bounded straight-line
+window. It reports stored values, measurement-dependent memory addresses, system
+writes, and unresolved flow/operation boundaries. A separate straight-line constant pass identifies candidate store addresses,
+including constants formed before a counter read. It lists overlapping constant-
+address loads/stores elsewhere in executable segments. Constants are discarded
+at direct targets, control-flow boundaries and unknown operations. The report treats executable bytes as candidates, not proven reachable
+instructions, and does not follow memory aliases or authorize an optimization.
+
+This analysis runs only in the converter tooling. It neither installs a runtime
+metric provider nor changes compiled execution. Resolving stored-value consumers
+and their observable effects is required before a native measurement replacement
+or elimination can be justified.
+
+The address pass does not establish reachability or unique entry into a region.
+References are investigation candidates, not whole-program alias results. A lack
+of listed consumers cannot prove a measurement dead: indirect entry, dynamic
+addresses, copies and external users can still observe stored data. All executable
+segment extents are validated before dependency following begins.
+
+The metric report also lists constant pointer handoff candidates matching a
+measurement store's exact address or its base register value. It records stored
+pointers, return values, and call arguments after applying the delay slot. Direct
+call targets are reported; constants do not survive a call. This does not infer
+object extents or prove that a callee accesses a particular field. Different
+interior pointers and dynamically formed aliases remain unresolved.
+
+## Native four-bit indexed image uploads
+
+PSMT4 host uploads convert packed low-nibble-first indices into bounded masked
+writes in native texture storage. The destination layout matches the existing
+Vulkan indexed sampler. Each write preserves the other seven indices in its
+32-bit word. Coordinate wrapping and storage wrapping follow that data layout;
+no executable instructions are involved.
+
+Upload progress survives packet boundaries and publishes with the enclosing
+transaction. An odd final index consumes only its own nibble; remaining transport
+padding does not modify texture data. Existing forward traversal, dimension and
+batch bounds still apply. Unsupported indexed formats and reverse traversal stop.
+
+## Native sprite pixel tests and blending
+
+The native Vulkan sprite path supports the eight alpha comparisons, framebuffer
+failure actions, destination-alpha tests and `(A-B)*C/128+D` RGB blending. Blend
+factors select source/destination alpha or FIX; channel arithmetic preserves
+negative floor rounding and supports clamp or eight-bit wrap. PABE can select
+blending by source alpha. FBA applies after testing and blending; source alpha
+is retained unless the failure action or framebuffer format masks it.
+
+Depth writes remain unsupported. With the supported no-depth-write configuration,
+alpha-failure KEEP/ZB_ONLY suppress colour output, FB_ONLY writes colour, and
+RGB_ONLY preserves destination alpha. Destination-alpha testing is ignored for
+24-bit framebuffers, whose destination blend alpha is 128. Invalid blend selectors
+stop. Destination-dependent draws require non-aliased framebuffer coverage so
+parallel shader invocations cannot race on the same destination pixel. Whole
+submission publication remains transactional.
+
+These are supported pixel semantics, not a claim of complete GS rasterization
+or game rendering. Triangles, perspective textures and native window presentation
+through the converted-program path remain unfinished.
+
+## Native drawing reset lifecycle
+
+The graphics lifecycle has an optional typed drawing-reset callback, invoked only
+after successful GPU synchronization. Rejection preserves the lifecycle state and
+leaves the compiled EE request retryable. The production adapter clears native
+command configuration, partial vertices, palette snapshots and upload progress;
+image storage is retained. CSR flush synchronizes without resetting drawing.
+A reset does not execute or decode guest instructions.
+
+## Native scalar and paired vector uploads
+
+The data-conversion helper now accepts scalar and V2 shapes at 32-, 16- and
+8-bit component widths. Scalar values populate all four lanes; V2 repeats its
+first pair into the upper pair. Narrow inputs use the existing explicit signed
+or unsigned widening. Component count is typed submission metadata, not a runtime
+instruction to interpret. VIF framing consumes source bytes separately from the
+four-byte transport padding, with existing bounded counts and destination wrap.
+
+The family retains the existing normal-mode, equal-cycle and unmasked restrictions.
+V3's fourth-lane transport behavior and masked writes remain explicit unsupported
+paths. Invalid/truncated submissions publish neither data nor configuration.
+
+## Native masked vector uploads
+
+Supported scalar, V2 and V4 formats also accept masked uploads. Each typed data
+view captures its selector word, row/column values and equal-cycle length when
+parsed. The reusable converter selects input data, a row lane, a column value or
+the existing destination lane. Mask groups restart at the cycle boundary and
+saturate at group three within a longer cycle. Packed-colour input uses the same
+selection after expansion.
+
+All validation precedes destination mutation; the launch owner's candidate state
+keeps data and packet configuration transactional. Normal row mode and equal
+cycle lengths remain required for ordinary formats. V3 and nontrivial row/cycle
+transformations remain unsupported. This supersedes earlier unmasked-only scope.
+
+## Native skipped-cycle uploads and fixed row addition
+
+Supported uploads can space groups of destination vectors with untouched gaps
+when the write count is no greater than the destination-cycle length. Typed
+spacing metadata determines the destination index, including storage wraparound;
+no transfer engine or instruction loop is introduced. The zero/zero default
+retains the existing contiguous 256-vector cycle behavior. Filling cycles and
+other unequal zero encodings remain unsupported.
+
+MODE 1 adds the captured row value to each input lane using unsigned 32-bit
+arithmetic. Masked row/column replacements and preserved destination lanes do
+not receive this addition. Row configuration itself stays unchanged, and packed
+V4-5 retains its mode-independent expansion. Mutable-row modes remain rejected.
+These capabilities supersede the earlier normal-mode/equal-cycle restrictions.
+
+## Prepared native vector writes and mutable row modes
+
+Upload conversion now prepares bounded typed writes containing destination,
+values and lane-enable masks. The vector owner applies those writes to its
+candidate storage without decoding the payload again. The planner also returns
+final row values, allowing subsequent uploads and configuration commands in the
+same submission to observe earlier row transformations. Plan storage remains
+owned by the submission until the compiled-owner callback returns.
+
+MODE 2 accumulates input into row values and writes the sums. MODE 3 writes input
+and replaces the corresponding row lanes. Only input-selected lanes update rows;
+row/column replacement and write protection leave rows unchanged. Packed V4-5
+continues to ignore MODE. Configuration and vector state publish only after
+successful acceptance, including any final compiled launch. This supersedes the
+earlier mutable-row restriction; filling cycles and V3 still stop explicitly.
+
+## Mask-selected filling cycles
+
+When a positive write-cycle length exceeds the positive input-cycle length, the
+planner now separates the output-vector count from consumed source elements.
+Input-phase writes decode source data normally; fill-phase lanes must select row,
+column or preserved destination data through the mask. Updated row values from
+prior input-phase writes are visible to subsequent fill selections. Destinations
+remain contiguous and wrap within their owner storage.
+
+Input-selected fill lanes stop explicitly because their lookahead behavior beyond
+nominal source consumption is not modeled. Unequal zero cycle encodings remain
+unsupported. No repeating-last-value approximation is used. Payload padding and
+following commands are consumed according to the input count, and malformed or
+unsupported batches publish neither configuration nor vector data.
+
+## Mask-defined V3 fourth lanes
+
+V3-32, V3-16 and V3-8 uploads are supported when every fourth lane selects row,
+column or preserved destination data. Three source components are consumed per
+input vector, with ordinary four-byte transport padding. Narrow components use
+the shared signed/unsigned widening and the same mask, cycle and row planner.
+
+Input-selected fourth lanes remain unsupported: the planner does not invent a
+fourth component or read past the declared source extent. If a later mask group
+requires such a lane, the whole submission is rejected before publishing writes
+or row configuration. This supersedes the earlier blanket V3 restriction.
+
+## Generated executable dependency evidence
+
+New EE projects include `cmake/native_output.cmake`. MSVC emits an executable
+linker map, then `check_native_output.cmake` inspects that map and the executable's
+DLL dependencies using the toolchain's dumpbin. The gate requires the generated
+EE entry/object and rejects known compiler/diagnostic execution libraries,
+decoder symbols, emulator dependencies and LLVM JIT runtime imports. Both MSVC
+library-name formats (with and without a suffix) are checked.
+
+Successful reports retain hashes of the executable and map plus the DLL listing.
+A failed audit removes any previous success report. Maps can contain private
+commercial-program metadata and must remain with ignored conversion output.
+This is a known-dependency regression gate: it cannot prove arbitrary renamed or
+newly introduced code lacks an interpreter. Source review, explicit native-link
+composition and execution of generated code remain separate acceptance evidence.
+Existing generated projects need regeneration to acquire the post-link gate.

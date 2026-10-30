@@ -54,7 +54,7 @@ target_include_directories(nt_ee_native INTERFACE libraries/ee_codegen/include l
 add_library(nt_ee_codegen libraries/ee_codegen/src/llvm.cpp libraries/ee_codegen/src/project.cpp)
 target_include_directories(nt_ee_codegen PUBLIC libraries/ee_codegen/include)
 target_link_libraries(nt_ee_codegen PUBLIC nt_r5900 nt_ee_native)
-add_library(nt_analysis libraries/analysis/src/discover.cpp)
+add_library(nt_analysis libraries/analysis/src/discover.cpp libraries/analysis/src/metrics.cpp)
 target_include_directories(nt_analysis PUBLIC libraries/analysis/include)
 target_link_libraries(nt_analysis PUBLIC nt_elf nt_r5900)
 target_link_libraries(nt_ee_codegen PRIVATE nt_analysis)

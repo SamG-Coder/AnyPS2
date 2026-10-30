@@ -1,5 +1,6 @@
 #include <nt/ee_vu_launch.hpp>
 #include <nt/native_drawing.hpp>
+#include <nt/ee_graphics.hpp>
 #include <iostream>
 
 extern "C" const nt::vu::Block* nt_vu_graphics_end_blocks();
@@ -54,7 +55,7 @@ int main() {
             direct.read(0x10003c30).value!=42 || consumer.drawing.pixels()[0]!=0x80706050)
             throw std::runtime_error("VIF DIRECT did not reach native Vulkan drawing");
         const auto image=consumer.drawing.pixels();
-        transport.clear(); word(0x0700002b); word(0x51000000|cursor); payload(); word(0x7f000000);
+        transport.clear(); word(0x0700002b); word(0x51000000|cursor); payload(); word(0x7b000000);
         if (direct.consume(1,transport,false)!=nt::ee::Stop::unsupported_system ||
             direct.read(0x10003c30).value!=42 || consumer.drawing.pixels()!=image)
             throw std::runtime_error("Invalid DIRECT batch published partial configuration or drawing");
@@ -74,6 +75,36 @@ int main() {
         if (direct.consume(2,transport,false)!=nt::ee::Stop::budget || consumer.drawing.pixels()[0]!=0x80201008)
             throw std::runtime_error("Native GIF submission did not reach Vulkan");
         if (consumer.renderer.validation_errors()) throw std::runtime_error("Native transfers caused Vulkan validation errors");
+        nt::ee::NativeGraphics lifecycle;
+        lifecycle.context=&consumer;
+        lifecycle.synchronize=[](void* raw) {
+            static_cast<Consumer*>(raw)->renderer.synchronize(); return nt::ee::Stop::budget;
+        };
+        lifecycle.reset_drawing=[](void* raw) {
+            static_cast<Consumer*>(raw)->drawing.reset(); return nt::ee::Stop::budget;
+        };
+        const nt::graphics::Packet upload_setup{{0x8004,0x10000000,14,0},
+            {0,1U<<16,0x50,0},{0,0,0x51,0},{8,1,0x52,0},{0,0,0x53,0}};
+        consumer.drawing.submit(consumer.renderer,std::array{upload_setup});
+        const auto before_reset=consumer.drawing.pixels();
+        if (lifecycle.configure(1,2,1)!=nt::ee::Stop::budget ||
+            lifecycle.write(0x12001000,0x200)!=nt::ee::Stop::budget || lifecycle.mode() ||
+            lifecycle.resets()!=1 || consumer.drawing.pixels()!=before_reset)
+            throw std::runtime_error("Native graphics reset did not preserve image storage");
+        const nt::graphics::Packet stale_image{{0x8001,0x08000000,0,0},{1,2,3,4}};
+        bool rejected=false;
+        try { consumer.drawing.submit(consumer.renderer,std::array{stale_image}); }
+        catch (const std::invalid_argument&) { rejected=true; }
+        if (!rejected || consumer.drawing.pixels()!=before_reset)
+            throw std::runtime_error("Native reset retained an active image upload");
+        const nt::graphics::Packet stale_draw{{0x8002,0x10000000,14,0},{0,0,5,0},{32U|(32U<<16),0,5,0}};
+        rejected=false;
+        try { consumer.drawing.submit(consumer.renderer,std::array{stale_draw}); }
+        catch (const std::invalid_argument&) { rejected=true; }
+        if (!rejected) throw std::runtime_error("Native reset retained drawing configuration");
+        launch.state.integers[0]=0; // Re-submit the packet at its original data offset.
+        if (launch.submit(1,{},&request)!=nt::ee::Stop::budget || consumer.drawing.pixels()[0]!=0x80201008)
+            throw std::runtime_error("Compiled VU drawing did not recover after reset");
         std::cout<<"Compiled VU to Vulkan sprite integration passed\n";
         return 0;
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }

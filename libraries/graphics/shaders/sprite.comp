@@ -7,6 +7,7 @@ layout(push_constant) uniform Draw {
     uint flags,clamp_u,clamp_v,texa;
     int x0,y0,dx,dy,u0,v0,du,dv;
     uint min_u,max_u,min_v,max_v;
+    uint test,blend;
 } draw;
 uint address(uint base,uint pitch,uint x,uint y) {
     x &= 2047; y &= 2047;
@@ -54,6 +55,20 @@ uint interpolate(uint a,uint b,uint fraction) {
     }
     return result;
 }
+bool alpha_pass(uint alpha) {
+    uint mode=(draw.test>>1)&7,reference=(draw.test>>4)&255;
+    if(mode==0) return false;
+    if(mode==1) return true;
+    if(mode==2) return alpha<reference;
+    if(mode==3) return alpha<=reference;
+    if(mode==4) return alpha==reference;
+    if(mode==5) return alpha>=reference;
+    if(mode==6) return alpha>reference;
+    return alpha!=reference;
+}
+int blend_channel(uint select,int source,int destination) {
+    return select==0 ? source : select==1 ? destination : 0;
+}
 void main() {
     uint x=draw.left+gl_GlobalInvocationID.x, y=draw.top+gl_GlobalInvocationID.y;
     if (x>=draw.right || y>=draw.bottom) return;
@@ -81,9 +96,31 @@ void main() {
             color |= result<<(channel*8);
         }
     }
+    uint mask=draw.mask;
+    if((draw.test&1)!=0 && !alpha_pass(color>>24)) {
+        uint failure=(draw.test>>12)&3;
+        if(failure==0 || failure==2) return; // No depth writes in this pipeline.
+        if(failure==3) mask|=0xff000000;
+    }
+    uint destination=0;
+    if((draw.flags&256)!=0 || (draw.test&0x4000)!=0) destination=memory.pixels[output_address];
+    if((draw.test&0x4000)!=0 && (draw.flags&512)==0 &&
+        (destination>>31)!=((draw.test>>15)&1)) return;
+    if((draw.flags&256)!=0 && ((draw.flags&1024)==0 || (color&0x80000000)!=0)) {
+        uint a=draw.blend&3,b=(draw.blend>>2)&3,c=(draw.blend>>4)&3,d=(draw.blend>>6)&3;
+        int factor=int(c==0 ? color>>24 : c==1 ? ((draw.flags&512)!=0 ? 128 : destination>>24) : (draw.blend>>8)&255);
+        uint blended=color&0xff000000;
+        for(uint channel=0;channel<3;++channel) {
+            int source=int((color>>(channel*8))&255),dest=int((destination>>(channel*8))&255);
+            int value=floor_div((blend_channel(a,source,dest)-blend_channel(b,source,dest))*factor,128)+blend_channel(d,source,dest);
+            uint result=(draw.flags&2048)!=0 ? uint(value)&255 : uint(clamp(value,0,255));
+            blended|=result<<(channel*8);
+        }
+        color=blended;
+    }
     if((draw.flags&32)!=0) color |= 0x80000000;
     // Aliased framebuffer pages can map different invocations onto one word.
     // Atomic bit operations preserve masked bits without an unordered R/W race.
-    atomicAnd(memory.pixels[output_address],draw.mask);
-    atomicOr(memory.pixels[output_address],color&~draw.mask);
+    atomicAnd(memory.pixels[output_address],mask);
+    atomicOr(memory.pixels[output_address],color&~mask);
 }

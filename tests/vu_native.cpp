@@ -247,7 +247,7 @@ int main() {
         auto wrong_packet=upload_packet; wrong_packet.back()^=1;
         if (packets.consume(0,wrong_packet,false)!=nt::ee::Stop::unsupported_vector || binding.ready() || packets.read(0x10003830).value)
             throw std::runtime_error("Wrong VU content changed binding or packet configuration");
-        auto trailing_packet=upload_packet; trailing_packet.insert(trailing_packet.end(),{0,0,0,0x7f});
+        auto trailing_packet=upload_packet; trailing_packet.insert(trailing_packet.end(),{0,0,0,0x7b});
         if (packets.consume(0,trailing_packet,false)!=nt::ee::Stop::unsupported_system || binding.ready())
             throw std::runtime_error("Unsupported trailing command partially bound VU code");
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_vector || binding.ready())
@@ -340,7 +340,7 @@ int main() {
         upload_packet=data_packet; upload_packet.resize(upload_packet.size()-4);
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::invalid_state || data_owner.state!=uploaded_state)
             throw std::runtime_error("Truncated upload committed data");
-        upload_packet=data_packet; packet_word(0x7f000000);
+        upload_packet=data_packet; packet_word(0x7b000000);
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_system || data_owner.state!=uploaded_state)
             throw std::runtime_error("Unsupported trailing command committed data");
         upload_packet.clear(); packet_word(0x03000040); packet_word(0x02000000); packet_word(0x6c018003);
@@ -348,7 +348,7 @@ int main() {
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
             data_owner.state.data[67]!=std::array<std::uint32_t,4>{9,10,11,12})
             throw std::runtime_error("TOPS-relative upload destination failed");
-        upload_packet.clear(); packet_word(0x01000201);
+        upload_packet.clear(); packet_word(0x01000100);
         upload_packet.insert(upload_packet.end(),data_packet.begin(),data_packet.end());
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_vector || packets.read(0x10003c40).value)
             throw std::runtime_error("Unsupported cycle mode committed configuration");
@@ -359,7 +359,7 @@ int main() {
             packet_word(0x14000000);
             if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
                 data_owner.state.vectors[0]!=expected || data_owner.state.data[0]!=expected)
-                throw std::runtime_error("Packed V4 upload failed native consumption");
+                throw std::runtime_error("Vector data upload failed native consumption");
         };
         unpack_and_launch(0x6d010000,{0xffff0000,0x80007fff},{0,0xffffffff,0x7fff,0xffff8000});
         unpack_and_launch(0x6d014000,{0xffff0000,0x80007fff},{0,0xffff,0x7fff,0x8000});
@@ -368,10 +368,42 @@ int main() {
         // High halfword is transport padding, deliberately not zero.
         unpack_and_launch(0x6f010000,{0xdeadfc1f},{248,0,248,128},3);
         unpack_and_launch(0x6f014000,{0xffff03e0},{0,248,0,0},2);
+        unpack_and_launch(0x60010000,{0x89abcdef},{0x89abcdef,0x89abcdef,0x89abcdef,0x89abcdef});
+        unpack_and_launch(0x61010000,{0xdead8000},{0xffff8000,0xffff8000,0xffff8000,0xffff8000});
+        unpack_and_launch(0x61014000,{0xdead8000},{0x8000,0x8000,0x8000,0x8000});
+        unpack_and_launch(0x62010000,{0xdeadbe80},{0xffffff80,0xffffff80,0xffffff80,0xffffff80});
+        unpack_and_launch(0x62014000,{0xdeadbe80},{128,128,128,128});
+        unpack_and_launch(0x64010000,{0x89abcdef,0x01234567},{0x89abcdef,0x01234567,0x89abcdef,0x01234567});
+        unpack_and_launch(0x65010000,{0x80007fff},{0x7fff,0xffff8000,0x7fff,0xffff8000});
+        unpack_and_launch(0x65014000,{0x80007fff},{0x7fff,0x8000,0x7fff,0x8000});
+        unpack_and_launch(0x66010000,{0xdead807f},{127,0xffffff80,127,0xffffff80});
+        unpack_and_launch(0x66014000,{0xdead807f},{127,128,127,128});
+        // Three V2-8 vectors cross the destination end; two bytes are padding.
+        upload_packet.clear(); packet_word(0x660343ff); packet_word(0x04030201); packet_word(0xdead0605);
+        packet_word(0x14000000);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
+            data_owner.state.data[1023]!=std::array<std::uint32_t,4>{1,2,1,2} ||
+            data_owner.state.vectors[0]!=std::array<std::uint32_t,4>{3,4,3,4} ||
+            data_owner.state.data[1]!=std::array<std::uint32_t,4>{5,6,5,6})
+            throw std::runtime_error("V2 packed transport padding or destination wrap failed");
+        upload_packet.clear(); packet_word(0x62004000);
+        for (unsigned i=0;i<64;++i) packet_word((i*4)|((i*4+1)<<8)|((i*4+2)<<16)|((i*4+3)<<24));
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
+            data_owner.state.data[255]!=std::array<std::uint32_t,4>{255,255,255,255})
+            throw std::runtime_error("Scalar encoded-zero count did not consume 256 input bytes");
+        const auto before_narrow_failure=data_owner.state;
+        upload_packet.clear(); packet_word(0x64010000); packet_word(1);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::invalid_state || data_owner.state!=before_narrow_failure)
+            throw std::runtime_error("Truncated V2 upload committed data");
+        for (const unsigned command:{0x63U,0x67U,0x6bU,0x73U,0x77U,0x7bU}) {
+            upload_packet.clear(); packet_word((command<<24)|0x10000); packet_word(0);
+            if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_system || data_owner.state!=before_narrow_failure)
+                throw std::runtime_error("Unsupported shape or masked upload used approximate semantics");
+        }
         const auto before_bad_format=data_owner.state;
-        upload_packet.clear(); packet_word(0x7d010000); packet_word(0); packet_word(0);
+        upload_packet.clear(); packet_word(0x7b010000); packet_word(0); packet_word(0);
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_system || data_owner.state!=before_bad_format)
-            throw std::runtime_error("Masked unpack silently used unmasked semantics");
+            throw std::runtime_error("Invalid unpack silently used supported semantics");
         upload_packet.clear(); packet_word(0x05000000); packet_word(0x6d010000); packet_word(0);
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::invalid_state || data_owner.state!=before_bad_format)
             throw std::runtime_error("Truncated packed upload changed native state");
@@ -380,6 +412,140 @@ int main() {
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
             data_owner.state.data[255]!=std::array<std::uint32_t,4>{255,255,255,255})
             throw std::runtime_error("Zero encoded count did not upload 256 packed vectors");
+        // Masks select data, row, column or preserved destination lanes.
+        const auto mask_setup=[&](unsigned cycle,std::uint32_t selectors) {
+            upload_packet.clear(); packet_word(0x01000000|cycle|(cycle<<8));
+            packet_word(0x30000000); for (unsigned v:{10U,20U,30U,40U}) packet_word(v);
+            packet_word(0x31000000); for (unsigned v:{100U,200U,300U,400U}) packet_word(v);
+            packet_word(0x20000000); packet_word(selectors);
+        };
+        for (unsigned i=0;i<6;++i) data_owner.state.data[i]={90,91,92,93};
+        mask_setup(2,0x00001be4); // First group D,R,C,P; second P,C,R,D.
+        packet_word(0x72040000); packet_word(0x04030201); packet_word(0x14000000);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
+            data_owner.state.vectors[0]!=std::array<std::uint32_t,4>{1,20,100,93} ||
+            data_owner.state.data[1]!=std::array<std::uint32_t,4>{90,200,30,2} ||
+            data_owner.state.data[2]!=std::array<std::uint32_t,4>{3,20,100,93})
+            throw std::runtime_error("Masked scalar selection or cycle restart failed");
+        mask_setup(0,0xaaaaaaaa); // Column selection saturates at column three.
+        packet_word(0x76060000); packet_word(0); packet_word(0); packet_word(0);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
+            data_owner.state.data[0]!=std::array<std::uint32_t,4>{100,100,100,100} ||
+            data_owner.state.data[4]!=std::array<std::uint32_t,4>{400,400,400,400})
+            throw std::runtime_error("Masked V2 column saturation failed");
+        mask_setup(0,0xe4); packet_word(0x7f010000); packet_word(0xfffffc1f); packet_word(0x14000000);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
+            data_owner.state.vectors[0]!=std::array<std::uint32_t,4>{248,20,100,100})
+            throw std::runtime_error("Masked packed-colour conversion failed");
+        const auto before_mask_failure=data_owner.state;
+        const auto old_mask=packets.read(0x10003c70).value;
+        mask_setup(1,0xffffffff); packet_word(0x7d010000); packet_word(0);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::invalid_state ||
+            data_owner.state!=before_mask_failure || packets.read(0x10003c70).value!=old_mask)
+            throw std::runtime_error("Truncated masked upload published data or configuration");
+        // A skipped slot is preserved while masked row addition wraps to 32 bits.
+        data_owner.state.data[1023]={11,12,13,14};
+        upload_packet.clear(); packet_word(0x01000203); packet_word(0x05000001);
+        packet_word(0x30000000); packet_word(0xffffffff); packet_word(10); packet_word(20); packet_word(30);
+        packet_word(0x600403fd); for (unsigned v:{1U,2U,3U,4U}) packet_word(v);
+        packet_word(0x14000000);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
+            data_owner.state.data[1021]!=std::array<std::uint32_t,4>{0,11,21,31} ||
+            data_owner.state.data[1022]!=std::array<std::uint32_t,4>{1,12,22,32} ||
+            data_owner.state.data[1023]!=std::array<std::uint32_t,4>{11,12,13,14} ||
+            data_owner.state.vectors[0]!=std::array<std::uint32_t,4>{2,13,23,33} ||
+            data_owner.state.data[1]!=std::array<std::uint32_t,4>{3,14,24,34} ||
+            packets.read(0x10003d00).value!=0xffffffff)
+            throw std::runtime_error("Skipped-cycle row addition changed gaps, wrap or row state");
+        mask_setup(1,0xe4); packet_word(0x05000001); packet_word(0x72010000); packet_word(5); packet_word(0x14000000);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
+            data_owner.state.vectors[0]!=std::array<std::uint32_t,4>{15,20,100,33})
+            throw std::runtime_error("Row addition applied to masked replacement/preserved lanes");
+        const auto before_row_failure=data_owner.state;
+        const auto prior_cycle=packets.read(0x10003c40).value;
+        upload_packet.clear(); packet_word(0x01000104); packet_word(0x05000002); packet_word(0x60010000); packet_word(99); packet_word(0x7b000000);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_system ||
+            data_owner.state!=before_row_failure || packets.read(0x10003c40).value!=prior_cycle)
+            throw std::runtime_error("Invalid trailing command committed row updates");
+        mask_setup(0,0);
+        packet_word(0x05000002); packet_word(0x60020000); packet_word(1); packet_word(2);
+        packet_word(0x05000003); packet_word(0x64010002); packet_word(9); packet_word(8);
+        packet_word(0x05000002); packet_word(0x60010003); packet_word(1); packet_word(0x14000000);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
+            data_owner.state.vectors[0]!=std::array<std::uint32_t,4>{11,21,31,41} ||
+            data_owner.state.data[1]!=std::array<std::uint32_t,4>{13,23,33,43} ||
+            data_owner.state.data[2]!=std::array<std::uint32_t,4>{9,8,9,8} ||
+            data_owner.state.data[3]!=std::array<std::uint32_t,4>{10,9,10,9} ||
+            packets.read(0x10003d00).value!=10 || packets.read(0x10003d10).value!=9)
+            throw std::runtime_error("Mutable row modes did not compose across uploads in one native batch");
+        mask_setup(0,0xe4e4); packet_word(0x05000002);
+        packet_word(0x72020000); packet_word(0x0201); packet_word(0x14000000);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
+            data_owner.state.data[1]!=std::array<std::uint32_t,4>{13,20,200,43} ||
+            packets.read(0x10003d00).value!=13 || packets.read(0x10003d10).value!=20 ||
+            packets.read(0x10003d20).value!=30 || packets.read(0x10003d30).value!=40)
+            throw std::runtime_error("Mask replacements mutated row state");
+        const auto before_failed_launch=data_owner.state;
+        upload_packet.clear(); packet_word(0x60010000); packet_word(7); packet_word(0x140007ff);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_vector ||
+            data_owner.state!=before_failed_launch || packets.read(0x10003d00).value!=13)
+            throw std::runtime_error("Failed native launch published mutable row or data state");
+        // Restore normal configuration for subsequent unrelated launch fixtures.
+        upload_packet.clear(); packet_word(0x01000000); packet_word(0x05000000);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget) throw std::runtime_error("Normal upload configuration failed");
+        data_owner.state.data[1]={9,8,7,6};
+        mask_setup(0,0xffaa5500); packet_word(0x01000401); packet_word(0x05000002);
+        packet_word(0x720603fe); packet_word(0x0201); packet_word(0x0700002a); packet_word(0x14000000);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
+            data_owner.state.data[1022]!=std::array<std::uint32_t,4>{11,21,31,41} ||
+            data_owner.state.data[1023]!=std::array<std::uint32_t,4>{11,21,31,41} ||
+            data_owner.state.vectors[0]!=std::array<std::uint32_t,4>{300,300,300,300} ||
+            data_owner.state.data[1]!=std::array<std::uint32_t,4>{9,8,7,6} ||
+            data_owner.state.data[2]!=std::array<std::uint32_t,4>{13,23,33,43} ||
+            data_owner.state.data[3]!=std::array<std::uint32_t,4>{13,23,33,43} ||
+            packets.read(0x10003d00).value!=13 || packets.read(0x10003c30).value!=42)
+            throw std::runtime_error("Masked filling lost source extent, updated rows, wrap or protected lanes");
+        const auto before_fill_failure=data_owner.state;
+        upload_packet.clear(); packet_word(0x20000000); packet_word(0); packet_word(0x72020000); packet_word(7);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_vector ||
+            data_owner.state!=before_fill_failure || packets.read(0x10003c70).value!=0xffaa5500)
+            throw std::runtime_error("Input-selected filling used invented data or published configuration");
+        upload_packet.clear(); packet_word(0x70060000); packet_word(7);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::invalid_state || data_owner.state!=before_fill_failure)
+            throw std::runtime_error("Truncated fill source changed vector state");
+        mask_setup(0,0x55555500); packet_word(0x01000401); packet_word(0x05000000);
+        packet_word(0x72004000);
+        for (unsigned i=0;i<16;++i) packet_word((i*4)|((i*4+1)<<8)|((i*4+2)<<16)|((i*4+3)<<24));
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
+            data_owner.state.data[252]!=std::array<std::uint32_t,4>{63,63,63,63} ||
+            data_owner.state.data[255]!=std::array<std::uint32_t,4>{10,20,30,40})
+            throw std::runtime_error("Encoded-zero filling did not consume the bounded source count");
+        upload_packet.clear(); packet_word(0x01000000); packet_word(0x05000000);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget) throw std::runtime_error("Upload configuration restoration failed");
+        mask_setup(0,0x40404040);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget) throw std::runtime_error("V3 mask setup failed");
+        unpack_and_launch(0x78010000,{1,2,3},{1,2,3,40});
+        unpack_and_launch(0x79010000,{0xffff8000,0xdead7fff},{0xffff8000,0xffffffff,0x7fff,40});
+        unpack_and_launch(0x79014000,{0xffff8000,0xdead7fff},{0x8000,0xffff,0x7fff,40});
+        unpack_and_launch(0x7a010000,{0xde7fff80},{0xffffff80,0xffffffff,127,40});
+        unpack_and_launch(0x7a014000,{0xde7fff80},{128,255,127,40});
+        unpack_and_launch(0x78010000,{1,2,3},{11,22,33,40},2);
+        if (packets.read(0x10003d30).value!=40) throw std::runtime_error("Masked V3 W changed row state");
+        const auto before_v3_failure=data_owner.state;
+        upload_packet.clear(); packet_word(0x05000000); packet_word(0x68010000);
+        packet_word(1); packet_word(2); packet_word(3);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_vector || data_owner.state!=before_v3_failure)
+            throw std::runtime_error("Unmasked V3 invented its fourth input lane");
+        upload_packet.clear(); packet_word(0x05000000); packet_word(0x20000000); packet_word(0x40);
+        packet_word(0x7a020000); packet_word(0x04030201); packet_word(0xdead0605);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_vector ||
+            data_owner.state!=before_v3_failure || packets.read(0x10003c70).value!=0x40404040)
+            throw std::runtime_error("Later V3 input-selected W published a partial plan");
+        upload_packet.clear(); packet_word(0x79010000); packet_word(0);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::invalid_state || data_owner.state!=before_v3_failure)
+            throw std::runtime_error("Truncated V3 consumed beyond its payload");
+        upload_packet.clear(); packet_word(0x05000000);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget) throw std::runtime_error("V3 mode restoration failed");
         nt::vu::State integer_branch;
         nt::vu::Binding shared_binding(nt::vu::Program(0,{nt_vu_shared_blocks(),nt_vu_shared_count()}),0,
             {nt_vu_shared_image(),nt_vu_shared_size()});

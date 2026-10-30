@@ -44,6 +44,26 @@ checked("${CMAKE_COMMAND}" -S "${run}/project" -B "${run}/build" -G "${GENERATOR
     ${platform} "-DANYPS2_ROOT=${ROOT}")
 checked("${CMAKE_COMMAND}" --build "${run}/build" --config Release --target ps2-native --parallel 2)
 set(executable "${run}/build/Release/ps2-native${EXE_SUFFIX}")
+if(NOT EXISTS "${executable}.audit.txt" OR NOT EXISTS "${executable}.map")
+    message(FATAL_ERROR "Generated EE output has no native dependency audit artifacts")
+endif()
+file(READ "${executable}.audit.txt" audit)
+if(NOT audit MATCHES "dependency audit passed" OR NOT audit MATCHES "Executable SHA256:")
+    message(FATAL_ERROR "Native output audit report is incomplete")
+endif()
+# A forbidden library added to link evidence must fail the same post-link gate.
+file(READ "${run}/build/CMakeCache.txt" cache)
+string(REGEX MATCH "ANYPS2_DUMPBIN:FILEPATH=([^\r\n]+)" match "${cache}")
+set(dumpbin "${CMAKE_MATCH_1}")
+file(READ "${executable}.map" clean_map)
+file(WRITE "${run}/forbidden.map" "${clean_map}\n nt_runtime:runtime.obj\n")
+file(WRITE "${run}/forbidden.audit.txt" "stale success must be removed")
+execute_process(COMMAND "${CMAKE_COMMAND}" "-DEXECUTABLE=${executable}"
+    "-DMAP_FILE=${run}/forbidden.map" "-DDUMPBIN=${dumpbin}" "-DREPORT=${run}/forbidden.audit.txt"
+    -P "${ROOT}/cmake/check_native_output.cmake" RESULT_VARIABLE rejected ERROR_VARIABLE rejection)
+if(rejected EQUAL 0 OR NOT rejection MATCHES "forbidden runtime dependency" OR EXISTS "${run}/forbidden.audit.txt")
+    message(FATAL_ERROR "Native output dependency gate accepted diagnostic runtime linkage: ${rejection}")
+endif()
 file(REMOVE "${run}/fixture.elf")
 execute_process(COMMAND "${executable}" "${run}/project/program.data"
     RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)

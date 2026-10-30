@@ -1688,7 +1688,7 @@ int main() {
         {
             // Compiled SD/LD use atomic native 64-bit service calls.
             nt::ee::Memory memory;
-            struct Backend { std::uint64_t value=0; bool fail=false; unsigned calls=0; } backend;
+            struct Backend { std::uint64_t value=0; bool fail=false,reset_fail=false; unsigned calls=0,resets=0; } backend;
             memory.io.context=&backend;
             memory.io.write64=[](void* context,std::uint32_t,std::uint64_t value) {
                 auto& b=*static_cast<Backend*>(context); ++b.calls;
@@ -1717,7 +1717,17 @@ int main() {
             };
             check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system && !platform.graphics.resets());
             backend.fail=false;
-            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && platform.graphics.resets()==1);
+            platform.graphics.reset_drawing=[](void* context) {
+                auto& b=*static_cast<Backend*>(context);
+                if (b.reset_fail) return nt::ee::Stop::unsupported_system;
+                ++b.resets; return nt::ee::Stop::budget;
+            };
+            backend.reset_fail=true;
+            const auto before_reset=state.executed;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system &&
+                !platform.graphics.resets() && !backend.resets && state.pc==0x3d0010 && state.executed==before_reset);
+            backend.reset_fail=false;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && platform.graphics.resets()==1 && backend.resets==1);
             state.pc=0x3d0018;
             check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.gpr[9].lo==0x4000);
             state.pc=0x3d0010; state.set(4,0x12001010); state.set(8,0);

@@ -1181,3 +1181,54 @@ Sprite texture setup is factored from AnyPS2's existing original renderer into a
 shared planner. The native packet adapter supplies fixed-UV endpoint/configuration
 data to that planner and uses the existing Vulkan sampler. Synthetic tests contain
 only original texels and commands.
+
+Native indexed palette planning is extracted from AnyPS2's original
+`gs_texture.cpp`, using the previously recorded public palette interfaces.
+Both diagnostic and native consumers now share the planner. New tests use
+original synthetic colours and index data; no upstream code or game palette
+payload is incorporated.
+
+The native PSMT4 upload address helper uses the same original bit-address layout
+as AnyPS2's Vulkan sampler, based on the public references already recorded for
+indexed textures. New upload fixtures contain original indices and independent
+boundary-address expectations. No reference implementation or commercial image
+payload was copied.
+
+Native sprite alpha testing and blending use the already pinned PCSX2 public
+`GSRegs.h` TEST/ALPHA/PABE/COLCLAMP field interfaces and the documented GS blend
+equation. The original Vulkan implementation evaluates integer channel arithmetic,
+explicit failure masks and destination tests; no upstream rasterizer code is
+copied. Synthetic fixtures exercise comparison, rounding and saturation behavior.
+
+Scalar and V2 native unpack conversion uses the pinned PCSX2 `Vif_Unpack.cpp`
+as a public behavior reference for scalar replication and paired-lane repetition.
+The implementation extends AnyPS2's original bounded widening helper. V3 remains
+unsupported because its fourth-lane input/transport behavior needs separate
+modeling; it is not approximated with a zero or repeated third component.
+
+Native masked vector uploads use the same pinned `Vif_Unpack.cpp` public
+selection behavior: input, row, column and preserved lanes, with cycle-group
+saturation. The original data conversion helper now applies a typed mask snapshot;
+no reference unpack executor is incorporated.
+
+Skipped-cycle destination spacing and fixed row addition use the same pinned
+public VIF unpack interfaces. AnyPS2 represents spacing as bounded destination
+stride metadata and uses unsigned lane addition. Filling cycles and mutable-row
+modes are explicitly rejected rather than borrowing an interpreter implementation.
+
+MODE 2 accumulation and MODE 3 row replacement follow the pinned public VIF
+write-selection behavior. The native implementation prepares original typed
+write plans and final row values before submitting to a compiled vector owner;
+no upstream unpack loop or executable instruction payload is incorporated.
+
+Masked filling-cycle planning uses the pinned `Vif_Unpack.cpp` source-consumption
+and mask-selection interfaces, cross-checked against the public PS2SDK VIF row
+filling interface (https://ps2dev.github.io/ps2sdk/group__packet2__types.html).
+Only row/column/protected fill lanes are accepted. Input-selected fill positions
+would require source lookahead beyond nominal consumed data and remain rejected;
+no guessed repeat value or upstream executor is used.
+
+Masked V3 data conversion uses the pinned VIF public component layout and mask
+selection interface. The fourth lane must explicitly select row, column or
+preserved data; input-selected fourth lanes are rejected. No reference's
+out-of-payload fourth-lane read is copied into the native planner.

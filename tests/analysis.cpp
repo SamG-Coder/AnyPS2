@@ -1,4 +1,5 @@
 #include <nt/analysis.hpp>
+#include <nt/metrics.hpp>
 #include <iostream>
 #include <array>
 #include <stdexcept>
@@ -11,6 +12,85 @@ void put(nt::Bytes& bytes, std::size_t offset, std::uint32_t word) {
 }
 int main() {
     try {
+        {
+            nt::Bytes image(40,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,40,40,5,4}}};
+            put(image,0,(16U<<26)|(8U<<16)|(25U<<11)|1U); // Read counter to r8.
+            put(image,4,0x3c090020); // LUI r9,0x20.
+            put(image,8,0x250a0001); // ADDIU r10,r8,1.
+            put(image,12,0xad2a0010); // SW r10,16(r9).
+            put(image,16,0x03e00008); // Return is an unresolved flow boundary.
+            put(image,20,0xad280014); // Delay slot is not silently discarded/proven safe.
+            auto sites=nt::analysis::inspect_metrics(image,fixture);
+            check(sites.size()==1 && sites[0].uses.size()==2,"Metric dependency sites lost");
+            check(sites[0].uses[0].kind==nt::analysis::MetricUseKind::stored_value &&
+                sites[0].uses[0].address==0x200010,"Derived metric store lost its address");
+            check(sites[0].uses[1].kind==nt::analysis::MetricUseKind::flow_boundary &&
+                sites[0].uses[1].pc==0x1010,"Metric analysis crossed a flow boundary");
+            auto bounded=nt::analysis::inspect_metrics(image,fixture,1);
+            check(bounded[0].uses.back().kind==nt::analysis::MetricUseKind::budget,"Metric inspection ignored bound");
+            put(image,4,0x8d090000); // Counter-derived load address.
+            sites=nt::analysis::inspect_metrics(image,fixture);
+            check(sites[0].uses[0].kind==nt::analysis::MetricUseKind::memory_address,"Counter-derived address was hidden");
+            put(image,4,0x4c000000);
+            sites=nt::analysis::inspect_metrics(image,fixture);
+            check(sites[0].uses[0].kind==nt::analysis::MetricUseKind::unknown_operation,"Unknown operation was treated as safe");
+            fixture.segments[0].file_size=44;
+            bool invalid=false;
+            try { nt::analysis::inspect_metrics(image,fixture); } catch (const std::invalid_argument&) { invalid=true; }
+            check(invalid,"Malformed metric source segment accepted");
+        }
+        {
+            nt::Bytes image(64,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,64,64,5,4}}};
+            put(image,0,0x3c090020); // Establish address before the measurement.
+            put(image,4,0x25290010);
+            put(image,8,(16U<<26)|(8U<<16)|(25U<<11)|1U);
+            put(image,12,0xad280000); // Counter result stored at 0x200010.
+            put(image,16,0x03e00008); put(image,20,0);
+            put(image,24,0x3c090020);
+            put(image,28,0x912a0011); // Byte read overlaps the counter word.
+            put(image,32,0x03e00008); put(image,36,0);
+            put(image,40,0x912a0011); // No constant survives the return.
+            auto sites=nt::analysis::inspect_metrics(image,fixture);
+            check(sites[0].uses[0].address==0x200010,"Pre-measurement address was not recovered");
+            check(sites[0].memory_uses.size()==2 && sites[0].memory_uses[1].pc==0x101c &&
+                !sites[0].memory_uses[1].write && sites[0].memory_uses[1].bytes==1,
+                "Overlapping byte consumer lost or stale post-return constant retained");
+            // A direct jump to the load invalidates the preceding linear constant.
+            put(image,48,0x08000407);
+            sites=nt::analysis::inspect_metrics(image,fixture);
+            check(sites[0].memory_uses.size()==1,"Address assumption crossed a direct entry target");
+            // A malformed later segment must be rejected before following into it.
+            fixture.segments.push_back({60,0x2000,16,16,5,4});
+            bool invalid=false;
+            try { nt::analysis::inspect_metrics(image,fixture); } catch (const std::invalid_argument&) { invalid=true; }
+            check(invalid,"Later executable segment was not validated");
+        }
+        {
+            nt::Bytes image(96,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,96,96,5,4}}};
+            put(image,0,0x3c090020);
+            put(image,4,(16U<<26)|(8U<<16)|(25U<<11)|1U);
+            put(image,8,0xad280010); // Measurement in a shared structure.
+            put(image,12,0x03e00008); put(image,16,0);
+            put(image,20,0x3c090020);
+            put(image,24,0x0c000418); // JAL, argument established in its slot.
+            put(image,28,0x01202021);
+            put(image,32,0x0c000418); put(image,36,0); // No constants across the previous call.
+            put(image,40,0x3c020020);
+            put(image,44,0xafa20000); // Structure pointer escapes through memory.
+            put(image,48,0x03e00008); put(image,52,0); // Return the pointer.
+            auto sites=nt::analysis::inspect_metrics(image,fixture);
+            const auto& uses=sites[0].pointer_uses;
+            check(uses.size()==4,"Pointer handoff analysis lost an escape or retained a stale call argument");
+            check(uses[0].kind==nt::analysis::MetricPointerKind::call_argument && uses[0].pc==0x1018 &&
+                uses[0].reg==4 && uses[0].target==0x1060,"Delay-slot pointer argument was not recorded");
+            check(uses[2].kind==nt::analysis::MetricPointerKind::stored_pointer && uses[2].pc==0x102c,
+                "Stored structure pointer was not recorded");
+            check(uses[3].kind==nt::analysis::MetricPointerKind::return_value && uses[3].reg==2,
+                "Returned structure pointer was not recorded");
+        }
         nt::Bytes bytes(32, 0);
         nt::elf::Executable elf{0x1000, 0, {{0,0x1000,32,32,5,4}}};
         put(bytes,0,0x08000404); // J 0x1010

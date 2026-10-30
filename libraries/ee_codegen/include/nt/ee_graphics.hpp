@@ -12,6 +12,8 @@ public:
     struct DisplayMode { std::uint32_t interlace,standard,frame; };
     void* context=nullptr;
     Stop (*synchronize)(void*)=nullptr;
+    // Optional drawing owner. Rejection must preserve that owner's state.
+    Stop (*reset_drawing)(void*)=nullptr;
     Stop configure(std::uint32_t interlace,std::uint32_t standard,std::uint32_t frame) {
         if (interlace!=1 || (standard!=2 && standard!=3) || frame>1) return Stop::unsupported_system;
         if (!synchronize) return Stop::unsupported_system;
@@ -42,6 +44,10 @@ public:
                 const auto result=synchronize(context);
                 if (result!=Stop::budget) return result;
                 if (value&0x200) {
+                    if (reset_drawing) {
+                        const auto reset=reset_drawing(context);
+                        if (reset!=Stop::budget) return reset;
+                    }
                     mask_=0x7f00; flags_=0; field_=0; events_=0; mode_.reset(); ++resets_;
                     return Stop::budget;
                 }

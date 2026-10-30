@@ -11,6 +11,7 @@ struct Sprite {
     std::uint32_t flags=0, clamp_u=0, clamp_v=0, texa=0;
     std::int32_t x0=0,y0=0,dx=0,dy=0,u0=0,v0=0,du=0,dv=0;
     std::uint32_t min_u=0,max_u=0,min_v=0,max_v=0;
+    std::uint32_t test=0,blend=0;
 };
 // Synchronous reference backend. Native window is an HWND on Windows.
 class VulkanRenderer {

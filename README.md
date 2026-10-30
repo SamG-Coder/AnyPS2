@@ -459,11 +459,15 @@ continuation commands remain unsupported.
 Compiled synthetic programs verify this path; GT4 still stops earlier at a
 performance measurement request with no supported native provider.
 
-Unmasked, contiguous V4-32, V4-16, V4-8 and packed V4-5 data uploads can populate
+Scalar, V2, masked V3 and V4 uploads in 32-, 16- and 8-bit formats,
+plus packed V4-5 data, can populate
 native VU1 storage, including wrapped and TOPS-relative destinations. Narrow lanes
 support signed/unsigned widening; packed colour lanes expand independently of MODE.
 Data and a final MSCAL commit together only when execution completes. Other unpack
-formats, masked writes and row/cycle transformations remain unsupported.
+formats, input-selected V3 fourth lanes and input-dependent fill lanes remain unsupported. Masked row/column/
+preserve filling is supported. Fixed row addition, accumulating/
+replacement row modes and skipped destination slots are supported. Masked uploads select
+input, row, column or preserved lanes with transactional configuration snapshots.
 
 VIF0 launches can share completed vector, integer-register and flag state with
 native EE vector operations. An active owner prevents a new launch; failed work
@@ -477,8 +481,10 @@ Compiled VU graphics requests can be staged as an ordered immutable batch and
 accepted by a native consumer only after the whole launch completes. A missing
 or rejecting consumer leaves execution uncommitted. A native adapter now translates
 supported packed/address-data and register-list packets into Vulkan solid-sprite
-commands. RGBA32/RGB24 host image uploads preserve ordering with draws, and fixed-UV
-sprites can sample those textures through Vulkan. Palette/perspective textures, other primitive types and display
+commands. RGBA32/RGB24 and PSMT4 host image uploads preserve ordering with draws, and fixed-UV
+sprites can sample those textures through Vulkan. PSMT4 indexed sprites support 16-entry RGBA32/RGB24 palettes with ordered and conditional loads.
+Sprites also support alpha tests and integer alpha blending.
+Perspective textures, other primitive types and display
 presentation through this path remain unfinished. Synthetic compiled VU-to-GPU
 tests pass; game rendering is not established.
 
@@ -490,3 +496,15 @@ The native VU runtime can route between registered ahead-of-time compiled blocks
 with bounded execution and explicit stops for missing targets or unsupported numeric
 inputs. It has no instruction decoder or interpreter fallback. This is validated
 with original synthetic programs; it is not yet connected to GT4's VU launches.
+
+To inspect performance-counter dependencies before choosing a native measurement
+replacement, run `ps2-inspect <executable.elf> --metrics`. This offline report
+lists executable-segment candidates and bounded register uses. Stored values and
+unresolved flow require further analysis; the report does not authorize removing
+measurements. Keep commercial-input reports under ignored `work/`.
+
+New generated EE projects retain a linker map and `.audit.txt` beside the native
+executable. A post-link check verifies compiled-entry evidence and rejects known
+interpreter, decoder and JIT dependencies. The report includes executable/map
+hashes and imported DLLs; it is a regression guard, not proof about arbitrary
+linked code. Keep commercial-input maps and reports under ignored `work/`.
