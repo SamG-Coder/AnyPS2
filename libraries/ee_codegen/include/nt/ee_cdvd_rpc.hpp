@@ -2,6 +2,7 @@
 #include <nt/ee_rpc_service.hpp>
 #include <nt/iso9660.hpp>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <memory>
 
@@ -44,5 +45,49 @@ private:
     std::filesystem::path image_;
     std::unique_ptr<disc::Iso9660> disc_;
     std::string error_;
+};
+
+// Native wall-clock service exposed through the public CD/DVD SCMD ABI.
+// Unknown drive commands remain explicit unsupported boundaries.
+class NativeCdvdScmdRpc final : public NativeRpcService {
+public:
+    using Clock = std::chrono::sys_seconds (*)();
+    NativeCdvdScmdRpc(const NativeCdvdInitRpc& session,std::uint32_t server,
+                      std::uint32_t buffer,Clock clock=wall_clock)
+        : NativeRpcService(0x80000593U,server,buffer),session_(session),clock_(clock) {}
+    std::uint32_t last_method() const { return last_method_; }
+    Stop call(Memory& memory,CodeOverlap protection,std::uint32_t method,
+              std::span<const std::uint8_t> args,std::uint32_t destination,std::uint32_t size) override {
+        last_method_=method;
+        if (method!=1) return Stop::unsupported_system;
+        if (!args.empty() || size!=16 || !clock_) return Stop::invalid_state;
+        if (!session_.initialized()) return Stop::unsupported_system;
+        const auto valid=rpc_output(memory,protection,destination,size);
+        if (valid!=Stop::budget) return valid;
+        using namespace std::chrono;
+        // The console clock ABI uses Japan standard time, independently of the
+        // PC's configured timezone. Keep calendar conversion in native code.
+        const auto now=clock_()+hours{9};
+        const auto day=floor<days>(now);
+        const year_month_day date{day};
+        const hh_mm_ss time{now-day};
+        const auto year_value=int(date.year());
+        if (year_value<2000 || year_value>2099) return Stop::unsupported_system;
+        const auto bcd=[](unsigned value) { return static_cast<std::uint8_t>((value/10)*16+value%10); };
+        const std::array<std::uint8_t,16> result{1,0,0,0,0,
+            bcd(static_cast<unsigned>(time.seconds().count())),
+            bcd(static_cast<unsigned>(time.minutes().count())),
+            bcd(static_cast<unsigned>(time.hours().count())),0,
+            bcd(unsigned(date.day())),bcd(unsigned(date.month())),bcd(year_value-2000)};
+        std::memcpy(memory.data+runtime::default_ram_address(destination),result.data(),result.size());
+        return Stop::budget;
+    }
+private:
+    static std::chrono::sys_seconds wall_clock() {
+        return std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    }
+    const NativeCdvdInitRpc& session_;
+    Clock clock_;
+    std::uint32_t last_method_=0;
 };
 }

@@ -34,15 +34,17 @@ public:
             throw std::runtime_error("Invalid linked IOP startup data");
         std::copy(bytes.begin(),bytes.end(),ram_.begin()+module_.base);
         services_=std::make_unique<nt::iop::NativeServiceContext>(ram_,
-            nt::iop::NativeContextLayout{(module_.base+module_.memory_size+255)&~255U,0x1ee000},
+            nt::iop::NativeContextLayout{(module_.base+module_.memory_size+255)&~255U,0x1ed000},
             nt_iop_generated_libraries(),nt_iop_generated_imports(),
             [](std::string_view) { return true; },disc,&destination_,0,delivery_);
         startup_=std::make_unique<nt::iop::NativeModuleStartup>(nt::iop::run_llvm,*services_,ram_,module_,nt_iop_generated_entries(),0x1ff000);
         incoming_=std::make_unique<nt::ee::NativeIopCommands>(services_->sif_control,services_->inbound);
         if (!disc.empty()) {
             cdvd_=std::make_unique<nt::ee::NativeCdvdInitRpc>(disc,0x1ee000,0x1ee010);
+            scmd_=std::make_unique<nt::ee::NativeCdvdScmdRpc>(*cdvd_,0x1ed000,0x1ed010);
             native_rpc_=std::make_unique<nt::ee::NativeSifCommandPeer>(platform.sif_link,ee,protection,0x1f0000,&platform.sif_receive);
             if (!native_rpc_->register_service(*cdvd_)) throw std::runtime_error("Cannot register reset-session CD/DVD service");
+            if (!native_rpc_->register_service(*scmd_)) throw std::runtime_error("Cannot register reset-session CD/DVD command service");
         }
     }
     nt::ee::NativeSifResetOwner owner() { return {this,reset,{this,commands}}; }
@@ -54,6 +56,7 @@ public:
     bool accepted() const { return accepted_; }
     std::uint32_t last_server() const { return last_server_; }
     bool cdvd_initialized() const { return cdvd_ && cdvd_->initialized(); }
+    std::uint32_t cdvd_command() const { return scmd_ ? scmd_->last_method() : 0; }
     nt::ee::Stop pump() {
         if (!accepted_) return nt::ee::Stop::budget;
         if (!platform_.sif_link.reset_teardown_complete()) return nt::ee::Stop::budget;
@@ -146,6 +149,7 @@ private:
     std::unique_ptr<nt::iop::NativeModuleStartup> startup_;
     std::unique_ptr<nt::ee::NativeIopCommands> incoming_;
     std::unique_ptr<nt::ee::NativeCdvdInitRpc> cdvd_;
+    std::unique_ptr<nt::ee::NativeCdvdScmdRpc> scmd_;
     std::unique_ptr<nt::ee::NativeSifCommandPeer> native_rpc_;
     nt::iop::NativeResult result_{nt::iop::NativeStop::budget,0};
     bool invoked_=false,started_=false;

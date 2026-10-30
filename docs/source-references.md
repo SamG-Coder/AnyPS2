@@ -1162,6 +1162,19 @@ No firmware cache routine or upstream implementation is copied.
 
 ## GT4 recompilation research reference
 
+The native CD/DVD synchronous-command endpoint uses the previously pinned
+PS2SDK `ee/rpc/cdvd/src/scmd.c`, `common/include/libcdvd-common.h`, and
+`iop/cdvd/cdvdfsv/src/cdvdfsv.c` as public ABI references. ReadClock returns
+native PC system time encoded in the eight-byte BCD clock layout, using JST
+independently of the PC timezone. The implementation uses C++ chrono calendar
+conversion; it does not reproduce firmware clock access. Dates outside
+2000–2099 and unimplemented commands stop explicitly. The endpoint shares the
+existing initialized ISO-session lifetime. No upstream implementation is copied.
+
+The selected compiled IOP reset-session integration now binds this endpoint.
+Actual GT4 execution next requests media-mode selection (SCMD method 34), which
+remains unsupported. This is startup progress, not a rendered frame or boot.
+
 - Repository: https://github.com/moesuito/gt4-staticrecomp
 - Inspected revision: `795cdc086464b003d49c0b44d0911dc761f58f5c`.
 - Inspected documents: `docs/ARCHITECTURE.md`, `docs/IOP-MAP.md`, and

@@ -140,7 +140,20 @@ void run_ee_file_rpc_tests() {
         require(call(0,words({mode}),16)==1 && cdvd.initialized()==(mode!=5));
         require(nt::le32(ram,0x5008)==0 && nt::le32(ram,0x500c)==0 && nt::le32(ram,0x5010)==0);
     }
+    nt::ee::NativeCdvdScmdRpc scmd(cdvd,0xa000,0xb000,[] {
+        using namespace std::chrono;
+        return sys_seconds{sys_days{year{2024}/February/28}+hours{15}+minutes{4}+seconds{59}};
+    });
+    require(scmd.call(memory,nt_ee_generated_code_overlap,1,{},0x5004,16)==Stop::budget);
+    const std::array<std::uint8_t,16> clock_result{1,0,0,0,0,0x59,0x04,0,0,0x29,0x02,0x24};
+    require(std::equal(clock_result.begin(),clock_result.end(),ram.begin()+0x5004));
     const auto before=ram;
+    require(scmd.call(memory,nt_ee_generated_code_overlap,1,{},0x1000,16)==Stop::code_write);
+    require(scmd.call(memory,nt_ee_generated_code_overlap,1,{},0xffff,16)==Stop::memory_fault);
+    require(scmd.call(memory,nt_ee_generated_code_overlap,1,words({0}),0x5004,16)==Stop::invalid_state);
+    require(scmd.call(memory,nt_ee_generated_code_overlap,1,{},0x5004,4)==Stop::invalid_state);
+    require(scmd.call(memory,nt_ee_generated_code_overlap,2,{},0x5004,16)==Stop::unsupported_system);
+    require(ram==before);
     require(cdvd.call(memory,nt_ee_generated_code_overlap,0,words({5}),0x1000,16)==Stop::code_write);
     require(cdvd.call(memory,nt_ee_generated_code_overlap,0,words({5}),0xffff,16)==Stop::memory_fault);
     require(cdvd.call(memory,nt_ee_generated_code_overlap,0,words({5}),0x5004,8)==Stop::invalid_state);
