@@ -64,6 +64,7 @@ public:
         }
         if (request.selector==15) return boot_device(a[0],ram);
         if (request.selector==7) return load_start(request,ram);
+        if (request.selector==8) return start_module(a[0]);
         // Other lifecycle ABIs can be compiled, but cannot succeed until their
         // native initialization and completion owner is connected.
         return {NativeServiceStatus::unavailable};
@@ -72,7 +73,8 @@ public:
     void attach_heap(NativeHeapServices& heap) { heap_=&heap; }
     void attach_catalog(std::vector<std::uint64_t> source_hashes) { catalog_=std::move(source_hashes); }
     void attach_sealed(std::vector<SealedModule> modules) { sealed_=std::move(modules); }
-    // -1 means selector 7 did not classify a file. Other values are diagnostics,
+    // -1 means selector 7 did not classify a file. 14 and 15 are StartModule
+    // results for an already started id and an unknown id. They are diagnostics,
     // not a module id and not evidence that an entry ran.
     int load_decision() const { return load_decision_; }
     const std::string& load_path() const { return load_path_; }
@@ -203,6 +205,15 @@ private:
         }
         return begin_sealed(request,*sealed,path,a,ram);
     }
+    // StartModule addresses a module id. This owner has no loaded-but-unstarted
+    // image, so a known id is already started and every other id is unknown.
+    // The name, argument span, and stack result pointer are not read.
+    NativeServiceReply start_module(std::uint32_t id) {
+        const auto known=id && ((pending_ && pending_->id==id) ||
+            std::any_of(resident_.begin(),resident_.end(),[&](const ResidentModule& item) { return item.id==id; }));
+        load_decision_=known ? 14 : 15;
+        return {NativeServiceStatus::returned,static_cast<std::uint32_t>(known ? -206 : -202)};
+    }
     NativeServiceReply finish_load(const NativeServiceRequest& request,std::span<std::uint8_t> ram) {
         if (!pending_ || request.context!=pending_->owner || !request.context || request.context->native_call_owner!=this)
             return {};
@@ -218,7 +229,7 @@ private:
         if (unlink) {
             release(pending_->image,ram);
             release(pending_->arguments,ram);
-        } else resident_.push_back(pending_->hash);
+        } else resident_.push_back({pending_->hash,pending_->id});
         auto caller=pending_->caller;
         caller.registers[2]=pending_->id;
         pending_.reset();
@@ -262,7 +273,8 @@ private:
             load_decision_=9;
             return {NativeServiceStatus::unavailable};
         }
-        if (std::find(resident_.begin(),resident_.end(),module.source_hash)!=resident_.end()) {
+        if (std::find_if(resident_.begin(),resident_.end(),[&](const ResidentModule& item) {
+                return item.hash==module.source_hash; })!=resident_.end()) {
             load_decision_=10;
             return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-206)};
         }
@@ -372,7 +384,8 @@ private:
     };
     NativeHeapServices* heap_=nullptr;
     std::vector<SealedModule> sealed_;
-    std::vector<std::uint64_t> resident_;
+    struct ResidentModule { std::uint64_t hash=0; std::uint32_t id=0; };
+    std::vector<ResidentModule> resident_;
     std::optional<Pending> pending_;
     std::uint32_t next_id_=1;
     std::uint32_t card_=0,disc_=0,path_=0,callbacks_=0;

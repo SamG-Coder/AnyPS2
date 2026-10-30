@@ -485,7 +485,9 @@ when the opened bytes are absent from or present in the AOT source catalog
 without a sealed entry. A sealed entry whose installed image matches calls that
 compiled code: the caller receives the module id and the guest result word
 receives the entry value. Entry value 1 releases the image. Any other value
-stays resident, and a second start returns -206. A wrong installed image and an
+stays resident, and a second start returns -206. StartModule returns -206 for
+that resident id and -202 for an unknown or released id, without reading the
+name or the result pointer and without calling an entry. A wrong installed image and an
 overlapping reservation do not start the entry.
 HI/LO coverage verifies initial state, signed/unsigned 64-bit products, explicit
 HI/LO writes and readback across one-instruction and larger slices. The LLVM

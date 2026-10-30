@@ -1177,8 +1177,12 @@ Entry value 1 releases the reservation. Any other value leaves the module
 resident, and a second start returns -206. A sealed image that is not installed,
 or an entry that is not compiled code, stops without a call. Nested
 LoadStartModule while an entry is still running stops. `rom` bytes are not read
-yet, so that device returns -203. Other lifecycle imports still stop at the
-service boundary. The pinned loadcore
+yet, so that device returns -203. StartModule (ordinal 8) takes the module id
+in the first argument and its result pointer at `sp+16`. This owner has no
+loaded-but-unstarted image, so a known resident or in-call id returns -206 and
+every other id returns -202. Neither path reads the name, the argument span, or
+the result pointer, and neither calls an entry. Other lifecycle imports still
+stop at the service boundary. The pinned loadcore
 `exports.tab` identifies FlushIcache/FlushDcache; immutable AOT code and coherent
 native data replace cache banks, with a host publication fence at these calls.
 No firmware cache routine or upstream implementation is copied.

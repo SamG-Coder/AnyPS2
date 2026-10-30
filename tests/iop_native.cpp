@@ -3593,6 +3593,13 @@ int main() {
             const auto decision=loader.load_decision();
             check(loader.invoke(request,guest).status==NativeServiceStatus::unavailable && loader.load_decision()==decision && unchanged(),
                   "Interrupt LoadStartModule changed the catalog decision");
+            request.interrupt_context=false;
+            request.selector=8;
+            request.arguments={0,0x2100,4,0x2200};
+            const auto unknown=loader.invoke(request,guest);
+            check(unknown.status==NativeServiceStatus::returned && unknown.value==static_cast<std::uint32_t>(-202) &&
+                  loader.load_decision()==15 && unchanged(),
+                  "StartModule of an unknown id wrote a result or started an entry");
         }
         {
             // A sealed entry is compiled code at its installed address. The file
@@ -3655,6 +3662,20 @@ int main() {
                   duplicate.second==static_cast<std::uint32_t>(-206) &&
                   load_native_word(guest,0x7000)==0x60 && loader.load_decision()==10,
                   "Second start of a resident module ran the entry again");
+            NativeServiceRequest started;
+            started.kind=NativeServiceKind::modload;
+            started.selector=8;
+            started.arguments={resident.second,0x2100,0,0x7000};
+            const auto again=loader.invoke(started,guest);
+            check(again.status==NativeServiceStatus::returned && again.value==static_cast<std::uint32_t>(-206) &&
+                  loader.load_decision()==14 && load_native_word(guest,0x7000)==0x60,
+                  "StartModule ran an entry that was already started");
+            started.arguments={1,0,0,0x7000};
+            const auto released_id=loader.invoke(started,guest);
+            check(released_id.status==NativeServiceStatus::returned &&
+                  released_id.value==static_cast<std::uint32_t>(-202) && loader.load_decision()==15 &&
+                  load_native_word(guest,0x7000)==0x60,
+                  "StartModule revived a released module id");
             loader.attach_disc(first.path);
             const auto occupied=run(0x2000);
             check(occupied.first.reason==NativeStop::unmapped_code &&
