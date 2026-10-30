@@ -6,8 +6,9 @@ namespace nt::iop {
 // available. The peer consumes an owned packet, not an emulated DMA interrupt.
 class NativeSifCommandEndpoint {
 public:
-    NativeSifCommandEndpoint(NativeSifDestination& destination,std::uint32_t command_buffer,NativeSifTransfers& completions)
-        : destination_(destination), completions_(completions), command_buffer_(command_buffer) {
+    using Delivery=std::function<NativeServiceReply(std::uint32_t,std::span<const std::uint8_t>,std::span<const std::uint8_t>)>;
+    NativeSifCommandEndpoint(NativeSifDestination& destination,std::uint32_t command_buffer,NativeSifTransfers& completions,Delivery delivery={})
+        : destination_(destination), completions_(completions), command_buffer_(command_buffer),delivery_(std::move(delivery)) {
         if (destination.memory.size()>0x2000000 || !destination.writable)
             throw std::invalid_argument("Invalid native SIF command destination");
     }
@@ -34,6 +35,7 @@ public:
             valid=validate(extra_address,extra.size());
             if (valid.status!=NativeServiceStatus::returned) return valid;
         }
+        if (delivery_) return completions_.try_complete([&]() { return delivery_(command_buffer_,packet,extra); },callback);
         // Allocate and snapshot before committing either write, including aliases.
         std::vector<std::uint8_t> command(packet.begin(),packet.end()),payload(extra.begin(),extra.end());
         return completions_.complete([&]() noexcept {
@@ -88,5 +90,6 @@ private:
     NativeSifTransfers& completions_;
     std::uint32_t command_buffer_;
     std::optional<std::vector<std::uint8_t>> pending_;
+    Delivery delivery_;
 };
 }

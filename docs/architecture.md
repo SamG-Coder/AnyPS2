@@ -1850,5 +1850,22 @@ it does not assert that external peers or delayed services are complete.
 
 ## EE LLVM native conversion
 
+Native SIF adapters connect the existing EE outbound queue and receive/completion
+path to the IOP command endpoint and inbound callback source. They validate the
+logical command and payload lengths before accepting a transfer. IOP-to-EE
+delivery snapshots aliases, publishes payload before the padded command and
+raises the EE receive completion. A stopped receiver returns backpressure;
+rejected delivery does not consume an IOP transfer token or queue a callback.
+EE-to-IOP delivery retains an immutable batch while the previous callback owns
+its packet buffer. The IOP link must already be initialized and have published
+its command address; these adapters do not assert reset completion or readiness.
+
+The `native-sif-link` integration test links both LLVM-generated synthetic EE
+and IOP code. It executes an IOP command send, the EE interrupt handler and
+receive rearm, then dispatches EE commands through compiled IOP callbacks with
+interrupt masking and backpressure. The GT4 executable does not yet install a
+compiled IOP reset session, so this transport milestone does not advance its
+current SIF reset stop.
+
 See [EE native architecture](ee-native.md) for conversion, execution, memory,
 startup services and native vector-control boundaries.

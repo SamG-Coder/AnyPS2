@@ -33,6 +33,12 @@ public:
     template<class Commit>
     NativeServiceReply complete(Commit&& commit,std::optional<NativeCallback> callback={}) {
         static_assert(noexcept(commit()), "SIF commit must not throw after writes begin");
+        return try_complete([&]() { commit(); return NativeServiceReply{NativeServiceStatus::returned,1}; },callback);
+    }
+    // A connected native peer can apply backpressure or reject a packet. Reserve
+    // callback storage first; the peer must leave its state unchanged on failure.
+    template<class Commit>
+    NativeServiceReply try_complete(Commit&& commit,std::optional<NativeCallback> callback={}) {
         if (!accepting() || next_token_>0x7fffffffU) return {};
         if (callback && !compiled(callback->address)) return {NativeServiceStatus::unmapped_code,0,callback->address};
         if (completions_.size()+1+static_cast<unsigned>(callback.has_value())>1024)
@@ -40,7 +46,9 @@ public:
         auto pending=completions_;
         pending.push_back({{},true});
         if (callback) pending.push_back({*callback,false});
-        commit();
+        const auto accepted=commit();
+        if (accepted.status!=NativeServiceStatus::returned || !accepted.value) return accepted;
+        if (accepted.value!=1) throw std::logic_error("Native SIF peer returned an invalid acceptance token");
         completions_.swap(pending);
         return {NativeServiceStatus::returned,next_token_++};
     }

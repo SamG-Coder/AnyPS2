@@ -156,6 +156,11 @@ if(BUILD_TESTING)
         target_link_libraries(iop-llvm-tests PRIVATE nt_iop_native nt_disc)
         target_compile_definitions(iop-llvm-tests PRIVATE ANYPS2_TEST_LARGE_LLVM=1)
         add_test(NAME iop-llvm-execution COMMAND iop-llvm-tests)
+        add_executable(sif-native-tests tests/sif_native.cpp
+            libraries/ee_native/src/io.cpp libraries/ee_native/src/numeric.cpp libraries/ee_native/src/vector.cpp
+            "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj" "${CMAKE_CURRENT_BINARY_DIR}/iop-llvm-fixture.obj")
+        target_link_libraries(sif-native-tests PRIVATE nt_ee_native nt_iop_native nt_fileio)
+        add_test(NAME native-sif-link COMMAND sif-native-tests)
         add_test(NAME iop-llvm-project COMMAND "${CMAKE_COMMAND}"
             "-DFIXTURE=$<TARGET_FILE:emit-iop-fixture>" "-DCONVERTER=$<TARGET_FILE:ps2-iop-recompile>"
             "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}" "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/iop-project-tests"
