@@ -1867,5 +1867,15 @@ interrupt masking and backpressure. The GT4 executable does not yet install a
 compiled IOP reset session, so this transport milestone does not advance its
 current SIF reset stop.
 
+`NativeServiceContext` owns the native IOP service composition for one lifetime.
+The standalone probe and connected transport test use the same provider setup,
+including worker synchronization, callbacks, RPC, files and allocator ownership.
+The caller retains the data arena and optional EE destination; a context rejects
+requests using a different arena. Heap, packet and interrupt-stack reservations
+are validated before service construction. A new context starts disconnected and
+uninitialized unless supplied an endpoint, and supplying that endpoint alone does
+not publish SIF readiness. Reset orchestration must still run module startup and
+establish the required service state before acknowledging completion.
+
 See [EE native architecture](ee-native.md) for conversion, execution, memory,
 startup services and native vector-control boundaries.

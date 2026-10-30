@@ -4,7 +4,7 @@
 #include <nt/ee_services.hpp>
 #include <nt/iop_native_sif_commands.hpp>
 #include <nt/iop_llvm.hpp>
-#include <nt/iop_native_libraries.hpp>
+#include <nt/iop_native_context.hpp>
 #include <iostream>
 #include <source_location>
 
@@ -25,9 +25,14 @@ int main() {
         nt::ee::NativePlatform platform; platform.attach(memory);
         nt::ee::NativeIopDelivery deliver(memory,nt_ee_generated_code_overlap,platform.sif_receive);
         NativeSifDestination destination{ee_ram,[](auto address,auto size) { return !nt_ee_generated_code_overlap(address,size); }};
-        NativeSifTransfers transfers(&destination);
-        NativeSifCommandEndpoint endpoint(destination,0x6000,transfers,deliver);
-        NativeSifCommands commands(&endpoint);
+        std::string output;
+        NativeServiceContext context(iop_ram,{0xc000,0xcc00,0xce00,0xf000},{},{},
+            [&](std::string_view text) { output+=text; return true; },{},&destination,0x6000,deliver);
+        auto& endpoint=*context.endpoint();
+        auto& commands=context.commands;
+        auto& inbound=context.inbound;
+        auto& interrupts=context.interrupts;
+        auto& control=context.sif_control;
         auto ee=nt::ee::NativePlatform::initial_state(0x3a0000);
         ee.set(4,5); ee.set(5,0x3c0000); ee.set(6,0); ee.set(7,0); ee.set(28,0x7000);
         require(platform.interrupts.service(0x12,ee,nt_ee_generated_contains,&platform.completions).status==Stop::budget);
@@ -63,14 +68,6 @@ int main() {
         require(ee.pc==0x3a0000 && load_native_word(ee_ram,0x7000)==5 && !platform.completions.ready() && platform.sif_receive.accepting());
         sent=send();
         require(sent.first.reason==NativeStop::budget && sent.second.registers[2]==2 && platform.completions.ready()==32);
-        NativeSifInbound inbound(iop_ram,0xce00);
-        NativeInterruptServices interrupts(0xf000,&inbound);
-        NativeSifControl control(interrupts,&transfers);
-        NativeEventServices events;
-        NativeBootServices boot;
-        NativeSystemServices system(events,boot,iop_ram);
-        NativeSifCommandSession session(events,system,control,&endpoint);
-        inbound.connect(commands,session,control);
         nt::ee::NativeIopCommands incoming(control,inbound);
         require(platform.sif_outbound.connect(incoming.sink()));
         // Explicit EE owner publication, followed by actual IOP initialization.
@@ -78,7 +75,7 @@ int main() {
         require(control.invoke({5,{},NativeServiceKind::sifman},iop_ram).status==NativeServiceStatus::returned);
         require(control.invoke({27,{0xce00},NativeServiceKind::sifman},iop_ram).value==0xce00);
         require(commands.invoke({8,{0xcc00,4},NativeServiceKind::sifcmd},iop_ram).status==NativeServiceStatus::returned);
-        NativeServiceRouter iop_services({&commands,&interrupts});
+        NativeServices& iop_services=context;
         Cpu registration; registration.pc=0x2480; registration.registers[31]=0x5000;
         require(run_native(run_llvm,registration,iop_ram,32,&iop_services).reason==NativeStop::unmapped_code);
         store_native_word(iop_ram,0xcf00,10);
@@ -103,6 +100,18 @@ int main() {
         require(platform.sif_outbound.submit(memory,0x3000,1).value!=0);
         require(platform.sif_outbound.pump(memory)==Stop::invalid_state && !inbound.busy() &&
                 load_native_word(iop_ram,0xcf00)==24);
+        std::vector<std::uint8_t> fresh_ram(0x10000);
+        NativeServiceContext fresh(fresh_ram,{0xc000,0xcc00,0xce00,0xf000},{},{},[](std::string_view) { return true; });
+        require(!fresh.endpoint() && !fresh.sif.accepting() && !fresh.sif_control.ready() && !fresh.inbound.busy());
+        require(fresh.invoke({29,{},NativeServiceKind::sifman},fresh_ram).value==0 &&
+                context.invoke({29,{},NativeServiceKind::sifman},iop_ram).value==1);
+        require(fresh.invoke({29,{},NativeServiceKind::sifman},iop_ram).status==NativeServiceStatus::address_fault);
+        for (const auto layout : {NativeContextLayout{0xc000,0xcc00,0xc000,0xf000},NativeContextLayout{0xc000,0xcc00,0xfff0,0xf000}}) {
+            bool rejected=false;
+            try { NativeServiceContext invalid(fresh_ram,layout,{},{},[](std::string_view) { return true; }); }
+            catch (const std::invalid_argument&) { rejected=true; }
+            require(rejected);
+        }
         std::cout<<"Bidirectional native SIF delivery and compiled EE/IOP handlers passed\n";
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }
