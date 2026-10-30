@@ -1896,3 +1896,14 @@ They are not exhaustive target proofs: the native call checks its actual target
 and stops if it is outside the compiled candidate set, even if some other native
 function exists at that address. Unknown executable content is never interpreted
 or compiled at runtime. Calls without a bounded candidate set still fail conversion.
+
+Generated EE projects optionally link an existing LLVM IOP bundle with
+`-DANYPS2_IOP_PROJECT=<converted-project>`. The probe option
+`--probe-iop-reset <module.data>` invokes its compiled startup entries at the
+actual EE reset request and reports the stopping boundary. Initialized data must
+match the linked metadata fingerprint. This is explicit investigation of a
+selected bundle, not automatic reset-archive resolution: it does not verify that
+the bundle implements the requested reset image, acknowledge reset, or publish
+BOOTEND on behalf of missing services. Completing startup entries alone does not
+establish an operational reset session. The normal path remains unchanged when
+the probe option is absent; generated output still undergoes dependency auditing.

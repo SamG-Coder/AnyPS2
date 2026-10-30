@@ -1,0 +1,19 @@
+function(anyps2_bind_iop target)
+    set(ANYPS2_IOP_PROJECT "" CACHE PATH "Converted LLVM IOP bundle for reset startup investigation")
+    if(NOT ANYPS2_IOP_PROJECT)
+        return()
+    endif()
+    foreach(input IN ITEMS generated.ll module_metadata.cpp module.data)
+        if(NOT EXISTS "${ANYPS2_IOP_PROJECT}/${input}")
+            message(FATAL_ERROR "Incomplete converted IOP project: ${input}")
+        endif()
+    endforeach()
+    set(object "${CMAKE_CURRENT_BINARY_DIR}/iop-native.obj")
+    add_custom_command(OUTPUT "${object}"
+        COMMAND "${ANYPS2_CLANG}" -x ir -target x86_64-pc-windows-msvc
+            -Werror -Wno-override-module -O2 -c "${ANYPS2_IOP_PROJECT}/generated.ll" -o "${object}"
+        DEPENDS "${ANYPS2_IOP_PROJECT}/generated.ll" VERBATIM)
+    target_sources(${target} PRIVATE "${object}" "${ANYPS2_IOP_PROJECT}/module_metadata.cpp")
+    target_include_directories(${target} PRIVATE "${ANYPS2_ROOT}/libraries/iop/include")
+    target_compile_definitions(${target} PRIVATE ANYPS2_NATIVE_IOP=1)
+endfunction()

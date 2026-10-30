@@ -76,3 +76,23 @@ execute_process(COMMAND "${bundle_executable}" --disc "${run}/fixture.irx.iso" R
 if(NOT result EQUAL 0 OR NOT out MATCHES "module=0 returned=43 executed=31" OR NOT out MATCHES "module=1 returned=43 executed=11" OR NOT out MATCHES "module=2 returned=43 executed=23")
     message(FATAL_ERROR "Compiled bundle did not preserve startup order and native linking: ${out} ${err}")
 endif()
+
+# Compose separately generated EE and IOP LLVM objects in the shipped host.
+# No reset occurs in this fixture: merely supplying a bundle must not start it.
+checked("${EEFIXTURE}" "${run}/ee.ll" "${run}/ee.elf")
+checked("${EECONVERTER}" "${run}/ee.elf" "${run}/ee-project")
+checked("${CMAKE_COMMAND}" -S "${run}/ee-project" -B "${run}/linked-build" -G "${GENERATOR}"
+    ${platform} "-DANYPS2_ROOT=${ROOT}" "-DANYPS2_IOP_PROJECT=${run}/project")
+checked("${CMAKE_COMMAND}" --build "${run}/linked-build" --config Release --target ps2-native --parallel 2)
+set(linked "${run}/linked-build/Release/ps2-native${EXE_SUFFIX}")
+execute_process(COMMAND "${linked}" "${run}/ee-project/program.data" --probe-iop-reset "${run}/project/module.data"
+    RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
+if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x0000102c executed=17 v0=43" OR out MATCHES "iop_reset_probe")
+    message(FATAL_ERROR "Linked IOP probe changed EE startup without reset: ${out} ${err}")
+endif()
+file(WRITE "${run}/invalid-iop.data" "invalid")
+execute_process(COMMAND "${linked}" "${run}/ee-project/program.data" --probe-iop-reset "${run}/invalid-iop.data"
+    RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
+if(NOT result EQUAL 1 OR NOT err MATCHES "Invalid linked IOP startup data")
+    message(FATAL_ERROR "Linked IOP probe accepted mismatched data: ${out} ${err}")
+endif()

@@ -12,6 +12,9 @@
 #include <iostream>
 #include <fstream>
 #include <stdexcept>
+#ifdef ANYPS2_NATIVE_IOP
+#include "iop_reset.hpp"
+#endif
 #if defined(ANYPS2_NATIVE_VU) || defined(ANYPS2_NATIVE_VU1)
 #include <nt/vu_artifact.hpp>
 #include <nt/ee_vu_upload.hpp>
@@ -78,15 +81,28 @@ nt::ee::Stop execute(nt::runtime::State* state,nt::ee::Memory* memory,std::uint6
 }
 int main(int argc,char** argv) {
     if (argc<2) {
-        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--disc <image.iso>] [--capture-vu <new-private-directory>] [--capture-stop <new-private-directory>]\n"; return 2;
+        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--disc <image.iso>] [--capture-vu <new-private-directory>] [--capture-stop <new-private-directory>]\n";
+#ifdef ANYPS2_NATIVE_IOP
+        std::cerr<<"Linked IOP investigation: --probe-iop-reset <module.data> (stops without acknowledging reset)\n";
+#endif
+        return 2;
     }
     try {
         std::uint64_t budget=1000000;
         std::filesystem::path disc,capture_directory,stop_directory;
         bool has_budget=false;
+#ifdef ANYPS2_NATIVE_IOP
+        std::filesystem::path iop_data;
+#endif
         for (int index=2;index<argc;++index) {
             const std::string_view text=argv[index];
             if (text=="--trace-services") { trace_services=true; continue; }
+#ifdef ANYPS2_NATIVE_IOP
+            if (text=="--probe-iop-reset") {
+                if (!iop_data.empty() || index+1==argc) throw std::runtime_error("Expected one linked IOP data path");
+                iop_data=argv[++index]; continue;
+            }
+#endif
             if (text=="--capture-stop") {
                 if (!stop_directory.empty() || index+1==argc)
                     throw std::runtime_error("Expected one private stop capture directory");
@@ -155,6 +171,13 @@ int main(int argc,char** argv) {
             static_cast<NativeGpu*>(context)->drawing.reset(); return nt::ee::Stop::budget;
         };
         nt::ee::NativeSifCommandPeer command_peer(platform.sif_link,memory,nt_ee_generated_code_overlap,0x1000,&platform.sif_receive);
+#ifdef ANYPS2_NATIVE_IOP
+        std::unique_ptr<probe::IopReset> iop_reset;
+        if (!iop_data.empty()) {
+            iop_reset=std::make_unique<probe::IopReset>(iop_data,disc,memory,platform,nt_ee_generated_code_overlap);
+            if (!command_peer.reset_owner(iop_reset->owner())) throw std::runtime_error("Cannot bind compiled IOP reset probe");
+        }
+#endif
         std::unique_ptr<nt::ee::NativeFileRpc> files;
         std::unique_ptr<nt::ee::NativeCdvdInitRpc> cdvd;
         if (!disc.empty()) {
@@ -167,6 +190,15 @@ int main(int argc,char** argv) {
         auto state=nt::ee::NativePlatform::initial_state(ANYPS2_EE_ENTRY);
         nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains,ANYPS2_EE_SYSCALL_TABLE);
         const auto stop=nt::ee::run(execute,state,memory,budget,services);
+#ifdef ANYPS2_NATIVE_IOP
+        if (iop_reset && iop_reset->invoked()) {
+            const auto result=iop_reset->result();
+            std::cout<<"iop_reset_probe=stopped entries_returned="<<iop_reset->returned()
+                     <<" startup_finished="<<iop_reset->finished()<<" executed="<<iop_reset->executed()
+                     <<" reason="<<static_cast<unsigned>(result.reason)<<" pc="<<nt::hex32(result.pc)
+                     <<" address="<<nt::hex32(result.address)<<" trap="<<nt::hex32(result.trap_code)<<'\n';
+        }
+#endif
         if (!capture_directory.empty()) capture.save(capture_directory);
         if (!stop_directory.empty()) probe::capture_stop(stop_directory,state,memory,stop);
         std::cout<<"stop="<<static_cast<unsigned>(stop)<<" pc="<<nt::hex32(state.pc)

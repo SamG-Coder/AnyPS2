@@ -162,6 +162,7 @@ if(BUILD_TESTING)
         target_link_libraries(sif-native-tests PRIVATE nt_ee_native nt_iop_native nt_fileio)
         add_test(NAME native-sif-link COMMAND sif-native-tests)
         add_test(NAME iop-llvm-project COMMAND "${CMAKE_COMMAND}"
+            "-DEEFIXTURE=$<TARGET_FILE:emit-ee-fixture>" "-DEECONVERTER=$<TARGET_FILE:ps2-recompile>"
             "-DFIXTURE=$<TARGET_FILE:emit-iop-fixture>" "-DCONVERTER=$<TARGET_FILE:ps2-iop-recompile>"
             "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}" "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/iop-project-tests"
             "-DGENERATOR=${CMAKE_GENERATOR}" "-DPLATFORM=${CMAKE_GENERATOR_PLATFORM}"

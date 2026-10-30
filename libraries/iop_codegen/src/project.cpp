@@ -38,6 +38,7 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
     std::ostringstream code, llvm;
     detail::llvm(llvm,program);
     code<<"#include <nt/iop_native.hpp>\nusing namespace nt::iop;\n";
+    code<<"std::uint64_t nt_iop_generated_data_hash() { return "<<fingerprint(module.memory)<<"ULL; }\n";
     code<<"NativeModule nt_iop_generated_module() { return {"<<module.base<<"U,"<<module.entry<<"U,"
         <<module.initialized_size<<"U,"<<memory_end-first<<"U,"
         <<(module.info ? module.info->global_pointer : 0)<<"U}; }\n";
