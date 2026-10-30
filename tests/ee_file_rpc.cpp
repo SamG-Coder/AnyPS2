@@ -33,6 +33,29 @@ void run_ee_file_rpc_tests() {
     nt::write_file(disc.path,fixture::single_file_iso("DATA.BIN;1",data));
     nt::ee::NativeFileRpc files(disc.path);
     nt::ee::NativeCdvdInitRpc cdvd(disc.path);
+    {
+        std::vector<std::uint8_t> reset_ram(0x10000);
+        nt::ee::Memory reset_memory{reset_ram.data(),reset_ram.size()};
+        nt::ee::NativePlatform reset_platform; reset_platform.attach(reset_memory);
+        reset_platform.completions.enable(5,true);
+        nt::ee::NativeCdvdInitRpc reset_cdvd(disc.path,0x8000,0x9000);
+        nt::ee::NativeSifCommandPeer dispatcher(reset_platform.sif_link,reset_memory,nt_ee_generated_code_overlap,0x1000,&reset_platform.sif_receive);
+        require(dispatcher.register_service(reset_cdvd));
+        auto command=words({56U|(4U<<8),0x9000,0x8000000a,0,0,9,0,0x7000,0,4,0x5000,16,1,0x8000});
+        command.resize(64);
+        const std::array<nt::ee::NativeSifPacket,2> request{{{0x9000,0,std::vector<std::uint8_t>(16)}, {0x1000,0x44,command}}};
+        require(dispatcher.owns_rpc(request) && !reset_cdvd.initialized());
+        require(dispatcher.dispatch_rpc(request,0x6000,false).status==Stop::unsupported_system);
+        require(dispatcher.dispatch_rpc(request,0x6000,true).value==0 && !reset_cdvd.initialized());
+        reset_platform.sif_receive.write(0x1000c000,0x184);
+        auto malformed=request; malformed[0].destination=0x9010;
+        require(dispatcher.dispatch_rpc(malformed,0x6000,true).status==Stop::invalid_state && !reset_cdvd.initialized());
+        const auto completed=dispatcher.dispatch_rpc(request,0x6000,true);
+        require(completed.status==Stop::budget && completed.value==1 && reset_cdvd.initialized() &&
+                nt::le32(reset_ram,0x5000)==1 && nt::le32(reset_ram,0x6008)==0x80000008 &&
+                reset_platform.completions.ready()==32 && !reset_platform.sif_link.peer_flags());
+        // The RPC dispatcher never publishes handshake or reset readiness.
+    }
     nt::ee::NativeRpcService* endpoint=&files;
     std::vector<std::uint8_t> ram(0x10000,0xcc);
     nt::ee::Memory memory{ram.data(),ram.size()};

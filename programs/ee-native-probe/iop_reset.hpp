@@ -1,6 +1,7 @@
 #pragma once
 #include <nt/ee_iop_delivery.hpp>
 #include <nt/ee_iop_commands.hpp>
+#include <nt/ee_cdvd_rpc.hpp>
 #include <nt/ee_platform.hpp>
 #include <nt/ee_sif_command_peer.hpp>
 #include <nt/iop_native_startup.hpp>
@@ -33,11 +34,16 @@ public:
             throw std::runtime_error("Invalid linked IOP startup data");
         std::copy(bytes.begin(),bytes.end(),ram_.begin()+module_.base);
         services_=std::make_unique<nt::iop::NativeServiceContext>(ram_,
-            nt::iop::NativeContextLayout{(module_.base+module_.memory_size+255)&~255U},
+            nt::iop::NativeContextLayout{(module_.base+module_.memory_size+255)&~255U,0x1ee000},
             nt_iop_generated_libraries(),nt_iop_generated_imports(),
             [](std::string_view) { return true; },disc,&destination_,0,delivery_);
         startup_=std::make_unique<nt::iop::NativeModuleStartup>(nt::iop::run_llvm,*services_,ram_,module_,nt_iop_generated_entries(),0x1ff000);
         incoming_=std::make_unique<nt::ee::NativeIopCommands>(services_->sif_control,services_->inbound);
+        if (!disc.empty()) {
+            cdvd_=std::make_unique<nt::ee::NativeCdvdInitRpc>(disc,0x1ee000,0x1ee010);
+            native_rpc_=std::make_unique<nt::ee::NativeSifCommandPeer>(platform.sif_link,ee,protection,0x1f0000,&platform.sif_receive);
+            if (!native_rpc_->register_service(*cdvd_)) throw std::runtime_error("Cannot register reset-session CD/DVD service");
+        }
     }
     nt::ee::NativeSifResetOwner owner() { return {this,reset,{this,commands}}; }
     bool invoked() const { return invoked_; }
@@ -47,6 +53,7 @@ public:
     bool finished() const { return startup_->finished(); }
     bool accepted() const { return accepted_; }
     std::uint32_t last_server() const { return last_server_; }
+    bool cdvd_initialized() const { return cdvd_ && cdvd_->initialized(); }
     nt::ee::Stop pump() {
         if (!accepted_) return nt::ee::Stop::budget;
         if (!platform_.sif_link.reset_teardown_complete()) return nt::ee::Stop::budget;
@@ -81,8 +88,14 @@ private:
     static nt::ee::IoRead commands(void* opaque,std::span<const nt::ee::NativeSifPacket> packets) {
         auto& self=*static_cast<IopReset*>(opaque);
         if (!self.accepted_) return {nt::ee::Stop::unsupported_system};
-        const auto sink=self.incoming_->sink();
-        const auto result=sink.accept(sink.context,packets);
+        nt::ee::IoRead result;
+        if (self.native_rpc_ && self.native_rpc_->owns_rpc(packets)) {
+            if (self.services_->inbound.busy()) return {nt::ee::Stop::budget,0};
+            result=self.native_rpc_->dispatch_rpc(packets,self.services_->endpoint()->command_buffer(),self.services_->command_session.rpc_ready());
+        } else {
+            const auto sink=self.incoming_->sink();
+            result=sink.accept(sink.context,packets);
+        }
         if (result.status==nt::ee::Stop::budget && result.value==1 && !packets.empty()) {
             const auto& bytes=packets.back().bytes;
             if (bytes.size()>=36 && nt::iop::load_native_word(bytes,8)==0x80000009)
@@ -132,6 +145,8 @@ private:
     std::unique_ptr<nt::iop::NativeServiceContext> services_;
     std::unique_ptr<nt::iop::NativeModuleStartup> startup_;
     std::unique_ptr<nt::ee::NativeIopCommands> incoming_;
+    std::unique_ptr<nt::ee::NativeCdvdInitRpc> cdvd_;
+    std::unique_ptr<nt::ee::NativeSifCommandPeer> native_rpc_;
     nt::iop::NativeResult result_{nt::iop::NativeStop::budget,0};
     bool invoked_=false,started_=false;
     std::uint32_t last_server_=0;

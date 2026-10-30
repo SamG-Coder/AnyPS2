@@ -13,6 +13,7 @@ public:
             throw std::invalid_argument("Invalid native SIF command destination");
     }
     bool accepting() const { return completions_.accepting(); }
+    std::uint32_t command_buffer() const { return command_buffer_; }
     NativeServiceReply snapshot(std::uint32_t address,std::uint32_t size,std::vector<std::uint8_t>& result) const {
         if (!accepting() || size>0x100000) return {};
         const auto offset=address&0x1fffffffU;

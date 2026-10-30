@@ -210,7 +210,8 @@ int main(int argc,char** argv) {
                      <<" startup_finished="<<iop_reset->finished()<<" executed="<<iop_reset->executed()
                      <<" reason="<<static_cast<unsigned>(result.reason)<<" pc="<<nt::hex32(result.pc)
                      <<" address="<<nt::hex32(result.address)<<" trap="<<nt::hex32(result.trap_code)
-                     <<" last_bind="<<nt::hex32(iop_reset->last_server())<<'\n';
+                     <<" last_bind="<<nt::hex32(iop_reset->last_server())
+                     <<" session_cdvd_initialized="<<iop_reset->cdvd_initialized()<<'\n';
         }
 #endif
         if (!capture_directory.empty()) capture.save(capture_directory);

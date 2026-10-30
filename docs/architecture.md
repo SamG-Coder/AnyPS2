@@ -1919,6 +1919,13 @@ incoming packets, outgoing replies and EE interrupt completion then share the
 native transport. Missing RPC servers still return an unsuccessful bind; the
 last requested server is reported to distinguish retry loops from useful work.
 Repeated reset and automatic selection of all archive services remain unfinished.
+The selected session also owns a fresh native CD/DVD initialization endpoint.
+It shares the existing RPC validation/reply implementation with bootstrap, but
+uses the compiled command session's completed handshake and published EE receive
+buffer. Its service tokens occupy a reserved range outside the IOP heap. Native
+RPC replies retain receive backpressure and EE interrupt completion; unregistered
+endpoints continue through the compiled server registry. CD/DVD synchronous and
+asynchronous command families are not implied by initialization support.
 
 Bundle conversion accepts `romdrv@<base>` in place of a relocation base to
 explicitly select the native read-only archive service for a ROMDRV 2.x module.

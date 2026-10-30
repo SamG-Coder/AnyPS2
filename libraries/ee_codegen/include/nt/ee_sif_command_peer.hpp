@@ -48,35 +48,30 @@ public:
             if (existing->id==service.id || existing->server==service.server || existing->buffer==service.buffer) return false;
         services_.push_back(&service); return true;
     }
-    std::uint32_t receive_address() const { return receive_address_; }
-    std::uint32_t software_register(unsigned index) const { return index<registers_.size() ? registers_[index] : 0; }
-    std::uint32_t last_option() const { return last_option_; }
-    std::optional<std::uint32_t> last_unavailable_server() const { return unavailable_server_; }
-    std::uint32_t last_command() const { return last_command_; }
-private:
-    static std::uint32_t word(std::span<const std::uint8_t> bytes,unsigned offset) {
-        std::uint32_t value; std::memcpy(&value,bytes.data()+offset,4); return value;
+    // Reuse native RPC services after an independently owned compiled handshake.
+    // This entry does not publish link flags or initialize the command session.
+    bool owns_rpc(std::span<const NativeSifPacket> packets) const {
+        if (packets.empty()) return false;
+        const auto& bytes=packets.back().bytes;
+        if (bytes.size()<36) return false;
+        const auto command=word(bytes,8);
+        for (const auto* service:services_) {
+            if (command==0x80000009 && word(bytes,32)==service->id) return true;
+            if (command==0x8000000a && bytes.size()>=56 && word(bytes,52)==service->server) return true;
+        }
+        return false;
     }
-    static IoRead accept(void* context,std::span<const NativeSifPacket> packets) {
-        return static_cast<NativeSifCommandPeer*>(context)->receive(packets);
-    }
-    IoRead reply(std::span<const std::uint8_t> bytes) {
-        if (!receiver_ || !memory_.completions || !receive_address_) return {Stop::unsupported_system};
-        if (!receiver_->accepting()) return {Stop::budget,0};
-        const auto delivered=receiver_->deliver(memory_,protection_,*memory_.completions,receive_address_,bytes);
-        return {delivered,delivered==Stop::budget ? 1U : 0U};
-    }
-    IoRead receive(std::span<const NativeSifPacket> packets) {
-        if (handed_off_) return reset_owner_.commands.accept(reset_owner_.commands.context,packets);
-        if (!connected_ || packets.empty() || packets.size()>2) return {Stop::unsupported_system};
+    IoRead dispatch_rpc(std::span<const NativeSifPacket> packets,std::uint32_t receive_address,bool ready) {
+        if (!ready) return {Stop::unsupported_system};
+        if (!protection_ || !port_ || port_%16 || port_>0x200000-112) return {Stop::invalid_state};
+        if (packets.empty() || packets.size()>2) return {Stop::invalid_state};
         const auto& packet=packets.back();
         if (packet.destination!=port_ || packet.bytes.size()<16) return {Stop::invalid_state};
         const auto header=word(packet.bytes,0),length=header&255;
         if (length<16 || length>112 || ((length+15)&~15U)!=packet.bytes.size()) return {Stop::invalid_state};
         const auto command=word(packet.bytes,8),option=word(packet.bytes,12);
-        last_command_=command; last_option_=option;
         if (command==0x8000000a) {
-            if (!rpc_ready_ || length<56 || option || word(packet.bytes,48)!=1) return {Stop::unsupported_system};
+            if (!ready || length<56 || option || word(packet.bytes,48)!=1) return {Stop::unsupported_system};
             NativeRpcService* service=nullptr;
             for (auto* item:services_) if (item->server==word(packet.bytes,52)) service=item;
             if (!service) return {Stop::unsupported_system};
@@ -89,9 +84,9 @@ private:
                     payload.bytes.size()!=((size+15U)&~15U)) return {Stop::invalid_state};
                 args=std::span(payload.bytes).first(size);
             }
-            if (!receiver_ || !memory_.completions || !receive_address_) return {Stop::unsupported_system};
+            if (!receiver_ || !memory_.completions || !receive_address) return {Stop::unsupported_system};
             if (!receiver_->accepting()) return {Stop::budget,0};
-            const auto valid=receiver_->validate(memory_,protection_,receive_address_,64);
+            const auto valid=receiver_->validate(memory_,protection_,receive_address,64);
             if (valid!=Stop::budget) return {valid};
             std::array<std::uint8_t,64> response{};
             const std::array<std::uint32_t,12> fields{64,0,0x80000008U,0,
@@ -99,8 +94,45 @@ private:
             std::memcpy(response.data(),fields.data(),sizeof(fields));
             const auto called=service->call(memory_,protection_,word(packet.bytes,32),args,word(packet.bytes,40),word(packet.bytes,44));
             if (called!=Stop::budget) return {called};
-            return reply(response);
+            return reply_to(response,receive_address);
         }
+        if (command!=0x80000009 || length<36 || option || (header>>8) || packets.size()!=1)
+            return {Stop::invalid_state};
+        for (const auto* service:services_) if (service->id==word(packet.bytes,32)) {
+            const auto response=nt::sif::bind_reply(word(packet.bytes,20),word(packet.bytes,28),service->server,service->buffer);
+            return reply_to(response,receive_address);
+        }
+        return {Stop::unsupported_system};
+    }
+    std::uint32_t receive_address() const { return receive_address_; }
+    std::uint32_t software_register(unsigned index) const { return index<registers_.size() ? registers_[index] : 0; }
+    std::uint32_t last_option() const { return last_option_; }
+    std::optional<std::uint32_t> last_unavailable_server() const { return unavailable_server_; }
+    std::uint32_t last_command() const { return last_command_; }
+private:
+    static std::uint32_t word(std::span<const std::uint8_t> bytes,unsigned offset) {
+        std::uint32_t value; std::memcpy(&value,bytes.data()+offset,4); return value;
+    }
+    static IoRead accept(void* context,std::span<const NativeSifPacket> packets) {
+        return static_cast<NativeSifCommandPeer*>(context)->receive(packets);
+    }
+    IoRead reply(std::span<const std::uint8_t> bytes) { return reply_to(bytes,receive_address_); }
+    IoRead reply_to(std::span<const std::uint8_t> bytes,std::uint32_t address) {
+        if (!receiver_ || !memory_.completions || !address) return {Stop::unsupported_system};
+        if (!receiver_->accepting()) return {Stop::budget,0};
+        const auto delivered=receiver_->deliver(memory_,protection_,*memory_.completions,address,bytes);
+        return {delivered,delivered==Stop::budget ? 1U : 0U};
+    }
+    IoRead receive(std::span<const NativeSifPacket> packets) {
+        if (handed_off_) return reset_owner_.commands.accept(reset_owner_.commands.context,packets);
+        if (!connected_ || packets.empty() || packets.size()>2) return {Stop::unsupported_system};
+        const auto& packet=packets.back();
+        if (packet.destination!=port_ || packet.bytes.size()<16) return {Stop::invalid_state};
+        const auto header=word(packet.bytes,0),length=header&255;
+        if (length<16 || length>112 || ((length+15)&~15U)!=packet.bytes.size()) return {Stop::invalid_state};
+        const auto command=word(packet.bytes,8),option=word(packet.bytes,12);
+        last_command_=command; last_option_=option;
+        if (command==0x8000000a) return dispatch_rpc(packets,receive_address_,rpc_ready_);
         if ((header>>8) || packets.size()!=1) return {Stop::invalid_state};
         if (command==0x80000003) {
             if (!reset_owner_.reset) return {Stop::unsupported_system};
@@ -132,12 +164,10 @@ private:
         if (command==0x80000009) {
             if (!rpc_ready_) return {Stop::unsupported_system};
             if (length<36 || option) return {Stop::invalid_state};
-            NativeRpcService* service=nullptr;
-            for (auto* item:services_) if (item->id==word(packet.bytes,32)) service=item;
-            const auto response=nt::sif::bind_reply(word(packet.bytes,20),word(packet.bytes,28),
-                service ? service->server : 0,service ? service->buffer : 0);
+            if (owns_rpc(packets)) return dispatch_rpc(packets,receive_address_,rpc_ready_);
+            const auto response=nt::sif::bind_reply(word(packet.bytes,20),word(packet.bytes,28),0,0);
             const auto result=reply(response);
-            if (!service && result.status==Stop::budget && result.value==1) unavailable_server_=word(packet.bytes,32);
+            if (result.status==Stop::budget && result.value==1) unavailable_server_=word(packet.bytes,32);
             return result;
         }
         if (command==0x80000001) {

@@ -13,6 +13,7 @@ public:
         : events_(events),control_(control),peer_(peer) {
         status_event_=system.invoke({41,{},NativeServiceKind::thbase},{}).value;
     }
+    bool rpc_ready() const { return rpc_published_ && rpc_acknowledged_; }
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
         if (request.kind!=NativeServiceKind::sifcmd) return {};
         const auto& a=request.arguments;
@@ -39,8 +40,11 @@ public:
             registers_[index]=load_native_word(packet,20);
             return {NativeServiceStatus::returned};
         }
-        if (command==0x80000002 && load_native_word(packet,12))
-            return signal(0x800,ram);
+        if (command==0x80000002 && load_native_word(packet,12)) {
+            const auto result=signal(0x800,ram);
+            if (result.status==NativeServiceStatus::returned && !result.value) rpc_acknowledged_=true;
+            return result;
+        }
         if (packet.size()<20 || (command!=0x80000000 && command!=0x80000002)) return {};
         const auto address=load_native_word(packet,16);
         return peer_->publish_buffer(address,[&]() {
@@ -84,6 +88,7 @@ private:
     NativeSifCommandEndpoint* peer_;
     std::uint32_t status_event_;
     bool rpc_published_=false;
+    bool rpc_acknowledged_=false;
     std::array<std::uint32_t,32> registers_{};
 };
 }

@@ -10,8 +10,8 @@ namespace nt::ee {
 // CD/DVD endpoints are registered separately only when implemented.
 class NativeCdvdInitRpc final : public NativeRpcService {
 public:
-    explicit NativeCdvdInitRpc(std::filesystem::path image)
-        : NativeRpcService(0x80000592U,0x4000,0x5000),image_(std::move(image)) {}
+    explicit NativeCdvdInitRpc(std::filesystem::path image,std::uint32_t server=0x4000,std::uint32_t buffer=0x5000)
+        : NativeRpcService(0x80000592U,server,buffer),image_(std::move(image)) {}
     bool initialized() const { return bool(disc_); }
     const std::string& error() const { return error_; }
     Stop call(Memory& memory,CodeOverlap protection,std::uint32_t method,
