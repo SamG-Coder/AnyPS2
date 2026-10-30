@@ -29,8 +29,9 @@ no commercial game or BIOS. `conversion-inventory` builds a synthetic disc with
 one convertible IOP module, one unsupported sibling, an EE executable and an
 unrecognized file. It checks that the sibling still converts, unrecognized bytes
 are not decoded, and the report keeps linked and executed coverage at zero.
-Names that differ only by a separator, and long names that share a 48-character
-prefix, keep distinct artifact directories and distinct IR. Each generated unit
+Names that differ only by a separator, only by letter case, and long names that
+share a 60-character prefix, keep distinct artifact directories and distinct IR.
+Each generated unit
 records its source identity beside that IR. A generated native fixture is compiled by the normal
 build so tests execute the generator's output.
 
@@ -474,6 +475,9 @@ The same process invokes the native modload boot-device query on a private RAM
 image: `cdrom:`, `cdrom0:`, and `rom:` through `rom3:` are legal; other
 well-formed paths are illegal; a null or unterminated pointer does not return
 success. The query does not create loader callback state or start a module.
+LoadStartModule on a synthetic disc returns -201 for a null or non-disc path
+and -203 when the image is absent. It stops without a module id or result write
+when the opened bytes are absent from or present in the AOT source catalog.
 HI/LO coverage verifies initial state, signed/unsigned 64-bit products, explicit
 HI/LO writes and readback across one-instruction and larger slices. The LLVM
 adapter uses ABI entry version 2 for the enlarged state buffer; rebuild generated

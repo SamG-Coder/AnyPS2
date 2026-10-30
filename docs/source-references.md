@@ -1159,9 +1159,16 @@ device the native disc or archive opener can use: `cdrom:` and `cdrom0:`, or
 `rom:` through `rom3:` without requiring a mounted image. Every other
 well-formed path is illegal. A null or unterminated guest pointer stops without
 success. The pinned SDK function returns success for every path and is marked
-unofficial, so that stub is not used. Recognized lifecycle imports, including
-LoadStartModule, stop at their native service boundary until an implementation
-owns them. The pinned loadcore
+unofficial, so that stub is not used. LoadStartModule (ordinal 7) reads a path, its argument span, and an optional
+result pointer before any file access. A null filename returns -201. A path
+outside `cdrom:`, `cdrom0:`, and `rom:` through `rom3:` returns -201. A legal
+path with no mounted image, and a missing cdrom file, return -203. An empty
+image returns -204. None of these writes the result pointer. An opened cdrom
+file is fingerprinted and compared with the linked AOT source catalog. Both a
+catalog miss and a catalog hit stop without relocating the image, registering
+it, calling its entry, or writing a module result. `rom` bytes are not read
+yet, so that device returns -203. Other lifecycle imports still stop at the
+service boundary. The pinned loadcore
 `exports.tab` identifies FlushIcache/FlushDcache; immutable AOT code and coherent
 native data replace cache banks, with a host publication fence at these calls.
 No firmware cache routine or upstream implementation is copied.

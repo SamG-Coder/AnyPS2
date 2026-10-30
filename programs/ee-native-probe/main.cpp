@@ -221,7 +221,11 @@ int main(int argc,char** argv) {
                      <<" boot_device_queries="<<iop_reset->boot_device_queries()
                      <<" boot_device="<<iop_reset->boot_device()
                      <<" boot_device_decision="<<iop_reset->boot_device_decision()
-                     <<" boot_device_path="<<iop_reset->boot_device_path()<<'\n';
+                     <<" boot_device_path="<<iop_reset->boot_device_path()
+                     <<" load_decision="<<iop_reset->load_decision()
+                     <<" load_bytes="<<iop_reset->load_bytes()
+                     <<" load_hash="<<iop_reset->load_hash()
+                     <<" load_path="<<iop_reset->load_path()<<'\n';
         }
 #endif
         if (!capture_directory.empty()) capture.save(capture_directory);

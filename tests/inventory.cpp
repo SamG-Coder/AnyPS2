@@ -1,6 +1,7 @@
 #include <nt/inventory.hpp>
 #include "reboot_fixture.hpp"
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -108,7 +109,8 @@ int main() {
             {"BOOT.ELF;1",make_elf()},
             {"IOPRP.IMG;1",archive_of({{"SYSMEM",good},{"BADMOD",bad}})},
             {"NOTES.BIN;1",nt::Bytes{'n','o','t',' ','c','o','d','e'}},
-            {packed,archive_of({{"FILE.A",module_with(0x24020007)},{"FILE_A",module_with(0x24020009)},{"SAME",module_with(0x2402000b)}})},
+            {packed,archive_of({{"FILE.A",module_with(0x24020007)},{"FILE_A",module_with(0x24020009)},{"SAME",module_with(0x2402000b)},
+                {"Ab",module_with(0x24020015)},{"AB",module_with(0x24020017)}})},
             {packed_alias,archive_of({{"SAME",module_with(0x2402000d)}})},
             {long_one,archive_of({{"EDGE",module_with(0x24020011)}})},
             {long_two,archive_of({{"EDGE",module_with(0x24020013)}})}
@@ -149,7 +151,9 @@ int main() {
             "Converted module lost its source identity");
         const auto require_distinct=[&](const std::string& id,const char* immediate) {
             const auto unit=find_exact(inventory,id);
-            check(unit && unit->stage==nt::inventory::Stage::llvm_generated,"Colliding source was not converted on its own");
+            if (!unit || unit->stage!=nt::inventory::Stage::llvm_generated)
+                throw std::runtime_error(std::string("Colliding source was not converted on its own: ")+std::string(id)+
+                    (unit ? " stage="+std::to_string(static_cast<int>(unit->stage))+" "+unit->detail : " missing"));
             const auto ir_text=read_text(unit->artifact);
             const auto marker=std::string("add i32 0, ")+immediate+"\n";
             check(ir_text.find(marker)!=std::string::npos,"Converted module lost its own instruction");
@@ -162,9 +166,32 @@ int main() {
         const auto alias_same=require_distinct(packed_alias+"/SAME","13");
         const auto first_long=require_distinct(long_one+"/EDGE","17");
         const auto second_long=require_distinct(long_two+"/EDGE","19");
+        const auto lower_case=require_distinct(packed+"/Ab","21");
+        const auto upper_case=require_distinct(packed+"/AB","23");
         check(dotted->artifact!=underscored->artifact,"Sanitized member names shared an artifact directory");
         check(packed_same->artifact!=alias_same->artifact,"Sanitized archive names shared an artifact directory");
         check(first_long->artifact!=second_long->artifact,"Long source prefixes shared an artifact directory");
+        const auto fold=[](std::filesystem::path path) {
+            auto text=path.generic_string();
+            for (auto& character:text) character=static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+            return text;
+        };
+        const auto identity_is_lower=[](const std::filesystem::path& artifact) {
+            for (const auto& part:artifact) {
+                const auto name=part.generic_string();
+                if (name.empty() || name.front()!='_') continue;
+                if (name.find_first_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ")!=std::string::npos) return false;
+            }
+            return true;
+        };
+        check(fold(lower_case->artifact)!=fold(upper_case->artifact),
+            "Case-only member names shared an artifact directory");
+        check(identity_is_lower(lower_case->artifact) && identity_is_lower(upper_case->artifact),
+            "Case-distinct artifact identity is not lowercase");
+        check(read_text(lower_case->artifact).find("add i32 0, 23\n")==std::string::npos,
+            "Lowercase member artifact contains the uppercase module");
+        check(read_text(upper_case->artifact).find("add i32 0, 21\n")==std::string::npos,
+            "Uppercase member artifact contains the lowercase module");
         check(read_text(dotted->artifact).find("add i32 0, 9\n")==std::string::npos,"Sanitized member artifact contains the other module");
         check(read_text(first_long->artifact).find("add i32 0, 19\n")==std::string::npos,"Long-prefix artifact contains the other module");
         bool refused=false;

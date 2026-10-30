@@ -44,6 +44,7 @@ public:
           system(events,boot,ram),command_session(events,system,sif_control,peer_.get()),stdio(std::move(output)),
           disc_service(disc.empty() ? nullptr : std::make_unique<NativeDiscServices>(disc,&descriptors,&events)),router(providers()),arena_(ram),packet_buffer_(layout.packet_buffer) {
         inbound.connect(commands,command_session,sif_control,&rpc_servers);
+        if (!disc.empty()) modload.attach_disc(disc);
     }
     NativeServiceContext(const NativeServiceContext&)=delete;
     NativeServiceContext& operator=(const NativeServiceContext&)=delete;

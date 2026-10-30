@@ -72,24 +72,35 @@ std::string stem(std::string value) {
     for (auto& character:value) character=static_cast<char>(std::toupper(static_cast<unsigned char>(character)));
     return value;
 }
-// Filesystem identity of one source name. Digits, letters and '-' are copied.
-// Every other byte, including '_' and separators, becomes '_' plus two lowercase
-// hex digits, so those bytes cannot alias a copied character. The decimal length
-// prefix makes the encoding injective, including the empty name. No hash is used.
+// Filesystem identity of one source name. Digits, letters and '-' are copied in
+// lowercase. Each group of four source bytes adds one hex digit whose bits record
+// which of those bytes were uppercase, so a case-insensitive filesystem cannot
+// merge names that differ only by case. Every other byte, including '_' and
+// separators, becomes '_' plus two lowercase hex digits. '=' separates the case
+// mask and is not produced by the body. The decimal length prefix makes the
+// encoding injective, including the empty name. No hash is used.
 std::string encode_identity(std::string_view text) {
     std::string encoded=std::to_string(text.size());
     encoded.push_back('_');
     static constexpr char hex[]="0123456789abcdef";
+    unsigned bits=0, count=0;
+    std::string cases;
     for (unsigned char character:text) {
-        const bool plain=(character>='0' && character<='9') || (character>='A' && character<='Z') ||
-            (character>='a' && character<='z') || character=='-';
-        if (plain) encoded.push_back(static_cast<char>(character));
-        else {
+        if (character>='A' && character<='Z') {
+            encoded.push_back(static_cast<char>(character-'A'+'a'));
+            bits|=1u<<count;
+        } else if ((character>='0' && character<='9') || (character>='a' && character<='z') || character=='-') {
+            encoded.push_back(static_cast<char>(character));
+        } else {
             encoded.push_back('_');
             encoded.push_back(hex[character>>4]);
             encoded.push_back(hex[character&0x0f]);
         }
+        if (++count==4) { cases.push_back(hex[bits]); bits=0; count=0; }
     }
+    if (count) cases.push_back(hex[bits]);
+    encoded.push_back('=');
+    encoded+=cases;
     return encoded;
 }
 // Split a long identity into nested components. A leading '_' keeps a short final
@@ -224,6 +235,9 @@ void convert_iop_group(Accumulator& accumulator,const std::string& owner,std::ve
         try {
             const auto exports=elf::iop_exports(module);
             for (const auto& library:exports) if (native_library(library.name)) unit.overlaps_native_service=true;
+            // ROMDRV 2.x with the six-entry archive ABI is the one export shape
+            // the native archive service actually replaces. An export signature
+            // alone is not a provider, so other libraries stay ordinary modules.
             unit.native_replacement=exports.size()==1 && exports.front().name=="romdrv" && (exports.front().version>>8)==2 &&
                 exports.front().functions.size()==6;
         } catch (const std::exception&) {}

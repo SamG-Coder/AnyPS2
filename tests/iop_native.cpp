@@ -84,8 +84,13 @@ int main() {
             check(call(0xb414,{0xb280,0xffff,0}).reason==NativeStop::unmapped_code &&
                   call(0xb424,{0xc000,0xc004}).reason==NativeStop::unmapped_code && load_native_word(data,0xc004)==0xb290,
                   "Invalid loader callback partially changed registration");
-            check(call(0xb42c).reason==NativeStop::import_request,
-                  "Unimplemented module loading invented success");
+            {
+                auto cpu=initial(); cpu.pc=0xb42c;
+                const auto loading=run_native(nt_iop_generated_run,cpu,data,128,&loader);
+                check(loading.reason==NativeStop::unmapped_code && cpu.pc==0x5000 &&
+                      cpu.registers[2]==static_cast<std::uint32_t>(-201),
+                      "Empty LoadStartModule path invented a module id");
+            }
             {
                 NativeModloadServices boot;
                 std::vector<std::uint8_t> paths(0x10000,0);
@@ -3463,6 +3468,70 @@ int main() {
             path("host:file"); check(file_call(4,0x2000,1)==static_cast<std::uint32_t>(-19),"Native disc service accepted a host path");
             path("cdrom0:/../DATA.BIN"); check(file_call(4,0x2000,1)==static_cast<std::uint32_t>(-2),"Native disc service accepted traversal");
             path("cdrom0:/MISSING.BIN"); check(file_call(4,0x2000,1)==static_cast<std::uint32_t>(-2),"Missing disc file succeeded");
+        }
+        {
+            // LoadStartModule may open a disc image. It must not report a module
+            // id or write the guest result until an AOT entry actually returns.
+            NativeModloadServices loader;
+            std::vector<std::uint8_t> guest(0x10000,0);
+            const auto place=[&](std::uint32_t address,std::string_view text) {
+                std::copy(text.begin(),text.end(),guest.begin()+address);
+                guest[address+text.size()]=0;
+            };
+            place(0x2000,"cdrom0:/MOD.IRX;1");
+            place(0x2100,"host:MOD.IRX");
+            place(0x2200,"alpha");
+            store_native_word(guest,0x7000,0x11111111);
+            NativeServiceRequest request;
+            request.kind=NativeServiceKind::modload;
+            request.selector=7;
+            const auto ask=[&](std::uint32_t name,std::uint32_t arglen,std::uint32_t args,std::uint32_t result) {
+                request.arguments={name,arglen,args,result};
+                request.interrupt_context=false;
+                return loader.invoke(request,guest);
+            };
+            const auto unchanged=[&] { return load_native_word(guest,0x7000)==0x11111111; };
+            const auto null_name=ask(0,0,0,0x7000);
+            check(null_name.status==NativeServiceStatus::returned && null_name.value==static_cast<std::uint32_t>(-201) &&
+                  loader.load_decision()==-1 && unchanged(),
+                  "Null LoadStartModule path classified a file or wrote the result");
+            check(ask(0x2000,4,0x2200,0x7000).status==NativeServiceStatus::address_fault && loader.load_decision()==-1 && unchanged(),
+                  "Unterminated LoadStartModule arguments opened a module");
+            check(ask(0x2000,0,0,0x1250).status==NativeServiceStatus::code_write && loader.load_decision()==-1 && unchanged(),
+                  "LoadStartModule accepted a result pointer in compiled code");
+            const auto unmounted=ask(0x2000,0,0,0x7000);
+            check(unmounted.status==NativeServiceStatus::returned && unmounted.value==static_cast<std::uint32_t>(-203) &&
+                  loader.load_decision()==5 && unchanged(),
+                  "LoadStartModule without a disc reported a module result");
+            struct TemporaryImage {
+                std::filesystem::path path=std::filesystem::temp_directory_path()/
+                    ("anyps2-load-start-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".iso");
+                ~TemporaryImage() { std::error_code ignored; std::filesystem::remove(path,ignored); }
+            } image;
+            const nt::Bytes payload{'m','o','d','u','l','e',1,2,3,4};
+            nt::write_file(image.path,fixture::single_file_iso("MOD.IRX;1",payload));
+            loader.attach_disc(image.path);
+            const auto foreign=ask(0x2100,0,0,0x7000);
+            check(foreign.status==NativeServiceStatus::returned && foreign.value==static_cast<std::uint32_t>(-201) &&
+                  loader.load_decision()==4 && unchanged(),
+                  "LoadStartModule accepted a non-disc path");
+            place(0x2300,"cdrom0:/MISSING.IRX;1");
+            const auto missing=ask(0x2300,0,0,0);
+            check(missing.status==NativeServiceStatus::returned && missing.value==static_cast<std::uint32_t>(-203) &&
+                  loader.load_decision()==3,
+                  "Missing LoadStartModule image returned success");
+            const auto opened=ask(0x2000,6,0x2200,0x7000);
+            check(opened.status==NativeServiceStatus::unavailable && loader.load_decision()==1 &&
+                  loader.load_path()=="cdrom0:/MOD.IRX;1" && loader.load_bytes()==payload.size() &&
+                  loader.load_hash()==nt::fingerprint(payload) && unchanged(),
+                  "Uncatalogued module image was started or its result was written");
+            loader.attach_catalog({loader.load_hash()});
+            check(ask(0x2000,6,0x2200,0x7000).status==NativeServiceStatus::unavailable && loader.load_decision()==2 && unchanged(),
+                  "Catalogued module image was reported started before its entry ran");
+            request.interrupt_context=true;
+            const auto decision=loader.load_decision();
+            check(loader.invoke(request,guest).status==NativeServiceStatus::unavailable && loader.load_decision()==decision && unchanged(),
+                  "Interrupt LoadStartModule changed the catalog decision");
         }
         std::cout<<"Compiled IOP LLVM execution passed without an interpreter library\n";
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }

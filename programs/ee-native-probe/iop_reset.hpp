@@ -37,6 +37,7 @@ public:
             nt::iop::NativeContextLayout{(module_.base+module_.memory_size+255)&~255U,0x1ed000},
             nt_iop_generated_libraries(),nt_iop_generated_imports(),
             [](std::string_view) { return true; },disc,&destination_,0,delivery_);
+        services_->modload.attach_catalog(nt_iop_generated_source_hashes());
         startup_=std::make_unique<nt::iop::NativeModuleStartup>(nt::iop::run_llvm,*services_,ram_,module_,nt_iop_generated_entries(),0x1ff000);
         incoming_=std::make_unique<nt::ee::NativeIopCommands>(services_->sif_control,services_->inbound);
         if (!disc.empty()) {
@@ -78,6 +79,10 @@ public:
     const std::string& boot_device() const { return services_->modload.boot_device(); }
     const std::string& boot_device_path() const { return services_->modload.boot_device_path(); }
     int boot_device_decision() const { return services_->modload.boot_device_decision(); }
+    int load_decision() const { return services_->modload.load_decision(); }
+    const std::string& load_path() const { return services_->modload.load_path(); }
+    std::uint64_t load_bytes() const { return services_->modload.load_bytes(); }
+    std::uint64_t load_hash() const { return services_->modload.load_hash(); }
     nt::ee::Stop pump() {
         if (!accepted_) return nt::ee::Stop::budget;
         if (!platform_.sif_link.reset_teardown_complete()) return nt::ee::Stop::budget;
