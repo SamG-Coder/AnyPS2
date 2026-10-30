@@ -3533,6 +3533,74 @@ int main() {
             check(loader.invoke(request,guest).status==NativeServiceStatus::unavailable && loader.load_decision()==decision && unchanged(),
                   "Interrupt LoadStartModule changed the catalog decision");
         }
+        {
+            // A sealed entry is compiled code at its installed address. The file
+            // hash selects it. The loader does not relocate or interpret the file.
+            NativeHeapServices heap(0x10000,0xb000,0x10000);
+            NativeModloadServices loader;
+            loader.attach_heap(heap);
+            std::vector<std::uint8_t> guest(0x10000,0);
+            const auto place=[&](std::uint32_t address,std::string_view text) {
+                std::copy(text.begin(),text.end(),guest.begin()+address);
+                guest[address+text.size()]=0;
+            };
+            place(0x2000,"cdrom0:/ONE.IRX;1");
+            place(0x2100,"cdrom0:/TWO.IRX;1");
+            store_native_word(guest,0x7000,0x11111111);
+            const nt::Bytes image(16,0);
+            const nt::Bytes one{'o','n','e'};
+            const nt::Bytes two{'t','w','o'};
+            loader.attach_sealed({
+                {nt::fingerprint(one),nt::fingerprint(image),0xb000,0xb288,16,0x600,0},
+                {nt::fingerprint(two),nt::fingerprint(image),0xb000,0xb280,16,0x600,0},
+            });
+            struct TemporaryImage {
+                std::filesystem::path path;
+                explicit TemporaryImage(const char* name) : path(std::filesystem::temp_directory_path()/
+                    (std::string("anyps2-sealed-")+name+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".iso")) {}
+                ~TemporaryImage() { std::error_code ignored; std::filesystem::remove(path,ignored); }
+            } first("one"), second("two");
+            nt::write_file(first.path,fixture::single_file_iso("ONE.IRX;1",one));
+            nt::write_file(second.path,fixture::single_file_iso("TWO.IRX;1",two));
+            loader.attach_disc(first.path);
+            const auto unchanged=[&] { return load_native_word(guest,0x7000)==0x11111111; };
+            const auto run=[&](std::uint32_t name) {
+                auto cpu=initial(); cpu.pc=0xb42c;
+                cpu.registers[4]=name; cpu.registers[5]=0; cpu.registers[6]=0; cpu.registers[7]=0x7000;
+                const auto result=run_native(nt_iop_generated_run,cpu,guest,128,&loader);
+                return std::pair{result,cpu.registers[2]};
+            };
+            guest[0xb000]=1;
+            const auto mismatch=run(0x2000);
+            check(mismatch.first.reason==NativeStop::import_request && mismatch.second==99 &&
+                  loader.load_decision()==9 && unchanged(),
+                  "A sealed module with the wrong installed image was started");
+            guest[0xb000]=0;
+            const auto released=run(0x2000);
+            check(released.first.reason==NativeStop::unmapped_code && released.first.pc==0x5000 &&
+                  released.second==1 && load_native_word(guest,0x7000)==0x61 && loader.load_decision()==8,
+                  "Released module entry did not return its value through the loader");
+            const auto restarted=run(0x2000);
+            check(restarted.first.reason==NativeStop::unmapped_code && restarted.second==2 &&
+                  load_native_word(guest,0x7000)==0x61,
+                  "Released module stayed resident");
+            loader.attach_disc(second.path);
+            const auto resident=run(0x2100);
+            check(resident.first.reason==NativeStop::unmapped_code && resident.second==3 &&
+                  load_native_word(guest,0x7000)==0x60 && loader.load_decision()==8,
+                  "Resident module entry did not supply the module id");
+            const auto duplicate=run(0x2100);
+            check(duplicate.first.reason==NativeStop::unmapped_code &&
+                  duplicate.second==static_cast<std::uint32_t>(-206) &&
+                  load_native_word(guest,0x7000)==0x60 && loader.load_decision()==10,
+                  "Second start of a resident module ran the entry again");
+            loader.attach_disc(first.path);
+            const auto occupied=run(0x2000);
+            check(occupied.first.reason==NativeStop::unmapped_code &&
+                  occupied.second==static_cast<std::uint32_t>(-205) &&
+                  load_native_word(guest,0x7000)==0x60 && loader.load_decision()==13,
+                  "Overlapping sealed image was started");
+        }
         std::cout<<"Compiled IOP LLVM execution passed without an interpreter library\n";
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

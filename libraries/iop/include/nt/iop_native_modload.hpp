@@ -1,21 +1,32 @@
 #pragma once
 #include <nt/iop_native_services.hpp>
 #include <nt/iop_native_code.hpp>
+#include <nt/iop_native_heap.hpp>
 #include <nt/binary.hpp>
 #include <nt/disc_files.hpp>
 #include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace nt::iop {
+// One ahead-of-time module the loader may start. source_hash identifies the
+// opened file. image_hash identifies the relocated bytes already installed at
+// base. The loader does not relocate the file or interpret its instructions.
+struct SealedModule {
+    std::uint64_t source_hash=0;
+    std::uint64_t image_hash=0;
+    std::uint32_t base=0, entry=0, initialized_size=0, memory_size=0, global_pointer=0;
+};
 // Native loader ABI ownership. Callback registration does not load a module,
 // authenticate executable content, or mark any module resident.
 class NativeModloadServices final : public NativeServices {
 public:
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
+        if (request.kind==NativeServiceKind::native_return) return finish_load(request,ram);
         if (request.kind==NativeServiceKind::loadcore && (request.selector==4 || request.selector==5)) {
             // AOT instructions are immutable and native data accesses are coherent.
             // Preserve the publication ordering without a simulated cache bank.
@@ -52,13 +63,15 @@ public:
             return {NativeServiceStatus::returned};
         }
         if (request.selector==15) return boot_device(a[0],ram);
-        if (request.selector==7) return load_start(a,ram);
+        if (request.selector==7) return load_start(request,ram);
         // Other lifecycle ABIs can be compiled, but cannot succeed until their
         // native initialization and completion owner is connected.
         return {NativeServiceStatus::unavailable};
     }
     void attach_disc(const std::filesystem::path& image) { files_=std::make_unique<disc::Files>(image); }
+    void attach_heap(NativeHeapServices& heap) { heap_=&heap; }
     void attach_catalog(std::vector<std::uint64_t> source_hashes) { catalog_=std::move(source_hashes); }
+    void attach_sealed(std::vector<SealedModule> modules) { sealed_=std::move(modules); }
     // -1 means selector 7 did not classify a file. Other values are diagnostics,
     // not a module id and not evidence that an entry ran.
     int load_decision() const { return load_decision_; }
@@ -119,10 +132,11 @@ private:
         boot_decision_=legal_boot_device(path)?0:1;
         return {NativeServiceStatus::returned,static_cast<std::uint32_t>(boot_decision_)};
     }
-    // Ordinal 7 opens a cdrom module image and requires its bytes to match a
-    // linked AOT source hash. A match still does not relocate, register, or
-    // call the entry, and it never writes the guest result pointer.
-    NativeServiceReply load_start(const std::array<std::uint32_t,4>& a,std::span<std::uint8_t> ram) {
+    // Ordinal 7 opens a cdrom module image. A hash without a sealed entry does
+    // not relocate, register, or call anything. A sealed entry runs only when
+    // its relocated image is already installed and its address is compiled code.
+    NativeServiceReply load_start(const NativeServiceRequest& request,std::span<std::uint8_t> ram) {
+        const auto& a=request.arguments;
         // A null filename is an illegal object. It is not an address fault and
         // it does not open a file. The module id is not this error code.
         if (!a[0]) return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-201)};
@@ -178,11 +192,189 @@ private:
         }
         load_bytes_=image.size();
         load_hash_=fingerprint(image);
-        // A catalog hit still does not place the image, call its entry, or
-        // write the guest result. Those steps need the sealed entry owner.
-        load_decision_=std::find(catalog_.begin(),catalog_.end(),load_hash_)==catalog_.end() ? 1 : 2;
-        return {NativeServiceStatus::unavailable};
+        const auto sealed=std::find_if(sealed_.begin(),sealed_.end(),[&](const SealedModule& module) {
+            return module.source_hash==load_hash_;
+        });
+        // A hash without a sealed entry is not a module start. The file stays
+        // where conversion installed it; this path does not relocate it.
+        if (sealed==sealed_.end()) {
+            load_decision_=std::find(catalog_.begin(),catalog_.end(),load_hash_)==catalog_.end() ? 1 : 2;
+            return {NativeServiceStatus::unavailable};
+        }
+        return begin_sealed(request,*sealed,path,a,ram);
     }
+    NativeServiceReply finish_load(const NativeServiceRequest& request,std::span<std::uint8_t> ram) {
+        if (!pending_ || request.context!=pending_->owner || !request.context || request.context->native_call_owner!=this)
+            return {};
+        const auto entry_result=request.arguments[0];
+        if (pending_->result) {
+            const auto stored=store_word(pending_->result,entry_result,ram);
+            if (stored.status!=NativeServiceStatus::returned) return stored;
+        }
+        const bool unlink=(entry_result&3U)==1U;
+        if (!unlink && pending_->info)
+            store_word(pending_->info+8,(entry_result&3U)<<16,ram);
+        release(pending_->stack,ram);
+        if (unlink) {
+            release(pending_->image,ram);
+            release(pending_->arguments,ram);
+        } else resident_.push_back(pending_->hash);
+        auto caller=pending_->caller;
+        caller.registers[2]=pending_->id;
+        pending_.reset();
+        load_decision_=8;
+        NativeServiceReply reply{NativeServiceStatus::restored};
+        reply.restore=caller;
+        return reply;
+    }
+    // Reserve the installed image, build argc/argv plus a module record, and
+    // transfer to the compiled entry. The caller's v0 becomes the module id
+    // only after that entry returns. Entry result 1 releases the reservation;
+    // every other low two-bit value leaves it resident.
+    NativeServiceReply begin_sealed(const NativeServiceRequest& request,const SealedModule& module,
+                                    const std::string& path,const std::array<std::uint32_t,4>& a,std::span<std::uint8_t> ram) {
+        if (pending_) {
+            load_decision_=12;
+            return {NativeServiceStatus::unavailable};
+        }
+        if (!request.context || !heap_) {
+            load_decision_=11;
+            return {NativeServiceStatus::unavailable};
+        }
+        if (!module.memory_size || module.initialized_size>module.memory_size ||
+            module.entry<module.base || module.entry-module.base>=module.memory_size) {
+            load_decision_=9;
+            return {NativeServiceStatus::unavailable};
+        }
+        if (module.initialized_size) {
+            const auto image=ram_offset(module.base,1,ram.size());
+            if (!image || ram.size()-*image<module.initialized_size || 0x200000-*image<module.initialized_size) {
+                load_decision_=9;
+                return {NativeServiceStatus::unavailable};
+            }
+            if (fingerprint(ram.subspan(*image,module.initialized_size))!=module.image_hash) {
+                load_decision_=9;
+                return {NativeServiceStatus::unavailable};
+            }
+        }
+        const auto entry=ram_offset(module.entry,4,ram.size());
+        if (!entry || !nt_iop_native_instruction(*entry)) {
+            load_decision_=9;
+            return {NativeServiceStatus::unavailable};
+        }
+        if (std::find(resident_.begin(),resident_.end(),module.source_hash)!=resident_.end()) {
+            load_decision_=10;
+            return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-206)};
+        }
+        std::vector<nt::ByteView> segments;
+        segments.push_back(nt::ByteView(reinterpret_cast<const std::uint8_t*>(path.data()),path.size()));
+        if (a[1]) {
+            const auto args=*ram_offset(a[2],1,ram.size());
+            const auto bytes=ram.subspan(args,a[1]);
+            for (std::size_t at=0;at<bytes.size();) {
+                const auto end=std::find(bytes.begin()+static_cast<std::ptrdiff_t>(at),bytes.end(),0);
+                segments.push_back(bytes.subspan(at,static_cast<std::size_t>(end-bytes.begin())-at));
+                at=static_cast<std::size_t>(end-bytes.begin())+1;
+            }
+        }
+        const auto argc=static_cast<std::uint32_t>(segments.size());
+        std::uint32_t bytes=48U+(argc+1U)*4U;
+        for (const auto& segment:segments) bytes+=static_cast<std::uint32_t>(segment.size())+1U;
+        const auto reserved=heap_->invoke({4,{2,module.memory_size,module.base},NativeServiceKind::sysmem},ram);
+        if (reserved.status!=NativeServiceStatus::returned) return reserved;
+        if (reserved.value!=module.base) {
+            if (reserved.value) release(reserved.value,ram);
+            const auto occupied=heap_->invoke({9,{module.base},NativeServiceKind::sysmem},ram);
+            const bool free=occupied.status==NativeServiceStatus::returned && (occupied.value&0x80000000U);
+            load_decision_=13;
+            return {NativeServiceStatus::returned,static_cast<std::uint32_t>(free ? -400 : -205)};
+        }
+        const auto arguments=heap_->invoke({4,{0,bytes,0},NativeServiceKind::sysmem},ram);
+        if (arguments.status!=NativeServiceStatus::returned || !arguments.value) {
+            release(module.base,ram);
+            if (arguments.status!=NativeServiceStatus::returned) return arguments;
+            load_decision_=13;
+            return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-400)};
+        }
+        constexpr std::uint32_t stack_size=0x1000;
+        const auto stack=heap_->invoke({4,{0,stack_size,0},NativeServiceKind::sysmem},ram);
+        if (stack.status!=NativeServiceStatus::returned || !stack.value) {
+            release(arguments.value,ram); release(module.base,ram);
+            if (stack.status!=NativeServiceStatus::returned) return stack;
+            load_decision_=13;
+            return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-400)};
+        }
+        const auto rollback=[&] {
+            release(stack.value,ram); release(arguments.value,ram); release(module.base,ram);
+        };
+        if (!bytes_writable(arguments.value,bytes,ram) || !bytes_writable(stack.value,stack_size,ram)) {
+            rollback();
+            return {NativeServiceStatus::code_write,0,arguments.value};
+        }
+        std::fill_n(ram.begin()+arguments.value,bytes,std::uint8_t{0});
+        std::fill_n(ram.begin()+stack.value,stack_size,std::uint8_t{0});
+        const auto info=arguments.value;
+        std::uint32_t cursor=info+48U+(argc+1U)*4U;
+        std::vector<std::uint32_t> argv;
+        argv.reserve(argc);
+        for (const auto& segment:segments) {
+            std::copy(segment.begin(),segment.end(),ram.begin()+cursor);
+            argv.push_back(cursor);
+            cursor+=static_cast<std::uint32_t>(segment.size())+1U;
+        }
+        store_word(info+4,argv.front(),ram);
+        store_word(info+8,2U<<16,ram);
+        store_word(info+12,next_id_,ram);
+        store_word(info+16,module.entry,ram);
+        store_word(info+20,module.global_pointer,ram);
+        store_word(info+24,module.base,ram);
+        store_word(info+28,module.initialized_size,ram);
+        store_word(info+36,module.memory_size-module.initialized_size,ram);
+        for (std::uint32_t index=0;index<argc;++index) store_word(info+48U+index*4U,argv[index],ram);
+        auto caller=*request.context;
+        if (caller.load_register) caller.registers[caller.load_register]=caller.load_value;
+        caller.load_register=0; caller.delay_slot=false; caller.pc=request.resume_pc; caller.registers[0]=0;
+        pending_=Pending{request.context,caller,a[3],next_id_,module.base,arguments.value,info,stack.value,module.source_hash};
+        ++next_id_;
+        load_decision_=7;
+        NativeServiceReply reply{NativeServiceStatus::called,module.entry};
+        NativeServiceCall call;
+        call.arguments={argc,info+48U,0,info};
+        call.global_pointer=module.global_pointer;
+        call.owner=this;
+        call.stack_pointer=stack.value+stack_size-16U;
+        reply.call=call;
+        return reply;
+    }
+    static bool bytes_writable(std::uint32_t address,std::uint32_t size,std::span<const std::uint8_t> ram) {
+        if (!size) return true;
+        const auto at=ram_offset(address,1,ram.size());
+        if (!at || ram.size()-*at<size || 0x200000-*at<size) return false;
+        for (std::uint32_t index=0;index<size;++index)
+            if (nt_iop_native_code_word((*at+index)&~3U)) return false;
+        return true;
+    }
+    static NativeServiceReply store_word(std::uint32_t address,std::uint32_t value,std::span<std::uint8_t> ram) {
+        const auto at=ram_offset(address,4,ram.size());
+        if (!at || ram.size()-*at<4 || 0x200000-*at<4) return {NativeServiceStatus::address_fault,0,address};
+        if (nt_iop_native_code_word(*at)) return {NativeServiceStatus::code_write,0,address};
+        store_native_word(ram,*at,value);
+        return {NativeServiceStatus::returned};
+    }
+    void release(std::uint32_t address,std::span<std::uint8_t> ram) {
+        if (address && heap_) heap_->invoke({5,{address,0,0,0},NativeServiceKind::sysmem},ram);
+    }
+    struct Pending {
+        const Cpu* owner;
+        Cpu caller;
+        std::uint32_t result,id,image,arguments,info,stack;
+        std::uint64_t hash;
+    };
+    NativeHeapServices* heap_=nullptr;
+    std::vector<SealedModule> sealed_;
+    std::vector<std::uint64_t> resident_;
+    std::optional<Pending> pending_;
+    std::uint32_t next_id_=1;
     std::uint32_t card_=0,disc_=0,path_=0,callbacks_=0;
     std::uint32_t boot_queries_=0;
     int boot_decision_=-1;

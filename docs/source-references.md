@@ -1164,9 +1164,17 @@ result pointer before any file access. A null filename returns -201. A path
 outside `cdrom:`, `cdrom0:`, and `rom:` through `rom3:` returns -201. A legal
 path with no mounted image, and a missing cdrom file, return -203. An empty
 image returns -204. None of these writes the result pointer. An opened cdrom
-file is fingerprinted and compared with the linked AOT source catalog. Both a
-catalog miss and a catalog hit stop without relocating the image, registering
-it, calling its entry, or writing a module result. `rom` bytes are not read
+file is fingerprinted against the linked AOT catalog. A miss, and a hit that
+has no sealed entry, stop without relocating the image, registering it, calling
+an entry, or writing a module result. A sealed entry runs only when its
+relocated image is already installed at the converted base and that entry is
+compiled code. The loader reserves that range, passes argc/argv and a module
+record, and transfers to the entry. After the entry returns, the caller's
+result is the module id and the guest result word receives the entry value.
+Entry value 1 releases the reservation. Any other value leaves the module
+resident, and a second start returns -206. A sealed image that is not installed,
+or an entry that is not compiled code, stops without a call. Nested
+LoadStartModule while an entry is still running stops. `rom` bytes are not read
 yet, so that device returns -203. Other lifecycle imports still stop at the
 service boundary. The pinned loadcore
 `exports.tab` identifies FlushIcache/FlushDcache; immutable AOT code and coherent
@@ -1202,8 +1210,9 @@ The selected compiled IOP reset-session integration binds these endpoints.
 Media-mode selection and one disk-ready poll are startup progress, not a
 rendered frame or boot. The compiled IOP session then accepts a `cdrom` path
 from the boot-device query above. The next stop is modload `LoadStartModule`
-(ordinal 7). That call does not open, relocate, or start a module. No frame
-was rendered.
+(ordinal 7). That call opens the cdrom image and fingerprints it. The image is
+not a sealed compiled entry, so the call stops without relocating, registering,
+or starting a module. No frame was rendered.
 
 - Repository: https://github.com/moesuito/gt4-staticrecomp
 - Inspected revision: `795cdc086464b003d49c0b44d0911dc761f58f5c`.
