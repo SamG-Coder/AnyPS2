@@ -1877,5 +1877,14 @@ uninitialized unless supplied an endpoint, and supplying that endpoint alone doe
 not publish SIF readiness. Reset orchestration must still run module startup and
 establish the required service state before acknowledging completion.
 
+`NativeModuleStartup` advances compiled module entries and deferred boot callbacks
+with an explicit operation budget. It retains the active thread and callback
+continuation across slices, validates all entry metadata before execution, and
+records each module return once. The standalone probe uses this runner with a
+combined initialization budget. Reaching its finished state means entries and
+boot callbacks returned; worker readiness and EE synchronization remain separate.
+The compiled integration test exercises one-operation slices through multiple
+entries and a deferred callback, including zero-budget and repeated-finish calls.
+
 See [EE native architecture](ee-native.md) for conversion, execution, memory,
 startup services and native vector-control boundaries.

@@ -1,4 +1,4 @@
-#include <nt/iop_native_context.hpp>
+#include <nt/iop_native_startup.hpp>
 #include <thread>
 #include <memory>
 #include <filesystem>
@@ -46,54 +46,30 @@ int main(int argc,char** argv) {
         auto& threads=services.threads;
         auto& interrupts=services.interrupts;
         auto& alarms=services.alarms;
-        auto& boot_callbacks=services.boot_callbacks;
-        const auto entries=nt_iop_generated_entries();
-        if (entries.empty()) throw std::runtime_error("Converted program has no startup entries");
-        for (std::size_t index=0;index<entries.size();++index) {
-            const auto& entry=entries[index];
-            if (entry.base<module.base || entry.base-module.base>module.memory_size ||
-                entry.memory_size>module.memory_size-(entry.base-module.base) ||
-                entry.initialized_size>entry.memory_size || entry.entry<entry.base || entry.entry-entry.base>=entry.initialized_size)
-                throw std::runtime_error("Invalid converted startup entry metadata");
-            nt::iop::Cpu state;
-            state.pc=entry.entry; state.registers[28]=entry.global_pointer;
-            state.registers[29]=stack_top; state.registers[31]=0xfffffffc;
-            const auto thread_id=threads.admit(state);
-            const auto before=threads.executed();
-            nt::iop::NativeResult result{};
-            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
-            while (true) {
-                result=threads.run(nt_iop_generated_run,memory,1000000-(threads.executed()-before),services);
-                state=threads.state(thread_id);
-                if (result.reason==nt::iop::NativeStop::unmapped_code && result.pc==0xfffffffc && state.pc!=0xfffffffc) continue;
-                const auto now=std::chrono::steady_clock::now();
-                if (result.reason==nt::iop::NativeStop::thread_wait && interrupts.delivery_enabled() && now<deadline) {
-                    auto delay=alarms.delay();
-                    if (const auto thread_delay=threads.delay(); thread_delay && (!delay || *thread_delay<*delay)) delay=thread_delay;
-                    if (delay) {
-                        std::this_thread::sleep_for(std::min(*delay,std::chrono::duration_cast<std::chrono::nanoseconds>(deadline-now)));
-                        continue;
-                    }
+        nt::iop::NativeModuleStartup startup(nt_iop_generated_run,services,memory,module,nt_iop_generated_entries(),stack_top);
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+        std::size_t reported=0;
+        while (!startup.finished()) {
+            const auto result=startup.advance(1000000-startup.executed());
+            for (;reported<startup.returned().size();++reported) {
+                const auto& returned=startup.returned()[reported];
+                std::cout<<"module="<<reported<<" returned="<<returned.value<<" executed="<<returned.executed<<'\n';
+            }
+            if (startup.finished()) break;
+            const auto now=std::chrono::steady_clock::now();
+            if (result.reason==nt::iop::NativeStop::thread_wait && interrupts.delivery_enabled() && now<deadline) {
+                auto delay=alarms.delay();
+                if (const auto thread_delay=threads.delay(); thread_delay && (!delay || *thread_delay<*delay)) delay=thread_delay;
+                if (delay) {
+                    std::this_thread::sleep_for(std::min(*delay,std::chrono::duration_cast<std::chrono::nanoseconds>(deadline-now)));
+                    continue;
                 }
-                break;
             }
-            if (result.reason==nt::iop::NativeStop::unmapped_code && state.pc==0xfffffffc && !state.delay_slot) {
-                std::cout<<"module="<<index<<" returned="<<state.registers[2]<<" executed="<<state.executed<<'\n';
-                continue;
-            }
-            std::cerr<<"Converted IOP program stopped: module="<<index<<" reason="<<static_cast<unsigned>(result.reason)
-                     <<" pc="<<std::hex<<state.pc<<" address="<<result.address
-                     <<" trap_code="<<result.trap_code<<" delay_slot="<<state.delay_slot<<'\n';
+            std::cerr<<"Native startup stopped: module="<<reported<<" reason="<<static_cast<unsigned>(result.reason)
+                     <<" pc="<<std::hex<<result.pc<<" address="<<result.address<<" trap_code="<<result.trap_code<<'\n';
             return 3;
         }
-        nt::iop::Cpu completion_state; completion_state.registers[29]=stack_top;
-        const auto completed=boot_callbacks.finish_startup(nt_iop_generated_run,completion_state,memory,1000000,services);
-        if (!boot_callbacks.complete()) {
-            std::cerr<<"Native startup callbacks stopped: reason="<<static_cast<unsigned>(completed.reason)
-                     <<" pc="<<std::hex<<completed.pc<<" address="<<completed.address<<" trap_code="<<completed.trap_code<<'\n';
-            return 3;
-        }
-        std::cout<<"startup_callbacks=complete executed="<<completion_state.executed<<'\n';
+        std::cout<<"startup_callbacks=complete executed="<<startup.callback_operations()<<'\n';
         const auto workers_before=threads.executed();
         while (true) {
             const auto workers=threads.run(nt_iop_generated_run,memory,1000000-(threads.executed()-workers_before),services);

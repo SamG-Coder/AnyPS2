@@ -5,6 +5,7 @@
 #include <nt/iop_native_sif_commands.hpp>
 #include <nt/iop_llvm.hpp>
 #include <nt/iop_native_context.hpp>
+#include <nt/iop_native_startup.hpp>
 #include <iostream>
 #include <source_location>
 
@@ -106,6 +107,26 @@ int main() {
         require(fresh.invoke({29,{},NativeServiceKind::sifman},fresh_ram).value==0 &&
                 context.invoke({29,{},NativeServiceKind::sifman},iop_ram).value==1);
         require(fresh.invoke({29,{},NativeServiceKind::sifman},iop_ram).status==NativeServiceStatus::address_fault);
+        store_native_word(fresh_ram,0xc700,0xc800);
+        Cpu registering;
+        NativeServiceRequest boot_registration{20,{0x2ec0,0,0,0},NativeServiceKind::loadcore};
+        boot_registration.context=&registering; boot_registration.global_pointer=1234;
+        require(fresh.invoke(boot_registration,fresh_ram).value==1);
+        NativeModule image{0x1000,0xa500,0x9700,0x9700,0};
+        std::vector<NativeModule> entries{{0xa100,0xa500,0x600,0x600,0},{0xa100,0xa508,0x600,0x600,0}};
+        NativeModuleStartup startup(run_llvm,fresh,fresh_ram,image,entries,0xf000);
+        require(startup.advance(0).reason==NativeStop::budget && startup.returned().empty() && !startup.finished());
+        for (unsigned slice=0;slice<100 && !startup.finished();++slice) {
+            const auto before=startup.executed();
+            const auto advanced=startup.advance(1);
+            require(startup.executed()-before<=1);
+            require(startup.finished() || advanced.reason==NativeStop::budget);
+        }
+        require(startup.finished() && startup.returned().size()==2 && startup.returned()[0].value==11 &&
+                startup.returned()[1].value==22 && startup.returned()[0].executed==2 && startup.callback_operations()>0 &&
+                load_native_word(fresh_ram,0xc800)==1234 && load_native_word(fresh_ram,0xc700)==0xc80c);
+        const auto initialized=startup.executed(); startup.advance(100);
+        require(startup.executed()==initialized && !fresh.sif_control.ready());
         for (const auto layout : {NativeContextLayout{0xc000,0xcc00,0xc000,0xf000},NativeContextLayout{0xc000,0xcc00,0xfff0,0xf000}}) {
             bool rejected=false;
             try { NativeServiceContext invalid(fresh_ram,layout,{},{},[](std::string_view) { return true; }); }
