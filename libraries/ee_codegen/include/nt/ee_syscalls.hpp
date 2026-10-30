@@ -6,12 +6,13 @@ constexpr bool intc_syscall(std::uint32_t number) {
     return number==0x12 || number==0x13 || number==0x16 || number==0x17 || number==0xffffffe4U || number==0xffffffe3U || number==0x10 || number==0x11 || number==0x14 || number==0x15 || number==0xffffffe6U || number==0xffffffe5U;
 }
 constexpr bool thread_syscall(std::uint32_t number) {
-    return (number>=0x20 && number<=0x23) || number==0x29 || number==0x2f || number==0x30 || number==0x31;
+    return (number>=0x20 && number<=0x23) || number==0x29 || number==0x2f || (number>=0x30 && number<=0x36);
 }
 constexpr bool settings_syscall(std::uint32_t number) { return number==0x4a || number==0x4b || number==0x6e || number==0x6f; }
 constexpr bool sif_control_syscall(std::uint32_t number) { return number==0x6b || number==0x78 || number==0x79 || number==0x7a; }
 constexpr std::uint32_t native_syscall_number(std::uint32_t number) {
     switch (number) {
+    case 0xffffffccU: case 0xffffffcaU: // Interrupt-safe thread wake/cancel.
     case 0xffffff90U: case 0xffffff8fU: // Interrupt-safe GS mask access.
     case 0xffffffbdU: case 0xffffffbaU: case 0xffffffb8U: // Interrupt-safe semaphore services.
     case 0xffffff8aU: case 0xffffff89U: case 0xffffff88U: // Interrupt-safe SIF services.

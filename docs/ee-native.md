@@ -1385,9 +1385,9 @@ state. This serialized model does not establish asynchronous console timing.
 VU0 macro/micro state sharing, UNPACK data preparation, continuation commands
 and Vulkan graphics-request completion remain separate unfinished work.
 
-Private startup still stops at enabled performance measurement before reaching
-this path. Offline inspection found counter reads and accumulation, so replacing
-the measurements with constants or removing them has not been justified.
+Private startup now passes counter configuration without inventing measurements.
+Counter reads and accumulation exist in the input; unavailable measurement reads
+still stop. Replacing their values with constants or removing them is not justified.
 
 The VU1 submission owner also accepts contiguous unmasked V4-32 uploads, with
 32-bit lanes preserved as data. Destination wrapping and TOPS-relative addressing
@@ -1415,7 +1415,8 @@ VU0 data uploads wrap within 256 vectors and its launch supplies ITOP without
 VU1 TOP or double-buffer state. Unit routing selects independent native owners.
 
 This is a cooperative serialized execution model. Reset of active work remains unsupported. Private GT4 startup
-still stops earlier at the unresolved native performance measurement request.
+now passes a split GIF image transfer, StartThread and SleepThread. A missing
+CD/DVD RPC endpoint and unmeasured performance reads remain startup blockers.
 
 VCALLMS and VCALLMSR now lower to explicit native VU0 launch calls. Immediate
 entries and CMSAR0-selected entries use the VU0 address mask; CMSAR0 is shared
@@ -1701,3 +1702,249 @@ This is a known-dependency regression gate: it cannot prove arbitrary renamed or
 newly introduced code lacks an interpreter. Source review, explicit native-link
 composition and execution of generated code remain separate acceptance evidence.
 Existing generated projects need regeneration to acquire the post-link gate.
+
+
+### Native VU continuation submissions
+
+MSCNT resumes the continuation recorded by a completed compiled VU launch.
+Ordinary E-bit stops now publish the pair following the delay pair, masked to
+that vector unit's address range. A new continuation submission clears a prior
+completed graphics boundary; internal graphics resumes retain that boundary to
+avoid executing past an E-bit stop within the same submission.
+
+MSCNT shares MSCAL's TOP/ITOP and double-buffer updates. Data uploads, row changes,
+vector state and graphics acceptance commit together. A continuation before any
+successful launch, an absent compiled entry, or a rejected graphics consumer
+stops without publishing the candidate state. Each submission retains the native
+block budget. Continuation entries must be included in offline compilation;
+missing entries never trigger runtime decoding or JIT compilation.
+The converter accepts an explicit `--continuations depth` after the entry list.
+Starting from all supplied roots, each round discovers the reachable E-stop
+continuations and adds them as native compilation roots, up to the requested
+depth (maximum 2048). Stable root sets stop expansion early. Indirect targets
+still need explicit roots. Missing code, unsupported delay combinations or
+unsupported operations reject generation without writing a partial module.
+The default depth is zero: unrelated bytes following an E stop are not presumed
+to be another program. Only padding
+may follow a launch within the current atomic packet submission. MSCALF and
+asynchronous execution remain unsupported.
+
+This is verified with original LLVM-compiled synthetic programs, including an
+E-bit graphics stop followed by a second continuation. It does not establish
+GT4 booting or resolve the missing native performance-counter provider.
+
+
+### Measurement pointer callee inspection
+
+The offline metric report follows candidate measurement-structure arguments into
+one direct callee. A bounded worklist carries candidate addresses through pointer
+arithmetic and direct branches, including ordinary and annulled delay slots.
+Different pointer values at a join remain separate candidates. The same address
+propagation helper serves the original linear scan and callee inspection.
+
+Reports retain unknown operations, missing code, nested calls, indirect transfers,
+and exhausted work budgets as explicit boundaries. Return delay slots are inspected
+before reporting the return boundary. Loads discard the destination's candidate
+value; they do not read assumed runtime contents from the original ELF. This is
+candidate discovery, not an alias analysis, reachability proof, or authorization
+to delete measurements. Dynamic addresses and pointer escapes still require work.
+The analysis itself does not change executable behavior or supply measurements.
+
+
+Metric callee inspection also reports unresolved memory addresses explicitly.
+Conditional moves retain an address candidate only when both outcomes share it;
+otherwise later accesses are marked unresolved. Floating/vector memory transfers
+have typed byte footprints, and integer quadword transfers retain their alignment
+behavior. Explicit break instructions terminate inspection as flow boundaries.
+The CLI accepts `--metrics [window]` with a validated bound from 1 through 4096,
+allowing larger investigations without removing the work limit. These changes do
+not turn candidate inspection into a proof that measurements can be discarded.
+
+
+### Native profiling-source capability probe
+
+`anyps2-host-metrics` queries Windows profiling-source descriptors through the
+separate `nt_host_metrics` library. It reports source IDs, names and sampling
+interval limits without changing collection settings. Source IDs are machine
+capabilities, not portable constants or a mapping to PS2 event IDs. The library
+bounds response allocation/retries and validates variable-length records before
+publishing typed descriptors. It is not linked into generated game executables.
+
+Windows advertising a source does not establish synchronous per-thread access,
+permissions, event semantics or measurement equivalence. The documented Windows
+thread-profiling API requires driver-configured hardware counters; unconfigured
+slots can return zero. AnyPS2 does not treat those zeros as valid samples, install
+a driver, or substitute sampled event counts for requested counter reads.
+A usable measurement provider and its semantic conversion remain unfinished.
+
+
+Metric pointer matching now includes bounded syntactic ancestors of structure
+addresses formed by immediate addition or OR. This finds calls receiving a parent
+structure rather than the exact counter-field base. The graph combines candidate
+values across scanned regions and can produce false positives; it must not be
+used as an alias or measurement-removal proof. Expansion stops after 128 distinct
+values and reports an incomplete search. Stored-pointer candidates include their
+destination when it can be resolved; absent destinations remain unresolved.
+
+
+### Native counter interval attribution
+
+The host metrics library can attribute typed, timestamp-ordered context-switch
+counter samples to one native thread. Each switch-in records a processor-local
+baseline; the matching switch-out contributes the difference. Migration starts a
+new baseline on the destination processor. The initial partial interval is
+excluded, and snapshots identify whether a full interval is available or the
+thread is still running. End timestamps identify the coverage boundary.
+
+Missing counters, reported lost events, inconsistent thread transitions,
+out-of-order samples, decreasing readings and arithmetic overflow permanently
+invalidate that measurement stream. No guessed wrap width, active-interval
+extrapolation or zero substitute is used. The caller must serialize input, retain
+source configuration identity, order events across processors and propagate
+trace loss notifications. Thread identity must remain valid for the session;
+a thread ID must not be reused within an accumulator's lifetime.
+
+Synthetic interval tests do not validate ETW event delivery or establish a usable
+provider. Live collection remains unverified because the isolated session probe
+was denied by Windows. The elevated probe result is pending; this component is
+not connected to guest performance requests or shipped game output.
+
+
+The host library now decodes Windows Thread_V2 context-switch records into owned
+counter samples. It checks the provider, opcode, version, payload extent, timestamp
+and a single PMC extension containing exactly the configured number of readings.
+Other event types are ignored; missing, duplicated or mismatched counter data is
+rejected. CPU indices use the SDK's processor-index accessor. Returned samples
+own their counter data and can outlive the callback buffer.
+
+This adapter accepts live Windows callback records, not arbitrary serialized
+pointers. A capture owner must catch decoding failures and invalidate the stream,
+track event loss and source identities, and ensure ordering before attribution.
+The event adapter and attribution pipeline have synthetic coverage. No live
+capture or guest measurement provider is claimed yet.
+
+### Private startup comparison
+
+The generated probe accepts `--capture-stop <new-private-directory>` to record
+CPU registers, the stopping PC and reason, RAM, and scratchpad after execution
+stops. Use an ignored directory under `work/` for commercial inputs. Existing
+directories are rejected before execution. `capture.txt` is written last and
+marks a completed observation; a failed write can leave an incomplete directory.
+These files can contain proprietary code and must never be committed.
+
+This is a diagnostic observation, not a resumable save state: native service,
+thread, Vulkan and VU state are not serialized. Emulator observations can guide
+startup comparisons but do not establish native correctness, authorize metric
+removal, or become dependencies of the generated executable.
+
+### Unobserved performance-counter configuration
+
+Without a metric provider, counter-control writes and reads are configuration
+operations. Potentially active counters are marked unavailable instead of
+accumulating synthetic values. Disabling counting preserves that mark; an
+explicit write while disabled restores a known value for that counter. A read
+of an unavailable counter stops before retiring the read or changing its output
+register. No cycles, cache misses or overflow interrupts are synthesized. This
+supports startup configuration, not measured profiling or full performance-unit
+exception semantics. Installed providers retain their existing atomic contract.
+
+Object-table entry discovery now recognizes bounded constant-offset table loads
+feeding indirect calls, paired with recoverable table pointers stored into the
+same object-field offset. It adds executable ELF targets as compilation candidates;
+it does not assume writable tables remain constant or replace runtime dispatch.
+Clobbered/dynamic bases and invalid targets do not produce entries.
+
+The discovery pass also proposes entries from bounded indexed switch tables:
+a matching unsigned range check, scaled index, table-base construction and
+indirect load/jump must be present. Table extents are capped and every entry
+must resolve to executable input bytes. Runtime guards, reads and destinations
+remain unchanged; candidate recovery is not constant folding.
+
+### Split native graphics transfers
+
+The GIF transport accepts aligned fragments of a bounded packet across separate
+submissions. It retains incomplete tag/payload data and submits complete EOP
+packets to the existing transactional native drawing consumer. No pixels or
+configuration from the incomplete packet are published early. Consumer rejection
+preserves the prior framing state so the completing fragment can be retried.
+GIF reset discards pending framing. Pending packet/status-register queries and
+VIF1 interleaving are rejected until that path is complete; cross-path arbitration
+and hardware queue/timing status are not modeled. Each combined pending/input
+batch is bounded to 65,536 quadwords. This frames graphics data, not instructions.
+
+SetupThread's registered return trampoline is now an offline compilation root
+when its argument can be recovered from executable input. StartThread diagnoses
+the actual missing entry or return trampoline, with no runtime compilation.
+
+### Native sleep and wakeup scheduling
+
+SleepThread consumes one queued wakeup or suspends the current continuation and
+selects a ready thread. WakeupThread releases a sleeping continuation or queues
+one wakeup for a ready thread; dormant, invalid and currently running targets
+are rejected. Cancellation returns and clears the queued count. Status queries
+report the sleep wait reason and queued wakeups. Starting a dormant thread clears
+old wakeups. Counter overflow is rejected without mutation.
+
+The interrupt-safe wake/cancel aliases update scheduler state without switching
+inside a callback. A pending higher-priority continuation can be selected after
+the interrupt chain restores its interrupted context. Ordinary wakeups may
+preempt at the native service boundary. No host threads or PS2 instruction
+execution are created: all continuations execute compiled LLVM code.
+
+Sleep with no queued wakeup and no ready replacement still stops without retiring
+the syscall or changing the thread state. Native event-driven idle waiting is not
+yet implemented. This is an explicit limitation, not a successful simulated wait.
+
+
+### Counter selector handling and reference limitations
+
+The explicit per-counter disable selector (16), and counter 0's unused selector
+0, preserve the last written value even when global/mode enables are set. A
+selector change does not erase an earlier unmeasured interval. An explicit write
+while that counter is disabled restores a known value. Reserved selectors remain
+unsupported when enabled; they are not treated as measured zero events.
+
+Native stop diagnostics report the failing operation (0 read control, 1 write
+control, 2 read counter, 3 write counter) and counter index. This distinguishes
+configuration acceptance from the first unresolved measurement.
+
+The pinned PCSX2 reference accumulates its virtual execution cycles for event 1
+and does not accumulate instruction/data-cache misses for event 6. These are
+reference compatibility choices, not host performance measurements or evidence
+that profiling can be removed. The current native integration still stops on an
+active counter-0 cycle read. Windows ETW collection alone cannot establish the
+required guest-to-native meaning. Replacing or eliminating the measurements
+requires resolving their consumers, including memory aliases and loaded code;
+the existing candidate report does not prove those uses are unobservable.
+
+
+Metric pointer exploration follows bounded nested direct calls and constant-target
+indirect calls. Link registers are assigned before call delay slots; branch and
+return targets are captured before their slots. A matching return resumes with
+the callee's resulting candidate registers rather than assuming ABI preservation.
+Unresolved targets, unknown operations and conditional-link branches remain
+explicit boundaries. Call depth is capped at 32 in addition to the instruction
+exploration budget. This remains candidate discovery, not a whole-program alias
+analysis or permission to remove measurements. Scalar and packed bitwise/copy
+operations propagate their known low-word candidates. Floating-point and vector
+arithmetic preserve integer candidates, while transfers back into integer
+registers invalidate their destinations. Copies from untracked upper lanes stay
+unknown, and vector code launches remain boundaries.
+
+
+### Native CD/DVD initialization RPC
+
+With a configured disc, endpoint `0x80000592`, method 0 owns a native ISO session.
+Mode 0 opens the ISO and validates its root directory, mode 1 opens the volume,
+and mode 5 releases the session. Reinitialization replaces ownership only after
+validation succeeds. Unsupported methods/modes stop explicitly. Four-byte legacy
+and 16-byte extended responses contain success and zero legacy version/logging
+metadata, without claiming Sony module identities.
+
+Response bounds and executable-write protection are shared with FILEIO and are
+checked before any lifecycle change. Media failures preserve the previous session
+and response bytes and expose a diagnostic. Other CD/DVD RPC endpoints, physical
+media control and IOP reset are not implemented by this endpoint. The native
+integration now passes this initialization and reaches an unsupported SIF IOP-reset
+command; this is startup progress, not visible boot. Active counter measurements
+remain unresolved independently.

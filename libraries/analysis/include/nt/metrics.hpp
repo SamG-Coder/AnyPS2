@@ -4,7 +4,7 @@
 #include <vector>
 
 namespace nt::analysis {
-enum class MetricUseKind { stored_value, memory_address, system_write, flow_boundary, unknown_operation, missing_code, budget };
+enum class MetricUseKind { stored_value, memory_address, system_write, flow_boundary, unknown_operation, missing_code, budget, unresolved_memory };
 struct MetricUse {
     std::uint32_t pc;
     MetricUseKind kind;
@@ -22,6 +22,9 @@ struct MetricPointerUse {
     unsigned reg;
     MetricPointerKind kind;
     std::optional<std::uint32_t> target;
+    std::vector<MetricMemoryUse> memory_uses;
+    std::vector<MetricUse> boundaries;
+    std::optional<std::uint32_t> storage;
 };
 struct MetricSite {
     std::uint32_t pc;
@@ -30,6 +33,7 @@ struct MetricSite {
     std::vector<MetricUse> uses;
     std::vector<MetricMemoryUse> memory_uses;
     std::vector<MetricPointerUse> pointer_uses;
+    bool pointer_search_incomplete=false;
 };
 // Executable-segment candidates, not proof of reachability. Follow register
 // dependencies only until a flow/unsupported boundary; never authorize removal.

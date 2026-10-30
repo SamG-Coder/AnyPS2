@@ -1,5 +1,6 @@
 #include "disc_fixture.hpp"
 #include <nt/ee_file_rpc.hpp>
+#include <nt/ee_cdvd_rpc.hpp>
 #include <nt/ee_sif_command_peer.hpp>
 #include <nt/ee_platform.hpp>
 #include <nt/ee_services.hpp>
@@ -31,11 +32,13 @@ void run_ee_file_rpc_tests() {
     const nt::Bytes data{11,22,33,44,55,66,77};
     nt::write_file(disc.path,fixture::single_file_iso("DATA.BIN;1",data));
     nt::ee::NativeFileRpc files(disc.path);
+    nt::ee::NativeCdvdInitRpc cdvd(disc.path);
+    nt::ee::NativeRpcService* endpoint=&files;
     std::vector<std::uint8_t> ram(0x10000,0xcc);
     nt::ee::Memory memory{ram.data(),ram.size()};
     nt::ee::NativePlatform platform; platform.attach(memory);
     nt::ee::NativeSifCommandPeer peer(platform.sif_link,memory,nt_ee_generated_code_overlap,0x1000,&platform.sif_receive);
-    require(peer.register_service(files) && !peer.register_service(files) && peer.connect(platform.sif_outbound));
+    require(peer.register_service(files) && !peer.register_service(files) && peer.register_service(cdvd) && peer.connect(platform.sif_outbound));
     nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
     auto state=nt::ee::NativePlatform::initial_state(0x3a0000);
     state.set(4,5); state.set(5,0x3c0000); state.set(6,0); state.set(7,0); state.set(28,0x7000);
@@ -57,7 +60,7 @@ void run_ee_file_rpc_tests() {
         if (!args.empty()) {
             const auto logical=args.size(); args.resize((logical+15)&~std::size_t(15));
             std::memcpy(ram.data()+0x9000,args.data(),args.size());
-            descriptors=words({0x9000,files.buffer,static_cast<std::uint32_t>(logical),0});
+            descriptors=words({0x9000,endpoint->buffer,static_cast<std::uint32_t>(logical),0});
         }
         auto command=words({0x4000,0x1000,static_cast<std::uint32_t>(size),0x44});
         descriptors.insert(descriptors.end(),command.begin(),command.end());
@@ -72,8 +75,8 @@ void run_ee_file_rpc_tests() {
     require(platform.sif_outbound.pump(memory)==Stop::budget);
     require(nt::le32(ram,0x6024)==files.server && nt::le32(ram,0x6028)==files.buffer); finish();
     const auto request=[&](unsigned method,const nt::Bytes& args,unsigned destination=0x5004,unsigned size=4) {
-        return submit(words({64U|(static_cast<unsigned>(args.size())<<8),args.empty() ? 0 : files.buffer,
-            0x8000000a,0,17,19,23,29,method,static_cast<unsigned>(args.size()),destination,size,1,files.server,0,0}),args);
+        return submit(words({64U|(static_cast<unsigned>(args.size())<<8),args.empty() ? 0 : endpoint->buffer,
+            0x8000000a,0,17,19,23,29,method,static_cast<unsigned>(args.size()),destination,size,1,endpoint->server,0,0}),args);
     };
     const auto call=[&](unsigned method,const nt::Bytes& args,unsigned size=4) {
         arm(); request(method,args,0x5004,size); require(platform.sif_outbound.pump(memory)==Stop::budget);
@@ -105,6 +108,38 @@ void run_ee_file_rpc_tests() {
     // Submit owns a snapshot, so corrupting caller RAM cannot change its request.
     ram[0x9004]='X'; require(platform.sif_outbound.pump(memory)==Stop::budget);
     require(nt::le32(ram,0x5004)==3 && files.statistics().requests==stats+1); finish();
+    endpoint=&cdvd;
+    arm(); submit(words({36,0,0x80000009,0,7,9,11,13,cdvd.id}));
+    require(platform.sif_outbound.pump(memory)==Stop::budget);
+    require(nt::le32(ram,0x6024)==cdvd.server && nt::le32(ram,0x6028)==cdvd.buffer); finish();
+    require(!cdvd.initialized());
+    for (const auto mode : {1U,0U,0U,5U,5U,0U}) {
+        require(call(0,words({mode}),16)==1 && cdvd.initialized()==(mode!=5));
+        require(nt::le32(ram,0x5008)==0 && nt::le32(ram,0x500c)==0 && nt::le32(ram,0x5010)==0);
+    }
+    const auto before=ram;
+    require(cdvd.call(memory,nt_ee_generated_code_overlap,0,words({5}),0x1000,16)==Stop::code_write);
+    require(cdvd.call(memory,nt_ee_generated_code_overlap,0,words({5}),0xffff,16)==Stop::memory_fault);
+    require(cdvd.call(memory,nt_ee_generated_code_overlap,0,words({5}),0x5004,8)==Stop::invalid_state);
+    require(cdvd.call(memory,nt_ee_generated_code_overlap,1,words({5}),0x5004,16)==Stop::unsupported_system);
+    require(cdvd.call(memory,nt_ee_generated_code_overlap,0,words({2}),0x5004,16)==Stop::unsupported_system);
+    require(cdvd.initialized() && ram==before);
+    nt::ee::NativeCdvdInitRpc missing(disc.path.string()+".missing");
+    require(missing.call(memory,nt_ee_generated_code_overlap,0,words({0}),0x5004,16)==Stop::unsupported_system);
+    require(!missing.initialized() && !missing.error().empty() && ram==before);
+    TemporaryDisc truncated;
+    auto incomplete=fixture::single_file_iso("DATA.BIN;1",data);
+    incomplete.resize(17*2048); // Descriptor exists, root directory extent does not.
+    nt::write_file(truncated.path,incomplete);
+    nt::ee::NativeCdvdInitRpc bad_media(truncated.path);
+    require(bad_media.call(memory,nt_ee_generated_code_overlap,0,words({1}),0x5004,16)==Stop::budget);
+    require(bad_media.initialized());
+    const auto media_before=ram;
+    require(bad_media.call(memory,nt_ee_generated_code_overlap,0,words({0}),0x5004,16)==Stop::unsupported_system);
+    require(bad_media.initialized() && ram==media_before && !bad_media.error().empty());
+    require(bad_media.call(memory,nt_ee_generated_code_overlap,0,words({5}),0x5004,4)==Stop::budget);
+    require(!bad_media.initialized() && bad_media.error().empty());
+    endpoint=&files;
     // Malformed payload size fails without publishing a result or completion.
     arm(); submit(words({64U|(8U<<8),files.buffer,0x8000000a,0,17,19,23,29,1,4,0x5004,4,1,files.server,0,0}),words({3}));
     const auto unchanged=ram; const auto completed=files.statistics().requests;

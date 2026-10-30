@@ -74,7 +74,60 @@ int main() {
         direct.write(0x10003000,0);
         if (direct.consume(2,transport,false)!=nt::ee::Stop::budget || consumer.drawing.pixels()[0]!=0x80201008)
             throw std::runtime_error("Native GIF submission did not reach Vulkan");
+        // One image packet split across transport submissions, including failure
+        // and retry at completion. No pixels are published from the prefix.
+        transport.clear();
+        const auto quad=[&](std::uint64_t low,std::uint64_t high) {
+            word(std::uint32_t(low)); word(std::uint32_t(low>>32));
+            word(std::uint32_t(high)); word(std::uint32_t(high>>32));
+        };
+        quad(4ULL|(1ULL<<60),14);
+        quad(1ULL<<48,0x50); quad(0,0x51); quad(4ULL|(1ULL<<32),0x52); quad(0,0x53);
+        quad(0x8001ULL|(2ULL<<58),0);
+        const auto before_stream=consumer.drawing.pixels();
+        if (direct.consume(2,transport,false)!=nt::ee::Stop::budget || consumer.drawing.pixels()!=before_stream)
+            throw std::runtime_error("Split image prefix was rejected or published early");
+        if (direct.read(0x10003020).status!=nt::ee::Stop::unsupported_system)
+            throw std::runtime_error("Pending stream reported idle GIF status");
+        const std::vector<std::uint8_t> interleaved{0,0,0,0x11};
+        if (direct.consume(1,interleaved,false)!=nt::ee::Stop::unsupported_system)
+            throw std::runtime_error("Incomplete GIF packet allowed cross-path work");
+        const auto sink=direct.graphics;
+        direct.graphics.submit=[](void*,std::span<const nt::graphics::Packet>) { return false; };
+        transport.clear(); quad(0x2222222211111111ULL,0x4444444433333333ULL);
+        if (direct.consume(2,transport,false)!=nt::ee::Stop::unsupported_system || consumer.drawing.pixels()!=before_stream)
+            throw std::runtime_error("Rejected stream completion committed state");
+        direct.graphics=sink;
+        if (direct.consume(2,transport,false)!=nt::ee::Stop::budget ||
+            consumer.drawing.pixels()[0]!=0x11111111 || consumer.drawing.pixels()[5]!=0x44444444)
+            throw std::runtime_error("Retried split image upload differs");
+        transport.clear(); quad(0x8001ULL|(2ULL<<58),0);
+        if (direct.consume(2,transport,false)!=nt::ee::Stop::budget)
+            throw std::runtime_error("Pending image header rejected");
+        direct.write(0x10003000,1); // Reset discards pending transport data.
+        transport.clear(); payload();
+        if (direct.consume(2,transport,false)!=nt::ee::Stop::budget || consumer.drawing.pixels()[0]!=0x80201008)
+            throw std::runtime_error("GIF reset retained pending transport framing");
+        transport.clear(); quad(0x7fffULL|(1ULL<<60),14);
+        std::vector<std::uint8_t> oversized(65536*16);
+        if (direct.consume(2,transport,false)!=nt::ee::Stop::budget ||
+            direct.consume(2,oversized,false)!=nt::ee::Stop::unsupported_system)
+            throw std::runtime_error("Graphics stream bound was not enforced");
+        direct.write(0x10003000,1);
         if (consumer.renderer.validation_errors()) throw std::runtime_error("Native transfers caused Vulkan validation errors");
+        direct.graphics.wait=[](void* raw) {
+            static_cast<Consumer*>(raw)->renderer.synchronize(); return true;
+        };
+        const auto before_flush=consumer.drawing.pixels();
+        transport.clear(); word(0x11000000); word(0x13000000);
+        if (direct.consume(1,transport,false)!=nt::ee::Stop::budget || consumer.drawing.pixels()!=before_flush ||
+            consumer.renderer.validation_errors())
+            throw std::runtime_error("Native Vulkan flush altered drawing or failed completion");
+        // A flush after uncommitted DIRECT cannot be moved before that draw.
+        transport.clear(); word(0x50000000|cursor); payload(); word(0x11000000);
+        if (direct.consume(1,transport,false)!=nt::ee::Stop::unsupported_system || consumer.drawing.pixels()!=before_flush)
+            throw std::runtime_error("Native flush was reordered across an uncommitted draw");
+
         nt::ee::NativeGraphics lifecycle;
         lifecycle.context=&consumer;
         lifecycle.synchronize=[](void* raw) {

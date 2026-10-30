@@ -1,5 +1,6 @@
 #include <nt/analysis.hpp>
 #include <array>
+#include <algorithm>
 #include <deque>
 #include <optional>
 #include <stdexcept>
@@ -233,6 +234,85 @@ std::set<std::uint32_t> stored_code_pointers(ByteView bytes,const elf::Executabl
     }
     return result;
 }
+std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executable& elf,const Program& program) {
+    using r5900::Op;
+    std::set<std::uint32_t> result;
+    for (const auto& [pc,jump]:program.instructions) {
+        if (jump.op!=Op::jr || !jump.rs || pc<28) continue;
+        std::array<const r5900::Instruction*,7> prior{};
+        bool complete=true;
+        for (unsigned n=0;n<prior.size();++n) {
+            const auto found=program.instructions.find(pc-4*(n+1));
+            if (found==program.instructions.end()) { complete=false; break; }
+            prior[n]=&found->second;
+        }
+        if (!complete) continue;
+        const auto& load=*prior[0]; const auto& add=*prior[1];
+        const auto& high=*prior[2]; const auto& scale=*prior[3];
+        const auto& branch=*prior[5]; const auto& bound=*prior[6];
+        if (load.op!=Op::lw || load.rt!=jump.rs || add.op!=Op::addu || add.rd!=load.rs ||
+            high.op!=Op::lui || !high.rt || scale.op!=Op::sll || scale.sa!=2 || !scale.rd ||
+            high.rt==scale.rd ||
+            !((add.rs==high.rt && add.rt==scale.rd) || (add.rt==high.rt && add.rs==scale.rd)) ||
+            bound.op!=Op::sltiu || bound.rs!=scale.rt || !bound.rt ||
+            bound.immediate<=0 || bound.immediate>4096 || branch.op!=Op::beq ||
+            !((branch.rs==bound.rt && !branch.rt) || (branch.rt==bound.rt && !branch.rs)) ||
+            branch.target()<=pc) continue;
+        // Candidate entries only: this is not a proof used to remove the guard
+        // or to fold table contents. The compiled code retains both at runtime.
+        const auto base=(std::uint32_t(high.immediate)<<16)+std::uint32_t(load.immediate);
+        std::set<std::uint32_t> entries;
+        for (unsigned n=0;n<static_cast<unsigned>(bound.immediate);++n) {
+            if (std::uint64_t(base)+4*n>0xffffffffULL) { entries.clear(); break; }
+            const auto word=initial_word(bytes,elf,base+4*n);
+            const auto entry=word ? executable_pointer(elf,*word) : std::nullopt;
+            if (!entry) { entries.clear(); break; }
+            entries.insert(*entry);
+        }
+        result.insert(entries.begin(),entries.end());
+    }
+    return result;
+}
+std::set<std::uint32_t> object_table_entries(ByteView bytes,const elf::Executable& elf,const Program& program) {
+    using r5900::Op;
+    std::set<std::pair<std::int32_t,std::uint32_t>> slots;
+    for (const auto& [pc,load]:program.instructions) {
+        if (load.op!=Op::lw || !load.rt) continue;
+        std::uint32_t offset=0;
+        for (unsigned step=1;step<=16 && std::uint64_t(pc)+step*4+4<=0xffffffffULL;++step) {
+            const auto found=program.instructions.find(pc+step*4);
+            if (found==program.instructions.end()) break;
+            const auto& i=found->second;
+            if (i.op==Op::addiu && i.rt==load.rt && i.rs==load.rt) {
+                offset+=std::uint32_t(i.immediate); continue;
+            }
+            if (i.op==Op::lw && i.rs==load.rt && i.rt) {
+                const auto call=program.instructions.find(i.pc+4);
+                if (call!=program.instructions.end() && call->second.op==Op::jalr && call->second.rs==i.rt)
+                    slots.emplace(load.immediate,offset+std::uint32_t(i.immediate));
+                break;
+            }
+            if (i.op==Op::sw || i.op==Op::sd || i.op==Op::sq || i.op==Op::sb || i.op==Op::sh) continue;
+            if (i.op==Op::lh && i.rt!=load.rt) continue;
+            break;
+        }
+    }
+    std::set<std::uint32_t> result;
+    for (const auto& [pc,store]:program.instructions) {
+        if (store.op!=Op::sw || !store.rt) continue;
+        if (std::none_of(slots.begin(),slots.end(),[&](const auto& slot) { return slot.first==store.immediate; })) continue;
+        unsigned fuel=128;
+        const auto table=candidate(bytes,elf,program,pc,store.rt,fuel,0xffffffffU);
+        if (!table) continue;
+        for (const auto& [field,offset]:slots) {
+            if (field!=store.immediate) continue;
+            const auto pointer=initial_word(bytes,elf,*table+offset);
+            if (!pointer) continue;
+            if (const auto entry=executable_pointer(elf,*pointer)) result.insert(*entry);
+        }
+    }
+    return result;
+}
 std::set<std::uint32_t> registered_code_pointers(ByteView bytes,const elf::Executable& elf,const Program& program) {
     std::set<std::uint32_t> result;
     std::map<std::uint32_t,unsigned> summaries;
@@ -256,6 +336,17 @@ std::set<std::uint32_t> registered_code_pointers(ByteView bytes,const elf::Execu
 std::set<std::uint32_t> thread_entries(ByteView bytes,const elf::Executable& elf,const Program& program) {
     using r5900::Op;
     std::set<std::uint32_t> result;
+    // SetupThread registers the common native return continuation in t0.
+    // Treat it as another compilation root, not a runtime address assumption.
+    for (const auto& [pc,instruction]:program.instructions) {
+        if (instruction.op!=Op::syscall) continue;
+        unsigned fuel=128;
+        const auto number=candidate(bytes,elf,program,pc,3,fuel,0xffffffffU);
+        if (!number || *number!=0x3c) continue;
+        fuel=128;
+        const auto root=candidate(bytes,elf,program,pc,8,fuel,0xffffffffU);
+        if (root) if (const auto entry=executable_pointer(elf,*root)) result.insert(*entry);
+    }
     for (const auto& [pc,call]:program.instructions) {
         if (call.op!=Op::jal || pc>0xfffffff7U) continue;
         const auto setup=program.instructions.find(call.target());

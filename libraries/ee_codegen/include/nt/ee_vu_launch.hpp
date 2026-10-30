@@ -22,6 +22,7 @@ public:
     Stop submit(unsigned unit,std::span<const NativeVectorDataView> data,const NativeLaunchView* request) {
         if (unit!=binding_.unit()) return Stop::unsupported_vector;
         if (shared_ && shared_->active) return Stop::vector_pending;
+        if (request && request->continuation && !completed_) return Stop::unsupported_vector;
         auto next=state;
         for (const auto& upload:data) {
             if (!write_vector_data(std::span(next.data).first(unit ? 1024 : 256),upload)) return Stop::invalid_state;
@@ -34,7 +35,9 @@ public:
             next.input_top=static_cast<std::uint16_t>(request->top);
             next.input_itop=static_cast<std::uint16_t>(request->itop);
             next.input_valid=unit ? 3 : 2;
-            last_result=binding_.launch(next,request->entry,block_budget_);
+            // A new submission clears a completed graphics boundary; internal
+            // graphics resumes below must retain that boundary instead.
+            last_result=binding_.launch(next,request->continuation ? next.next_pair : request->entry,block_budget_);
             std::vector<vu::GraphicsPacket> packets;
             std::uint64_t blocks=last_result.blocks;
             std::size_t quadwords=0;
@@ -59,6 +62,7 @@ public:
             }
         }
         state=std::move(next);
+        if (request) completed_=true;
         if (request && shared_) {
             shared_->values=state.vectors; shared_->integers=state.integers;
             shared_->mac=state.mac; shared_->status=state.status;
@@ -89,6 +93,7 @@ private:
     vu::Binding& binding_;
     std::uint64_t block_budget_;
     VectorStorage* shared_;
+    bool completed_=false;
 };
 
 // Non-owning submission routing; owners must outlive the packet consumer.

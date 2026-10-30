@@ -35,7 +35,7 @@ public:
             return {Stop::budget,id};
         }
         auto id=arg(0);
-        if (call==0x23 || (!id && (call==0x29 || call==0x30 || call==0x31))) id=current_;
+        if (call==0x23 || call==0x32 || (!id && (call==0x29 || call==0x30 || call==0x31))) id=current_;
         const auto found=records_.find(id);
         if (found==records_.end()) return (call==0x30 || call==0x31) && id<256 ? Result{Stop::budget,0} : fail();
         auto& thread=found->second;
@@ -45,12 +45,35 @@ public:
         }
         if (call==0x22) {
             if (thread.status!=0x10) return fail();
-            if (!compiled || !compiled(physical(thread.entry)) || !compiled(root_)) return {Stop::unmapped_code};
+            if (!compiled || !compiled(physical(thread.entry)) || !compiled(root_)) {
+                memory.fault_address=compiled && compiled(physical(thread.entry)) ? root_ : physical(thread.entry);
+                return {Stop::unmapped_code};
+            }
             thread.context={}; thread.context.pc=physical(thread.entry);
             thread.context.set(4,arg(1)); thread.context.set(28,signed_word(thread.gp));
             thread.context.set(29,physical(thread.stack)+thread.size-0x2a0); thread.context.set(31,signed_word(root_));
-            thread.priority=thread.initial_priority; thread.status=2; thread.order=next_order_++;
+            thread.wakeups=0; thread.priority=thread.initial_priority; thread.status=2; thread.order=next_order_++;
             return {Stop::budget,id};
+        }
+        if (call==0x32) {
+            if (thread.wakeups) { --thread.wakeups; return {Stop::budget,id}; }
+            // No native idle/event wait owner exists yet. Preserve the caller
+            // rather than reporting a sleep which cannot select runnable work.
+            if (!has_ready())
+                return {Stop::syscall};
+            thread.status=4; return {Stop::budget,id};
+        }
+        if (call==0x33 || call==0x34) {
+            if (id==current_ || thread.status==0x10) return fail();
+            if (thread.status==4) { thread.status=2; thread.order=next_order_++; }
+            else {
+                if (thread.wakeups==0x7fffffffU) return {Stop::unsupported_system};
+                ++thread.wakeups;
+            }
+            return {Stop::budget,id};
+        }
+        if (call==0x35 || call==0x36) {
+            const auto count=thread.wakeups; thread.wakeups=0; return {Stop::budget,count};
         }
         if (call==0x29) {
             if (arg(1)>=128) return fail();
@@ -58,7 +81,7 @@ public:
             return {Stop::budget,previous};
         }
         if (call==0x23) {
-            if (std::none_of(records_.begin(),records_.end(),[](const auto& item) { return item.second.status==2; })) return {Stop::syscall};
+            if (!has_ready()) return {Stop::syscall};
             thread.status=0x10; return {Stop::budget,state.gpr[2].lo};
         }
         if (call==0x30 || call==0x31) {
@@ -68,7 +91,7 @@ public:
                 if (!protection) return {Stop::invalid_state};
                 if (protection(address,48)) { memory.fault_address=arg(1); return {Stop::code_write}; }
                 const std::array<std::uint32_t,12> words{thread.status,thread.entry,thread.stack,thread.size,thread.gp,
-                    thread.initial_priority,thread.priority,thread.attributes,thread.option,0,0,0};
+                    thread.initial_priority,thread.priority,thread.attributes,thread.option,thread.status==4 ? 1U : 0U,0,thread.wakeups};
                 std::memcpy(memory.data+address,words.data(),48);
             }
             return {Stop::budget,thread.status};
@@ -94,6 +117,9 @@ public:
         selected->second.status=1; current_=selected->first;
     }
 private:
+    bool has_ready() const {
+        return std::any_of(records_.begin(),records_.end(),[](const auto& item) { return item.second.status==2; });
+    }
     static std::uint64_t signed_word(std::uint32_t value) { return static_cast<std::uint64_t>(static_cast<std::int64_t>(std::bit_cast<std::int32_t>(value))); }
     static std::uint32_t physical(std::uint32_t address) { return runtime::default_ram_address(address); }
     static bool range(const Memory& memory,std::uint32_t address,std::uint32_t size,unsigned alignment) {
@@ -102,7 +128,7 @@ private:
     }
     struct Record {
         std::uint32_t status,entry,stack,size,gp,initial_priority,priority,attributes,option;
-        runtime::State context{}; std::uint64_t order=0;
+        runtime::State context{}; std::uint64_t order=0; std::uint32_t wakeups=0;
     };
     std::map<std::uint32_t,Record> records_;
     std::uint32_t current_=0,root_=0; std::uint64_t next_order_=0;

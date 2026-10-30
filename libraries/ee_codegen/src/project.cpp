@@ -104,6 +104,16 @@ void project(const std::filesystem::path& input,const std::filesystem::path& out
                 std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;
             continuations.push_back(address); added=true;
         }
+        for (const auto address:analysis::bounded_switch_entries(bytes,executable,discovered)) {
+            if (discovered.instructions.contains(address) ||
+                std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;
+            continuations.push_back(address); added=true;
+        }
+        for (const auto address:analysis::object_table_entries(bytes,executable,discovered)) {
+            if (discovered.instructions.contains(address) ||
+                std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;
+            continuations.push_back(address); added=true;
+        }
         for (const auto address:analysis::registered_code_pointers(bytes,executable,discovered)) {
             if (discovered.instructions.contains(address) ||
                 std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;

@@ -9,7 +9,7 @@
 
 namespace nt::ee {
 struct NativeUploadView { unsigned destination; std::span<const std::uint8_t> bytes; };
-struct NativeLaunchView { unsigned entry,top,itop; };
+struct NativeLaunchView { unsigned entry,top,itop; bool continuation=false; };
 // Native packet configuration. Unsupported work is rejected as a whole batch.
 class NativePacketSetup {
 public:
@@ -32,9 +32,11 @@ public:
             switch (address-0x10003000) {
             case 0: return {Stop::budget,gif_paused_ ? 8U : 0U};
             case 0x10: return {Stop::budget,gif_mode_};
-            case 0x20: return {Stop::budget,gif_mode_|(gif_paused_ ? 8U : 0U)};
+            case 0x20:
+                if (gif_stream_.pending()) return {Stop::unsupported_system};
+                return {Stop::budget,gif_mode_|(gif_paused_ ? 8U : 0U)};
             case 0x40: case 0x50: case 0x60: case 0x70: case 0x80: case 0x90: case 0xa0:
-                return {Stop::budget,0}; // No native packet has been accepted.
+                return gif_stream_.pending() ? IoRead{Stop::unsupported_system} : IoRead{Stop::budget,0};
             default: return {Stop::unsupported_system};
             }
         }
@@ -61,7 +63,7 @@ public:
     Stop write(std::uint32_t address,std::uint32_t value) {
         if (address%16) return Stop::unsupported_system;
         if (address==0x10003000) {
-            if (value&1) { gif_paused_=false; gif_mode_=0; }
+            if (value&1) { gif_paused_=false; gif_mode_=0; gif_stream_={}; }
             else gif_paused_=(value&8)!=0;
             return Stop::budget;
         }
@@ -92,10 +94,14 @@ public:
         if (channel==2) {
             if (gif_paused_ || !graphics.submit) return Stop::unsupported_system;
             std::vector<graphics::Packet> packets;
-            try { graphics::append_packets(packets,bytes); }
+            auto next=gif_stream_;
+            try { next.append(bytes,packets); }
             catch (const std::invalid_argument&) { return Stop::unsupported_system; }
-            return graphics.submit(graphics.context,packets) ? Stop::budget : Stop::unsupported_system;
+            if (!packets.empty() && !graphics.submit(graphics.context,packets)) return Stop::unsupported_system;
+            gif_stream_=std::move(next);
+            return Stop::budget;
         }
+        if (channel==1 && gif_stream_.pending()) return Stop::unsupported_system;
         if (channel>=2 || bytes.size()%4) return Stop::unsupported_system;
         if (units_[channel].stopped || units_[channel].broken || vector_active) return Stop::unsupported_system;
         auto next=units_[channel];
@@ -104,8 +110,8 @@ public:
         std::vector<NativeVectorPlan> data_plans;
         std::vector<graphics::Packet> drawing;
         std::size_t drawing_bytes=0;
-        bool launch=false;
-        unsigned entry=0;
+        bool launch=false,continuation=false;
+        unsigned entry=0,launch_command=0,wait_command=0;
         std::size_t offset=0;
         const auto word=[&]() {
             std::uint32_t value; std::memcpy(&value,bytes.data()+offset,4); offset+=4; return value;
@@ -129,8 +135,18 @@ public:
             case 5: next.mode=code&3U; break;
             case 7: next.mark=code&0xffffU; break;
             case 0x10: break; // FLUSHE: no outstanding compiled vector work.
-            case 0x14:
+            case 0x11: case 0x13:
+                if (!channel || !graphics.wait || !drawing.empty()) return Stop::unsupported_system;
+                wait_command=command;
+                break;
+            case 0x14: case 0x15: case 0x17:
                 if (!submit_compiled || !uploads.empty() || !drawing.empty()) return Stop::unsupported_vector;
+                if (command==0x15) {
+                    if (!channel || !graphics.wait) return Stop::unsupported_system;
+                    wait_command=command;
+                }
+                launch_command=command;
+                continuation=command==0x17;
                 entry=code&(channel ? 2047U : 511U);
                 next.itop=next.itops;
                 if (channel) {
@@ -216,6 +232,12 @@ public:
             }
             next.code=code;
         }
+        // Validation precedes the host wait. No current-batch effects have
+        // occurred yet, and a retry cannot replay a previously submitted draw.
+        if (wait_command && !graphics.wait(graphics.context)) {
+            rejected_command_=wait_command;
+            return Stop::unsupported_system;
+        }
         if (!uploads.empty()) {
             const auto result=accept_uploads(compiled_context,channel,uploads);
             if (result!=Stop::budget) {
@@ -226,9 +248,9 @@ public:
             }
         }
         if (launch || !data.empty()) {
-            const NativeLaunchView request{entry,next.top,next.itop};
+            const NativeLaunchView request{entry,next.top,next.itop,continuation};
             const auto result=submit_compiled(launch_context,channel,data,launch ? &request : nullptr);
-            if (result!=Stop::budget) { rejected_command_=launch ? 0x14 : 0x6c; return result; }
+            if (result!=Stop::budget) { rejected_command_=launch ? launch_command : 0x6c; return result; }
         }
         if (!drawing.empty() && !graphics.submit(graphics.context,drawing)) return Stop::unsupported_system;
         units_[channel]=next; rejected_command_=0;
@@ -249,6 +271,7 @@ private:
         std::array<std::uint32_t,8> row_column{};
     };
     std::array<Unit,2> units_{};
+    graphics::PacketStream gif_stream_;
     bool gif_paused_=false;
     std::uint32_t gif_mode_=0;
 };

@@ -1,7 +1,9 @@
 # Source references and provenance
 
 AnyPS2 uses public instruction/ABI interfaces and local open-source
-references. No BIOS image or BIOS disassembly was used for this implementation.
+references. No BIOS code or BIOS disassembly is incorporated into this implementation.
+A user-supplied BIOS may be used locally with a reference emulator for differential
+diagnostics; it is not an AnyPS2 conversion input or output dependency.
 
 - PCSX2, revision `1f67c53b6723fcd6a90041a5b296f0e34a6a3222`:
   https://github.com/PCSX2/pcsx2
@@ -1232,3 +1234,85 @@ Masked V3 data conversion uses the pinned VIF public component layout and mask
 selection interface. The fourth lane must explicitly select row, column or
 preserved data; input-selected fourth lanes are rejected. No reference's
 out-of-payload fourth-lane read is copied into the native planner.
+
+
+Native MSCNT submission behavior was checked against the already pinned PCSX2
+`Vif_Codes.cpp` public `vifCode_MSCNT` and `vuExecMicro` interfaces: reuse the saved
+program position and perform the same TOP/ITOP and buffer selection updates as
+MSCAL. AnyPS2 implements this through existing compiled-entry dispatch and its
+transactional native submission owner. No upstream execution loop was copied.
+
+
+Native host profiling-source enumeration uses Microsoft public Windows APIs:
+`TraceQueryInformation` with `TraceProfileSourceListInfo` and `PROFILE_SOURCE_INFO`
+(Windows SDK 10.0.28000.0 interface, consulted 2026-10-30). The original bounded
+parser and query wrapper do not copy SDK implementation code.
+- https://learn.microsoft.com/en-us/windows/win32/api/evntrace/ne-evntrace-trace_query_info_class
+- https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-enablethreadprofiling
+- https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-readthreadprofilingdata
+
+The thread-profiling documentation requires a driver to configure hardware
+counters and states that unconfigured counter slots read as zero. Such zeros
+are not valid evidence of zero measured events and are not used as guest results.
+
+
+The native counter investigation also consulted Microsoft's public ETW PMU
+collection and system-session documentation on 2026-10-30:
+- https://learn.microsoft.com/en-us/windows-hardware/test/wpt/recording-pmu-events
+- https://learn.microsoft.com/en-us/windows/win32/etw/configuring-and-starting-a-systemtraceprovider-session
+
+The interval accumulator is original implementation over typed counter readings.
+It is not derived from a third-party profiler, and synthetic samples are original.
+Live ETW capture and the mapping to guest measurements remain unverified.
+
+
+The original ETW counter-record adapter uses the Windows SDK 10.0.28000.0
+`EVENT_RECORD`, PMC extended-data and processor-index interfaces, together with
+Microsoft's documented Thread_V2/CSwitch layout (consulted 2026-10-30):
+- https://learn.microsoft.com/en-us/windows/win32/etw/thread-v2
+- https://learn.microsoft.com/en-us/windows/win32/etw/cswitch
+- https://learn.microsoft.com/en-us/windows/win32/api/evntcons/ns-evntcons-event_header_extended_data_item
+Only the public interface layout is used; no profiler implementation was copied.
+
+The context-switch adapter also consults Microsoft's PerfView `CSwitchTraceData`
+at revision `9f071a5cb2e70cdfee13abc510344ab1e8840c90` (MIT, copyright
+.NET Foundation and Contributors), inspected 2026-10-30:
+- https://github.com/microsoft/perfview/blob/9f071a5cb2e70cdfee13abc510344ab1e8840c90/src/TraceEvent/Parsers/KernelTraceEventParser.cs
+- https://github.com/microsoft/perfview/blob/9f071a5cb2e70cdfee13abc510344ab1e8840c90/LICENSE.TXT
+Its newer-version parsing retains incoming/outgoing thread IDs at offsets 0/4.
+AnyPS2 uses those interface facts in its original adapter; no implementation
+code is copied. Version 5 support is restricted to the observed 28-byte record;
+only the common thread-ID prefix is consumed, not the additional payload fields.
+Version 2 still requires 24 bytes. Other versions and lengths fail explicitly.
+
+PCSX2 release `v2.8.2` was used as a separate, unmodified local reference
+application for startup observations on 2026-10-30:
+- https://github.com/PCSX2/pcsx2/releases/tag/v2.8.2
+Its existing PINE protocol and debugger were used to collect private observations.
+The already pinned source checkout's `SaveState.cpp` and `PINE.cpp` were consulted
+for interface framing. No emulator, BIOS, game code or save-state content is
+incorporated into AnyPS2. Reference execution is not native-conversion acceptance.
+
+The counter-configuration change uses the already pinned PCSX2 `R5900.h` control
+field interface and the separate emulator checkpoint described above. It does
+not copy PCSX2's approximate counter accumulation or return its unmeasured cache
+miss value as a native measurement. Unknown measurement state is an original
+conservative implementation. Object-table discovery and its fixtures are original.
+
+Native EE sleep/wakeup continuations use the already pinned PS2SDK thread status
+and syscall interfaces, with the pinned Play! PS2OS sleep/wakeup/cancellation
+behavior as a reference. The implementation is original and uses compiled native
+continuations; no reference scheduler or BIOS code is copied or linked. The
+CD/DVD initialization endpoint was identified from PS2SDK `ee/rpc/cdvd/src/libcdvd.c`
+and `iop/cdvd/cdvdfsv/src/cdvdfsv.c`. Its original native initialization adapter
+uses the public `CdInitPkt` layout in `ee/rpc/cdvd/src/libcdvd.c` and mode values
+in `common/include/libcdvd-common.h`. It opens/closes an AnyPS2 ISO session and
+returns the public legacy zero-version metadata; no proprietary module version,
+firmware implementation or reference-emulator success stub is copied.
+
+
+Counter selector handling was checked against the pinned PCSX2 `COP0.cpp`
+public event classification and `R5900.h` control fields. The independent native
+implementation recognizes explicit selector disable without adopting PCSX2's
+virtual-cycle accumulation or unsupported-event zero approximation. Regression
+fixtures execute original counter transfers compiled through LLVM.

@@ -26,6 +26,32 @@ void run_ee_batch_tests();
 void run_ee_file_rpc_tests();
 int main() {
     try {
+        {
+            std::vector<std::uint8_t> ram(0x10000);
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::runtime::State state;
+            nt::ee::NativeThreads threads;
+            threads.initialize({0x8000,0x1000,0x8d60},0,0x1100);
+            const std::array<std::uint32_t,9> descriptor{0,0x1200,0x9000,0x1000,0,10,0,0,0};
+            std::memcpy(ram.data()+0x2000,descriptor.data(),sizeof(descriptor));
+            const auto call=[&](unsigned number,unsigned a0=0,unsigned a1=0) {
+                state.set(4,a0); state.set(5,a1);
+                return threads.invoke(number,state,memory,[](std::uint32_t) { return true; },
+                    [](std::uint32_t,std::uint32_t) { return false; });
+            };
+            check(call(0x32).status==nt::ee::Stop::syscall); // No runnable replacement.
+            check(call(0x20,0x2000).value==2 && call(0x33,2).value==~std::uint64_t(0));
+            check(call(0x22,2).status==nt::ee::Stop::budget);
+            check(call(0x33,2).value==2 && call(0x34,2).value==2);
+            check(call(0x35,2).value==2 && call(0x36,2).value==0);
+            check(call(0x33,2).value==2);
+            check(call(0x32).value==1); threads.schedule(state);
+            check(call(0x2f).value==2 && call(0x32).status==nt::ee::Stop::budget);
+            check(call(0x32).status==nt::ee::Stop::syscall); // Credit consumed exactly once.
+            check(call(0x30,1,0x2100).value==4);
+            std::uint32_t wait=0; std::memcpy(&wait,ram.data()+0x2100+36,4); check(wait==1);
+            check(call(0x33,1).value==1); threads.schedule(state);
+            check(call(0x2f).value==1 && call(0x33,0).value==~std::uint64_t(0));
+        }
         for (const auto slice : {1U,2U,64U}) {
             nt::runtime::State state; state.pc=0x1000;
             state.gpr[0]={99,77};
@@ -949,14 +975,59 @@ int main() {
             state.pc=0x1498; state.gpr[0].lo=42;
             check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall &&
                   memory.performance.counters[0]==0 && memory.performance.counters[1]==0 && state.gpr[0].lo==42);
-            state={}; state.pc=0x147c; state.gpr[8].lo=0x80000000;
+            state={}; state.pc=0x147c; state.gpr[8].lo=0x80000824U;
             check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::unsupported_system &&
-                  !state.executed && state.pc==0x147c && memory.performance.control==0x12340);
+                  state.executed==4 && state.pc==0x148c && memory.performance.control==0x80000824U &&
+                  memory.metrics.unavailable_counters==3);
             state.pc=0x14a4;
-            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall && state.executed==1 && memory.performance.control==0x12340);
-            memory.performance.control=0x80000000; state={}; state.pc=0x1488; state.gpr[11].lo=123;
-            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::unsupported_system &&
-                  !state.executed && state.gpr[11].lo==123);
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall && memory.performance.control==0x80000824U);
+            // A configuration read is valid while measurements are unavailable.
+            state={}; state.pc=0x1488; state.gpr[11].lo=123;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget &&
+                  state.gpr[11].lo==0xffffffff80000824ULL);
+            // Disabling alone cannot invent the missing accumulated value.
+            state={}; state.pc=0x147c;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && memory.performance.control==0);
+            state={}; state.pc=0x148c; state.gpr[12].lo=123;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system &&
+                  !state.executed && state.gpr[12].lo==123);
+            // Resetting both disabled counters restores exact known values.
+            state={}; state.pc=0x1498;
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall &&
+                  memory.metrics.unavailable_counters==0);
+            state={}; state.pc=0x148c;
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall &&
+                  state.gpr[12].lo==0 && state.gpr[13].lo==0);
+            // Explicit per-counter disable selectors preserve written values,
+            // even with global and all execution-mode enables set. Exercise the
+            // compiled transfers, not only the native callback in isolation.
+            for (const auto primary : {0U,16U}) {
+                memory={}; state={}; state.pc=0x147c;
+                state.gpr[8].lo=0x8000781eU|(primary<<5)|(16U<<15);
+                state.gpr[9].lo=0x80000005U; state.gpr[10].lo=321;
+                check(nt_ee_generated_run(&state,&memory,16)==nt::ee::Stop::syscall &&
+                      state.executed==6 && memory.metrics.unavailable_counters==0 &&
+                      state.gpr[12].lo==0xffffffff80000005ULL && state.gpr[13].lo==321);
+            }
+            // Disabling one selector must not hide an active second counter.
+            memory={}; state={}; state.pc=0x147c;
+            state.gpr[8].lo=0x8000781eU|(16U<<5)|(1U<<15);
+            state.gpr[9].lo=17; state.gpr[10].lo=29;
+            check(nt_ee_generated_run(&state,&memory,16)==nt::ee::Stop::unsupported_system &&
+                  state.executed==5 && state.pc==0x1490 && state.gpr[12].lo==17 &&
+                  memory.metrics.unavailable_counters==2 && memory.metrics.rejected_counter==1 &&
+                  memory.metrics.rejected_operation==static_cast<unsigned>(nt::ee::PerformanceOperation::read_counter));
+            // A selector change does not erase an unmeasured earlier interval.
+            state={}; state.pc=0x147c;
+            state.gpr[8].lo=0x8000781eU|(16U<<5)|(16U<<15);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+            state={}; state.pc=0x1490; state.gpr[13].lo=123;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system &&
+                  !state.executed && state.gpr[13].lo==123);
+            // An explicit write under the disabled selector restores knowledge.
+            state={}; state.pc=0x1484; state.gpr[10].lo=73;
+            check(nt_ee_generated_run(&state,&memory,16)==nt::ee::Stop::syscall &&
+                  state.gpr[13].lo==73 && memory.metrics.unavailable_counters==0);
             struct Metrics { bool reject=true; unsigned calls=0; std::uint32_t mode=0; } metrics;
             memory.metrics={&metrics,+[](void* raw,nt::ee::PerformanceState& next,
                 nt::ee::PerformanceOperation operation,unsigned counter,std::uint32_t value,std::uint32_t mode) {

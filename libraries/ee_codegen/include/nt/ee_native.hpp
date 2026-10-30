@@ -5,8 +5,8 @@
 
 namespace nt::ee {
 enum class Stop : std::uint32_t { budget, syscall, unmapped_code, invalid_state, memory_fault, code_write, unsupported_numeric, interrupt_pending, vector_pending, unsupported_vector, unsupported_system, breakpoint, arithmetic_overflow, trap, unpublished_code };
-// Disabled performance-counter metadata. Enabling measurement requires a native
-// metric provider; no synthetic cycles are accumulated here.
+// Counter configuration and last explicit writes. Unmeasured accumulated values
+// are tracked separately and must never be returned as measurements.
 struct PerformanceState { std::uint32_t control=0; std::uint32_t counters[2]{}; };
 // Native service accesses return Stop::budget on completion; other stops must
 // preserve service state and remain retryable. No callback receives guest code.
@@ -19,6 +19,9 @@ struct NativePerformance {
     void* context=nullptr;
     IoRead (*request)(void*,PerformanceState&,PerformanceOperation,unsigned,std::uint32_t,std::uint32_t)=nullptr;
     bool rejected=false;
+    std::uint8_t unavailable_counters=0;
+    std::uint8_t rejected_operation=0;
+    std::uint8_t rejected_counter=0;
     std::uint32_t rejected_control=0;
 };
 struct NativeIo {

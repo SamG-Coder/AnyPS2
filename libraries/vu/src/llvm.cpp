@@ -407,9 +407,9 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         writer.pending.push_back({"i16",delayed_value,offsetof(State,delayed_value)});
         writer.commit();
     }
-    if (branch_block || graphics_block) {
-        writer.pending.push_back({"i32",next_pair,offsetof(State,next_pair)}); writer.commit();
-    }
+    if (!branch_block && !graphics_block)
+        next_pair=std::to_string((pairs.back().address+1)&(unit ? 2047U : 511U));
+    writer.pending.push_back({"i32",next_pair,offsetof(State,next_pair)}); writer.commit();
     if ((!branch_block && !graphics_block) || graphics_end) {
         writer.publish_quotient(); writer.publish_p();
         writer.pending.push_back({"i32","0",offsetof(State,mac_read_delay)}); writer.commit();
@@ -423,18 +423,28 @@ void emit_llvm(std::ostream& output,std::span<const Pair> pairs,unsigned unit,st
     emit_region(output,pairs,unit,symbol,true);
 }
 void emit_program_llvm(std::ostream& output,std::span<const Pair> pairs,unsigned unit,
-                       std::span<const unsigned> entries,std::string_view symbol) {
+                       std::span<const unsigned> entries,std::string_view symbol,unsigned continuation_depth) {
     if (pairs.empty()) throw std::invalid_argument("Empty VU program image");
     for (std::size_t i=1;i<pairs.size();++i)
         if (pairs[i].address!=pairs[i-1].address+1) throw std::invalid_argument("VU program image must be contiguous");
-    const auto flow=discover(pairs,unit,entries);
-    if (!flow.missing.empty() || !flow.complex_delay.empty()) {
-        std::string message="VU program control-flow gaps:";
-        for (const auto address:flow.missing) message+="\n  missing pair "+std::to_string(address);
-        for (const auto address:flow.complex_delay) message+="\n  unsupported delay at pair "+std::to_string(address);
-        throw std::invalid_argument(message);
-    }
+    if (continuation_depth>2048) throw std::invalid_argument("VU continuation depth exceeds 2048");
     std::set<unsigned> roots(entries.begin(),entries.end());
+    Flow flow;
+    for (unsigned depth=0;;++depth) {
+        const std::vector<unsigned> seeds(roots.begin(),roots.end());
+        flow=discover(pairs,unit,seeds);
+        if (!flow.missing.empty() || !flow.complex_delay.empty()) {
+            std::string message="VU program control-flow gaps at continuation depth "+std::to_string(depth)+":";
+            for (const auto address:flow.missing) message+="\n  missing pair "+std::to_string(address);
+            for (const auto address:flow.complex_delay) message+="\n  unsupported delay at pair "+std::to_string(address);
+            throw std::invalid_argument(message);
+        }
+        if (depth==continuation_depth) break;
+        const auto previous_size=roots.size();
+        for (const auto& transfer:flow.transfers) if (transfer.terminates)
+            roots.insert((transfer.address+2)&(unit ? 2047U : 511U));
+        if (roots.size()==previous_size) break;
+    }
     for (const auto& pair:pairs) if (!pair.end && flow.reachable.contains(pair.address) && decode_lower(pair,unit).operation==LowerOperation::graphics_kick)
         roots.insert((pair.address+1)&(unit ? 2047U : 511U));
     for (const auto& transfer:flow.transfers) {

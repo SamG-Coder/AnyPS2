@@ -454,10 +454,20 @@ game VU launch execution and visible rendering remain unverified.
 
 VIF1 `MSCAL` can invoke a bound native VU1 program, with TOP/ITOP inputs and
 buffer selection. Launches commit only on completion. The initial path accepts
-one launch at the end of a configuration batch; mixed program uploads/launches,
-continuation commands remain unsupported.
-Compiled synthetic programs verify this path; GT4 still stops earlier at a
-performance measurement request with no supported native provider.
+one launch at the end of a configuration batch. Mixed program uploads/launches
+remain unsupported. MSCNT can resume a previously completed native launch at a compiled continuation entry.
+VIF1 MSCALF and graphics flush commands require an explicit native graphics wait
+owner. To compile a known chain of subsequent E-stop entries,
+use `ps2-vu-recompile input.bin output.ll 1 0 0 --continuations 2`.
+The depth counts additional completed launches, not instruction pairs; missing
+continuation code is rejected during generation.
+Compiled synthetic programs verify this path. Private GT4 startup now passes
+performance-counter configuration and recovered object/switch-table calls, then
+accepts split GIF image transfers and schedules native threads through sleep and
+wakeup. Disc-backed CD/DVD RPC initialization now succeeds; the current native
+run reaches an unsupported SIF IOP-reset command. Unmeasured counter reads also
+remain unresolved and stop explicitly; no measurement values are fabricated. Native GT4 boot
+has not been established.
 
 Scalar, V2, masked V3 and V4 uploads in 32-, 16- and 8-bit formats,
 plus packed V4-5 data, can populate
@@ -498,8 +508,9 @@ inputs. It has no instruction decoder or interpreter fallback. This is validated
 with original synthetic programs; it is not yet connected to GT4's VU launches.
 
 To inspect performance-counter dependencies before choosing a native measurement
-replacement, run `ps2-inspect <executable.elf> --metrics`. This offline report
-lists executable-segment candidates and bounded register uses. Stored values and
+replacement, run `ps2-inspect <executable.elf> --metrics [window]` (default 128, maximum 4096). This offline report
+lists executable-segment candidates, bounded register uses, and candidate memory
+accesses in direct callees receiving a measurement-structure pointer. Stored values and
 unresolved flow require further analysis; the report does not authorize removing
 measurements. Keep commercial-input reports under ignored `work/`.
 
@@ -508,3 +519,9 @@ executable. A post-link check verifies compiled-entry evidence and rejects known
 interpreter, decoder and JIT dependencies. The report includes executable/map
 hashes and imported DLLs; it is a regression guard, not proof about arbitrary
 linked code. Keep commercial-input maps and reports under ignored `work/`.
+
+
+On Windows, `anyps2-host-metrics` lists the native profiling sources advertised
+by the current system. It is a read-only capability probe: it does not install a
+driver, configure global counters, start tracing, or provide guest measurements.
+Advertised sources alone do not establish a usable native performance provider.

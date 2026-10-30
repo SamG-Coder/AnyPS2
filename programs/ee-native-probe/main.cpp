@@ -1,8 +1,10 @@
+#include "capture.hpp"
 #include <nt/ee_services.hpp>
 #include <nt/ee_platform.hpp>
 #include <nt/ee_sif_command_peer.hpp>
 #include <nt/binary.hpp>
 #include <nt/ee_file_rpc.hpp>
+#include <nt/ee_cdvd_rpc.hpp>
 #include <memory>
 #include <nt/vulkan_renderer.hpp>
 #include <nt/native_drawing.hpp>
@@ -76,15 +78,23 @@ nt::ee::Stop execute(nt::runtime::State* state,nt::ee::Memory* memory,std::uint6
 }
 int main(int argc,char** argv) {
     if (argc<2) {
-        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--disc <image.iso>] [--capture-vu <new-private-directory>]\n"; return 2;
+        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--disc <image.iso>] [--capture-vu <new-private-directory>] [--capture-stop <new-private-directory>]\n"; return 2;
     }
     try {
         std::uint64_t budget=1000000;
-        std::filesystem::path disc,capture_directory;
+        std::filesystem::path disc,capture_directory,stop_directory;
         bool has_budget=false;
         for (int index=2;index<argc;++index) {
             const std::string_view text=argv[index];
             if (text=="--trace-services") { trace_services=true; continue; }
+            if (text=="--capture-stop") {
+                if (!stop_directory.empty() || index+1==argc)
+                    throw std::runtime_error("Expected one private stop capture directory");
+                stop_directory=argv[++index];
+                if (std::filesystem::exists(stop_directory))
+                    throw std::runtime_error("Stop capture directory already exists");
+                continue;
+            }
             if (text=="--capture-vu") {
                 if (!capture_directory.empty() || index+1==argc) throw std::runtime_error("Expected one private VU capture directory");
                 capture_directory=argv[++index];
@@ -107,7 +117,9 @@ int main(int argc,char** argv) {
         nt::ee::Memory memory{ram.data(),ram.size()};
         NativeGpu gpu;
         nt::ee::NativePlatform platform; platform.attach(memory);
-        platform.packet_setup.graphics={&gpu,NativeGpu::submit};
+        platform.packet_setup.graphics={&gpu,NativeGpu::submit,[](void* raw) {
+            return NativeGpu::synchronize(raw)==nt::ee::Stop::budget;
+        }};
         VuCapture capture;
 #if defined(ANYPS2_NATIVE_VU) || defined(ANYPS2_NATIVE_VU1)
         nt::ee::NativeVuUploads compiled_uploads;
@@ -144,8 +156,11 @@ int main(int argc,char** argv) {
         };
         nt::ee::NativeSifCommandPeer command_peer(platform.sif_link,memory,nt_ee_generated_code_overlap,0x1000,&platform.sif_receive);
         std::unique_ptr<nt::ee::NativeFileRpc> files;
+        std::unique_ptr<nt::ee::NativeCdvdInitRpc> cdvd;
         if (!disc.empty()) {
             files=std::make_unique<nt::ee::NativeFileRpc>(disc);
+            cdvd=std::make_unique<nt::ee::NativeCdvdInitRpc>(disc);
+            if (!command_peer.register_service(*cdvd)) throw std::runtime_error("Cannot register native CD/DVD initialization");
             if (!command_peer.register_service(*files)) throw std::runtime_error("Cannot register native disc service");
         }
         if (!command_peer.connect(platform.sif_outbound)) throw std::runtime_error("Cannot connect native command peer");
@@ -153,6 +168,7 @@ int main(int argc,char** argv) {
         nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains,ANYPS2_EE_SYSCALL_TABLE);
         const auto stop=nt::ee::run(execute,state,memory,budget,services);
         if (!capture_directory.empty()) capture.save(capture_directory);
+        if (!stop_directory.empty()) probe::capture_stop(stop_directory,state,memory,stop);
         std::cout<<"stop="<<static_cast<unsigned>(stop)<<" pc="<<nt::hex32(state.pc)
                  <<" executed="<<state.executed<<" v0="<<state.gpr[2].lo<<" syscall="<<state.gpr[3].lo;
         if (stop==nt::ee::Stop::memory_fault || stop==nt::ee::Stop::code_write || stop==nt::ee::Stop::unpublished_code || (stop==nt::ee::Stop::unsupported_system && memory.fault_address))
@@ -162,15 +178,18 @@ int main(int argc,char** argv) {
             const auto control=memory.metrics.rejected_control;
             std::cout<<" unsupported_performance_control="<<nt::hex32(control)
                      <<" event0="<<((control>>5)&31)<<" event1="<<((control>>15)&31)
-                     <<" metric_provider="<<(memory.metrics.request ? "rejected" : "missing");
+                     <<" metric_provider="<<(memory.metrics.request ? "rejected" : "missing")
+                     <<" metric_operation="<<static_cast<unsigned>(memory.metrics.rejected_operation)
+                     <<" metric_counter="<<static_cast<unsigned>(memory.metrics.rejected_counter);
         }
         if (stop==nt::ee::Stop::unmapped_code && state.gpr[3].lo==0x74)
             std::cout<<" requested_syscall="<<state.gpr[4].lo
                      <<" uncompiled_handler="<<nt::hex32(static_cast<std::uint32_t>(state.gpr[5].lo));
-        if (stop==nt::ee::Stop::unmapped_code && state.gpr[3].lo==0x20)
+        if (stop==nt::ee::Stop::unmapped_code && (state.gpr[3].lo==0x20 || state.gpr[3].lo==0x22))
             std::cout<<" uncompiled_thread_entry="<<nt::hex32(memory.fault_address);
         if (stop==nt::ee::Stop::unsupported_system && command_peer.last_command())
             std::cout<<" native_peer_command="<<nt::hex32(command_peer.last_command())<<" option="<<command_peer.last_option();
+        if (cdvd && !cdvd->error().empty()) std::cerr<<"disc initialization: "<<cdvd->error()<<'\n';
         if (!gpu.error.empty()) std::cerr<<"graphics: "<<gpu.error<<'\n';
         if (trace_services) {
 #ifdef ANYPS2_NATIVE_VU
@@ -189,6 +208,7 @@ int main(int argc,char** argv) {
                          <<" rejected_vif_command="<<platform.packet_setup.rejected_command();
             }
             if (gpu.renderer) std::cout<<" graphics_resets="<<platform.graphics.resets()<<" gpu=\""<<gpu.renderer->device_name()<<"\"";
+            if (cdvd) std::cout<<" cdvd_initialized="<<cdvd->initialized();
             if (files) {
                 const auto stats=files->statistics();
                 std::cout<<" file_requests="<<stats.requests<<" file_opens="<<stats.opens<<" file_bytes="<<stats.bytes_read<<" file_method="<<stats.last_method;

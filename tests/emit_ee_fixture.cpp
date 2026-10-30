@@ -302,11 +302,30 @@ int main(int argc,char** argv) {
         word(0x160,0xac850008); word(0x164,0x03e00008); word(0x168,0);
         nt::write_file(argv[2],elf);
         const auto original=elf;
+        elf.resize(0x280,0); word(100,0x100); word(104,0x100);
+        const std::uint32_t table_call[]{0x24042040,0x24082000,0xac880044,0x8c820044,
+            0x24420018,0x84450000,0x8c430004,0x0060f809,0x00852021,12};
+        for (unsigned i=0;i<std::size(table_call);++i) word(0x100+i*4,table_call[i]);
+        word(0x160,0x2402002b); word(0x164,0x03e00008); word(0x168,0);
+        word(0x198,4); word(0x19c,0x1060);
+        nt::write_file(std::string(argv[2])+".table",elf);
+        elf=original;
+        elf.resize(0x188,0); word(100,8);
+        const std::uint32_t switch_call[]{0x24040001,0x2c820002,0x10400009,0,
+            0x00041080,0x3c030000,0x00621821,0x8c632000,0x00600008,0};
+        for (unsigned i=0;i<std::size(switch_call);++i) word(0x100+i*4,switch_call[i]);
+        word(0x130,12); word(0x140,0x2402002b); word(0x144,12);
+        word(0x150,0x2402002c); word(0x154,12); word(0x180,0x1040); word(0x184,0x1050);
+        nt::write_file(std::string(argv[2])+".switch",elf);
+        elf=original;
         const std::uint32_t startup[]{0x24040000,0x24054000,0x24061000,0x24072000,0x24081040,
             0x2403003c,12,0x0040e821,0x24043000,0x2405ffff,0x2403003d,12,
             0x00408021,0x2403003e,12,0x2403007f,12};
         for (unsigned i=0;i<std::size(startup);++i) word(0x100+i*4,startup[i]);
         nt::write_file(std::string(argv[2])+".startup",elf);
+        word(0x110,0x24081070); word(0x13c,0x01000008); word(0x140,0);
+        word(0x170,0x2402004d); word(0x174,0x2403007f); word(0x178,12);
+        nt::write_file(std::string(argv[2])+".thread-root",elf);
         elf=original;
         elf.resize(0x300,0);
         word(100,32); word(32,0x200); word(44,0x00280002); word(48,0x00020003);
@@ -319,6 +338,21 @@ int main(int argc,char** argv) {
         word(0x12c,0x8c990014); word(0x130,0x0320f809); word(0x134,0); word(0x138,12);
         word(0x170,0x24420007); word(0x174,0x03e00008); word(0x178,0);
         nt::write_file(std::string(argv[2])+".lifecycle",elf);
+        elf=original;
+        elf.resize(0x400,0);
+        word(68,0x140); word(72,0x140); word(88,0x300); word(100,0x100); word(104,0x100);
+        const std::uint32_t sleep_main[]{0x24040000,0x34058000,0x24061000,0x24072000,0x24081120,
+            0x2403003c,12,0x0040e821,0x24042040,0x0c00044c,0,0x00402021,
+            0x24030022,12,0x24030032,12,0x8c022080,0x2442004d,0x2403007f,12};
+        for (unsigned i=0;i<std::size(sleep_main);++i) word(0x100+i*4,sleep_main[i]);
+        word(0x200,0x24040001); word(0x204,0x24030033); word(0x208,12);
+        word(0x20c,0x24020001); word(0x210,0xac022080); word(0x214,0x03e00008); word(0x218,0);
+        word(0x220,0x24030023); word(0x224,12); word(0x228,0x2403007f); word(0x22c,12);
+        word(0x230,0x24030020); word(0x234,12); word(0x238,0x03e00008); word(0x23c,0);
+        word(0x344,0x1100); word(0x348,0x9000); word(0x34c,0x1000); word(0x354,10);
+        nt::write_file(std::string(argv[2])+".sleep",elf);
+        word(0x204,0x2403ffcc);
+        nt::write_file(std::string(argv[2])+".iwake",elf);
         elf=original;
         word(92,0x1000); nt::write_file(std::string(argv[2])+".overlap",elf);
         word(92,0x2000); word(0x100,0x4c000000); nt::write_file(std::string(argv[2])+".unsupported",elf);

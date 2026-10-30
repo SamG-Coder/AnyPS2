@@ -10,6 +10,7 @@ namespace nt::vu {
 void emit_llvm(std::ostream& output,std::span<const Pair> pairs,unsigned unit,std::string_view symbol="nt_vu_generated");
 // Compile reachable blocks from explicit entries into one module with native
 // block-table and count accessors. Indirect destinations require explicit entries.
+// A bounded number of subsequent E-stop continuations may be discovered offline.
 void emit_program_llvm(std::ostream& output,std::span<const Pair> pairs,unsigned unit,
-    std::span<const unsigned> entries,std::string_view symbol="nt_vu_program");
+    std::span<const unsigned> entries,std::string_view symbol="nt_vu_program",unsigned continuation_depth=0);
 }

@@ -2244,3 +2244,103 @@ executables before running them. A negative case injects diagnostic-library link
 evidence and a stale success report, then requires the audit to reject and remove
 the report. This supplements the existing generated build-configuration check;
 it does not substitute for executing generated code or source/dependency review.
+
+
+The `vu-llvm-execution` milestone also compiles and executes a multi-entry native
+continuation fixture. It covers MSCNT before initialization, ordinary E-bit resume
+addresses, TOP/ITOP updates, a rejected graphics consumer and retry, continuation
+after an E-bit graphics stop, and rollback of a data upload when the next compiled
+entry is missing. These fixtures contain original synthetic code only.
+
+
+The `analysis` milestone covers measurement-pointer callee candidates with a
+synthetic ELF: likely-branch annulment, distinct pointer values at a join, return
+delay-slot reads, nested-call boundaries, unsupported operations, and bounded
+changing-pointer loops. It tests offline analysis only; it does not claim game
+booting or establish that measurements can be removed.
+
+The same analysis milestone verifies that conditional pointer replacement cannot
+leave a stale address, identical conditional outcomes retain a candidate, typed
+memory footprints preserve quadword alignment, unresolved addresses are reported,
+and explicit breaks terminate exploration.
+
+
+On Windows, `host-metrics-capabilities` validates profile-source response parsing
+with original synthetic records, multiple linked entries, empty responses,
+truncated records, invalid offsets, absent final records and unterminated names.
+The separate live `anyps2-host-metrics` probe verifies enumeration on the current
+host. Neither parser success nor live enumeration demonstrates counter collection
+or game booting.
+
+The VU continuation execution fixture now supplies only its initial entry to the
+compiler and requests two continuation rounds. Its compiled native execution
+therefore checks offline entry recovery as well as MSCNT submission. Requesting
+a third round beyond the synthetic image must fail with a missing-pair diagnostic
+and no partial LLVM output.
+
+The metric analysis milestone includes a parent-structure argument whose callee
+reads a measured child field, a stored parent pointer with a resolved destination,
+and an unknown loaded pointer that must not inherit invented ancestry.
+
+The host metrics milestone also checks native thread interval attribution using
+original synthetic samples: initial partial intervals, active snapshots, CPU
+migration, exclusion of other threads, lost-event invalidation, discontinuous
+switches, counter regression, ordering errors, overflow and missing counter data.
+It validates the attribution contract, not live ETW capture or PS2 metric semantics.
+
+Synthetic Windows event records now exercise decoding through thread attribution,
+including processor indices above 255 and ownership after source-buffer mutation.
+The milestone rejects unsupported versions, truncated payloads, missing counters,
+wrong counter counts and duplicate PMC extensions, and ignores unrelated events.
+
+The same synthetic decoding/attribution scenario runs for context-switch V2
+(24 bytes) and V5 (28 bytes). It checks exact version-specific lengths, rejects
+unknown versions, and keeps nonzero unused V5 payload data out of thread/counter
+results. Live V5 capture remains a separate elevated integration check.
+
+The generated EE project milestone executes its original synthetic LLVM fixture
+with `--capture-stop`, checks the stopped PC and result register plus RAM and
+scratchpad extents, and verifies that a second capture cannot overwrite the first.
+It retains the existing post-link dependency audit. Captures are diagnostic
+observations and are not tested or advertised as resumable save states.
+
+The EE execution milestone covers counter configuration/readback, unavailable
+measurements, disabling without inventing a result, and explicit reset recovery.
+The project milestone also compiles and executes an original object-table call
+with a delayed argument adjustment and an otherwise undiscovered target. Analysis
+checks malformed targets, a clobbered table base and unrelated object fields.
+
+The same project milestone compiles and executes a synthetic bounded indexed
+switch, selecting a non-first table target. Analysis rejects partial malformed
+tables and bounds over an unrelated register.
+
+The Vulkan transfer milestone splits an original image packet after its image
+tag, verifies no early pixel publication, rejects completion and retries it,
+checks swizzled destination pixels, and covers reset, input bounds and rejected
+cross-path interleaving. The generated EE project milestone also reaches an
+otherwise undiscovered SetupThread return trampoline through compiled code.
+
+The thread milestone compiles two original EE programs which create/start a
+worker, sleep the main continuation, and resume it through ordinary or
+interrupt-safe wakeup. The interrupt-safe variant returns through the compiled
+thread exit trampoline before the main continuation resumes. A worker-written
+marker distinguishes immediate preemption from deferred switching. Native scheduler
+checks cover credits, cancellation, dormant/invalid targets, wait status and
+unchanged state when sleep has no runnable replacement.
+
+
+The Release `analysis` milestone also covers nested measurement-structure calls,
+call/return delay-slot effects, overlapping JALR target/link registers, unknown
+callee argument replacement and bounded recursion. These original synthetic
+fixtures validate offline candidate discovery; they do not establish native
+counter equivalence or game boot acceptance. The same milestone covers scalar
+and packed bitwise/copy propagation, integer-pointer preservation across
+floating/vector arithmetic, and invalidation on upper-lane/coprocessor reads.
+
+
+The Release `ee-llvm-execution` RPC milestone covers CD/DVD initialization with
+an original synthetic ISO: binding, completion through a compiled interrupt
+handler, initialization/reinitialization/shutdown, legacy version fields,
+malformed output bounds, executable protection, unsupported requests, missing
+media and a volume with a truncated root extent. Failed calls preserve session
+ownership and output bytes. The tests share the FILEIO transport harness.

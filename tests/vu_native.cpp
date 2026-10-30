@@ -57,8 +57,79 @@ extern "C" std::uint32_t nt_vu_graphics_end_count();
 extern "C" nt::vu::Result nt_vu_clip_0(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_clip_4(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_clip_18(nt::vu::State*);
+extern "C" const nt::vu::Block* nt_vu_continuation_blocks();
+extern "C" std::uint32_t nt_vu_continuation_count();
+extern "C" const std::uint8_t* nt_vu_continuation_image();
+extern "C" std::uint32_t nt_vu_continuation_size();
 int main() {
     try {
+        {
+            nt::vu::Binding binding(nt::vu::Program(1,{nt_vu_continuation_blocks(),nt_vu_continuation_count()}),0,
+                {nt_vu_continuation_image(),nt_vu_continuation_size()});
+            if (!binding.upload(1,std::array{nt::vu::UploadView{0,{nt_vu_continuation_image(),nt_vu_continuation_size()}}}))
+                throw std::runtime_error("Continuation fixture binding failed");
+            nt::ee::NativeVuLaunch owner(binding);
+            nt::ee::NativePacketSetup packets;
+            owner.connect(packets);
+            const auto submit=[&](std::initializer_list<std::uint32_t> words) {
+                const auto bytes=std::span(reinterpret_cast<const std::uint8_t*>(words.begin()),words.size()*4);
+                return packets.consume(1,bytes,false);
+            };
+            if (submit({0x17000000})!=nt::ee::Stop::unsupported_vector)
+                throw std::runtime_error("Uninitialized continuation accepted");
+            if (submit({0x03000020,0x02000010,0x04000007,0x14000000})!=nt::ee::Stop::budget ||
+                owner.state.next_pair!=2 || owner.state.integers[0]!=1)
+                throw std::runtime_error("Compiled E stop lost its continuation");
+            owner.state.data[0]={0x8000,0,0,0}; // Original empty EOP packet.
+            struct Consumer { bool accept=false; unsigned accepted=0; } consumer;
+            owner.graphics.context=&consumer;
+            owner.graphics.submit=[](void* raw,std::span<const nt::vu::GraphicsPacket> batch) {
+                auto& c=*static_cast<Consumer*>(raw);
+                if (!c.accept || batch.size()!=1) return false;
+                ++c.accepted; return true;
+            };
+            const auto before=owner.state;
+            const auto top=packets.read(0x10003cd0).value;
+            if (submit({0x04000009,0x170007ff})!=nt::ee::Stop::unsupported_vector || owner.state!=before ||
+                packets.read(0x10003cd0).value!=top || consumer.accepted)
+                throw std::runtime_error("Rejected continuation committed state");
+            consumer.accept=true;
+            if (submit({0x04000009,0x170007ff})!=nt::ee::Stop::budget || owner.state.next_pair!=4 ||
+                owner.state.integers[0]!=2 || owner.state.input_top!=0x30 || owner.state.input_itop!=9 || consumer.accepted!=1)
+                throw std::runtime_error("Native continuation did not resume/update inputs exactly once");
+            if (submit({0x17000000})!=nt::ee::Stop::budget || owner.state.next_pair!=6 ||
+                owner.state.integers[0]!=3 || consumer.accepted!=1 || owner.state.graphics_completes)
+                throw std::runtime_error("Continuation retained completed graphics boundary");
+            const auto complete=owner.state;
+            if (submit({0x6c010000,1,2,3,4,0x17000000})!=nt::ee::Stop::unsupported_vector ||
+                owner.last_result.status!=nt::vu::RunStatus::unmapped_block || owner.state!=complete)
+                throw std::runtime_error("Missing compiled continuation did not roll back upload");
+            struct Completion { bool ready=false; unsigned calls=0; } completion;
+            packets.graphics.context=&completion;
+            packets.graphics.wait=[](void* raw) {
+                auto& c=*static_cast<Completion*>(raw); ++c.calls; return c.ready;
+            };
+            if (submit({0x07000063,0x15000000})!=nt::ee::Stop::unsupported_system || owner.state!=complete ||
+                packets.rejected_command()!=0x15 || packets.read(0x10003c30).value || completion.calls!=1)
+                throw std::runtime_error("Failed graphics wait committed launch or configuration");
+            completion.ready=true;
+            if (submit({0x07000063,0x15000000})!=nt::ee::Stop::budget || owner.state.integers[0]!=4 ||
+                packets.read(0x10003c30).value!=99 || completion.calls!=2)
+                throw std::runtime_error("MSCALF retry did not run compiled entry exactly once");
+            const auto after_wait=owner.state;
+            if (submit({0x11000000,0x13000000,0x07000064})!=nt::ee::Stop::budget ||
+                completion.calls!=3 || owner.state!=after_wait || packets.read(0x10003c30).value!=100)
+                throw std::runtime_error("Native flush did not complete previous graphics");
+            if (submit({0x11000000,0x7b000000})!=nt::ee::Stop::unsupported_system || completion.calls!=3)
+                throw std::runtime_error("Invalid trailing command invoked graphics wait");
+            if (submit({0x15000000,0x07000065})!=nt::ee::Stop::unsupported_system ||
+                completion.calls!=3 || owner.state!=after_wait)
+                throw std::runtime_error("Invalid post-launch command published native work");
+            packets.graphics.wait=nullptr;
+            if (submit({0x11000000})!=nt::ee::Stop::unsupported_system)
+                throw std::runtime_error("Missing native completion callback silently accepted");
+
+        }
         nt::vu::State state;
         state.integers[0]=0xffff; state.integers[2]=2;
         state.vectors[0]={0x80000001,2,3,4};

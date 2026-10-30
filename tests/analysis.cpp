@@ -91,6 +91,209 @@ int main() {
             check(uses[3].kind==nt::analysis::MetricPointerKind::return_value && uses[3].reg==2,
                 "Returned structure pointer was not recorded");
         }
+        {
+            // A measured structure escapes through a direct call. Explore both
+            // likely-branch paths without applying its slot to the untaken path.
+            nt::Bytes image(128,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,128,128,5,4}}};
+            put(image,0,0x3c090020);
+            put(image,4,(16U<<26)|(8U<<16)|(25U<<11)|1U);
+            put(image,8,0xad280010);
+            put(image,12,0x0c000410); // Callee 0x1040.
+            put(image,16,0x01202021); // a0 = structure in delay slot.
+            put(image,20,0x03e00008);
+            put(image,64,0x50a00003); // BEQL a1,zero,0x1050.
+            put(image,68,0x24840004); // Only taken path advances pointer.
+            put(image,72,0x8c820010);
+            put(image,76,0x08000415); // Join at 0x1054.
+            put(image,80,0x8c830010); // Also jump's slot on untaken path.
+            put(image,84,0x03e00008);
+            put(image,88,0x8c820018); // Return delay slot still consumes pointer.
+            auto sites=nt::analysis::inspect_metrics(image,fixture);
+            const auto& call=sites[0].pointer_uses[0];
+            const auto has=[&](std::uint32_t pc,std::uint32_t address) {
+                for (const auto& use:call.memory_uses) if (use.pc==pc && use.address==address) return true;
+                return false;
+            };
+            check(has(0x1048,0x200010) && !has(0x1048,0x200014) &&
+                has(0x1050,0x200010) && has(0x1050,0x200014) &&
+                has(0x1058,0x200018) && has(0x1058,0x20001c),
+                "Callee branch/return delay-slot address candidates differ");
+            check(call.boundaries.size()==1 && call.boundaries[0].kind==nt::analysis::MetricUseKind::flow_boundary,
+                "Callee return boundary not retained");
+            auto bounded=nt::analysis::inspect_metrics(image,fixture,1);
+            check(!bounded[0].pointer_uses.empty() && !bounded[0].pointer_uses[0].boundaries.empty() &&
+                bounded[0].pointer_uses[0].boundaries[0].kind==nt::analysis::MetricUseKind::budget,
+                "Short callee window ignored exploration bound");
+            put(image,64,0x0c00041c); // Nested callee stops explicitly.
+            put(image,112,0x0000000d);
+            sites=nt::analysis::inspect_metrics(image,fixture);
+            check(sites[0].pointer_uses[0].memory_uses.empty() &&
+                sites[0].pointer_uses[0].boundaries[0].kind==nt::analysis::MetricUseKind::flow_boundary,
+                "Unknown nested callee assumed to preserve pointer");
+            put(image,64,0x4c000000);
+            sites=nt::analysis::inspect_metrics(image,fixture);
+            check(sites[0].pointer_uses[0].boundaries[0].kind==nt::analysis::MetricUseKind::unknown_operation,
+                "Unsupported callee operation hidden");
+            put(image,64,0x24840001); put(image,68,0x08000410); put(image,72,0);
+            sites=nt::analysis::inspect_metrics(image,fixture,4);
+            bool exhausted=false;
+            for (const auto& stop:sites[0].pointer_uses[0].boundaries)
+                exhausted|=stop.kind==nt::analysis::MetricUseKind::budget;
+            check(exhausted,"Changing-pointer loop ignored callee work bound");
+            put(image,64,(6U<<21)|(5U<<16)|(4U<<11)|11U); // MOVN may replace known a0.
+            put(image,68,0x8c820010); put(image,72,0x03e00008); put(image,76,0);
+            sites=nt::analysis::inspect_metrics(image,fixture);
+            const auto& unknown=sites[0].pointer_uses[0];
+            bool unresolved=false;
+            for (const auto& stop:unknown.boundaries)
+                unresolved|=stop.pc==0x1044 && stop.kind==nt::analysis::MetricUseKind::unresolved_memory;
+            check(unresolved && unknown.memory_uses.empty(),"Conditional pointer replacement retained stale address");
+            put(image,64,(4U<<21)|(5U<<16)|(4U<<11)|10U); // MOVZ with identical choices.
+            put(image,68,(49U<<26)|(4U<<21)|(2U<<16)|16U); // LWC1 does not overwrite integer a0.
+            put(image,72,(30U<<26)|(4U<<21)|(3U<<16)|31U); // LQ aligns down to 16 bytes.
+            put(image,76,(57U<<26)|(4U<<21)|(4U<<16)|32U); // SWC1 is not a GPR pointer escape.
+            put(image,80,0x03e00008); put(image,84,0);
+            sites=nt::analysis::inspect_metrics(image,fixture);
+            const auto& accesses=sites[0].pointer_uses[0].memory_uses;
+            check(accesses.size()==3 && accesses[0].address==0x200010 && accesses[0].bytes==4 &&
+                accesses[1].address==0x200010 && accesses[1].bytes==16 &&
+                accesses[2].address==0x200020 && accesses[2].write,
+                "Conditional common pointer or typed memory footprint differs");
+            put(image,64,0x0000000d); // Explicit BREAK is a stop, not an unknown instruction.
+            sites=nt::analysis::inspect_metrics(image,fixture);
+            check(sites[0].pointer_uses[0].memory_uses.empty() &&
+                sites[0].pointer_uses[0].boundaries[0].kind==nt::analysis::MetricUseKind::flow_boundary,
+                "Explicit break did not stop callee inspection");
+
+        }
+        {
+            nt::Bytes image(80,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,80,80,5,4}}};
+            put(image,0,0x3c090030); // Parent structure at 0x300000.
+            put(image,4,0x252a0020); // Child structure at parent + 32.
+            put(image,8,(16U<<26)|(8U<<16)|(25U<<11)|1U);
+            put(image,12,0xad480010); // Measurement at child + 16.
+            put(image,16,0x0c000410); put(image,20,0x01202021); // Pass parent.
+            put(image,24,0x03e00008); put(image,28,0);
+            put(image,64,0x8c820030); // Callee reads measured field through parent.
+            put(image,68,0x03e00008); put(image,72,0);
+            auto sites=nt::analysis::inspect_metrics(image,fixture);
+            bool found=false;
+            for (const auto& pointer:sites[0].pointer_uses) if (pointer.value==0x300000 && pointer.reg==4)
+                for (const auto& read:pointer.memory_uses)
+                    found|=read.address==0x300030 && read.pc==0x1040 && !read.write;
+            check(found && !sites[0].pointer_search_incomplete,"Containing-structure measurement consumer was missed");
+            put(image,32,0x3c090030); put(image,36,0x3c0b0040); put(image,40,0xad690020);
+            sites=nt::analysis::inspect_metrics(image,fixture);
+            bool escaped=false;
+            for (const auto& pointer:sites[0].pointer_uses)
+                escaped|=pointer.kind==nt::analysis::MetricPointerKind::stored_pointer && pointer.storage==0x400020;
+            check(escaped,"Containing structure's stored-pointer destination was lost");
+
+            put(image,4,0x8d2a0000); // Unknown loaded pointer cannot inherit parent ancestry.
+            sites=nt::analysis::inspect_metrics(image,fixture);
+            check(sites[0].pointer_uses.empty(),"Loaded pointer inherited invented parent structure");
+        }
+        {
+            // Follow an original measured-structure argument through a nested
+            // call and its resolved return, including both delay slots.
+            nt::Bytes image(160,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,160,160,5,4}}};
+            put(image,0,0x3c090020);
+            put(image,4,(16U<<26)|(8U<<16)|(25U<<11)|1U);
+            put(image,8,0xad280010);
+            put(image,12,0x0c000410); put(image,16,0x01202021);
+            put(image,20,0x0000000d);
+            put(image,64,0x0c000420); // JAL 0x1080.
+            put(image,68,0x24840004); // Advance argument in call slot.
+            put(image,72,0x8c83000c); // Read through callee-modified pointer.
+            put(image,76,0x0000000d);
+            put(image,128,0x8c82000c);
+            put(image,132,0x03e00008);
+            put(image,136,0x24840004); // Return slot modifies caller's a0.
+            auto sites=nt::analysis::inspect_metrics(image,fixture);
+            const auto has=[&](std::uint32_t pc,std::uint32_t address) {
+                for (const auto& use:sites[0].pointer_uses[0].memory_uses)
+                    if (use.pc==pc && use.address==address) return true;
+                return false;
+            };
+            check(has(0x1080,0x200010) && has(0x1048,0x200014),
+                "Nested call lost argument or return-slot effects");
+            // A callee overwriting a0 with an unknown load must invalidate it.
+            put(image,136,0x8ca40000);
+            sites=nt::analysis::inspect_metrics(image,fixture);
+            check(!has(0x1048,0x200014),"Nested call invented preserved argument");
+            bool unknown=false;
+            for (const auto& stop:sites[0].pointer_uses[0].boundaries)
+                unknown|=stop.pc==0x1048 && stop.kind==nt::analysis::MetricUseKind::unresolved_memory;
+            check(unknown,"Unknown returned argument lost its memory boundary");
+            // Reading the jump operand before its slot permits a slot to change
+            // the link register without changing this return's destination.
+            put(image,136,0x241f0000);
+            sites=nt::analysis::inspect_metrics(image,fixture);
+            check(has(0x1048,0x200010),"Return target was read after its delay slot");
+            // JALR may use the same register for target and link. Capture the
+            // old target before the link write, and publish link before slot.
+            put(image,64,0x24191080);
+            put(image,68,(25U<<21)|(25U<<11)|9U);
+            put(image,72,0x24840004);
+            put(image,76,0x8c83000c); put(image,80,0x0000000d);
+            put(image,132,(25U<<21)|8U); put(image,136,0x24840004);
+            sites=nt::analysis::inspect_metrics(image,fixture);
+            check(has(0x1080,0x200010) && has(0x104c,0x200014),
+                "Overlapping JALR target/link lost nested consumers");
+            // Recursive helper traversal must remain bounded.
+            put(image,128,0x0c000420); put(image,132,0);
+            sites=nt::analysis::inspect_metrics(image,fixture,4096);
+            bool bounded=false;
+            for (const auto& stop:sites[0].pointer_uses[0].boundaries)
+                bounded|=stop.kind==nt::analysis::MetricUseKind::budget;
+            check(bounded,"Recursive metric helper ignored call-depth bound");
+        }
+        {
+            nt::Bytes image(96,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,96,96,5,4}}};
+            put(image,0,0x3c090020);
+            put(image,4,(16U<<26)|(8U<<16)|(25U<<11)|1U);
+            put(image,8,0xad280010);
+            put(image,12,0x0c000410); put(image,16,0x01202021);
+            put(image,20,0x0000000d);
+            put(image,68,0x8c820010); put(image,72,0x0000000d);
+            const auto scalar=[](unsigned function) { return (4U<<21)|(4U<<11)|function; };
+            const auto packed=[](unsigned function,unsigned sub) {
+                return (28U<<26)|(4U<<21)|(4U<<11)|(sub<<6)|function;
+            };
+            const std::array<std::pair<std::uint32_t,std::uint32_t>,12> operations{{
+                {scalar(36),0}, {scalar(37),0x200000}, {scalar(38),0x200000}, {scalar(39),0xffdfffff},
+                {packed(9,18),0}, {packed(41,18),0x200000},
+                {packed(9,19),0x200000}, {packed(41,19),0xffdfffff},
+                {(28U<<26)|(4U<<16)|(4U<<11)|(14U<<6)|9U,0x200000},
+                {(28U<<26)|(4U<<16)|(4U<<11)|(27U<<6)|41U,0},
+                {(17U<<26)|(16U<<21)|(4U<<11)|(4U<<6)|6U,0x200000}, // MOV.S
+                {(18U<<26)|(31U<<21)|(4U<<11)|(4U<<6)|44U,0x200000} // VSUB
+            }};
+            for (const auto [instruction,value]:operations) {
+                put(image,64,instruction);
+                const auto sites=nt::analysis::inspect_metrics(image,fixture);
+                bool found=false;
+                for (const auto& use:sites[0].pointer_uses[0].memory_uses)
+                    found|=use.pc==0x1044 && use.address==value+16;
+                check(found,"Integer candidate lost across bitwise/copy/independent coprocessor operation");
+            }
+            for (const auto instruction : {
+                    (28U<<26)|(4U<<21)|(4U<<11)|(14U<<6)|41U, // PCPYUD reads unknown upper half.
+                    (18U<<26)|(1U<<21)|(4U<<16), // QMFC2 overwrites integer candidate.
+                    (18U<<26)|(2U<<21)|(4U<<16)}) { // CFC2 likewise.
+                put(image,64,instruction);
+                const auto sites=nt::analysis::inspect_metrics(image,fixture);
+                const auto& call=sites[0].pointer_uses[0];
+                bool unresolved=false;
+                for (const auto& stop:call.boundaries)
+                    unresolved|=stop.pc==0x1044 && stop.kind==nt::analysis::MetricUseKind::unresolved_memory;
+                check(call.memory_uses.empty() && unresolved,"Unknown coprocessor/upper-lane value retained stale pointer");
+            }
+        }
         nt::Bytes bytes(32, 0);
         nt::elf::Executable elf{0x1000, 0, {{0,0x1000,32,32,5,4}}};
         put(bytes,0,0x08000404); // J 0x1010
@@ -234,6 +437,42 @@ int main() {
             check(roots().empty(),"Annulled argument copy leaked into fallthrough");
             put(image,0x40,0x1000ffff); put(image,0x44,0);
             check(roots().empty(),"Loop summary escaped its reachable graph");
+        }
+        {
+            nt::Bytes image(0x100,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,0x80,0x80,5,4},{0x80,0x2000,0x80,0x80,6,4}}};
+            put(image,0,0x24082000); put(image,4,0xac880044); // Install table.
+            put(image,8,0x8c820044); put(image,12,0x24420018);
+            put(image,16,0x84450000); put(image,20,0x8c430004);
+            put(image,24,0x0060f809); put(image,28,0); put(image,32,12);
+            put(image,0x60,0x03e00008); put(image,0x9c,0x1060);
+            const auto roots=[&] {
+                return nt::analysis::object_table_entries(image,fixture,nt::analysis::discover(image,fixture,128,{},true));
+            };
+            check(roots()==std::set<std::uint32_t>{0x1060},"Object table target lost");
+            for (auto invalid:{0U,0x1061U,0x2000U}) {
+                put(image,0x9c,invalid); check(roots().empty(),"Invalid object table target accepted");
+            }
+            put(image,0x9c,0x1060); put(image,16,0x8c820000);
+            check(roots().empty(),"Clobbered table base propagated");
+            put(image,16,0x84450000); put(image,4,0xac880048);
+            check(roots().empty(),"Unrelated object field treated as table");
+        }
+        {
+            nt::Bytes image(0x100,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,0x80,0x80,5,4},{0x80,0x2000,0x80,0x80,6,4}}};
+            put(image,0,0x2c820002); put(image,4,0x1040000a); put(image,8,0);
+            put(image,12,0x00041080); put(image,16,0x3c030000); put(image,20,0x00621821);
+            put(image,24,0x8c632000); put(image,28,0x00600008); put(image,32,0); put(image,48,12);
+            put(image,0x60,0x03e00008); put(image,0x70,0x03e00008);
+            put(image,0x80,0x1060); put(image,0x84,0x1070);
+            const auto roots=[&] {
+                return nt::analysis::bounded_switch_entries(image,fixture,nt::analysis::discover(image,fixture,128,{},true));
+            };
+            check(roots()==std::set<std::uint32_t>{0x1060,0x1070},"Bounded switch entries lost");
+            put(image,0x84,0x1071); check(roots().empty(),"Malformed switch accepted partially");
+            put(image,0x84,0x1070); put(image,0,0x2ca20002);
+            check(roots().empty(),"Unrelated bound supplied switch extent");
         }
         std::cout << "Control-flow discovery and address-boundary tests passed\n";
         return 0;

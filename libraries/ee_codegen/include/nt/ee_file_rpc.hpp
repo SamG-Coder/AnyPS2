@@ -12,13 +12,7 @@ public:
     Stop call(Memory& memory,CodeOverlap protection,std::uint32_t method,std::span<const std::uint8_t> args,
               std::uint32_t destination,std::uint32_t result_size) override {
         const auto writable=[&](std::uint32_t raw,std::uint32_t size) {
-            const auto address=runtime::default_ram_address(raw);
-            if (!memory.data || std::uint64_t(address)+size>memory.size || std::uint64_t(address)+size>0x2000000U) {
-                memory.fault_address=raw; return Stop::memory_fault;
-            }
-            if (!protection) return Stop::invalid_state;
-            if (size && protection(address,size)) { memory.fault_address=raw; return Stop::code_write; }
-            return Stop::budget;
+            return rpc_output(memory,protection,raw,size);
         };
         auto valid=writable(destination,result_size);
         if (valid!=Stop::budget) return valid;

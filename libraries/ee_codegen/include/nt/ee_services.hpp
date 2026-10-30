@@ -25,7 +25,9 @@ public:
     Stop finish(runtime::State& state,Memory& memory) { return handlers_.finish(state,memory); }
     Stop finish_interrupt(runtime::State& state,Memory& memory) {
         if (handlers_.active() || !memory.interrupts) return Stop::invalid_state;
-        return memory.interrupts->finish(state);
+        const auto result=memory.interrupts->finish(state);
+        if (result==Stop::budget && !memory.interrupts->active()) threads_.schedule(state);
+        return result;
     }
     Stop interrupt(runtime::State& state,Memory& memory) {
         if (handlers_.active()) return Stop::interrupt_pending;
@@ -88,11 +90,12 @@ public:
             return result==Stop::budget ? returned(state,state.gpr[2].lo) : result;
         }
         if (thread_syscall(number)) {
-            if (handlers_.active() || (memory.interrupts && memory.interrupts->active())) return Stop::unsupported_system;
+            const bool interrupt=memory.interrupts && memory.interrupts->active();
+            if (handlers_.active() || (interrupt && number!=0x34 && number!=0x36)) return Stop::unsupported_system;
             const auto result=threads_.invoke(number,state,memory,compiled_,protected_code_);
             if (result.status!=Stop::budget) return result.status;
             returned(state,result.value);
-            threads_.schedule(state);
+            if (!interrupt && number!=0x34 && number!=0x36) threads_.schedule(state);
             return Stop::budget;
         }
         if (intc_syscall(number)) {

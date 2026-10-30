@@ -241,5 +241,26 @@ int main(int argc,char** argv) {
     nt::vu::emit_program_llvm(shared_module,nt::vu::frame(bytes,0,0),0,entries,"nt_vu_shared");
     const auto shared_text=shared_module.str();
     nt::write_file(std::string(argv[1])+".shared",nt::ByteView(reinterpret_cast<const std::uint8_t*>(shared_text.data()),shared_text.size()));
+    bytes.clear();
+    pair(0x80000000|(1U<<11)|(1U<<16)|(1U<<6)|50,0x400002ff);
+    pair(0x80000335); // First stop resumes at pair two.
+    pair(0x80000000|(27U<<6)|60,0x400002ff); // XGKICK at data zero.
+    pair(0x80000000|(1U<<11)|(1U<<16)|(1U<<6)|50);
+    pair(0x80000000|(1U<<11)|(1U<<16)|(1U<<6)|50,0x400002ff);
+    pair(0x80000335);
+    std::ostringstream continuation_module;
+    const std::array<unsigned,1> continuation_entries{0};
+    nt::vu::emit_program_llvm(continuation_module,nt::vu::frame(bytes,1,0),1,continuation_entries,"nt_vu_continuation",2);
+    std::ostringstream missing_continuation;
+    bool missing_rejected=false;
+    try {
+        nt::vu::emit_program_llvm(missing_continuation,nt::vu::frame(bytes,1,0),1,
+            continuation_entries,"nt_vu_missing_continuation",3);
+    } catch (const std::invalid_argument& error) {
+        missing_rejected=std::string(error.what()).find("missing pair 6")!=std::string::npos;
+    }
+    if (!missing_rejected || !missing_continuation.str().empty()) return 1;
+    const auto continuation_text=continuation_module.str();
+    nt::write_file(std::string(argv[1])+".continuation",nt::ByteView(reinterpret_cast<const std::uint8_t*>(continuation_text.data()),continuation_text.size()));
     nt::write_file(argv[1],nt::ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));
 }

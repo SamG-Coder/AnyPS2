@@ -11,17 +11,45 @@ extern "C" std::uint64_t nt_ee_performance(nt::ee::Memory* memory,std::uint32_t 
     IoRead result{Stop::unsupported_system};
     if (memory->metrics.request) {
         result=memory->metrics.request(memory->metrics.context,candidate,request,counter,value,execution_mode);
-    } else if (!(candidate.control&0x80000000U) &&
-               !(request==PerformanceOperation::write_control && (value&0x80000000U))) {
+    } else {
+        // Configuration is observable independently of accumulated measurements.
+        // Conservatively taint counters whenever counting may have occurred;
+        // disabling counting does not recover a value that was never measured.
+        auto unavailable=memory->metrics.unavailable_counters;
+        const auto active=[](std::uint32_t control) -> std::uint8_t {
+            if (!(control&0x80000000U)) return 0;
+            std::uint8_t mask=0;
+            for (unsigned index=0;index<2;++index) {
+                const auto event=(control>>(5+10*index))&31U;
+                // Selector 16 explicitly disables an individual counter. The
+                // primary counter also has an unused zero selector. Reserved
+                // selectors remain unknown rather than acquiring semantics.
+                if (event==16 || (!index && !event)) continue;
+                if (control&(0x1eU<<(10*index))) mask|=1U<<index;
+            }
+            return mask;
+        };
+        unavailable|=active(candidate.control);
         result.status=Stop::budget;
         switch (request) {
         case PerformanceOperation::read_control: result.value=candidate.control; break;
-        case PerformanceOperation::write_control: candidate.control=value; break;
-        case PerformanceOperation::read_counter: result.value=candidate.counters[counter]; break;
-        case PerformanceOperation::write_counter: candidate.counters[counter]=value; break;
+        case PerformanceOperation::write_control:
+            candidate.control=value; unavailable|=active(value); break;
+        case PerformanceOperation::read_counter:
+            if (unavailable&(1U<<counter)) result.status=Stop::unsupported_system;
+            else result.value=candidate.counters[counter];
+            break;
+        case PerformanceOperation::write_counter:
+            candidate.counters[counter]=value;
+            unavailable&=static_cast<std::uint8_t>(~(1U<<counter));
+            unavailable|=active(candidate.control);
+            break;
         }
+        if (result.status==Stop::budget) memory->metrics.unavailable_counters=unavailable;
     }
     memory->metrics.rejected=result.status!=Stop::budget;
+    memory->metrics.rejected_operation=static_cast<std::uint8_t>(operation);
+    memory->metrics.rejected_counter=static_cast<std::uint8_t>(counter);
     memory->metrics.rejected_control=request==PerformanceOperation::write_control ? value : memory->performance.control;
     if (result.status==Stop::budget) memory->performance=candidate;
     return (std::uint64_t(result.status)<<32)|result.value;
