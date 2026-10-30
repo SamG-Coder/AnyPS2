@@ -182,6 +182,30 @@ SlotScan merge_foreign_slots(const std::vector<SlotScan>& scans,std::size_t skip
     }
     return foreign;
 }
+static bool module_owner(std::span<const elf::IopModule> modules,std::uint32_t address,std::size_t& owner) {
+    for (std::size_t index=0;index<modules.size();++index) {
+        const auto& module=modules[index];
+        const auto extent=module.info ? module.info->text_size : module.initialized_size;
+        if (address%4 || address<module.base || address-module.base>=extent) continue;
+        owner=index; return true;
+    }
+    return false;
+}
+static void replace_callback_roots(std::vector<std::set<std::uint32_t>>& callback_roots,std::vector<std::set<std::uint32_t>>& emitted,
+    std::size_t source,const std::set<std::uint32_t>& callbacks,std::span<const elf::IopModule> modules,std::set<std::size_t>& pending) {
+    emitted[source]=callbacks;
+    std::vector<std::set<std::uint32_t>> next(callback_roots.size());
+    for (std::size_t from=0;from<emitted.size();++from)
+        for (const auto address : emitted[from]) {
+            std::size_t owner=0;
+            if (module_owner(modules,address,owner)) next[owner].insert(address);
+        }
+    for (std::size_t index=0;index<next.size();++index)
+        if (next[index]!=callback_roots[index]) {
+            callback_roots[index]=std::move(next[index]);
+            pending.insert(index);
+        }
+}
 static Program discover_module(const elf::IopModule& module,std::span<const std::uint32_t> entries,std::span<const elf::IopExports> libraries,
     std::span<const elf::IopModule> data_modules,std::set<std::uint32_t>* external_callbacks=nullptr,std::vector<Gap>* gaps=nullptr,
     const SlotScan* foreign_slots=nullptr,SlotScan* slot_scan=nullptr) {
@@ -225,10 +249,11 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         throw std::runtime_error("IOP conversion: unsupported native imports:"+unresolved.str());
     bool halt=false;
     std::set<std::uint32_t> abandoned;
-    std::set<std::uint32_t> pending(entries.begin(),entries.end());
-    pending.insert(module.entry);
+    std::set<std::uint32_t> structural(entries.begin(),entries.end());
+    structural.insert(module.entry);
     for (const auto& table : elf::iop_exports(module))
-        pending.insert(table.functions.begin(),table.functions.end());
+        structural.insert(table.functions.begin(),table.functions.end());
+    std::set<std::uint32_t> pending=structural;
     std::map<std::uint32_t,Constants> states;
     std::set<std::uint32_t> table_transfers;
     std::map<std::uint32_t,std::set<std::uint32_t>> stack_transfers;
@@ -243,24 +268,29 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         const auto segment=address&0xe0000000U;
         return (segment==0x80000000U || segment==0xa0000000U) ? address&0x1fffffffU : address;
     };
-    const auto discover_callback=[&](std::uint32_t address) {
+    // Pointer edges can be retracted when a later store opens the slot.
+    // Service, stack, and returned-constant callbacks stay pinned to the
+    // instruction that discovered them.
+    std::map<std::uint32_t,std::set<std::uint32_t>> pinned_sources,pointer_sources;
+    const auto discover_callback=[&](std::uint32_t address,std::uint32_t source,bool from_pointer) {
         const auto target=physical_address(address);
+        (from_pointer ? pointer_sources : pinned_sources)[target].insert(source);
         if (external_callbacks && (target<module.base || target-module.base>=extent)) external_callbacks->insert(target);
         else enqueue(target,Constants{});
     };
-    const auto discover_stack_thread=[&](const Constants& input) {
+    const auto discover_stack_thread=[&](std::uint32_t source,const Constants& input) {
         if (!input.stack_offsets[4]) return;
         const auto slot=std::int64_t(*input.stack_offsets[4])+8;
         if (slot>std::numeric_limits<std::int32_t>::max()) return;
         const auto stored=input.stack_words.find(static_cast<std::int32_t>(slot));
         if (stored!=input.stack_words.end() && stored->second)
-            for (const auto entry : *stored->second) if (entry) discover_callback(entry);
+            for (const auto entry : *stored->second) if (entry) discover_callback(entry,source,false);
     };
-    const auto discover_loader_callbacks=[&](std::uint32_t service,const Constants& input) {
+    const auto discover_loader_callbacks=[&](std::uint32_t source,std::uint32_t service,const Constants& input) {
         if (service!=0xe000c && service!=0xe000d) return;
         const auto count=service==0xe000c ? 3U : 1U;
         for (unsigned index=0;index<count;++index) if (input.registers[4+index])
-            for (const auto target : *input.registers[4+index]) if (target) discover_callback(target);
+            for (const auto target : *input.registers[4+index]) if (target) discover_callback(target,source,false);
     };
     const auto trapped=[&](std::uint32_t pc) {
         Instruction stop; stop.address=pc; stop.flow=Flow::trap; stop.operation=Operation::breakpoint; return stop;
@@ -311,6 +341,75 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         return instruction;
     };
     std::set<std::uint32_t> inspected_selectors;
+    // Drop callees that were queued by a loaded pointer after that proof is
+    // withdrawn. Delay slots stay, but they do not create a fall-through edge.
+    // Exports, explicit roots, and callbacks pinned by a reached instruction stay.
+    const auto retain_reached=[&]() {
+        std::set<std::uint32_t> reachable,queued;
+        std::vector<std::uint32_t> work;
+        const auto add_control=[&](std::uint32_t next) {
+            if (!states.contains(next)) return;
+            reachable.insert(next);
+            if (queued.insert(next).second) work.push_back(next);
+        };
+        for (const auto root : structural) add_control(root);
+        for (std::size_t cursor=0;cursor<work.size();++cursor) {
+            const auto pc=work[cursor];
+            const auto found=program.instructions.find(pc);
+            if (found==program.instructions.end()) continue;
+            const auto& instruction=found->second;
+            const auto add_delay=[&]() { if (program.instructions.contains(pc+4)) reachable.insert(pc+4); };
+            switch (instruction.flow) {
+            case Flow::sequential: case Flow::service: add_control(pc+4); break;
+            case Flow::direct: add_delay(); add_control(instruction.target); break;
+            case Flow::conditional: add_delay(); add_control(instruction.target); add_control(pc+8); break;
+            case Flow::call: add_delay(); add_control(instruction.target); add_control(pc+8); break;
+            case Flow::indirect:
+                add_delay();
+                for (const auto target : instruction.targets) add_control(target);
+                break;
+            case Flow::indirect_call:
+                add_delay();
+                for (const auto target : instruction.targets) add_control(target);
+                add_control(pc+8);
+                break;
+            case Flow::return_register: add_delay(); break;
+            default: break;
+            }
+            for (const auto& [target,sources] : pinned_sources) {
+                if (!states.contains(target) || queued.contains(target)) continue;
+                for (const auto source : sources) if (reachable.contains(source)) { add_control(target); break; }
+            }
+        }
+        if (external_callbacks) {
+            std::set<std::uint32_t> kept;
+            const auto outside=[&](std::uint32_t target) { return target<module.base || target-module.base>=extent; };
+            for (const auto& [target,sources] : pinned_sources) {
+                if (!outside(target)) continue;
+                for (const auto source : sources) if (reachable.contains(source)) { kept.insert(target); break; }
+            }
+            for (const auto& [site,targets] : pointer_transfers)
+                if (reachable.contains(site)) for (const auto target : targets) {
+                    const auto physical=physical_address(target);
+                    if (outside(physical)) kept.insert(physical);
+                }
+            *external_callbacks=std::move(kept);
+        }
+        for (auto cursor=program.instructions.begin();cursor!=program.instructions.end();) {
+            if (reachable.contains(cursor->first)) ++cursor;
+            else cursor=program.instructions.erase(cursor);
+        }
+        std::set<std::uint32_t> kept_words;
+        for (const auto& [pc,instruction] : program.instructions) {
+            kept_words.insert(pc);
+            if (instruction.flow==Flow::native_return) kept_words.insert(pc+4);
+        }
+        program.protected_words=std::move(kept_words);
+        for (auto cursor=program.open_indirect_sites.begin();cursor!=program.open_indirect_sites.end();) {
+            if (program.instructions.contains(*cursor)) ++cursor;
+            else cursor=program.open_indirect_sites.erase(cursor);
+        }
+    };
     do {
         while (!pending.empty()) {
             if (halt) break;
@@ -321,22 +420,22 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
             const auto after=transfer(instruction,input);
             if (instruction.flow==Flow::trap) continue;
             if (instruction.flow==Flow::native_return) {
-                if (instruction.operation==Operation::native_import) discover_loader_callbacks(instruction.immediate,input);
+                if (instruction.operation==Operation::native_import) discover_loader_callbacks(pc,instruction.immediate,input);
                 if (instruction.operation==Operation::native_import && instruction.immediate==0x90011 && input.registers[6])
-                    for (const auto address : *input.registers[6]) if (address) discover_callback(address);
+                    for (const auto address : *input.registers[6]) if (address) discover_callback(address,pc,false);
                 if (instruction.operation==Operation::native_import && instruction.immediate==0x9000a && input.registers[5])
-                    for (const auto address : *input.registers[5]) if (address) discover_callback(address);
+                    for (const auto address : *input.registers[5]) if (address) discover_callback(address,pc,false);
                 if (instruction.operation==Operation::native_import && instruction.immediate==0x40004 && input.registers[6])
-                    for (const auto address : *input.registers[6]) discover_callback(address);
+                    for (const auto address : *input.registers[6]) discover_callback(address,pc,false);
                 if (instruction.operation==Operation::native_import &&
                     (instruction.immediate==0x60023 || instruction.immediate==0x60024) && input.registers[5])
-                    for (const auto address : *input.registers[5]) discover_callback(address);
+                    for (const auto address : *input.registers[5]) discover_callback(address,pc,false);
                 if (instruction.operation==Operation::native_import && instruction.immediate==0x7001e && input.registers[4])
-                    for (const auto address : *input.registers[4]) if (address) discover_callback(address);
+                    for (const auto address : *input.registers[4]) if (address) discover_callback(address,pc,false);
                 if (instruction.operation==Operation::native_import && instruction.immediate==0x70020 && input.registers[6])
-                    for (const auto address : *input.registers[6]) if (address) discover_callback(address);
+                    for (const auto address : *input.registers[6]) if (address) discover_callback(address,pc,false);
                 if (instruction.operation==Operation::native_import && (instruction.immediate==0xc0012 || instruction.immediate==0x4000e || instruction.immediate==0x10014) && input.registers[4])
-                    for (const auto address : *input.registers[4]) if (address) discover_callback(address);
+                    for (const auto address : *input.registers[4]) if (address) discover_callback(address,pc,false);
                 if (instruction.operation==Operation::native_import && instruction.immediate==0x30014 && input.registers[4]) {
                     const auto initial_word=[&](std::uint32_t address)->std::optional<std::uint32_t> {
                         const auto physical=physical_address(address);
@@ -356,18 +455,18 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                         if (!operations || *operations>0xffffffffU-56) continue;
                         for (const auto offset : {0U,4U,12U,16U,20U,24U,28U,32U,36U,40U,44U,48U,52U,56U}) {
                             const auto function=initial_word(*operations+offset);
-                            if (function && *function) discover_callback(*function);
+                            if (function && *function) discover_callback(*function,pc,false);
                         }
                         const auto type=initial_word(descriptor+4);
                         if (type && (*type&0xf0000000U)==0x10000000U && *operations<=0xffffffffU-104) {
                             for (const auto offset : {68U,72U,76U,80U,84U,88U,92U,96U,100U,104U}) {
                                 const auto function=initial_word(*operations+offset);
-                                if (function && *function) discover_callback(*function);
+                                if (function && *function) discover_callback(*function,pc,false);
                             }
                         }
                     }
                 }
-                if (instruction.operation==Operation::native_import && instruction.immediate==0x60004) discover_stack_thread(input);
+                if (instruction.operation==Operation::native_import && instruction.immediate==0x60004) discover_stack_thread(pc,input);
                 if (instruction.operation==Operation::native_import && instruction.immediate==0x60004 && input.registers[4]) {
                     for (const auto address : *input.registers[4]) {
                         const auto descriptor=physical_address(address);
@@ -380,7 +479,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                             // Initial data supplies a candidate, never a promise that the
                             // descriptor stays immutable. Runtime creation still checks it.
                             const auto entry=le32(owner.memory,offset+8);
-                            if (entry) discover_callback(entry);
+                            if (entry) discover_callback(entry,pc,false);
                             break;
                         }
                     }
@@ -417,8 +516,8 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
             // Inspect each direct call before unrelated callers merge at the import.
             if (instruction.flow==Flow::call || instruction.flow==Flow::direct) {
                 const auto target=native_imports.find(instruction.target);
-                if (target!=native_imports.end() && target->second.immediate==0x60004) discover_stack_thread(successor);
-                if (target!=native_imports.end()) discover_loader_callbacks(target->second.immediate,successor);
+                if (target!=native_imports.end() && target->second.immediate==0x60004) discover_stack_thread(pc,successor);
+                if (target!=native_imports.end()) discover_loader_callbacks(pc,target->second.immediate,successor);
             }
             if (indirect) {
                 // Loaded-pointer callees start with unknown registers. The caller's
@@ -445,7 +544,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                 if (target%4 || program.instructions.contains(target)) continue;
                 for (const auto& owner : data_modules) {
                     const auto text=owner.info ? owner.info->text_size : owner.initialized_size;
-                    if (target>=owner.base && target-owner.base<text) { discover_callback(target); break; }
+                    if (target>=owner.base && target-owner.base<text) { discover_callback(target,selector,false); break; }
                 }
             }
         }
@@ -480,7 +579,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                 pointer_transfers[site]=targets;
                 auto& recovered_instruction=program.instructions.at(site);
                 recovered_instruction.targets.assign(targets.begin(),targets.end());
-                for (const auto target : targets) discover_callback(target);
+                for (const auto target : targets) discover_callback(target,site,true);
             }
             // An unbounded store through one fixed slot is not a 16-value proof
             // and must not enqueue callees from that edge.
@@ -493,6 +592,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         }
         if (halt) break;
     } while (!pending.empty());
+    if (!halt) retain_reached();
     if (halt) return program;
     const auto unresolved_indirect=[&](std::uint32_t pc,const Instruction& i) {
         return (i.flow==Flow::indirect || i.flow==Flow::indirect_call) && !states.at(pc).registers[i.source] &&
@@ -510,7 +610,8 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                     if (note_gap(gaps,Gap{Gap::Kind::indirect,{},0,0,pc,0,"r"+std::to_string(i.source)})) break;
         } else throw std::runtime_error("IOP conversion: indirect target sets are unknown or exceed the 16-value analysis bound:"+indirect_errors.str());
     }
-    for (const auto& [pc,targets] : stack_transfers) program.guarded_callback_sites.insert(pc);
+    for (const auto& [pc,targets] : stack_transfers)
+        if (program.instructions.contains(pc)) program.guarded_callback_sites.insert(pc);
     return program;
 }
 Program discover(const elf::IopModule& module,std::span<const std::uint32_t> entries) {
@@ -528,30 +629,41 @@ Program discover_bundle(std::span<const elf::IopModule> modules,std::span<const 
                 throw std::runtime_error("IOP conversion: overlapping bundle modules");
         auto exports=elf::iop_exports(module); libraries.insert(libraries.end(),exports.begin(),exports.end());
     }
-    std::vector<std::set<std::uint32_t>> roots(modules.size());
+    std::vector<std::set<std::uint32_t>> entry_roots(modules.size()), callback_roots(modules.size()), emitted(modules.size());
     std::set<std::size_t> pending;
     for (std::size_t index=0;index<modules.size();++index) pending.insert(index);
-    const auto add_root=[&](std::uint32_t address) {
-        for (std::size_t index=0;index<modules.size();++index) {
-            const auto& module=modules[index];
-            const auto extent=module.info ? module.info->text_size : module.initialized_size;
-            if (address%4 || address<module.base || address-module.base>=extent) continue;
-            if (roots[index].insert(address).second) pending.insert(index);
-            return;
-        }
-        throw std::runtime_error("IOP conversion: bundle code root has no executable owner at "+hex32(address));
+    const auto add_entry=[&](std::uint32_t address) {
+        std::size_t owner=0;
+        if (!module_owner(modules,address,owner))
+            throw std::runtime_error("IOP conversion: bundle code root has no executable owner at "+hex32(address));
+        entry_roots[owner].insert(address);
+        pending.insert(owner);
     };
-    for (const auto entry : entries) add_root(entry);
-    // Callback registration may discover code in an already analyzed module.
-    // Revisit only owners with new roots until the bundle reaches a fixed point.
+    const auto module_roots_of=[&](std::size_t index) {
+        std::set<std::uint32_t> combined=entry_roots[index];
+        combined.insert(callback_roots[index].begin(),callback_roots[index].end());
+        return std::vector<std::uint32_t>(combined.begin(),combined.end());
+    };
+    const auto publish_callbacks=[&](std::size_t source,const std::set<std::uint32_t>& callbacks) {
+        for (const auto address : callbacks) {
+            std::size_t owner=0;
+            if (!module_owner(modules,address,owner))
+                throw std::runtime_error("IOP conversion: bundle code root has no executable owner at "+hex32(address));
+        }
+        replace_callback_roots(callback_roots,emitted,source,callbacks,modules,pending);
+    };
+    for (const auto entry : entries) add_entry(entry);
+    // Callback roots follow the latest finished analysis. A retracted loaded
+    // pointer drops the callee and revisits its former owner.
     std::vector<Program> programs(modules.size());
     std::vector<std::string> failures(modules.size());
     std::vector<SlotScan> scans(modules.size()), applied(modules.size());
-    unsigned slot_rounds=0;
+    unsigned slot_rounds=0, steps=0;
     for (;;) {
     while (!pending.empty()) {
+        if (++steps>4096) throw std::runtime_error("IOP conversion: module reanalysis step limit exceeded");
         const auto index=*pending.begin(); pending.erase(pending.begin());
-        const std::vector<std::uint32_t> module_roots(roots[index].begin(),roots[index].end());
+        const auto module_roots=module_roots_of(index);
         std::set<std::uint32_t> callbacks;
         applied[index]=merge_foreign_slots(scans,index);
         try {
@@ -563,7 +675,7 @@ Program discover_bundle(std::span<const elf::IopModule> modules,std::span<const 
             // missing operation/service batch before any output is emitted.
             failures[index]=error.what();
         }
-        for (const auto callback : callbacks) add_root(callback);
+        publish_callbacks(index,callbacks);
     }
     bool failed=false;
     for (const auto& item : failures) if (!item.empty()) failed=true;
@@ -609,23 +721,25 @@ std::vector<ModuleDiagnosis> diagnose_bundle(std::span<const elf::IopModule> mod
             libraries.insert(libraries.end(),exports.begin(),exports.end());
         } catch (const std::exception& error) { blocked[index]=error.what(); }
     }
-    std::vector<std::set<std::uint32_t>> roots(modules.size());
+    std::vector<std::set<std::uint32_t>> entry_roots(modules.size()), callback_roots(modules.size()), emitted(modules.size());
     std::set<std::size_t> pending;
     for (std::size_t index=0;index<modules.size();++index) {
         if (blocked[index].empty()) pending.insert(index);
         else results[index].unexpected=blocked[index];
     }
-    const auto add_root=[&](std::uint32_t address) {
-        for (std::size_t index=0;index<modules.size();++index) {
-            const auto& module=modules[index];
-            const auto extent=module.info ? module.info->text_size : module.initialized_size;
-            if (address%4 || address<module.base || address-module.base>=extent) continue;
-            if (roots[index].insert(address).second) pending.insert(index);
-            return true;
-        }
-        return false;
+    const auto add_entry=[&](std::uint32_t address) {
+        std::size_t owner=0;
+        if (!module_owner(modules,address,owner)) return false;
+        entry_roots[owner].insert(address);
+        pending.insert(owner);
+        return true;
     };
-    for (const auto entry : entries) if (!add_root(entry))
+    const auto module_roots_of=[&](std::size_t index) {
+        std::set<std::uint32_t> combined=entry_roots[index];
+        combined.insert(callback_roots[index].begin(),callback_roots[index].end());
+        return std::vector<std::uint32_t>(combined.begin(),combined.end());
+    };
+    for (const auto entry : entries) if (!add_entry(entry))
         results.front().gaps.push_back(Gap{Gap::Kind::unresolved_target,{},0,0,entry,0,"bundle code root has no executable owner"});
     unsigned steps=0;
     std::vector<SlotScan> scans(modules.size()), applied(modules.size());
@@ -640,7 +754,7 @@ std::vector<ModuleDiagnosis> diagnose_bundle(std::span<const elf::IopModule> mod
         }
         const auto index=*pending.begin(); pending.erase(pending.begin());
         if (!results[index].unexpected.empty()) continue;
-        const std::vector<std::uint32_t> module_roots(roots[index].begin(),roots[index].end());
+        const auto module_roots=module_roots_of(index);
         std::set<std::uint32_t> callbacks;
         std::vector<Gap> gaps;
         applied[index]=merge_foreign_slots(scans,index);
@@ -652,8 +766,20 @@ std::vector<ModuleDiagnosis> diagnose_bundle(std::span<const elf::IopModule> mod
             results[index].gaps=std::move(gaps);
         }
         if (!results[index].unexpected.empty()) continue;
-        for (const auto callback : callbacks) if (!add_root(callback))
-            results[index].gaps.push_back(Gap{Gap::Kind::unresolved_target,{},0,0,callback,0,"callback has no executable owner"});
+        std::set<std::uint32_t> owned;
+        for (const auto callback : callbacks) {
+            std::size_t owner=0;
+            if (!module_owner(modules,callback,owner)) {
+                bool seen=false;
+                for (const auto& existing : results[index].gaps)
+                    if (existing.kind==Gap::Kind::unresolved_target && existing.address==callback && existing.detail=="callback has no executable owner")
+                        seen=true;
+                if (!seen) results[index].gaps.push_back(Gap{Gap::Kind::unresolved_target,{},0,0,callback,0,"callback has no executable owner"});
+                continue;
+            }
+            owned.insert(callback);
+        }
+        replace_callback_roots(callback_roots,emitted,index,owned,modules,pending);
     }
     if (limited) break;
     bool diagnosis_stopped=false;

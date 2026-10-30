@@ -155,7 +155,10 @@ delay slot. An unbounded store through a fixed slot may call any instruction
 compiled into that program, and every other address stops as unmapped code;
 proved loaded pointers stay on their smaller set. A load skipped by a branch
 stays unresolved, and a known-address store in another bundle module poisons
-that slot, opens it, or widens its executable targets. The local startup regression requires both
+that slot, opens it, or widens its executable targets. A callee reached only
+through that proof is removed once the slot is open. A fill, copy, or move
+with one constant destination and byte count poisons only that span. An
+unknown-address store in the same module leaves a single-slot load open. The local startup regression requires both
 native registration markers; it does not claim completed transfers or a boot.
 The heaplib milestone executes linked guest calls for fixed and expandable
 heaps. It checks alignment and non-overlap, free-size accounting, coalescing,

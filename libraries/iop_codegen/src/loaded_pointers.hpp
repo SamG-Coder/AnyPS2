@@ -34,9 +34,11 @@ struct LoadedPointerResult {
 // slot. Return edges discard register cells; a callee entry still sees the
 // caller's cells until it writes them. The delay slot of a jump is not a
 // fallthrough into the next instruction. An unknown absolute address or a
-// memory fill/copy/move drops every proof in the module that contains that
-// instruction. A known-address store decoded in another module poisons, opens,
-// or widens that same slot. A stack-relative store is not an absolute slot.
+// memory fill, copy, or move with an unknown destination makes every
+// single-slot load in that same module open. It does not change another
+// module. A constant destination and byte count poison only that span. A
+// known-address store decoded in another module poisons, opens, or widens
+// that same slot. A stack-relative store is not an absolute slot.
 // Partial overlaps leave the site unresolved.
 // Runtime transfer still rejects a pointer outside a proved set.
 inline LoadedPointerResult recoverable_loaded_pointers(
@@ -122,7 +124,17 @@ inline LoadedPointerResult recoverable_loaded_pointers(
     };
     for (const auto& [pc,instruction] : program.instructions) {
         if (instruction.operation==Operation::memory_fill || instruction.operation==Operation::memory_copy ||
-            instruction.operation==Operation::memory_move) { mark_wild(pc); if (wild) break; continue; }
+            instruction.operation==Operation::memory_move) {
+            // memset/memcpy/memmove take the destination in a0 and the byte count in a2.
+            // One constant range poisons only that span. An unknown range can write any slot.
+            const auto state=state_at(pc);
+            const auto destination=state ? state->registers[4] : Constant{};
+            const auto length=state ? state->registers[6] : Constant{};
+            if (state && destination && destination->size()==1 && length && length->size()==1 && *length->begin() && *length->begin()<=0x200000U)
+                poison_span(physical(*destination->begin()),*length->begin());
+            else if (!(length && length->size()==1 && *length->begin()==0)) { mark_wild(pc); if (wild) break; }
+            continue;
+        }
         const bool store=instruction.operation==Operation::store_byte || instruction.operation==Operation::store_half ||
             instruction.operation==Operation::store_word || instruction.operation==Operation::store_word_left ||
             instruction.operation==Operation::store_word_right;
@@ -302,8 +314,10 @@ inline LoadedPointerResult recoverable_loaded_pointers(
         if (state==states.end() || identity==known.end() || state->second.registers[instruction.source]) continue;
         const auto& cell=identity->second.regs[instruction.source];
         const auto owner=cell.kind==Cell::Kind::slot ? module_of(cell.slot) : std::optional<std::size_t>{};
-        if (cell.kind!=Cell::Kind::slot || !owner || module_wild[*owner] || poisoned.contains(cell.slot)) continue;
-        if (open_slots.contains(cell.slot)) { result.open.insert(pc); continue; }
+        if (cell.kind!=Cell::Kind::slot || !owner || poisoned.contains(cell.slot)) continue;
+        // An unknown store can overwrite this slot. The load address remains
+        // one word, so the call is open rather than left unresolved.
+        if (module_wild[*owner] || open_slots.contains(cell.slot)) { result.open.insert(pc); continue; }
         std::set<std::uint32_t> targets;
         if (const auto found=stored.find(cell.slot); found!=stored.end()) targets=found->second;
         const auto initial=image_word(cell.slot);

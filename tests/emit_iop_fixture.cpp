@@ -322,6 +322,86 @@ int main(int argc,char** argv) {
             if (widened.open_indirect_sites.contains(0x6000c) || !saw_caller || !saw_writer ||
                 !widened.instructions.contains(0x60020) || !widened.instructions.contains(0x61020))
                 throw std::runtime_error("Cross-module executable store did not widen the proved set");
+            // The proved callee lives in the writer. The first pass records it before
+            // the writer's store is visible; the finished bundle must not keep it.
+            nt::elf::IopModule retracted_caller{0x60000,0x60000,nt::Bytes(0x100),0x100,{}};
+            const auto put_caller=[&](unsigned pc,std::uint32_t word) { fixture::put32(retracted_caller.memory,pc-retracted_caller.base,word); };
+            put_caller(0x60000,0x3c010006); put_caller(0x60004,0x8c220080); put_caller(0x60008,0); put_caller(0x6000c,0x0040f809);
+            put_caller(0x60010,0); put_caller(0x60014,0x03e00008); put_caller(0x60018,0); put_caller(0x60080,0x00061020);
+            nt::elf::IopModule retracted_writer{0x61000,0x61000,nt::Bytes(0x40),0x40,{}};
+            fixture::put32(retracted_writer.memory,0,0x3c010006); fixture::put32(retracted_writer.memory,4,0xac240080);
+            fixture::put32(retracted_writer.memory,8,0x03e00008); fixture::put32(retracted_writer.memory,0x20,0x03e00008);
+            fixture::put32(retracted_writer.memory,0x24,0x24020002);
+            const std::array<nt::elf::IopModule,2> retracted_modules{std::move(retracted_caller),std::move(retracted_writer)};
+            const auto retracted=nt::iop_codegen::ir::discover_bundle(retracted_modules,std::array<std::uint32_t,2>{0x60000U,0x61000U});
+            if (!retracted.open_indirect_sites.contains(0x6000c) || retracted.instructions.contains(0x61020) ||
+                !retracted.instructions.contains(0x61000) || !retracted.instructions.at(0x6000c).targets.empty())
+                throw std::runtime_error("Retracted writer leaf stayed compiled");
+            std::ostringstream retracted_ir; nt::iop_codegen::emit_program(retracted_ir,retracted);
+            const auto retracted_text=retracted_ir.str();
+            const auto retracted_at=retracted_text.find("code"+std::to_string(0x6000c)+":");
+            const auto retracted_next=retracted_at==std::string::npos ? std::string::npos : retracted_text.find("\ncode",retracted_at+1);
+            const auto retracted_block=retracted_at==std::string::npos ? std::string{} :
+                retracted_text.substr(retracted_at,retracted_next==std::string::npos ? std::string::npos : retracted_next-retracted_at);
+            if (retracted_block.find("call i1 @is_instruction")==std::string::npos || retracted_text.find("code"+std::to_string(0x61020)+":")!=std::string::npos)
+                throw std::runtime_error("Retracted writer leaf remained a compiled indirect target");
+        }
+        // The only unbounded store is inside the initial-word leaf. Opening the
+        // slot must remove that leaf instead of leaving the first proof compiled.
+        {
+            nt::elf::IopModule image{0x80000,0x80000,nt::Bytes(0x90),0x90,{}};
+            const auto put=[&](unsigned pc,std::uint32_t word) { fixture::put32(image.memory,pc-image.base,word); };
+            put(0x80000,0x3c010008); put(0x80004,0x8c220080); put(0x80008,0); put(0x8000c,0x0040f809);
+            put(0x80010,0); put(0x80014,0x03e00008); put(0x80018,0);
+            put(0x80040,0x3c010008); put(0x80044,0xac240080); put(0x80048,0x03e00008); put(0x8004c,0);
+            put(0x80080,0x00080040);
+            const auto opened=nt::iop_codegen::ir::discover(image);
+            if (!opened.open_indirect_sites.contains(0x8000c) || opened.instructions.contains(0x80040) ||
+                !opened.instructions.at(0x8000c).targets.empty())
+                throw std::runtime_error("Retracted same-module leaf stayed compiled");
+            std::ostringstream generated; nt::iop_codegen::emit_llvm(generated,image);
+            const auto ir=generated.str();
+            const auto at=ir.find("code"+std::to_string(0x8000c)+":");
+            const auto next=at==std::string::npos ? std::string::npos : ir.find("\ncode",at+1);
+            const auto block=at==std::string::npos ? std::string{} : ir.substr(at,next==std::string::npos ? std::string::npos : next-at);
+            if (block.find("call i1 @is_instruction")==std::string::npos || ir.find("code"+std::to_string(0x80040)+":")!=std::string::npos)
+                throw std::runtime_error("Retracted same-module leaf remained a compiled indirect target");
+        }
+        // A constant returned from a reached helper is not an instruction edge.
+        {
+            nt::elf::IopModule image{0x90000,0x90000,nt::Bytes(0x50),0x50,{}};
+            const auto put=[&](unsigned pc,std::uint32_t word) { fixture::put32(image.memory,pc-image.base,word); };
+            put(0x90000,0x0c024008); put(0x90004,0); put(0x90008,0x03e00008); put(0x9000c,0);
+            put(0x90020,0x3c020009); put(0x90024,0x34420040); put(0x90028,0x03e00008); put(0x9002c,0);
+            put(0x90040,0x03e00008); put(0x90044,0x24020007);
+            const auto program=nt::iop_codegen::ir::discover(image);
+            if (!program.instructions.contains(0x90040) || !program.instructions.contains(0x90020))
+                throw std::runtime_error("Returned constant callback was dropped");
+        }
+        // A constant memset poisons its span. It does not drop every other slot.
+        {
+            nt::elf::IopModule filled{0x70000,0x70000,nt::Bytes(0x140),0x140,{}};
+            const auto put=[&](unsigned pc,std::uint32_t word) { fixture::put32(filled.memory,pc-filled.base,word); };
+            put(0x70000,0x3c040007); put(0x70004,0x34840040); put(0x70008,0x24050000); put(0x7000c,0x24060010);
+            put(0x70010,0x0c01c045); put(0x70014,0); put(0x70018,0x3c010007); put(0x7001c,0x8c220080);
+            put(0x70020,0); put(0x70024,0x0040f809); put(0x70028,0); put(0x7002c,0x03e00008); put(0x70030,0);
+            put(0x70060,0x03e00008); put(0x70064,0x24020001); put(0x70080,0x00070060);
+            put(0x70100,0x41e00000); put(0x70104,0); put(0x70108,0x00000104);
+            put(0x7010c,0x63737973); put(0x70110,0x0062696c); put(0x70114,0x03e00008); put(0x70118,0x2400000e);
+            const auto proved=nt::iop_codegen::ir::discover(filled);
+            const auto& site=proved.instructions.at(0x70024);
+            if (site.targets.size()!=1 || site.targets.front()!=0x70060 || proved.open_indirect_sites.contains(0x70024))
+                throw std::runtime_error("Constant memset dropped an unrelated loaded pointer");
+            auto overlap=filled; fixture::put32(overlap.memory,0xc,0x24060080);
+            std::ostringstream partial; bool unresolved=false;
+            try { nt::iop_codegen::emit_llvm(partial,overlap); }
+            catch (const std::runtime_error& error) { unresolved=std::string(error.what()).find("unresolved indirect")!=std::string::npos; }
+            if (!unresolved || !partial.str().empty()) throw std::runtime_error("Overlapping memset left a loaded pointer bounded");
+            auto unknown=filled; fixture::put32(unknown.memory,0,0); fixture::put32(unknown.memory,4,0);
+            const auto opened_fill=nt::iop_codegen::ir::discover(unknown);
+            if (!opened_fill.open_indirect_sites.contains(0x70024) || opened_fill.instructions.contains(0x70060) ||
+                !opened_fill.instructions.at(0x70024).targets.empty())
+                throw std::runtime_error("Unknown memset left a single-slot load unresolved");
         }
         // A call between the load and the use discards the loaded register.
         {
