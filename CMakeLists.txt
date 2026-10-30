@@ -158,7 +158,7 @@ if(BUILD_TESTING)
                 "${CMAKE_CURRENT_BINARY_DIR}/iop-llvm-fixture.ll" -o "${CMAKE_CURRENT_BINARY_DIR}/iop-llvm-fixture.obj"
             DEPENDS emit-iop-fixture VERBATIM)
         add_executable(iop-llvm-tests tests/iop_native.cpp tests/iop_llvm_adapter.cpp "${CMAKE_CURRENT_BINARY_DIR}/iop-llvm-fixture.obj")
-        target_link_libraries(iop-llvm-tests PRIVATE nt_iop_native nt_disc)
+        target_link_libraries(iop-llvm-tests PRIVATE nt_iop_native nt_iop nt_disc)
         target_compile_definitions(iop-llvm-tests PRIVATE ANYPS2_TEST_LARGE_LLVM=1)
         add_test(NAME iop-llvm-execution COMMAND iop-llvm-tests)
         add_executable(sif-native-tests tests/sif_native.cpp

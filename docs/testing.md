@@ -147,7 +147,11 @@ intrman through the shared provider router. It checks both register banks,
 MMIO/service coherence and address aliases, tag registers, per-channel priority
 and enable preservation, and shared global-enable state. Unsupported transfer
 starts, interrupt-control operations, channels and register widths must stop
-without changing channel state. The local startup regression requires both
+without changing channel state. Compiled dmacman imports use that same register,
+priority and enable behavior. Slice setup and transfer starts stop without a
+completed transfer or a register write. A constant-address loaded pointer calls
+only its proved targets, and a null pointer does not fall through the jump
+delay slot. The local startup regression requires both
 native registration markers; it does not claim completed transfers or a boot.
 The heaplib milestone executes linked guest calls for fixed and expandable
 heaps. It checks alignment and non-overlap, free-size accounting, coalescing,

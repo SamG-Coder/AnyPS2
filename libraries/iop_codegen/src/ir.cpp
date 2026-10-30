@@ -1,6 +1,7 @@
 #include <nt/iop_ir.hpp>
 #include "constants.hpp"
 #include "jump_tables.hpp"
+#include "loaded_pointers.hpp"
 #include "returned_addresses.hpp"
 #include "stack_callbacks.hpp"
 #include <set>
@@ -39,6 +40,13 @@ std::optional<Operation> native_operation(const elf::IopImport& import) {
     if (import.library=="sysmem" && (import.version>>8)==1 && ((import.ordinal>=4 && import.ordinal<=10) || import.ordinal==14))
         return Operation::native_import;
     if (import.library=="heaplib" && (import.version>>8)==1 && import.ordinal>=4 && import.ordinal<=8) return Operation::native_import;
+    // Binding identifies the host ABI. Slice setup and transfer starts remain
+    // explicit runtime stops and do not report a completed DMA operation.
+    if (import.library=="dmacman" && (import.version>>8)==1 &&
+        ((import.ordinal>=4 && import.ordinal<=11) || (import.ordinal>=14 && import.ordinal<=17) ||
+         import.ordinal==26 || import.ordinal==27 || import.ordinal==28 || import.ordinal==32 ||
+         (import.ordinal>=33 && import.ordinal<=35)))
+        return Operation::native_import;
     if (import.library!="sysclib" || (import.version>>8)!=1) return {};
     switch (import.ordinal) {
     case 8: case 17: case 18: case 19: case 20: case 21: case 22: case 23: case 25: case 26: case 27: case 29: case 30: case 32: case 36: case 41: return Operation::native_import;
@@ -180,7 +188,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         }
         Instruction call; call.address=module.base+import.offset;
         call.operation=*operation; call.flow=Flow::native_return;
-        call.immediate=import.ordinal|(!host ? 0x20000U : import.library=="loadcore" ? 0x10000U : import.library=="ioman" ? 0x30000U : import.library=="intrman" ? 0x40000U : import.library=="thevent" ? 0x50000U : import.library=="thbase" ? 0x60000U : import.library=="sifman" ? 0x70000U : import.library=="stdio" ? 0x80000U : import.library=="sifcmd" ? 0x90000U : import.library=="thsemap" ? 0xa0000U : import.library=="thmsgbx" ? 0xb0000U : import.library=="sysclib" ? 0xc0000U : import.library=="heaplib" ? 0xd0000U : import.library=="modload" ? 0xe0000U : import.library=="romdrv" ? 0xf0000U : 0U);
+        call.immediate=import.ordinal|(!host ? 0x20000U : import.library=="loadcore" ? 0x10000U : import.library=="ioman" ? 0x30000U : import.library=="intrman" ? 0x40000U : import.library=="thevent" ? 0x50000U : import.library=="thbase" ? 0x60000U : import.library=="sifman" ? 0x70000U : import.library=="stdio" ? 0x80000U : import.library=="sifcmd" ? 0x90000U : import.library=="thsemap" ? 0xa0000U : import.library=="thmsgbx" ? 0xb0000U : import.library=="sysclib" ? 0xc0000U : import.library=="heaplib" ? 0xd0000U : import.library=="modload" ? 0xe0000U : import.library=="romdrv" ? 0xf0000U : import.library=="dmacman" ? 0x100000U : 0U);
         native_imports.emplace(call.address,call);
         if (!host) {
             auto bound=import; bound.offset+=module.base; bound.table_offset+=module.base;
@@ -198,6 +206,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
     std::map<std::uint32_t,Constants> states;
     std::set<std::uint32_t> table_transfers;
     std::map<std::uint32_t,std::set<std::uint32_t>> stack_transfers;
+    std::map<std::uint32_t,std::set<std::uint32_t>> pointer_transfers;
     for (const auto root : pending) states.emplace(root,Constants{});
     const auto enqueue=[&](std::uint32_t target,const Constants& state) {
         const auto [at,inserted]=states.emplace(target,state);
@@ -364,6 +373,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                     physical=*table; table_transfers.insert(pc);
                 }
                 else if (const auto callbacks=stack_transfers.find(pc);callbacks!=stack_transfers.end()) physical=callbacks->second;
+                else if (const auto loaded=pointer_transfers.find(pc);loaded!=pointer_transfers.end()) physical=loaded->second;
                 instruction.targets.assign(physical.begin(),physical.end());
                 program.instructions.at(pc).targets=instruction.targets;
             }
@@ -384,7 +394,10 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                 if (target!=native_imports.end()) discover_loader_callbacks(target->second.immediate,successor);
             }
             if (indirect) {
-                for (const auto target : instruction.targets) enqueue(target,successor);
+                // Loaded-pointer callees start with unknown registers. The caller's
+                // post-delay constants are not a proof about the callee.
+                const bool loaded_pointer=pointer_transfers.contains(pc);
+                for (const auto target : instruction.targets) enqueue(target,loaded_pointer ? Constants{} : successor);
             } else if (instruction.flow!=Flow::return_register) enqueue(instruction.target,successor);
             if (instruction.flow==Flow::conditional) enqueue(pc+8,successor);
             if (instruction.flow==Flow::call || instruction.flow==Flow::indirect_call) enqueue(pc+8,Constants{});
@@ -424,17 +437,38 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                 if (targets.size()!=before) pending.insert(pc);
             }
         }
+        if (!halt) {
+            const auto recovered=recoverable_loaded_pointers(program,states,data_modules);
+            std::vector<std::uint32_t> stale;
+            for (const auto& [site,targets] : pointer_transfers)
+                if (const auto found=recovered.find(site); found==recovered.end() || found->second!=targets) stale.push_back(site);
+            for (const auto site : stale) {
+                pointer_transfers.erase(site);
+                if (const auto found=program.instructions.find(site); found!=program.instructions.end()) found->second.targets.clear();
+            }
+            for (const auto& [site,targets] : recovered) {
+                if (const auto found=pointer_transfers.find(site); found!=pointer_transfers.end() && found->second==targets) continue;
+                pointer_transfers[site]=targets;
+                auto& recovered_instruction=program.instructions.at(site);
+                recovered_instruction.targets.assign(targets.begin(),targets.end());
+                for (const auto target : targets) discover_callback(target);
+            }
+        }
         if (halt) break;
     } while (!pending.empty());
     if (halt) return program;
+    const auto unresolved_indirect=[&](std::uint32_t pc,const Instruction& i) {
+        return (i.flow==Flow::indirect || i.flow==Flow::indirect_call) && !states.at(pc).registers[i.source] &&
+            !table_transfers.contains(pc) && !stack_transfers.contains(pc) && !pointer_transfers.contains(pc);
+    };
     std::ostringstream indirect_errors;
     for (const auto& [pc,i] : program.instructions)
-        if ((i.flow==Flow::indirect || i.flow==Flow::indirect_call) && !states.at(pc).registers[i.source] && !table_transfers.contains(pc) && !stack_transfers.contains(pc))
+        if (unresolved_indirect(pc,i))
             indirect_errors<<"\n  unresolved indirect transfer at "<<hex32(pc)<<" through r"<<i.source;
     if (!indirect_errors.str().empty()) {
         if (gaps) {
             for (const auto& [pc,i] : program.instructions)
-                if ((i.flow==Flow::indirect || i.flow==Flow::indirect_call) && !states.at(pc).registers[i.source] && !table_transfers.contains(pc) && !stack_transfers.contains(pc))
+                if (unresolved_indirect(pc,i))
                     if (note_gap(gaps,Gap{Gap::Kind::indirect,{},0,0,pc,0,"r"+std::to_string(i.source)})) break;
         } else throw std::runtime_error("IOP conversion: indirect target sets are unknown or exceed the 16-value analysis bound:"+indirect_errors.str());
     }

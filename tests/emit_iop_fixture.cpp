@@ -224,6 +224,48 @@ int main(int argc,char** argv) {
             catch (const std::runtime_error& error) { unknown=std::string(error.what()).find("unresolved indirect")!=std::string::npos; }
             if (!unknown || !rejected_shift.str().empty()) throw std::runtime_error("Shift inferred a target from mutable memory");
         }
+        // A non-constant store keeps a loaded pointer unresolved even when the
+        // initial word is an executable address.
+        {
+            nt::elf::IopModule unknown_slot{0x40000,0x40000,nt::Bytes(0x200),0x200,{}};
+            const auto put=[&](unsigned pc,std::uint32_t word) { fixture::put32(unknown_slot.memory,pc-unknown_slot.base,word); };
+            put(0x40000,0x3c010004); put(0x40004,0xac240180); put(0x40008,0x03e00008);
+            put(0x40010,0x3c020004); put(0x40014,0x8c420180); put(0x40018,0);
+            put(0x4001c,0x14400003); put(0x40020,0); put(0x40024,0x0801000f); put(0x40028,0x24020001);
+            put(0x4002c,0x0040f809); put(0x40030,0); put(0x40034,0x03e00008); put(0x40038,0);
+            put(0x4003c,0x03e00008); put(0x40040,0);
+            put(0x40100,0x03e00008); put(0x40104,0x24020021); put(0x40180,0x00040100);
+            const std::array unknown_roots{0x40010U};
+            std::ostringstream partial; bool unresolved=false;
+            try { nt::iop_codegen::emit_llvm(partial,unknown_slot,unknown_roots); }
+            catch (const std::runtime_error& error) { unresolved=std::string(error.what()).find("unresolved indirect")!=std::string::npos; }
+            if (!unresolved || !partial.str().empty()) throw std::runtime_error("Non-constant pointer store became a bounded indirect target");
+        }
+        // A call between the load and the use discards the loaded register.
+        {
+            nt::elf::IopModule clobber{0x20000,0x20000,nt::Bytes(0x40),0x40,{}};
+            const auto put=[&](unsigned pc,std::uint32_t word) { fixture::put32(clobber.memory,pc-clobber.base,word); };
+            put(0x20000,0x3c020002); put(0x20004,0x8c420030); put(0x20008,0); put(0x2000c,0x0c008009); put(0x20010,0);
+            put(0x20014,0x0040f809); put(0x20018,0); put(0x2001c,0x03e00008); put(0x20020,0);
+            put(0x20024,0x03e00008); put(0x20028,0); put(0x20030,0x00020024);
+            std::ostringstream partial; bool unresolved=false;
+            try { nt::iop_codegen::emit_llvm(partial,clobber); }
+            catch (const std::runtime_error& error) { unresolved=std::string(error.what()).find("unresolved indirect")!=std::string::npos; }
+            if (!unresolved || !partial.str().empty()) throw std::runtime_error("Call preserved a loaded pointer register");
+        }
+        // A partial store overlaps the loaded word and rejects an otherwise valid pointer.
+        {
+            nt::elf::IopModule partial_store{0x30000,0x30000,nt::Bytes(0x90),0x90,{}};
+            const auto put=[&](unsigned pc,std::uint32_t word) { fixture::put32(partial_store.memory,pc-partial_store.base,word); };
+            put(0x30000,0x3c010003); put(0x30004,0xa0200080); put(0x30008,0x03e00008);
+            put(0x30010,0x3c020003); put(0x30014,0x8c420080); put(0x30018,0); put(0x3001c,0x00400008); put(0x30020,0);
+            put(0x30028,0x03e00008); put(0x3002c,0x24020001); put(0x30080,0x00030028);
+            const std::array partial_roots{0x30010U};
+            std::ostringstream partial; bool unresolved=false;
+            try { nt::iop_codegen::emit_llvm(partial,partial_store,partial_roots); }
+            catch (const std::runtime_error& error) { unresolved=std::string(error.what()).find("unresolved indirect")!=std::string::npos; }
+            if (!unresolved || !partial.str().empty()) throw std::runtime_error("Partial store left a loaded pointer bounded");
+        }
         for (const bool variable : {false,true}) {
             auto signed_shift=module; signed_shift.memory.assign(0x60,0); signed_shift.initialized_size=0x60;
             fixture::put32(signed_shift.memory,0,0x3c088000);
@@ -565,6 +607,23 @@ int main(int argc,char** argv) {
             irq_word(0x1fb0+i*4,0x2f68+i*8);
             irq_word(0x2f68+i*8,0x03e00008); irq_word(0x2f6c+i*8,0x24020000|(11*(i+1)));
         }
+        // 0x3000-0x45ff and the heap arena stay data for existing service tests.
+        module.memory.resize(0x3900);
+        irq_word(0x4800,0x41e00000); irq_word(0x4804,0); irq_word(0x4808,0x00000102);
+        constexpr char dma_name[]="dmacman";
+        std::copy(std::begin(dma_name),std::end(dma_name),module.memory.begin()+0x380c);
+        constexpr unsigned dma_ordinals[]{16,33,34,17,28,32,8};
+        for (unsigned index=0;index<std::size(dma_ordinals);++index) {
+            irq_word(0x4814+index*8,0x03e00008); irq_word(0x4818+index*8,0x24000000|dma_ordinals[index]);
+        }
+        constexpr std::uint32_t dma_sequence[]{0x03e08021,0x3c041234,0x34845678,0x0c001205,0,0x24040009,0x0c001207,0x24050005,
+            0x24040009,0x0c001209,0,0x0c00120b,0,0x0200f821,0x03e00008,0};
+        for (unsigned index=0;index<std::size(dma_sequence);++index) irq_word(0x4860+index*4,dma_sequence[index]);
+        irq_word(0x48a0,0x0c00120d); irq_word(0x48a4,0x24040003); irq_word(0x48a8,0x03e00008);
+        irq_word(0x48b0,0x0c00120f); irq_word(0x48b4,0x24040009); irq_word(0x48b8,0x03e00008);
+        irq_word(0x48c0,0x0c001207); irq_word(0x48c4,0x2404000d); irq_word(0x48c8,0x03e00008);
+        constexpr std::uint32_t dma_start[]{0x24040003,0x3c050100,0x0c001211,0x34a50200,0x03e00008,0};
+        for (unsigned index=0;index<std::size(dma_start);++index) irq_word(0x48d0+index*4,dma_start[index]);
         module.initialized_size=static_cast<std::uint32_t>(module.memory.size());
         for (const auto overwrite : {0xa0800008U,0xa0a00000U}) {
             auto invalidated=module;
@@ -688,7 +747,23 @@ int main(int argc,char** argv) {
             if (analyzed.instructions.contains(0xb100))
                 throw std::runtime_error("Unknown return value was treated as a callback address");
         }
-        const std::array bundle{module,provider,dispatch,factories};
+        // Constant-address loads. The jump's delay slot writes the pointer register
+        // and must not fall through into the jalr.
+        nt::elf::IopModule pointers{0x10000,0x10000,nt::Bytes(0x200),0x200,{}};
+        const auto pointer_word=[&](unsigned pc,std::uint32_t word) { fixture::put32(pointers.memory,pc-pointers.base,word); };
+        pointer_word(0x10000,0x03e00008); pointer_word(0x10004,0x24020021);
+        pointer_word(0x10008,0x03e00008); pointer_word(0x1000c,0x24020022);
+        constexpr std::uint32_t pointer_a[]{0x03e08021,0x3c020001,0x8c420180,0,0x14400003,0,0x08004016,0x24020001,
+            0x0040f809,0,0x0200f821,0x03e00008,0,0,0x03e00008,0};
+        for (unsigned index=0;index<std::size(pointer_a);++index) pointer_word(0x10020+index*4,pointer_a[index]);
+        constexpr std::uint32_t pointer_b[]{0x03e08021,0x3c030001,0x8c630184,0,0x14600003,0,0x08004028,0x24020001,
+            0x0060f809,0,0x0200f821,0x03e00008,0,0,0,0,0x03e00008,0};
+        for (unsigned index=0;index<std::size(pointer_b);++index) pointer_word(0x10060+index*4,pointer_b[index]);
+        constexpr std::uint32_t pointer_store[]{0x3c010001,0x3c030001,0x24630008,0xac230184,0x03e00008,0};
+        for (unsigned index=0;index<std::size(pointer_store);++index) pointer_word(0x100b0+index*4,pointer_store[index]);
+        pointer_word(0x10180,0x00010000);
+        bundle_roots.insert(bundle_roots.end(),{0x4860U,0x48a0U,0x48b0U,0x48c0U,0x48d0U,0x10020U,0x10060U,0x100b0U});
+        const std::array bundle{module,provider,dispatch,factories,pointers};
         {
             auto broken=bundle; fixture::put32(broken[3].memory,0x300,0);
             std::ostringstream partial; bool rejected=false;
@@ -726,7 +801,7 @@ int main(int argc,char** argv) {
             if (!failed_bundle || !partial.str().empty()) throw std::runtime_error("Invalid bundle emitted partial native code");
         }
         // Earlier owners must be revisited when a later module discovers a callback.
-        const std::array reversed{provider,module,dispatch,factories};
+        const std::array reversed{provider,module,dispatch,factories,pointers};
         std::ostringstream reverse_code;
         nt::iop_codegen::emit_bundle(reverse_code,reversed,bundle_roots);
         for (const auto target : {0xa061U,0xa080U,0xb800U}) {
@@ -762,7 +837,7 @@ int main(int argc,char** argv) {
             put(0x8800,0x00401821);
             put(first+(count-2)*4,0x03e00008); put(first+(count-1)*4,0);
             std::vector<std::uint32_t> roots=bundle_roots; roots.push_back(first);
-            const std::array large_bundle{large,provider,dispatch,factories};
+            const std::array large_bundle{large,provider,dispatch,factories,pointers};
             std::ostringstream llvm; nt::iop_codegen::emit_bundle(llvm,large_bundle,roots);
             const auto text=llvm.str();
             nt::write_file(argv[3],nt::ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));

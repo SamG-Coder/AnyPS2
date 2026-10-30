@@ -26,6 +26,8 @@
 #include <nt/iop_native_stdio.hpp>
 #include <nt/iop_native_modload.hpp>
 #include <nt/iop_native_archive.hpp>
+#include <nt/iop_devices.hpp>
+#include <nt/iop_native_dmacman.hpp>
 #include "reboot_fixture.hpp"
 #include "disc_fixture.hpp"
 #include <chrono>
@@ -2350,6 +2352,65 @@ int main() {
                       "Indirect call escaped its finite target proof or rejected a valid alias");
             }
         }
+        {
+            std::vector<std::uint8_t> dma_ram(0x11000);
+            BootstrapDevices devices;
+            NativeDmacmanServices dma(devices);
+            for (const auto alias : {0U,0x80000000U,0xa0000000U}) {
+                auto sequence=initial(alias); sequence.pc=alias|0x4860;
+                NativeResult stop{};
+                do { stop=run_native(nt_iop_generated_run,sequence,dma_ram,1,&dma); } while (stop.reason==NativeStop::budget);
+                const auto priority=devices.read(0x1f801570,4);
+                check(stop.reason==NativeStop::unmapped_code && sequence.pc==0x5000 && sequence.executed==20 &&
+                      sequence.registers[2]==0x12345d78 && priority && *priority==0x12345d78,
+                      "Compiled dmacman priority/enable sequence did not update DPCR2");
+            }
+            const auto priority_before=devices.read(0x1f801570,4);
+            const auto expect_stop=[&](std::uint32_t entry,std::uint32_t stub,std::uint32_t ordinal,unsigned executed) {
+                auto cpu=initial(); cpu.pc=entry;
+                const auto stop=run_native(nt_iop_generated_run,cpu,dma_ram,16,&dma);
+                const auto priority=devices.read(0x1f801570,4);
+                check(stop.reason==NativeStop::import_request && stop.pc==stub && stop.trap_code==(0x100000U|ordinal) &&
+                      cpu.executed==executed && priority && priority_before && *priority==*priority_before,
+                      "DMA stop reported success or changed channel priority");
+            };
+            expect_stop(0x48a0,0x4834,28,2); expect_stop(0x48b0,0x483c,32,2);
+            expect_stop(0x48c0,0x481c,33,2); expect_stop(0x48d0,0x4844,8,4);
+            const auto channel=DmaController::channel_register(3,8);
+            const auto chcr=channel ? devices.read(*channel,4) : std::optional<std::uint32_t>{};
+            check(chcr && *chcr==0,"Rejected CHCR START wrote the channel register");
+            check(dma.invoke({28,{3},NativeServiceKind::dmacman},dma_ram).status==NativeServiceStatus::unavailable &&
+                  dma.invoke({32,{3},NativeServiceKind::dmacman},dma_ram).status==NativeServiceStatus::unavailable &&
+                  dma.invoke({33,{13,1},NativeServiceKind::dmacman},dma_ram).status==NativeServiceStatus::unsupported,
+                  "DMA availability status did not match the ordinal");
+            NativeResult stop{};
+            auto pointers=initial(); pointers.pc=0x10020; store_native_word(dma_ram,0x10180,0);
+            do { stop=nt_iop_generated_run(pointers,dma_ram,1); } while (stop.reason==NativeStop::budget);
+            check(stop.reason==NativeStop::unmapped_code && pointers.pc==0x5000 && pointers.executed==10 && pointers.registers[2]==1,
+                  "Null loaded pointer fell through a jump delay slot into jalr");
+            store_native_word(dma_ram,0x10180,0x10000);
+            pointers=initial(); pointers.pc=0x10020;
+            do { stop=nt_iop_generated_run(pointers,dma_ram,1); } while (stop.reason==NativeStop::budget);
+            check(stop.reason==NativeStop::unmapped_code && pointers.pc==0x5000 && pointers.executed==13 && pointers.registers[2]==0x21,
+                  "Constant-address loaded pointer did not reach its compiled callee");
+            auto guarded=initial(); guarded.pc=0x10040; guarded.registers[2]=0x1000;
+            stop=nt_iop_generated_run(guarded,dma_ram,1);
+            check(stop.reason==NativeStop::unmapped_code && !guarded.executed && stop.address==0x1000 && guarded.pc==0x10040,
+                  "Loaded pointer accepted a destination outside its proved set");
+            pointers=initial(); pointers.pc=0x10060;
+            do { stop=nt_iop_generated_run(pointers,dma_ram,1); } while (stop.reason==NativeStop::budget);
+            check(stop.reason==NativeStop::unmapped_code && pointers.executed==10 && pointers.registers[2]==1 &&
+                  load_native_word(dma_ram,0x10184)==0,
+                  "Unset stored pointer was treated as an executable target");
+            pointers=initial(); pointers.pc=0x100b0;
+            do { stop=nt_iop_generated_run(pointers,dma_ram,1); } while (stop.reason==NativeStop::budget);
+            check(stop.reason==NativeStop::unmapped_code && pointers.executed==6 && load_native_word(dma_ram,0x10184)==0x10008,
+                  "Constant pointer store did not reach its slot");
+            pointers=initial(); pointers.pc=0x10060;
+            do { stop=nt_iop_generated_run(pointers,dma_ram,1); } while (stop.reason==NativeStop::budget);
+            check(stop.reason==NativeStop::unmapped_code && pointers.pc==0x5000 && pointers.executed==13 && pointers.registers[2]==0x22,
+                  "Stored loaded pointer did not reach its compiled callee");
+        }
 #ifdef ANYPS2_TEST_LARGE_LLVM
         for (const auto alias : {0U,0x80000000U,0xa0000000U}) for (const auto budget : {1U,255U,256U,257U,2048U}) {
             auto large=initial(alias); large.pc=alias|0x8000; large.registers[4]=alias|0x6000;
@@ -3601,6 +3662,6 @@ int main() {
                   load_native_word(guest,0x7000)==0x60 && loader.load_decision()==13,
                   "Overlapping sealed image was started");
         }
-        std::cout<<"Compiled IOP LLVM execution passed without an interpreter library\n";
+        std::cout<<"Compiled IOP LLVM execution passed; dmacman register checks use the diagnostic device library\n";
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

@@ -294,7 +294,9 @@ numbers, transfer-start flags and the priority/enable operations. PCSX2's pinned
 IOP hardware register declarations corroborate the two channel banks and tag
 register locations. AnyPS2 independently maps these operations to shared C++
 device state. No SDK implementation is copied; unsupported transfer starts and
-DMA interrupt behavior remain explicit failures.
+DMA interrupt behavior remain explicit failures. Compiled imports bind the same
+register, priority and enable ordinals. sceSetSliceDMA and sceStartDMA bind as
+unavailable stops and do not report a completed transfer.
 The pinned PS2SDK heaplib public interface/export table and its open-source
 service define heap flags, return codes, eight-byte allocation accounting and
 growth/release behavior. AnyPS2 uses an independently written map-based allocator
