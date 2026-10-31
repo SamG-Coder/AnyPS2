@@ -260,7 +260,7 @@ EeRejection reject_unsupported(std::span<const r5900::Instruction> instructions)
         }
         std::ostringstream where;
         where<<"0x"<<std::hex<<i.pc;
-        if ((i.op==r5900::Op::mfc0 || i.op==r5900::Op::mtc0) && i.rd!=0 && i.rd!=2 && i.rd!=3 && i.rd!=5 && i.rd!=10 && i.rd!=25 && i.rd!=12 && i.rd!=14 && i.rd!=30 && i.rd!=6 && !(i.rd==28 && i.op==r5900::Op::mfc0))
+        if ((i.op==r5900::Op::mfc0 || i.op==r5900::Op::mtc0) && i.rd!=0 && i.rd!=2 && i.rd!=3 && i.rd!=5 && i.rd!=10 && i.rd!=25 && i.rd!=12 && i.rd!=14 && i.rd!=30 && i.rd!=6 && !((i.rd==28 || i.rd==9 || i.rd==1) && i.op==r5900::Op::mfc0))
             add_constraint(rejection,"EE system transfer selector is not supported at "+where.str());
         if (i.op==r5900::Op::cfc2 && i.rd==20)
             add_constraint(rejection,"EE vector random-register transfer is not implemented at "+where.str());

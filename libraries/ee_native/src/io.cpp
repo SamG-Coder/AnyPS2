@@ -5,7 +5,7 @@
 extern "C" std::uint64_t nt_ee_performance(nt::ee::Memory* memory,std::uint32_t operation,
     std::uint32_t counter,std::uint32_t value,std::uint32_t execution_mode) {
     using namespace nt::ee;
-    if (operation>static_cast<unsigned>(PerformanceOperation::write_counter) || counter>1)
+    if (operation>static_cast<unsigned>(PerformanceOperation::read_clock) || counter>1)
         return std::uint64_t(Stop::invalid_state)<<32;
     const auto request=static_cast<PerformanceOperation>(operation);
     auto candidate=memory->performance;
@@ -30,6 +30,7 @@ extern "C" std::uint64_t nt_ee_performance(nt::ee::Memory* memory,std::uint32_t 
         unavailable|=active(candidate.control);
         result.status=Stop::budget;
         switch (request) {
+        case PerformanceOperation::read_clock: result.status=Stop::unsupported_system; break;
         case PerformanceOperation::read_control: result.value=candidate.control; break;
         case PerformanceOperation::write_control:
             candidate.control=value; unavailable|=active(value); break;

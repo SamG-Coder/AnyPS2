@@ -382,6 +382,8 @@ int main(int argc,char** argv) {
             <<" native_pmu_error="<<live_counters->error();
         if (pmu) if (const auto measured=pmu->last_sample())
             std::cout<<" measured_native_cycles="<<(*measured)[0]<<" measured_native_icache_misses="<<(*measured)[1];
+        if (stop==nt::ee::Stop::unmapped_code && state.gpr[3].lo==7)
+            std::cout<<" uncompiled_image_entry="<<nt::hex32(memory.fault_address);
         if (stop==nt::ee::Stop::unmapped_code && state.gpr[3].lo==0x74)
             std::cout<<" requested_syscall="<<state.gpr[4].lo
                      <<" uncompiled_handler="<<nt::hex32(static_cast<std::uint32_t>(state.gpr[5].lo));

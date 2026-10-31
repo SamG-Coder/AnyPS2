@@ -6,6 +6,7 @@
 #include <nt/ee_handlers.hpp>
 #include <nt/ee_interrupts.hpp>
 #include <nt/ee_threads.hpp>
+#include <nt/ee_launch.hpp>
 #include <nt/ee_settings.hpp>
 #include <nt/ee_graphics.hpp>
 #include <nt/ee_completions.hpp>
@@ -72,6 +73,7 @@ public:
         }
         number=native_syscall_number(number);
         if (!startup_syscall(number)) return Stop::syscall;
+        if (number==7) return replace_image(state,memory);
         if (number==2) {
             if (!memory.graphics) return Stop::unsupported_system;
             const auto result=memory.graphics->configure(static_cast<std::uint32_t>(state.gpr[4].lo),
@@ -150,20 +152,30 @@ public:
         const auto arg=[&](unsigned n) { return static_cast<std::uint32_t>(state.gpr[4+n].lo); };
         const auto stack=runtime::initial_stack(arg(1),arg(2),memory.size);
         if (!stack) return Stop::invalid_state;
-        const auto raw=arg(3);
-        const auto address=runtime::default_ram_address(raw);
-        if (!memory.data || address%4 || std::uint64_t(address)+8>memory.size) {
-            memory.fault_address=raw; return Stop::memory_fault;
-        }
-        if (!protected_code_) return Stop::invalid_state;
-        if (protected_code_(address,8)) { memory.fault_address=raw; return Stop::code_write; }
-        // Empty explicit launch context: argc=0, argv[0]=null. Validate before committing.
-        std::memset(memory.data+address,0,8);
+        const auto arguments=launch_.write(memory,arg(3),protected_code_);
+        if (arguments!=Stop::budget) return arguments;
         main_=MainThread{*stack,arg(0),arg(4)};
         threads_.initialize(*stack,arg(0),arg(4));
         return returned(state,stack->pointer);
     }
 private:
+    Stop replace_image(runtime::State& state,Memory& memory) {
+        if (handlers_.active() || (memory.interrupts && memory.interrupts->active()) ||
+            !threads_.can_replace_image()) return Stop::unsupported_system;
+        const auto entry=runtime::default_ram_address(static_cast<std::uint32_t>(state.gpr[4].lo));
+        if (!entry || entry%4 || entry>=0x2000000U) return Stop::invalid_state;
+        if (!compiled_ || !compiled_(entry)) { memory.fault_address=entry; return Stop::unmapped_code; }
+        LaunchArguments next;
+        const auto captured=next.capture(memory,static_cast<std::uint32_t>(state.gpr[6].lo),static_cast<std::uint32_t>(state.gpr[7].lo));
+        if (captured!=Stop::budget) return captured;
+        // Commit after validation; a failed handoff preserves all old ownership.
+        launch_=std::move(next); threads_.replace_image(); semaphores_={}; main_.reset(); heap_.reset();
+        if (memory.interrupts) { memory.interrupts->replace_image(); memory.interrupts->publish(memory); }
+        state.pc=entry; state.delay_slot=false; state.pending_target=0; state.branch_pc=0;
+        state.set(28,static_cast<std::uint64_t>(static_cast<std::int64_t>(std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(state.gpr[5].lo)))));
+        state.set(4,0); // No optional host startup structure; arguments arrive through SetupThread.
+        ++state.executed; return Stop::budget;
+    }
     Stop semaphore(runtime::State& state,Memory& memory,std::uint32_t number) {
         const auto id=static_cast<std::uint32_t>(state.gpr[4].lo);
         const auto record=number==0x40 ? nullptr : semaphores_.find(id);
@@ -220,6 +232,7 @@ private:
         state.set(2,value); state.pc+=4; ++state.executed;
         return Stop::budget; // A completed service consumes one operation from the runner's budget.
     }
+    LaunchArguments launch_;
     NativeSettings settings_;
     NativeThreads threads_;
     SyscallHandlers handlers_;

@@ -1590,3 +1590,21 @@ readback remain unsupported. The seven-operation sequence is a single native
 boundary and needs at least seven operations of diagnostic budget; no partial
 hardware-register state is exposed. Interior entry points still stop through
 the unsupported primitive path.
+
+- Zlib 1.3.1, https://zlib.net/fossils/zlib-1.3.1.tar.gz,
+  SHA256 `9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23`:
+  unmodified static decompression dependency of the conversion tools only.
+  Notice retained in [zlib license](third-party/zlib-LICENSE.txt).
+- Gran Turismo Modding Hub, revision
+  `d70af9d3db86aa1fb0f91ff7ce7ee8ad719b4c61`,
+  https://nenkai.github.io/gt-modding-hub/formats/ps2_core/:
+  public compressed segmented-executable container fields inform the independent
+  C++ importer. Only the unencrypted raw-deflate container is supported; no keys,
+  game routines or game data are included. Filename and game identity are not
+  used for parsing or execution selection. Opaque metadata is not authenticated.
+
+- The pinned Play! `Source/ee/PS2OS.cpp` ExecPS2/SetupThread interfaces and
+  PS2SDK public startup argument structures inform independent native image
+  handoff: snapshot arguments, retire the old main continuation, clear process
+  INTC callbacks, mask INTC delivery, and initialize the next main thread.
+  No reference implementation or console instructions were copied.

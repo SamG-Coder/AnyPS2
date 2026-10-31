@@ -293,6 +293,14 @@ int main(int argc,char** argv) {
     }
     code.push_back(nt::r5900::decode(0x410020,0x40883000U)); // Native reservation request.
     code.push_back(nt::r5900::decode(0x410024,0x40083000U)); // Readback remains unsupported.
+    code.push_back(nt::r5900::decode(0x410028,0x40084800U)); // Count becomes native elapsed-clock read.
+    code.push_back(nt::r5900::decode(0x41002c,0x40080800U)); // Random index requires a native binding; never fabricated.
+    {
+        unsigned pc=0x420010;
+        for (const auto word:{0x24040500U,0x34058000U,0x24061000U,0x24072400U,0x24081100U,0x2403003cU,12U,0x2403007bU,12U}) {
+            code.push_back(nt::r5900::decode(pc,word)); pc+=4;
+        }
+    }
     const std::array<nt::ee_codegen::LayoutDeclaration,2> layouts{{
         {0,0xd0000000U,0x87,0xc7}, // Two direct views of synthetic RAM.
         {0,0x13000000U,0x004c0003U,0x004c0041U} // Read-only then inaccessible native port.

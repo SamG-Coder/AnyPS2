@@ -55,6 +55,13 @@ public:
         selected->second.semaphore=0; selected->second.status=(selected->second.status&8) ? 8U : 2U; selected->second.order=next_order_++;
         return true;
     }
+    bool can_replace_image() const {
+        if (!current_ || records_.at(current_).status!=1) return false;
+        return std::all_of(records_.begin(),records_.end(),[&](const auto& item) {
+            return item.first==current_ || item.second.status==0x10;
+        });
+    }
+    void replace_image() { records_.clear(); current_=0; root_=0; next_order_=0; }
     void initialize(runtime::InitialStack stack,std::uint32_t gp,std::uint32_t root) {
         root_=physical(root);
         records_.emplace(1,Record{1,0,stack.base,stack.size,gp,0,0,0,0}); current_=1;

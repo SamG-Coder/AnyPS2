@@ -39,7 +39,7 @@ inline void emit_performance_transfer(Writer& w,const r5900::Instruction& i) {
     // Public MTPS encodings with nonzero register field have no effect.
     if (write && !(selector&1) && (selector&62)) return;
     using ee::PerformanceOperation;
-    const auto operation=(selector&1) ?
+    const auto operation=i.rd==9 ? PerformanceOperation::read_clock : (selector&1) ?
         (write ? PerformanceOperation::write_counter : PerformanceOperation::read_counter) :
         (write ? PerformanceOperation::write_control : PerformanceOperation::read_control);
     const auto source=write ? w.narrow(w.reg(i.rt)) : std::string("0");
@@ -66,7 +66,7 @@ inline void emit_system_transfer(Writer& w,const r5900::Instruction& i,std::size
              <<"\nnative_reserve_stop"<<suffix<<":\n  ret i32 10\nnative_reserve_ready"<<suffix<<":\n";
         return;
     }
-    if (i.rd==0 || i.rd==2 || i.rd==3 || i.rd==5 || i.rd==10) { emit_address_space(w,i); return; }
+    if (i.rd==0 || i.rd==1 || i.rd==2 || i.rd==3 || i.rd==5 || i.rd==10) { emit_address_space(w,i); return; }
     // Native RAM has no reserved guest TLB entries or private cache lines.
     // Reject attempts to establish a reservation rather than silently losing it.
     if (i.rd==6 || i.rd==28) {
@@ -80,7 +80,7 @@ inline void emit_system_transfer(Writer& w,const r5900::Instruction& i,std::size
         }
         return;
     }
-    if (i.rd==25) { emit_performance_transfer(w,i); return; }
+    if (i.rd==25 || i.rd==9) { emit_performance_transfer(w,i); return; }
     const auto offset=i.rd==12 ? offsetof(runtime::State,cop0_status) :
                       i.rd==14 ? offsetof(runtime::State,cop0_epc) : offsetof(runtime::State,cop0_error_epc);
     if (i.op==Op::mtc0) w.store("i32",w.narrow(w.reg(i.rt)),offset);

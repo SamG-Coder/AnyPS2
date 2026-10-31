@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(AnyPS2 VERSION 0.1.0 LANGUAGES CXX)
+project(AnyPS2 VERSION 0.1.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -19,6 +19,12 @@ target_include_directories(nt_binary PUBLIC libraries/binary/include)
 add_library(nt_disc libraries/disc/src/disc_files.cpp libraries/disc/src/iso9660.cpp libraries/disc/src/reboot_image.cpp)
 target_include_directories(nt_disc PUBLIC libraries/disc/include)
 target_link_libraries(nt_disc PUBLIC nt_binary)
+include(cmake/converter_zlib.cmake)
+add_library(nt_package libraries/package/src/packed_image.cpp)
+target_include_directories(nt_package PUBLIC libraries/package/include PRIVATE "${anyps2_zlib_SOURCE_DIR}" "${anyps2_zlib_BINARY_DIR}")
+target_link_libraries(nt_package PUBLIC nt_binary PRIVATE zlibstatic)
+add_executable(ps2-unpack programs/ps2-unpack/main.cpp)
+target_link_libraries(ps2-unpack PRIVATE nt_package nt_disc)
 add_library(nt_elf libraries/elf/src/elf.cpp libraries/elf/src/iop_module.cpp libraries/elf/src/iop_imports.cpp libraries/elf/src/iop_exports.cpp)
 target_include_directories(nt_elf PUBLIC libraries/elf/include)
 target_link_libraries(nt_elf PUBLIC nt_binary)
@@ -93,11 +99,15 @@ add_executable(ps2-convert-inventory programs/ps2-convert-inventory/main.cpp)
 target_link_libraries(ps2-convert-inventory PRIVATE nt_inventory)
 add_executable(AnyPS2 programs/AnyPS2/main.cpp)
 target_link_libraries(AnyPS2 PRIVATE nt_process)
-add_dependencies(AnyPS2 ps2-import ps2-inspect ps2-recompile ps2-iop-recompile ps2-convert-inventory ps2-build)
+add_dependencies(AnyPS2 ps2-unpack ps2-import ps2-inspect ps2-recompile ps2-iop-recompile ps2-convert-inventory ps2-build)
 
 include(CTest)
 option(ANYPS2_TEST_PRESENTATION "Run a visible Vulkan window integration test" OFF)
 if(BUILD_TESTING)
+    add_executable(packed-image-tests tests/packed_image.cpp)
+    target_include_directories(packed-image-tests PRIVATE "${anyps2_zlib_SOURCE_DIR}" "${anyps2_zlib_BINARY_DIR}")
+    target_link_libraries(packed-image-tests PRIVATE nt_package nt_elf zlibstatic)
+    add_test(NAME packed-image COMMAND packed-image-tests)
     if(WIN32)
         add_executable(host-metrics-tests tests/host_metrics.cpp)
         target_link_libraries(host-metrics-tests PRIVATE nt_host_metrics)
@@ -150,6 +160,13 @@ if(BUILD_TESTING)
             "-DGENERATOR=${CMAKE_GENERATOR}" "-DPLATFORM=${CMAKE_GENERATOR_PLATFORM}"
             "-DEXE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ee_project.cmake")
         set_tests_properties(ee-llvm-project PROPERTIES TIMEOUT 120)
+        add_test(NAME packed-llvm-project COMMAND "${CMAKE_COMMAND}"
+            "-DFIXTURE=$<TARGET_FILE:packed-image-tests>" "-DUNPACKER=$<TARGET_FILE:ps2-unpack>"
+            "-DCONVERTER=$<TARGET_FILE:ps2-recompile>" "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+            "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/packed-project-tests" "-DGENERATOR=${CMAKE_GENERATOR}"
+            "-DPLATFORM=${CMAKE_GENERATOR_PLATFORM}" "-DEXE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/packed_project.cmake")
+        set_tests_properties(packed-llvm-project PROPERTIES TIMEOUT 120)
         add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/iop-llvm-fixture.obj"
             COMMAND emit-iop-fixture "${CMAKE_CURRENT_BINARY_DIR}/iop-llvm-reference.ll"
                 "${CMAKE_CURRENT_BINARY_DIR}/iop-llvm-fixture.irx" "${CMAKE_CURRENT_BINARY_DIR}/iop-llvm-fixture.ll"

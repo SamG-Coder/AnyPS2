@@ -52,7 +52,11 @@ private:
         self.error_=Error::none;
         auto unknown=self.unavailable_;
         const auto next_control=op==PerformanceOperation::write_control ? value : state.control;
-        bool needs_sample=false;
+        const bool clock_read=op==PerformanceOperation::read_clock;
+        if (clock_read && !self.elapsed_) {
+            self.error_=Error::unavailable_event; return {Stop::unsupported_system};
+        }
+        bool needs_sample=clock_read;
         for (unsigned i=0;i<2;++i) {
             if (performance_active(state.control,i) && (!self.measurable(state.control,i) || !self.previous_))
                 unknown|=1U<<i;
@@ -73,6 +77,7 @@ private:
         }
         IoRead result{Stop::budget};
         switch (op) {
+        case PerformanceOperation::read_clock: result.value=static_cast<std::uint32_t>((*now)[0]); break;
         case PerformanceOperation::read_control: result.value=state.control; break;
         case PerformanceOperation::write_control: state.control=value; break;
         case PerformanceOperation::write_counter:

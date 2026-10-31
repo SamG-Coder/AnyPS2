@@ -261,7 +261,7 @@ EeAssessment assess(ByteView bytes,std::span<const PayloadMapping> mappings) {
             instructions.push_back(instruction);
             using r5900::Op;
             const bool transfer=(instruction.op==Op::mtc0 || instruction.op==Op::mfc0) &&
-                (instruction.rd==0 || instruction.rd==2 || instruction.rd==3 || instruction.rd==5 || instruction.rd==6 || instruction.rd==10);
+                (instruction.rd==0 || instruction.rd==1 || instruction.rd==2 || instruction.rd==3 || instruction.rd==5 || instruction.rd==6 || instruction.rd==10);
             if (transfer || instruction.op==Op::tlbr || instruction.op==Op::tlbwi ||
                 instruction.op==Op::tlbwr || instruction.op==Op::tlbp) {
                 if (!result.address_space_requests) result.first_address_space_request=instruction.pc;

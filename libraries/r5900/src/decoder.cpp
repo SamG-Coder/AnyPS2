@@ -37,7 +37,7 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
         if (w == 0x42000006) i.op = Op::tlbwr;
         if (w == 0x42000008) i.op = Op::tlbp;
         if (w == 0x42000018) i.op = Op::eret;
-        if (((i.rd == 0 || i.rd == 2 || i.rd == 3 || i.rd == 5 || i.rd == 10 || i.rd == 6 || i.rd == 12 || i.rd == 14 || i.rd == 30 || (i.rd == 28 && i.rs == 0)) && (w & 0x7ff) == 0) ||
+        if (((i.rd == 0 || i.rd == 2 || i.rd == 3 || i.rd == 5 || i.rd == 10 || i.rd == 6 || i.rd == 12 || i.rd == 14 || i.rd == 30 || ((i.rd == 28 || i.rd == 9 || i.rd == 1) && i.rs == 0)) && (w & 0x7ff) == 0) ||
             (i.rd == 25 && (w & 0x7c0) == 0)) {
             if (i.rs == 0) i.op = Op::mfc0;
             if (i.rs == 4) i.op = Op::mtc0;

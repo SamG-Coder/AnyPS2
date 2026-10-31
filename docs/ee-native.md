@@ -2106,3 +2106,20 @@ Private GT4 validation completes the populated layout declarations and vacant
 entry cleanup, then reaches ExecPS2. The loaded secondary image has not yet been
 linked into the boot executable's AOT code set. The warning still renders before
 the black handoff screen; a title screen is not established.
+
+Count-register reads are lowered to the same native elapsed clock selected for
+profiling, returning the low 32 bits with the required signed register extension.
+This is an explicit native clock replacement, without PS2-frequency scaling.
+Strict CPU-counter providers reject this operation; absent or regressed samples
+stop without retirement. Counter configuration and reset slots are independent
+of the absolute elapsed-clock read. Count writes remain unsupported.
+
+Native ExecPS2 handoff validates a compiled entry and snapshots bounded arguments
+before changing ownership. It accepts a current main thread with no other live
+workers, resets main-thread/heap/semaphore state, removes INTC callbacks and masks
+INTC delivery without acknowledging pending producer events or resetting DMA.
+SetupThread publishes the captured argument block into validated writable RAM.
+Uncompiled targets stop with their requested entry; active interrupts, live peer
+threads, invalid pointers and oversized arguments preserve the previous image.
+The Random-index register remains an explicit unsupported address-space service;
+it is not replaced with a fabricated index or assumed to be an entropy source.

@@ -2465,3 +2465,16 @@ ranges. Conversion rejects conflicting backing and permissions. Analysis fixture
 recover table pointers from original synthetic ELF data and reject truncated
 records and unrelated service calls. These are native-code acceptance tests;
 actual GT4 execution is separately required and does not imply a title screen.
+
+### Packed executable and native handoff milestone
+
+`packed-image` covers original synthetic DEFLATE/section input, malformed lengths,
+truncation, trailing data, out-of-RAM sections, missing entry points and conflicting
+versus equal overlaps. `packed-llvm-project` unpacks a synthetic container, emits
+LLVM, compiles, audits and executes the resulting native program. Compiled EE
+checks cover clock sampling, wrap/sign extension, unavailable/regressed sources,
+unsupported Random-index reads, and image handoff into a compiled startup entry.
+The handoff checks retained arguments after old storage is cleared, reset thread
+identity, INTC masking without loss of pending events, and atomic rejection of
+invalid or uncompiled entries. Actual secondary-image linking remains distinct
+from these synthetic gates and standalone machine compilation.

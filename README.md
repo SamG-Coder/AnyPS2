@@ -23,7 +23,7 @@ There is no generated C++ game-code backend or C++ fallback. Retain local IR and
 build artifacts for reproducibility; keep converted commercial content ignored.
 The standalone IOP converter is implemented for a bounded subset. EE/VU LLVM
 conversion and integration into game startup remain unfinished.
-**GT4 does not yet boot to a visible screen or run as a playable game.**
+**GT4 renders its opening warning through Vulkan, but has not reached the title screen or playable gameplay.**
 No performance improvement is claimed.
 
 ## Pipeline
@@ -48,7 +48,9 @@ not linked or bundled.
 
 ## Build and test
 
-Requires CMake 3.24 or later and a C++20 compiler. The tested platform is Windows
+Requires CMake 3.24 or later, a C++20 compiler and a C compiler for the pinned
+zlib conversion dependency. Initial configuration downloads zlib 1.3.1 with a
+verified archive hash; generated game executables do not link this importer dependency. The tested platform is Windows
 x64 with Visual Studio's C++ workload. Install the Vulkan SDK (including `glslc`
 and validation layers) and a Vulkan-capable graphics driver. GS solid-sprite
 drawing now uses Vulkan compute; there is no silent CPU rendering fallback.
@@ -571,3 +573,16 @@ On Windows, `anyps2-host-metrics` lists the native profiling sources advertised
 by the current system. It is a read-only capability probe: it does not install a
 driver, configure global counters, start tracing, or provide guest measurements.
 Advertised sources alone do not establish a usable native performance provider.
+
+For an unencrypted length-prefixed DEFLATE executable container, `ps2-unpack`
+produces a private ELF input for ordinary LLVM conversion:
+
+```powershell
+.\build\Release\ps2-unpack.exe --disc 'C:\path\to\owned-game.iso' 'path/to/packed-program' work\secondary.elf
+.\build\Release\ps2-recompile.exe work\secondary.elf work\secondary-native
+```
+
+The importer validates bounded segments and rejects conflicting overlaps; opaque
+container metadata is not authenticated. Only the segment containing the entry
+point is initially marked executable. It neither runs the program nor connects
+it to an existing executable; secondary-image handoff remains in development.

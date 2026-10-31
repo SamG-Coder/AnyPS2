@@ -8,12 +8,12 @@
 #endif
 
 int main(int argc, char** argv) {
-    const std::map<std::string,std::string> programs{{"import","ps2-import"},{"inspect","ps2-inspect"},
+    const std::map<std::string,std::string> programs{{"import","ps2-import"},{"inspect","ps2-inspect"},{"unpack","ps2-unpack"},
         {"recompile","ps2-recompile"},{"iop-recompile","ps2-iop-recompile"},{"inventory","ps2-convert-inventory"},
         {"build","ps2-build"}};
     if (argc < 2 || std::string_view(argv[1]) == "--help") {
         std::cout << "AnyPS2 - generic BIOS-free PS2-to-PC toolchain\n"
-            "Usage: AnyPS2 <import|inspect|iop-recompile|recompile|inventory|build> [arguments]\n"
+            "Usage: AnyPS2 <import|inspect|unpack|iop-recompile|recompile|inventory|build> [arguments]\n"
             "Each command is a separate C++ program. Run a command without arguments for its usage.\n"
             "LLVM is the only conversion backend. EE entry-flow conversion is experimental and stops at syscalls.\n";
         return 0;

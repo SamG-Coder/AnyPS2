@@ -97,8 +97,43 @@ int main() {
             check(nt_ee_generated_run(&state,&memory,7)==nt::ee::Stop::unsupported_system);
             setup(0,0,0);
             check(nt_ee_generated_run(&state,&memory,7)==nt::ee::Stop::unsupported_system);
+            state={}; state.pc=0x41002c; state.set(8,123);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system && state.gpr[8].lo==123 && !state.executed);
             setup(0,7,0x47); state.pc+=4;
             check(nt_ee_generated_run(&state,&memory,7)==nt::ee::Stop::unsupported_system && state.executed==0);
+        }
+        {
+            std::vector<std::uint8_t> ram(0x10000);
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::runtime::State state;
+            nt::ee::NativeInterrupts interrupts; memory.interrupts=&interrupts;
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
+            state.pc=0x11ec; state.set(3,0x3c); state.set(4,0); state.set(5,0x8000);
+            state.set(6,0x1000); state.set(7,0x2000); state.set(8,0x1100);
+            check(services.invoke(state,memory)==nt::ee::Stop::budget);
+            unsigned pointer=0x80002100U; std::memcpy(ram.data()+0x2200,&pointer,4);
+            std::memcpy(ram.data()+0x2100,"native-launch",14);
+            state.pc=0x11ec; state.set(3,7); state.set(4,0x420010); state.set(5,0x80000500U);
+            state.set(6,16); state.set(7,0x80002200U);
+            const auto retired=state.executed;
+            check(services.invoke(state,memory)==nt::ee::Stop::unsupported_system && services.main_thread() && state.executed==retired);
+            state.set(6,1); state.set(4,0x123456);
+            check(services.invoke(state,memory)==nt::ee::Stop::invalid_state && services.main_thread());
+            state.set(4,0x123454);
+            check(services.invoke(state,memory)==nt::ee::Stop::unmapped_code && services.main_thread());
+            check(interrupts.install(3,0x350000,nt_ee_generated_contains)==nt::ee::Stop::budget);
+            interrupts.raise(3);
+            state.set(4,0x420010); state.set(7,0xfffffff0U);
+            check(services.invoke(state,memory)==nt::ee::Stop::memory_fault && services.main_thread() && state.executed==retired);
+            state.set(7,0x80002200U);
+            check(services.invoke(state,memory)==nt::ee::Stop::budget && state.pc==0x420010 &&
+                !services.main_thread() && !services.current_thread() && state.gpr[28].lo==0xffffffff80000500ULL);
+            check(interrupts.read(0x1000f010).value==0 && interrupts.read(0x1000f000).value==(1U<<3));
+            std::memset(ram.data()+0x2100,0,14); // Captured arguments survive old-image clearing.
+            check(nt::ee::run(nt_ee_generated_run,state,memory,32,services)==nt::ee::Stop::syscall &&
+                state.pc==0x420030 && services.main_thread() && services.current_thread()->id==1);
+            unsigned argc=0,argv=0,end=99;
+            std::memcpy(&argc,ram.data()+0x2400,4); std::memcpy(&argv,ram.data()+0x2404,4); std::memcpy(&end,ram.data()+0x2408,4);
+            check(argc==1 && !end && std::strcmp(reinterpret_cast<const char*>(ram.data()+argv),"native-launch")==0);
         }
         {
             // Execute original LLVM counter transfers against deterministic
@@ -164,6 +199,8 @@ int main() {
             check(nt_ee_generated_run(&state,&measured,1)==nt::ee::Stop::unsupported_system &&
                   pmu.error()==nt::ee::NativePerformanceCounters::Error::regressed_sample &&
                   measured.performance.counters[0]==80);
+            state={}; state.pc=0x410028;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system);
             // Native clock policy deliberately replaces both profiling events
             // with elapsed ticks; it never presents them as hardware misses.
             sample=1000; available=true;
@@ -187,6 +224,15 @@ int main() {
             check(nt_ee_generated_run(&state,&timed,1)==nt::ee::Stop::budget);
             state.pc=0x1498;
             check(nt_ee_generated_run(&state,&timed,8)==nt::ee::Stop::syscall);
+            state={}; state.pc=0x410028; sample=0x180000004ULL;
+            const auto before_control=timed.performance.control;
+            check(nt_ee_generated_run(&state,&timed,1)==nt::ee::Stop::budget &&
+                  state.gpr[8].lo==0xffffffff80000004ULL && timed.performance.control==before_control);
+            state.pc=0x410028; available=false;
+            check(nt_ee_generated_run(&state,&timed,1)==nt::ee::Stop::unsupported_system && state.pc==0x410028);
+            available=true; sample--;
+            check(nt_ee_generated_run(&state,&timed,1)==nt::ee::Stop::unsupported_system && clock.error()==nt::ee::NativePerformanceCounters::Error::regressed_sample);
+            ++sample;
             sample+=1000; state.pc=0x148c;
             check(nt_ee_generated_run(&state,&timed,2)==nt::ee::Stop::budget &&
                   state.gpr[12].lo==0 && state.gpr[13].lo==0);

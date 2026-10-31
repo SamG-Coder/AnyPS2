@@ -12,7 +12,7 @@ struct PerformanceState { std::uint32_t control=0; std::uint32_t counters[2]{}; 
 // preserve service state and remain retryable. No callback receives guest code.
 struct IoRead { Stop status; std::uint32_t value=0; };
 struct IoRead64 { Stop status; std::uint64_t value=0; };
-enum class PerformanceOperation : std::uint32_t { read_control, write_control, read_counter, write_counter };
+enum class PerformanceOperation : std::uint32_t { read_control, write_control, read_counter, write_counter, read_clock };
 // Providers own measurement semantics and must reject unsupported event/mode
 // combinations atomically. They receive typed requests, never guest instructions.
 struct NativePerformance {

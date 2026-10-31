@@ -23,6 +23,6 @@ constexpr std::uint32_t native_syscall_number(std::uint32_t number) {
 }
 constexpr bool startup_syscall(std::uint32_t number) {
     number=native_syscall_number(number);
-    return number==0x7f || number==2 || number==0x70 || number==0x71 || number==0x76 || number==0x77 || sif_control_syscall(number) || settings_syscall(number) || thread_syscall(number) || intc_syscall(number) || cache_syscall(number) || number==0x74 || number==0x3c || number==0x3d || number==0x3e || (number>=0x40 && number<=0x48);
+    return number==0x7f || number==7 || number==2 || number==0x70 || number==0x71 || number==0x76 || number==0x77 || sif_control_syscall(number) || settings_syscall(number) || thread_syscall(number) || intc_syscall(number) || cache_syscall(number) || number==0x74 || number==0x3c || number==0x3d || number==0x3e || (number>=0x40 && number<=0x48);
 }
 }

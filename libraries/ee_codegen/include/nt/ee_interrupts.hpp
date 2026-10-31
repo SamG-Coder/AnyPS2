@@ -90,6 +90,12 @@ public:
         if (enable) enabled_|=1U<<line; else enabled_&=~(1U<<line);
         return {Stop::budget,previous!=enable ? 1U : 0U};
     }
+    // Exec replaces the process's INTC callbacks and masks delivery. Pending
+    // producer events and DMA ownership are not silently acknowledged/reset.
+    void replace_image() {
+        enabled_=0; handlers_={}; sbus_={};
+        std::erase_if(records_,[](const auto& record) { return !record.dma; });
+    }
     bool active() const { return interrupted_.has_value(); }
     bool returning(const runtime::State& state) const { return interrupted_ && state.pc==return_gate; }
     Stop enter(runtime::State& state,Memory& memory,CodeOverlap protection) {
