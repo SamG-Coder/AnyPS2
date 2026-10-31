@@ -41,18 +41,18 @@ public:
     }
     unsigned semaphore_waiters(std::uint32_t id) const {
         return static_cast<unsigned>(std::count_if(records_.begin(),records_.end(),[id](const auto& item) {
-            return item.second.status==4 && item.second.semaphore==id;
+            return (item.second.status&4) && item.second.semaphore==id;
         }));
     }
     bool signal_semaphore(std::uint32_t id) {
         auto selected=records_.end();
         for (auto i=records_.begin();i!=records_.end();++i) {
             const auto& thread=i->second;
-            if (thread.status!=4 || thread.semaphore!=id) continue;
+            if (!(thread.status&4) || thread.semaphore!=id) continue;
             if (selected==records_.end() || thread.order<selected->second.order) selected=i;
         }
         if (selected==records_.end()) return false;
-        selected->second.semaphore=0; selected->second.status=2; selected->second.order=next_order_++;
+        selected->second.semaphore=0; selected->second.status=(selected->second.status&8) ? 8U : 2U; selected->second.order=next_order_++;
         return true;
     }
     void initialize(runtime::InitialStack stack,std::uint32_t gp,std::uint32_t root) {
@@ -85,6 +85,30 @@ public:
         const auto found=records_.find(id);
         if (found==records_.end()) return (call==0x30 || call==0x31) && id<256 ? Result{Stop::budget,0} : fail();
         auto& thread=found->second;
+        if (call==0x25) {
+            if (id==current_ || thread.status==0x10) return fail();
+            thread.status=0x10; thread.semaphore=0; thread.wakeups=0;
+            thread.context={}; thread.delete_on_exit=false;
+            return {Stop::budget,id};
+        }
+        if (call==0x37) {
+            if (id==current_ || (thread.status!=2 && thread.status!=4)) return fail();
+            thread.status=thread.status==4 ? 12U : 8U;
+            return {Stop::budget,id};
+        }
+        if (call==0x39) {
+            if (thread.status!=8 && thread.status!=12) return fail();
+            thread.status=thread.status==12 ? 4U : 2U;
+            if (thread.status==2) thread.order=next_order_++;
+            return {Stop::budget,id};
+        }
+        if (call==0x2d) {
+            if (id==current_ || !(thread.status&4)) return fail();
+            thread.status=(thread.status&8) ? 8U : 2U;
+            thread.semaphore=0; thread.context.set(2,~std::uint64_t(0));
+            if (thread.status==2) thread.order=next_order_++;
+            return {Stop::budget,id};
+        }
         if (call==0x21) {
             if (id==current_ || thread.status!=0x10) return fail();
             records_.erase(found); return {Stop::budget,id};
@@ -111,7 +135,7 @@ public:
         }
         if (call==0x33 || call==0x34) {
             if ((id==current_ && thread.status!=4) || thread.status==0x10) return fail();
-            if (thread.status==4 && !thread.semaphore) { thread.status=2; thread.order=next_order_++; }
+            if ((thread.status&4) && !thread.semaphore) { thread.status=(thread.status&8) ? 8U : 2U; thread.order=next_order_++; }
             else {
                 if (thread.wakeups==0x7fffffffU) return {Stop::unsupported_system};
                 ++thread.wakeups;
@@ -139,7 +163,7 @@ public:
                 if (protection(address,48)) { memory.fault_address=arg(1); return {Stop::code_write}; }
                 const std::array<std::uint32_t,12> words{thread.status,thread.entry,thread.stack,thread.size,thread.gp,
                     thread.initial_priority,thread.priority,thread.attributes,thread.option,
-                    thread.status==4 ? (thread.semaphore ? 2U : 1U) : 0U,thread.semaphore,thread.wakeups};
+                    (thread.status&4) ? (thread.semaphore ? 2U : 1U) : 0U,thread.semaphore,thread.wakeups};
                 std::memcpy(memory.data+address,words.data(),48);
             }
             return {Stop::budget,thread.status};

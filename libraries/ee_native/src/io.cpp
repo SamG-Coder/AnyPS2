@@ -98,3 +98,36 @@ extern "C" std::uint64_t nt_ee_address_space(nt::ee::Memory* memory,std::uint32_
         nt::ee::IoRead{nt::ee::Stop::unsupported_system};
     return (std::uint64_t(result.status)<<32)|result.value;
 }
+
+
+// This consumes a converted layout declaration, not a sequence of CPU register
+// writes. It owns no simulated entries and cannot redirect individual accesses.
+// Unsupported aliases require a converter/native allocation implementation.
+extern "C" std::uint32_t nt_ee_validate_native_layout(nt::ee::Memory* memory,
+    std::uint32_t slot,std::uint32_t mask,std::uint32_t address,std::uint32_t first,std::uint32_t second) {
+    using nt::ee::Stop;
+    const auto unsupported=static_cast<std::uint32_t>(Stop::unsupported_system);
+    if (slot>=48 || (address&255)) return unsupported;
+    if (first&0x80000000U) {
+        if (mask || address!=nt::ee::scratchpad_begin || (first&6U)!=6U || (first&0x7fffffc0U) || (second&0xffffffc0U) ||
+            !memory->scratchpad || memory->scratchpad_bytes<nt::ee::scratchpad_size) return unsupported;
+        return static_cast<std::uint32_t>(Stop::budget);
+    }
+    bool valid_mask=false;
+    for (const auto candidate:{0U,0x6000U,0x1e000U,0x7e000U,0x1fe000U,0x7fe000U,0x1ffe000U})
+        valid_mask|=mask==candidate;
+    if (!valid_mask || (address&(mask|0x1fffU))) return unsupported;
+    const std::uint32_t page=(mask+0x2000U)/2,entries[]{first,second};
+    for (unsigned half=0;half<2;++half) {
+        const auto entry=entries[half];
+        if ((entry&0xfc000000U) || (entry&6)!=6) return unsupported;
+        const auto physical=(entry&0x03ffffc0U)<<6;
+        if (physical%page || !memory->data || std::uint64_t(physical)+page>memory->size) return unsupported;
+        for (std::uint64_t offset=0;offset<page;offset+=4096) {
+            const auto logical=std::uint64_t(address)+std::uint64_t(half)*page+offset;
+            if (logical>0xffffffffULL || nt::runtime::default_ram_address(static_cast<std::uint32_t>(logical))!=physical+offset)
+                return unsupported;
+        }
+    }
+    return static_cast<std::uint32_t>(Stop::budget);
+}

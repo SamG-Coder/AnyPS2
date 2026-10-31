@@ -1573,3 +1573,20 @@ behavior identify the debug serial path. The native adapter sends bytes to an
 explicit synchronous host sink; a completed write has no pending transmit queue.
 An absent or failed sink stops. It does not model serial baud timing or receive
 traffic. The CLI owns diagnostic output, not the reusable library.
+
+The native thread lifecycle extends the existing scheduler with normal-context
+TerminateThread, SuspendThread, ResumeThread and ReleaseWaitThread using the
+public PS2SDK kernel.h/syscallnr.h interfaces at the pinned revision. Suspended
+waiters remain suspended after an event or explicit wait release. Wait release
+returns failure to the blocked operation; termination removes pending wait and
+wake state before restart. Interrupt variants remain unsupported. No upstream
+implementation is copied.
+
+A complete indexed address-layout write sequence can be lowered as one native
+layout declaration. The current lowering validates only writable identity RAM,
+existing native RAM aliases and the already allocated scratchpad. It creates no
+TLB/register bank and adds no lookup to loads or stores. Other layouts and
+readback remain unsupported. The seven-operation sequence is a single native
+boundary and needs at least seven operations of diagnostic budget; no partial
+hardware-register state is exposed. Interior entry points still stop through
+the unsupported primitive path.

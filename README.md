@@ -111,7 +111,9 @@ remaining packet commands,
 drawing translation/presentation, further indirect-target discovery
 and game-supplied IOP module integration remain unfinished. DMA completion delivery now shares the native interrupt
 dispatcher and is verified with a compiled packet-to-handler test. Address-translation
-routines compile to native requests, but no production mapping provider is connected. Native
+routines compile to native requests. Complete indexed layout declarations can be
+lowered to validation of existing native RAM and scratchpad allocations; additional
+aliases and layout readback remain unsupported. No runtime TLB provider is connected. Native
 thread lifecycle and cooperative priority switching are implemented, with worker
 execution and return covered by compiled synthetic tests. Timer 3 alias
 registration, public INTC handler chains and native delivery of externally raised
@@ -336,7 +338,8 @@ the data as instructions. Keep all converted commercial content under `work/`.
 
 The runtime supports a subset of EE integer/MMI operations, delay slots, memory
 transfers, limited floating-point behavior, startup thread/heap services,
-thread creation/start/exit/deletion and priority scheduling at syscall boundaries,
+thread creation/start/exit/deletion, normal-context termination/suspension/resume,
+wait release and priority scheduling at syscall boundaries,
 thread status queries, volatile OSD configuration, FIFO semaphore blocking/wakeup
 when another thread is runnable,
 guest syscall registration and callbacks,

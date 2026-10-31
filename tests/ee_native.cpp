@@ -28,6 +28,34 @@ void run_ee_file_rpc_tests();
 int main() {
     try {
         {
+            // Whole native layout transaction, followed by direct compiled
+            // accesses to the existing backing. No address-space provider.
+            std::array<std::uint8_t,0x4000> ram{},scratch{};
+            nt::ee::Memory memory; memory.data=ram.data(); memory.size=ram.size();
+            memory.scratchpad=scratch.data(); memory.scratchpad_bytes=scratch.size();
+            nt::runtime::State state;
+            const auto setup=[&](unsigned address,unsigned first,unsigned second) {
+                state={}; state.pc=0x410000; state.set(8,0); state.set(9,0);
+                state.set(10,address); state.set(11,first); state.set(12,second);
+            };
+            setup(nt::ee::scratchpad_begin,0x80000007,7);
+            check(nt_ee_generated_run(&state,&memory,6)==nt::ee::Stop::budget && state.executed==0 && state.pc==0x410000);
+            check(nt_ee_generated_run(&state,&memory,7)==nt::ee::Stop::budget && state.executed==7 && state.pc==0x41001c);
+            state.pc=0x360000; state.set(4,nt::ee::scratchpad_begin+4); state.set(8,0x345678);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+            unsigned value=0; std::memcpy(&value,scratch.data()+4,4); check(value==0x345678);
+            setup(0,7,0x47);
+            check(nt_ee_generated_run(&state,&memory,7)==nt::ee::Stop::budget);
+            setup(0xc0000000,7,0x47);
+            check(nt_ee_generated_run(&state,&memory,7)==nt::ee::Stop::unsupported_system && state.executed==0);
+            setup(0,3,0x47);
+            check(nt_ee_generated_run(&state,&memory,7)==nt::ee::Stop::unsupported_system);
+            setup(nt::ee::scratchpad_begin,0x80000007,7); memory.scratchpad=nullptr;
+            check(nt_ee_generated_run(&state,&memory,7)==nt::ee::Stop::unsupported_system);
+            setup(0,7,0x47); state.pc+=4;
+            check(nt_ee_generated_run(&state,&memory,7)==nt::ee::Stop::unsupported_system && state.executed==0);
+        }
+        {
             // Execute original LLVM counter transfers against deterministic
             // samples; these samples are test input, never a runtime fallback.
             std::uint64_t sample=100;
@@ -141,8 +169,24 @@ int main() {
             check(call(0x32).status==nt::ee::Stop::syscall); // Credit consumed exactly once.
             check(call(0x30,1,0x2100).value==4);
             std::uint32_t wait=0; std::memcpy(&wait,ram.data()+0x2100+36,4); check(wait==1);
+            check(call(0x37,1).value==1 && call(0x30,1).value==12);
+            check(call(0x2d,1).value==1 && call(0x30,1).value==8);
+            check(call(0x39,1).value==1 && call(0x30,1).value==2);
+            check(call(0x2d,1).value==~std::uint64_t(0));
+            threads.schedule(state);
+            check(state.gpr[2].lo==~std::uint64_t(0));
+            check(call(0x32).value==1); threads.schedule(state);
             check(call(0x33,1).value==1); threads.schedule(state);
             check(call(0x2f).value==1 && call(0x33,0).value==~std::uint64_t(0));
+            // Suspended semaphore waiters retain their queue membership until
+            // an actual signal, and are not made runnable by that signal.
+            check(threads.wait_semaphore(9)==nt::ee::Stop::budget);
+            threads.schedule(state);
+            check(call(0x37,1).value==1 && threads.semaphore_waiters(9)==1);
+            check(threads.signal_semaphore(9) && threads.semaphore_waiters(9)==0);
+            check(call(0x30,1).value==8);
+            check(call(0x39,1).value==1); threads.schedule(state);
+            check(call(0x2f).value==1);
             nt::ee::NativeThreads idle;
             idle.initialize({0x8000,0x1000,0x8d60},0,0x1100); idle.allow_idle=true;
             const auto idle_call=[&](unsigned number,unsigned id=0) {
@@ -771,7 +815,18 @@ int main() {
             std::array<std::uint32_t,12> status{}; std::memcpy(status.data(),ram.data()+0x5100,48);
             check(status[1]==0x390000 && status[2]==0x24000 && status[5]==10 && status[8]==7);
             check(call(0x22,2,0x12345678)==nt::ee::Stop::budget && state.gpr[2].lo==2 && state.pc==0x11f0);
+            check(call(0x37,2)==nt::ee::Stop::budget && state.gpr[2].lo==2);
+            check(call(0x30,2)==nt::ee::Stop::budget && state.gpr[2].lo==8);
+            check(call(0x37,2)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
+            check(call(0x39,2)==nt::ee::Stop::budget && state.gpr[2].lo==2);
+            check(call(0x25,2)==nt::ee::Stop::budget && state.gpr[2].lo==2);
+            check(call(0x30,2)==nt::ee::Stop::budget && state.gpr[2].lo==16);
+            check(call(0x22,2,0x12345678)==nt::ee::Stop::budget && state.gpr[2].lo==2);
             check(call(0x21,2)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
+            check(call(0x32)==nt::ee::Stop::budget && state.pc==0x390000);
+            check(call(0x2d,1)==nt::ee::Stop::budget && state.pc==0x11f0 && state.gpr[2].lo==~std::uint64_t(0));
+            check(call(0x25,2)==nt::ee::Stop::budget);
+            check(call(0x22,2,0x12345678)==nt::ee::Stop::budget);
             state.gpr[16].lo=0xabcdef; state.cop0_status=0x400; state.cop0_epc=0x1234;
             check(call(0x29,0,20)==nt::ee::Stop::budget && state.pc==0x390000);
             check(state.gpr[4].lo==0x12345678 && state.gpr[28].lo==0x6000 && state.gpr[29].lo==0x24d60);

@@ -113,6 +113,21 @@ void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::s
             w.store("i32",std::to_string(payload.address),offsetof(ee::Memory,fault_address),"%memory");
             w.out<<"  ret i32 14\npayload_ready"<<suffix<<":\n";
         }
+        if (native_layout_transaction(instructions.subspan(n)) && !(n && instructions[n-1].branch())) {
+            const auto enough=w.value("icmp uge i64 "+remaining+", 7");
+            w.out<<"  br i1 "<<enough<<", label %layout_call"<<suffix<<", label %budget_stop\nlayout_call"<<suffix<<":\n";
+            std::string args;
+            for (unsigned field=0;field<5;++field) args+=", i32 "+w.narrow(w.reg(instructions[n+field].rt));
+            const auto result=w.value("call i32 @nt_ee_validate_native_layout(ptr %memory"+args+")");
+            const auto layout_ready=w.value("icmp eq i32 "+result+", 0");
+            w.out<<"  br i1 "<<layout_ready<<", label %layout_done"<<suffix<<", label %layout_stop"<<suffix
+                 <<"\nlayout_stop"<<suffix<<":\n  ret i32 "<<result<<"\nlayout_done"<<suffix<<":\n";
+            w.store("i32",std::to_string(i.pc+28),offsetof(runtime::State,pc));
+            w.store("i64",w.binary("add","i64",w.load("i64",offsetof(runtime::State,executed)),"7"),offsetof(runtime::State,executed));
+            const auto left=w.binary("sub","i64",remaining,"7");
+            w.out<<"  store i64 "<<left<<", ptr %remaining\n  br label %dispatch\n";
+            continue;
+        }
         if (i.op==Op::breakpoint) { w.out<<"  ret i32 11\n"; continue; }
         if (i.op==Op::syscall) { w.out<<"  ret i32 1\n"; continue; }
         std::string taken="true";
@@ -321,6 +336,7 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
     const auto end=w.binary("add","i64",address,bytes);
     const auto overlap=code_overlap(w,address,end,ranges);
     w.out<<"  ret i1 "<<overlap<<"\n}\n";
+    w.out<<"declare i32 @nt_ee_validate_native_layout(ptr, i32, i32, i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_address_space(ptr, i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_performance(ptr, i32, i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_io_read32(ptr, i32)\ndeclare i32 @nt_ee_io_write32(ptr, i32, i32)\ndeclare i32 @nt_ee_io_write8(ptr, i32, i32)\n";

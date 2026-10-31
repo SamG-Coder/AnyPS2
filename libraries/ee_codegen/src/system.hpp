@@ -2,6 +2,16 @@
 #include "llvm_writer.hpp"
 
 namespace nt::ee_codegen {
+// Fold only a complete straight-line initialization transaction. Interior
+// entry points retain the unsupported primitive path; no register bank exists.
+inline bool native_layout_transaction(std::span<const r5900::Instruction> code) {
+    if (code.size()<7) return false;
+    constexpr unsigned selectors[]{0,5,10,2,3};
+    for (unsigned n=0;n<7;++n) if (code[n].pc!=code[0].pc+4*n) return false;
+    for (unsigned n=0;n<5;++n)
+        if (code[n].op!=Op::mtc0 || code[n].rd!=selectors[n] || (code[n].word&0x7ffU)) return false;
+    return code[5].op==Op::sync && code[6].op==Op::tlbwi;
+}
 inline bool address_space_operation(Op op) {
     return op==Op::tlbr || op==Op::tlbwi || op==Op::tlbwr || op==Op::tlbp;
 }

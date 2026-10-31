@@ -282,6 +282,15 @@ int main(int argc,char** argv) {
             code.push_back(nt::r5900::decode(pc,word)); pc+=4;
         }
     }
+    {
+        unsigned pc=0x410000,source=8;
+        for (const auto selector:{0U,5U,10U,2U,3U}) {
+            code.push_back(nt::r5900::decode(pc,0x40800000U|(source++<<16)|(selector<<11))); pc+=4;
+        }
+        for (const auto word:{0x0000040fU,0x42000002U,12U}) {
+            code.push_back(nt::r5900::decode(pc,word)); pc+=4;
+        }
+    }
     std::ostringstream generated; nt::ee_codegen::emit_llvm(generated,code,{},payloads);
     if (generated.str().find("fence seq_cst")==std::string::npos) throw std::runtime_error("Native SYNC ordering was omitted");
     const auto text=generated.str();
