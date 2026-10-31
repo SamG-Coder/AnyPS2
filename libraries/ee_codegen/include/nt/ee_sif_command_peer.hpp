@@ -124,7 +124,11 @@ private:
         return {delivered,delivered==Stop::budget ? 1U : 0U};
     }
     IoRead receive(std::span<const NativeSifPacket> packets) {
-        if (handed_off_) return reset_owner_.commands.accept(reset_owner_.commands.context,packets);
+        if (handed_off_) {
+            if (!packets.empty() && packets.back().bytes.size()>=16 && word(packets.back().bytes,8)==0x80000003)
+                return reset(packets,link_.peer_address());
+            return reset_owner_.commands.accept(reset_owner_.commands.context,packets);
+        }
         if (!connected_ || packets.empty() || packets.size()>2) return {Stop::unsupported_system};
         const auto& packet=packets.back();
         if (packet.destination!=port_ || packet.bytes.size()<16) return {Stop::invalid_state};
@@ -134,23 +138,7 @@ private:
         last_command_=command; last_option_=option;
         if (command==0x8000000a) return dispatch_rpc(packets,receive_address_,rpc_ready_);
         if ((header>>8) || packets.size()!=1) return {Stop::invalid_state};
-        if (command==0x80000003) {
-            if (!reset_owner_.reset) return {Stop::unsupported_system};
-            if (option || length<24) return {Stop::invalid_state};
-            const auto count=word(packet.bytes,16);
-            if (count>79 || count>length-24) return {Stop::invalid_state};
-            const auto bytes=std::span(packet.bytes).subspan(24,count);
-            if (std::find(bytes.begin(),bytes.end(),0)!=bytes.end()) return {Stop::invalid_state};
-            const NativeSifResetRequest request{word(packet.bytes,20),
-                {reinterpret_cast<const char*>(bytes.data()),bytes.size()}};
-            const auto accepted=reset_owner_.reset(reset_owner_.context,request);
-            if (accepted.status!=Stop::budget || !accepted.value) return accepted;
-            if (accepted.value!=1) return {Stop::invalid_state};
-            handed_off_=true;
-            rpc_ready_=false; receive_address_=0; registers_.fill(0); unavailable_server_.reset();
-            // New link addresses/flags are exclusively owned by the session.
-            return accepted;
-        }
+        if (command==0x80000003) return reset(packets,port_);
         if (command==0x80000002 && option==1) {
             // Publishing register zero acknowledges the available RPC dispatcher,
             // not any particular RPC server or successful game module startup.
@@ -187,6 +175,31 @@ private:
         receive_address_=address;
         if (command==0x80000002) link_.acknowledge_main(0x20000);
         return {Stop::budget,1};
+    }
+    IoRead reset(std::span<const NativeSifPacket> packets,std::uint32_t port) {
+        if (!reset_owner_.reset) return {Stop::unsupported_system};
+        if (!port || packets.size()!=1) return {Stop::invalid_state};
+        const auto& packet=packets.front();
+        if (packet.destination!=port || packet.bytes.size()<24) return {Stop::invalid_state};
+        const auto header=word(packet.bytes,0),length=header&255U;
+        if ((header>>8) || length<24 || length>104 || ((length+15U)&~15U)!=packet.bytes.size() ||
+            word(packet.bytes,8)!=0x80000003 || word(packet.bytes,12)) return {Stop::invalid_state};
+        last_command_=0x80000003; last_option_=0;
+        const auto count=word(packet.bytes,16);
+        if (count>80 || count>length-24) return {Stop::invalid_state};
+        const auto bytes=std::span(packet.bytes).subspan(24,count);
+        const auto end=std::find(bytes.begin(),bytes.end(),0);
+        // Accept counted text with optional trailing NUL padding, never hidden
+        // arguments after an embedded terminator.
+        if (std::any_of(end,bytes.end(),[](auto byte) { return byte!=0; })) return {Stop::invalid_state};
+        const NativeSifResetRequest request{word(packet.bytes,20),
+            {reinterpret_cast<const char*>(bytes.data()),static_cast<std::size_t>(end-bytes.begin())}};
+        const auto accepted=reset_owner_.reset(reset_owner_.context,request);
+        if (accepted.status!=Stop::budget || !accepted.value) return accepted;
+        if (accepted.value!=1) return {Stop::invalid_state};
+        handed_off_=true;
+        rpc_ready_=false; receive_address_=0; registers_.fill(0); unavailable_server_.reset();
+        return accepted;
     }
     NativeSifLink& link_;
     Memory& memory_;

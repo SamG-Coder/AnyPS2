@@ -1960,7 +1960,12 @@ startup and publishing flags produced by the new services. Compiled workers,
 incoming packets, outgoing replies and EE interrupt completion then share the
 native transport. Missing RPC servers still return an unsuccessful bind; the
 last requested server is reported to distinguish retry loops from useful work.
-Repeated reset and automatic selection of all archive services remain unfinished.
+Repeated reset routes back to the lifetime owner. It verifies archive membership
+again and prepares fresh backing and service objects before retiring the old
+workers, handles, registrations and queued replies. Startup waits for EE teardown;
+only the new compiled workers publish their handshake and completion state.
+Failed preparation leaves the old lifetime intact. Automatic selection of all
+archive services remains unfinished.
 The selected session also owns a fresh native CD/DVD initialization endpoint.
 It shares the existing RPC validation/reply implementation with bootstrap, but
 uses the compiled command session's completed handshake and published EE receive

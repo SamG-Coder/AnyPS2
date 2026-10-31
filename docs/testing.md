@@ -2478,3 +2478,13 @@ The handoff checks retained arguments after old storage is cleared, reset thread
 identity, INTC masking without loss of pending events, and atomic rejection of
 invalid or uncompiled entries. Actual secondary-image linking remains distinct
 from these synthetic gates and standalone machine compilation.
+
+### Repeated native IOP reset
+
+`native-sif-link` runs LLVM-compiled startup twice through the native reset owner.
+It checks deferred startup during EE teardown, malformed counted arguments,
+post-handoff reset routing, preservation after a failed data-image validation,
+fresh initialization and cancellation of an old queued command. The test ISO,
+archive and code are original synthetic fixtures. Actual GT4 now completes its
+second reset and reaches another indirect callback; this is startup progress,
+not a title-screen result.

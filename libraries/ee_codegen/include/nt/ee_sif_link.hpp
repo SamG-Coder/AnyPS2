@@ -14,6 +14,7 @@ public:
     void begin_peer_reset() { peer_address_=0; peer_flags_=0; reset_clear_pending_=0x30000; }
     bool reset_teardown_complete() const { return reset_clear_pending_==0; }
     std::uint32_t peer_flags() const { return peer_flags_; }
+    std::uint32_t peer_address() const { return peer_address_; }
     void acknowledge_main(std::uint32_t flags) { main_flags_&=~flags; }
     std::uint32_t main_address() const { return main_address_; }
     std::uint32_t main_flags() const { return main_flags_; }

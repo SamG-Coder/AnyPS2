@@ -13,6 +13,7 @@
 extern "C" nt::ee::Stop nt_ee_generated_run(nt::runtime::State*,nt::ee::Memory*,std::uint64_t);
 extern "C" bool nt_ee_generated_code_overlap(std::uint32_t,std::uint32_t);
 extern "C" bool nt_ee_generated_contains(std::uint32_t);
+void run_iop_reset_tests();
 namespace {
 void require(bool condition,std::source_location at=std::source_location::current()) {
     if (!condition) throw std::runtime_error("Native SIF integration failed at "+std::to_string(at.line()));
@@ -65,15 +66,26 @@ int main() {
             require(reset_platform.sif_outbound.pump(reset_memory)==Stop::budget && owner.calls==3 &&
                     reset_platform.sif_outbound.status(1)==0xffffffff && reset_platform.completions.status()==0x40);
             require(reset_platform.sif_link.service(0x7a,4,0).value==0x30000); // No fabricated BOOTEND.
-            require(submit(1).value==2 && reset_platform.sif_outbound.pump(reset_memory)==Stop::budget &&
-                    owner.calls==3 && owner.commands==1); // Old dispatcher is no longer active.
+            require(submit(3).value==2 && reset_platform.sif_outbound.pump(reset_memory)==Stop::budget &&
+                    owner.calls==4 && owner.commands==0 && owner.arguments=="x"); // Reset still reaches the lifetime owner.
+            store_native_word(reset_ram,0x4008,0x80000002);
+            require(reset_platform.sif_outbound.submit(reset_memory,0x3000,1).value==3 &&
+                    reset_platform.sif_outbound.pump(reset_memory)==Stop::budget && owner.commands==1);
             nt::ee::NativeSifOutbound malformed_outbound;
             nt::ee::NativeSifCommandPeer malformed(reset_platform.sif_link,reset_memory,nt_ee_generated_code_overlap,0x1000);
             require(malformed.reset_owner({&owner,Owner::reset,{&owner,Owner::receive}}) && malformed.connect(malformed_outbound));
             store_native_word(reset_ram,0x4010,9); // Only eight argument bytes fit.
+            store_native_word(reset_ram,0x4008,0x80000003);
             require(malformed_outbound.submit(reset_memory,0x3000,1).value==1 &&
-                    malformed_outbound.pump(reset_memory)==Stop::invalid_state && owner.calls==3);
+                    malformed_outbound.pump(reset_memory)==Stop::invalid_state && owner.calls==4);
+            nt::ee::NativeSifOutbound embedded_outbound;
+            nt::ee::NativeSifCommandPeer embedded(reset_platform.sif_link,reset_memory,nt_ee_generated_code_overlap,0x1000);
+            require(embedded.reset_owner({&owner,Owner::reset,{&owner,Owner::receive}}) && embedded.connect(embedded_outbound));
+            store_native_word(reset_ram,0x4010,3); reset_ram[0x401a]='y';
+            require(embedded_outbound.submit(reset_memory,0x3000,1).value==1 &&
+                    embedded_outbound.pump(reset_memory)==Stop::invalid_state && owner.calls==4);
         }
+        run_iop_reset_tests();
         std::vector<std::uint8_t> ee_ram(0x10000,0xcc),iop_ram(0x10000,0);
         nt::ee::Memory memory{ee_ram.data(),ee_ram.size()};
         nt::ee::NativePlatform platform; platform.attach(memory);
