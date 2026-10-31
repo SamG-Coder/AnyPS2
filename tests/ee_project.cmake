@@ -65,7 +65,7 @@ if(rejected EQUAL 0 OR NOT rejection MATCHES "forbidden runtime dependency" OR E
     message(FATAL_ERROR "Native output dependency gate accepted diagnostic runtime linkage: ${rejection}")
 endif()
 file(REMOVE "${run}/fixture.elf")
-execute_process(COMMAND "${executable}" "${run}/project/program.data" --capture-stop "${run}/observation"
+execute_process(COMMAND "${executable}" "${run}/project/program.data" --headless --capture-stop "${run}/observation"
     RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
 if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x0000102c executed=17 v0=43")
     message(FATAL_ERROR "Compiled EE ELF execution differs: ${out} ${err}")
@@ -80,19 +80,19 @@ if(NOT observation MATCHES "complete=true" OR NOT observation MATCHES "resumable
     message(FATAL_ERROR "Native stop observation differs from executed fixture")
 endif()
 file(SHA256 "${run}/observation/cpu.txt" before_capture)
-execute_process(COMMAND "${executable}" "${run}/project/program.data" --capture-stop "${run}/observation"
+execute_process(COMMAND "${executable}" "${run}/project/program.data" --headless --capture-stop "${run}/observation"
     RESULT_VARIABLE result ERROR_VARIABLE err TIMEOUT 10)
 file(SHA256 "${run}/observation/cpu.txt" after_capture)
 if(NOT result EQUAL 1 OR NOT err MATCHES "already exists" OR NOT before_capture STREQUAL after_capture)
     message(FATAL_ERROR "Existing native observation was not preserved")
 endif()
-execute_process(COMMAND "${executable}" "${run}/project/program.data" 1
+execute_process(COMMAND "${executable}" "${run}/project/program.data" --headless 1
     RESULT_VARIABLE result OUTPUT_VARIABLE out TIMEOUT 10)
 if(NOT result EQUAL 4 OR NOT out MATCHES "executed=1")
     message(FATAL_ERROR "EE operation budget was ignored: ${out}")
 endif()
 file(WRITE "${run}/truncated.data" "short")
-execute_process(COMMAND "${executable}" "${run}/truncated.data" RESULT_VARIABLE result ERROR_VARIABLE err TIMEOUT 10)
+execute_process(COMMAND "${executable}" "${run}/truncated.data" --headless RESULT_VARIABLE result ERROR_VARIABLE err TIMEOUT 10)
 if(NOT result EQUAL 1 OR NOT err MATCHES "data mismatch")
     message(FATAL_ERROR "EE executable accepted mismatched data")
 endif()
@@ -101,7 +101,7 @@ checked("${CONVERTER}" "${run}/fixture.elf.startup" "${run}/startup")
 checked("${CMAKE_COMMAND}" -S "${run}/startup" -B "${run}/startup-build" -G "${GENERATOR}"
     ${platform} "-DANYPS2_ROOT=${ROOT}")
 checked("${CMAKE_COMMAND}" --build "${run}/startup-build" --config Release --target ps2-native --parallel 2)
-execute_process(COMMAND "${run}/startup-build/Release/ps2-native${EXE_SUFFIX}" "${run}/startup/program.data"
+execute_process(COMMAND "${run}/startup-build/Release/ps2-native${EXE_SUFFIX}" "${run}/startup/program.data" --headless
     RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
 if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00001040 executed=16 v0=16384 syscall=127")
     message(FATAL_ERROR "Compiled startup service continuation differs: ${out} ${err}")
@@ -111,7 +111,7 @@ checked("${CONVERTER}" "${run}/fixture.elf.lifecycle" "${run}/lifecycle")
 checked("${CMAKE_COMMAND}" -S "${run}/lifecycle" -B "${run}/lifecycle-build" -G "${GENERATOR}"
     ${platform} "-DANYPS2_ROOT=${ROOT}")
 checked("${CMAKE_COMMAND}" --build "${run}/lifecycle-build" --config Release --target ps2-native --parallel 2)
-execute_process(COMMAND "${run}/lifecycle-build/Release/ps2-native${EXE_SUFFIX}" "${run}/lifecycle/program.data"
+execute_process(COMMAND "${run}/lifecycle-build/Release/ps2-native${EXE_SUFFIX}" "${run}/lifecycle/program.data" --headless
     RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
 if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00001038 executed=23 v0=50")
     message(FATAL_ERROR "Compiled lifecycle callback differs: ${out} ${err}")
@@ -121,7 +121,7 @@ checked("${CONVERTER}" "${run}/fixture.elf.table" "${run}/table")
 checked("${CMAKE_COMMAND}" -S "${run}/table" -B "${run}/table-build" -G "${GENERATOR}"
     ${platform} "-DANYPS2_ROOT=${ROOT}")
 checked("${CMAKE_COMMAND}" --build "${run}/table-build" --config Release --target ps2-native --parallel 2)
-execute_process(COMMAND "${run}/table-build/Release/ps2-native${EXE_SUFFIX}" "${run}/table/program.data"
+execute_process(COMMAND "${run}/table-build/Release/ps2-native${EXE_SUFFIX}" "${run}/table/program.data" --headless
     RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
 if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00001024 executed=12 v0=43")
     message(FATAL_ERROR "Compiled object-table indirect call differs: ${out} ${err}")
@@ -131,7 +131,7 @@ checked("${CONVERTER}" "${run}/fixture.elf.switch" "${run}/switch")
 checked("${CMAKE_COMMAND}" -S "${run}/switch" -B "${run}/switch-build" -G "${GENERATOR}"
     ${platform} "-DANYPS2_ROOT=${ROOT}")
 checked("${CMAKE_COMMAND}" --build "${run}/switch-build" --config Release --target ps2-native --parallel 2)
-execute_process(COMMAND "${run}/switch-build/Release/ps2-native${EXE_SUFFIX}" "${run}/switch/program.data"
+execute_process(COMMAND "${run}/switch-build/Release/ps2-native${EXE_SUFFIX}" "${run}/switch/program.data" --headless
     RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
 if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00001054 executed=11 v0=44")
     message(FATAL_ERROR "Compiled indexed switch differs: ${out} ${err}")
@@ -141,7 +141,7 @@ checked("${CONVERTER}" "${run}/fixture.elf.thread-root" "${run}/thread-root")
 checked("${CMAKE_COMMAND}" -S "${run}/thread-root" -B "${run}/thread-root-build" -G "${GENERATOR}"
     ${platform} "-DANYPS2_ROOT=${ROOT}")
 checked("${CMAKE_COMMAND}" --build "${run}/thread-root-build" --config Release --target ps2-native --parallel 2)
-execute_process(COMMAND "${run}/thread-root-build/Release/ps2-native${EXE_SUFFIX}" "${run}/thread-root/program.data"
+execute_process(COMMAND "${run}/thread-root-build/Release/ps2-native${EXE_SUFFIX}" "${run}/thread-root/program.data" --headless
     RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
 if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00001078 executed=19 v0=77")
     message(FATAL_ERROR "Compiled thread return continuation differs: ${out} ${err}")
@@ -157,7 +157,7 @@ foreach(wake sleep iwake)
     checked("${CMAKE_COMMAND}" -S "${run}/${wake}" -B "${run}/${wake}-build" -G "${GENERATOR}"
         ${platform} "-DANYPS2_ROOT=${ROOT}")
     checked("${CMAKE_COMMAND}" --build "${run}/${wake}-build" --config Release --target ps2-native --parallel 2)
-    execute_process(COMMAND "${run}/${wake}-build/Release/ps2-native${EXE_SUFFIX}" "${run}/${wake}/program.data"
+    execute_process(COMMAND "${run}/${wake}-build/Release/ps2-native${EXE_SUFFIX}" "${run}/${wake}/program.data" --headless
         RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
     if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x0000104c executed=[0-9]+ v0=${expected_wakeup_result}")
         message(FATAL_ERROR "Compiled sleep/wakeup thread handoff differs: ${out} ${err}")

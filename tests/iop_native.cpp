@@ -732,6 +732,26 @@ int main() {
         check(pair_threads.run(nt_iop_generated_run,ram,64,pair_services).reason==NativeStop::unmapped_code &&
               pair_threads.state(first_id).registers[2]==43 && pair_threads.executed()==16,
               "Foreground wakeup did not resume the sleeping continuation");
+        for (const auto slice:{1U,64U}) {
+            NativeInterruptServices worker_interrupts(0xf000);
+            NativeThreadServices workers(worker_interrupts);
+            NativeServiceRouter worker_services({&workers,&worker_interrupts});
+            const auto sleeping=workers.admit(sleeper);
+            auto waking=waker; waking.registers[4]=sleeping;
+            const auto waking_id=workers.admit(waking);
+            NativeResult result{NativeStop::budget,0};
+            for (unsigned attempt=0;attempt<32 && result.reason==NativeStop::budget;++attempt)
+                result=workers.run(nt_iop_generated_run,ram,slice,worker_services,
+                    NativeThreadServices::CompletionPolicy::continue_workers);
+            check(result.reason==NativeStop::thread_wait && workers.executed()==16 &&
+                  workers.state(waking_id).registers[2]==99 && workers.state(sleeping).registers[2]==43,
+                  "Persistent worker session stopped at a completed continuation or lost its budget");
+            auto unknown=initial(); unknown.pc=0x1914; unknown.registers[31]=0x1fffc0;
+            workers.admit(unknown);
+            check(workers.run(nt_iop_generated_run,ram,64,worker_services,
+                  NativeThreadServices::CompletionPolicy::continue_workers).reason==NativeStop::unmapped_code,
+                  "Persistent worker session swallowed an unknown code target");
+        }
         NativeInterruptServices queued_interrupts(0xf000);
         NativeThreadServices queued_threads(queued_interrupts);
         NativeServiceRouter queued_services({&queued_threads,&queued_interrupts});
@@ -1502,6 +1522,18 @@ int main() {
         transfer_descriptor(1,0xc810,0x120,16,4);
         check(sif_call(7,0xc840,2).first.reason==NativeStop::import_request && ee_memory==prior_ee,
               "Native SIF transfer silently accepted an unsupported EE interrupt attribute");
+        check(sif.rejected_transfer() && sif.rejected_transfer()->index==1 && sif.rejected_transfer()->attributes==4,
+              "Rejected SIF descriptor diagnostics lost");
+        transfer_descriptor(1,0xc804,0x120,16);
+        check(sif_call(7,0xc840,2).first.reason==NativeStop::budget && !sif.rejected_transfer() &&
+              std::equal(ram.begin()+0xc804,ram.begin()+0xc814,ee_memory.begin()+0x120),
+              "Word-aligned IOP SIF source incorrectly required quadword alignment");
+        check(sif.take().has_value(),"Word-aligned SIF transfer lost completion"); sif.finish(0);
+        const auto aligned_ee=ee_memory;
+        transfer_descriptor(1,0xc805,0x120,16);
+        check(sif_call(7,0xc840,2).first.reason==NativeStop::import_request && ee_memory==aligned_ee && !sif.take(),
+              "Misaligned source partially committed a SIF batch");
+        ee_memory=prior_ee;
         transfer_descriptor(1,0xc810,0x120,16);
         check(sif_call(32,0xc840,2,0x4000).first.reason==NativeStop::unmapped_code && ee_memory==prior_ee,
               "Unknown SIF completion handler allowed a partial transfer");

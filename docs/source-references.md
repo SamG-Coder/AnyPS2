@@ -1526,3 +1526,12 @@ completion, not a serial timing model. The pinned PS2SDK dmacman.h and dmacman.c
 provide sceSetSliceDMA's five-argument ABI and success return. Native descriptors,
 owned buffers, validation and typed LLVM transfer metadata are original AnyPS2
 code. No commercial code, SDK source or game-derived fixtures are incorporated.
+
+EE semaphore wake ordering was checked against the pinned Play! PS2OS.cpp
+SemaLinkThread/SemaReleaseSingleThread behavior and PS2SDK EE wait-status fields.
+The independent native continuation queue hands a token directly to the oldest
+waiter and defers interrupt-context scheduling until interrupt return. No
+reference game-specific stack modifications are used. The pinned PS2SDK IOP
+sifman.c describes word-based source transfers; native SIF copies now accept
+word-aligned source buffers while retaining complete-quadword length and EE
+destination checks. Tail-lane and interrupt-tag behavior remains unsupported.

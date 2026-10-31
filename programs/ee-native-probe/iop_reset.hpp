@@ -75,6 +75,7 @@ public:
     std::uint32_t last_server() const { return last_server_; }
     bool cdvd_initialized() const { return cdvd_ && cdvd_->initialized(); }
     const nt::iop::NativeSerialServices& serial() const { return services_->serial(); }
+    const auto& rejected_transfer() const { return services_->sif.rejected_transfer(); }
     std::uint32_t cdvd_command() const { return scmd_ ? scmd_->last_method() : 0; }
     std::uint32_t cdvd_media() const { return cdvd_ ? cdvd_->media_mode() : 0; }
     std::uint32_t cdvd_argument() const { return scmd_ ? scmd_->last_argument() : 0; }
@@ -110,7 +111,8 @@ public:
         auto& link=platform_.sif_link;
         control.acknowledge_sub(control.sub_flags() & ~link.peer_flags());
         control.publish_main(link.main_address(),link.main_flags());
-        result_=services_->threads.run(nt::iop::run_llvm,ram_,1000000,*services_);
+        result_=services_->threads.run(nt::iop::run_llvm,ram_,1000000,*services_,
+            nt::iop::NativeThreadServices::CompletionPolicy::continue_workers);
         link.acknowledge_main(link.main_flags() & ~control.main_flags());
         link.publish_peer(control.sub_address(),control.sub_flags());
         return result_.reason==nt::iop::NativeStop::thread_wait ? nt::ee::Stop::budget : nt::ee::Stop::unsupported_system;
@@ -167,7 +169,8 @@ private:
             result_={nt::iop::NativeStop::import_request,0,0,0x70005}; return;
         }
         services_->interrupts.invoke({9,{},nt::iop::NativeServiceKind::intrman},ram_);
-        result_=services_->threads.run(nt::iop::run_llvm,ram_,1000000,*services_);
+        result_=services_->threads.run(nt::iop::run_llvm,ram_,1000000,*services_,
+            nt::iop::NativeThreadServices::CompletionPolicy::continue_workers);
     }
     static nt::ee::IoRead commands(void* opaque,std::span<const nt::ee::NativeSifPacket> packets) {
         auto& self=*static_cast<IopReset*>(opaque);

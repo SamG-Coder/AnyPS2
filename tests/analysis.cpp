@@ -424,6 +424,14 @@ int main() {
                 return nt::analysis::registered_code_pointers(image,fixture,nt::analysis::discover(image,fixture,128,{},true));
             };
             check(roots()==std::set<std::uint32_t>{0x1070},"Registered argument callback lost");
+            for (unsigned reg=8;reg<12;++reg) {
+                put(image,4,0x24001070U|(reg<<16));
+                put(image,0x44,(reg<<21)|(8U<<11)|0x2dU);
+                check(roots()==std::set<std::uint32_t>{0x1070},"Extended EE argument callback lost");
+            }
+            put(image,4,0x240c1070); put(image,0x44,0x0180402d);
+            check(roots().empty(),"Non-argument register treated as an ABI input");
+            put(image,4,0x24051070);
             put(image,0x44,0x24a80004);
             check(roots().empty(),"Modified argument treated as an exact pointer copy");
             put(image,0x44,0x00a0402d); put(image,0x48,0x8c880000);
@@ -437,6 +445,13 @@ int main() {
             check(roots().empty(),"Annulled argument copy leaked into fallthrough");
             put(image,0x40,0x1000ffff); put(image,0x44,0);
             check(roots().empty(),"Loop summary escaped its reachable graph");
+            // Eighth argument saved across a helper call before registration.
+            put(image,4,0x240b1070); put(image,0x40,0x0160b82d);
+            put(image,0x44,0x0c000418); put(image,0x48,0);
+            put(image,0x4c,0xac970000); put(image,0x60,0x03e00008);
+            check(roots()==std::set<std::uint32_t>{0x1070},"Preserved argument copy lost across helper call");
+            put(image,0x40,0x0160402d); put(image,0x4c,0xac880000);
+            check(roots().empty(),"Volatile argument copy survived helper call");
         }
         {
             nt::Bytes image(0x100,0);
@@ -481,6 +496,25 @@ int main() {
             check(roots()==std::set<std::uint32_t>{0x1060,0x1070},"Scheduled bound comparison lost switch entries");
             put(image,12,0x34020000);
             check(roots().empty(),"Overwritten guard supplied a switch bound");
+        }
+        {
+            nt::Bytes image(0x100,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,0x80,0x80,5,4},{0x80,0x2000,0x80,0x80,6,4}}};
+            put(image,0,0x2c850002); put(image,4,0x10a0000a);
+            put(image,8,0x3c020000); // Table high in the range-branch delay slot.
+            put(image,12,0x00041880); put(image,16,0x24422000);
+            put(image,20,0x00621821); put(image,24,0x8c640000);
+            put(image,28,0x00800008); put(image,48,12);
+            put(image,0x60,0x03e00008); put(image,0x70,0x03e00008);
+            put(image,0x80,0x1060); put(image,0x84,0x1070);
+            const auto roots=[&] {
+                return nt::analysis::bounded_switch_entries(image,fixture,nt::analysis::discover(image,fixture,128,{},true));
+            };
+            check(roots()==std::set<std::uint32_t>{0x1060,0x1070},"Split table-address switch lost");
+            put(image,16,0x24822000);
+            check(roots().empty(),"Unrelated table low-address source accepted");
+            put(image,16,0x24422000); put(image,0x84,0x1071);
+            check(roots().empty(),"Split switch accepted a malformed entry");
         }
         std::cout << "Control-flow discovery and address-boundary tests passed\n";
         return 0;

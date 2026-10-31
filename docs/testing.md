@@ -2413,3 +2413,20 @@ disk-ready results for an open session and a closed session. Rejected media
 values, protected writes, and mode cleared by shutdown keep the previous
 session state. Failed calls preserve session ownership and output bytes. The
 tests share the FILEIO transport harness.
+
+The EE semaphore scheduler regression executes a compiled WaitSema and verifies
+that an idle wait retires it once, retains its continuation, and exposes the
+actual waiter count. FIFO handoff, independent SleepThread wake credits,
+interrupt-safe signalling without a duplicate token, and rejection of deletion
+with live waiters are covered. The IOP LLVM transfer test accepts a word-aligned
+source, rejects byte-misaligned sources without partial writes, and checks rejected
+descriptor diagnostics. Analysis tests cover all eight EE argument registers,
+callee-preserved callback copies across helper calls, and volatile/non-argument
+rejection. Bounded switch coverage includes table addresses split between the
+range-branch delay slot and an explicit low-half addition. These synthetic checks do not establish title-screen or gameplay support.
+
+Persistent IOP worker tests execute a sleeping and waking pair with one-operation
+and whole-run budgets, retire both continuations, and reach an actual idle wait.
+Unknown executable targets still stop. Module-startup completion reporting is
+unchanged. Generated EE/IOP project tests use the explicit --headless option so
+Vulkan inspection windows cannot stall automation.

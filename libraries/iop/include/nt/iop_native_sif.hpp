@@ -17,6 +17,8 @@ struct NativeSifDestination {
 // is required; the standalone IOP probe cannot fabricate an attached peer.
 class NativeSifTransfers final : public NativeServices, public NativeCallbackSource {
 public:
+    struct RejectedTransfer { std::uint32_t index,source,destination,size,attributes; };
+    const std::optional<RejectedTransfer>& rejected_transfer() const { return rejected_; }
     explicit NativeSifTransfers(NativeSifDestination* destination=nullptr) : destination_(destination) {
         if (destination && (destination->memory.size()>0x2000000 || !destination->writable))
             throw std::invalid_argument("Invalid native SIF destination");
@@ -65,6 +67,7 @@ public:
             handler_=NativeCallback{a[0],a[1]}; return returned();
         }
         if (op!=7 && op!=32) return {};
+        rejected_.reset();
         const auto count=a[1];
         if (!count || count>32 || completions_.size()+2>1024) return returned();
         if (op==32 && a[2] && !compiled(a[2])) return {NativeServiceStatus::unmapped_code,0,a[2]};
@@ -80,7 +83,12 @@ public:
             const auto size=load_native_word(ram,at+8),attributes=load_native_word(ram,at+12);
             // Irregular tail lanes and EE interrupt/tag attributes need an EE
             // command endpoint; do not invent their effects with a plain copy.
-            if ((attributes&~2U) || !size || (size&15) || (source&15) || (address&15) || size>0x100000-payload.size()) return {};
+            // IOP sources are word-aligned; only the EE destination and the
+            // supported complete-quadword payload require 16-byte alignment.
+            if ((attributes&~2U) || !size || (size&15) || (source&3) || (address&15) || size>0x100000-payload.size()) {
+                rejected_=RejectedTransfer{index,source,address,size,attributes};
+                return {};
+            }
             const auto input=ram_offset(source,1,ram.size());
             if (!input || size>ram.size()-*input || size>0x200000-*input) return {NativeServiceStatus::address_fault,0,source};
             const auto output=address&0x1fffffffU;
@@ -116,6 +124,7 @@ private:
         return entry && nt_iop_native_instruction(*entry);
     }
     NativeSifDestination* destination_;
+    std::optional<RejectedTransfer> rejected_;
     std::optional<NativeCallback> handler_;
     struct Completion { NativeCallback callback; bool general; };
     std::deque<Completion> completions_;

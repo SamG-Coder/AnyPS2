@@ -495,10 +495,12 @@ Hardware profiling remains an optional diagnostic mode, not a startup requiremen
 See [native measurement limitations](docs/ee-native.md#native-elapsed-time-profiling).
 GT4 now produces its opening copyright/driving-warning image through Vulkan.
 The private render-target readback contains actual game-generated text. Display
-presentation is still incomplete: the game-selected buffer remains black at the
-current stop, an empty EE semaphore wait. Title-screen and gameplay support are
-not established. `--capture-stop` saves private render evidence; `--display-stop`
-opens a diagnostic Vulkan window at the game-selected resolution after execution stops.
+selection now reaches the same image at the configured 640 x 448 resolution.
+The executable opens a Vulkan window by default after execution stops; its title
+labels that stopped state. Use `--headless` for automated runs. `--capture-stop`
+saves separate render-target and selected-display evidence. Continuous
+presentation, the title screen and gameplay are not established. The current
+startup boundary is another undiscovered indirect EE target.
 
 Scalar, V2, masked V3 and V4 uploads in 32-, 16- and 8-bit formats,
 plus packed V4-5 data, can populate

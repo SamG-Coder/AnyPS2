@@ -69,7 +69,8 @@ unsigned stored_arguments(const Program& program,std::uint32_t entry) {
     using r5900::Op;
     using Origins=std::array<unsigned,32>;
     Origins initial{};
-    for (unsigned reg=4;reg<8;++reg) initial[reg]=1U<<(reg-4);
+    // The EE ABI passes eight integer arguments in registers a0 through t3.
+    for (unsigned reg=4;reg<12;++reg) initial[reg]=1U<<(reg-4);
     std::deque<std::pair<std::uint32_t,Origins>> pending{{entry,initial}};
     std::set<std::pair<std::uint32_t,Origins>> visited;
     unsigned stored=0,budget=256;
@@ -110,9 +111,18 @@ unsigned stored_arguments(const Program& program,std::uint32_t entry) {
             if (transfer(i,origins)) pending.emplace_back(pc+4,origins);
             continue;
         }
-        // Calls and link branches require another summary; do not carry volatile
-        // origins across them or into their delay slots with a stale link value.
-        if (i.op==Op::jal || i.op==Op::jalr || i.op==Op::bltzal || i.op==Op::bgezal ||
+        // ABI-preserved copies may reach registration after a helper call.
+        // This only proposes compilation roots; it never folds runtime values.
+        if (i.op==Op::jal || i.op==Op::jalr) {
+            origins[i.op==Op::jal ? 31 : i.rd]=0;
+            const auto slot=program.instructions.find(pc+4);
+            if (slot==program.instructions.end() || !transfer(slot->second,origins)) continue;
+            for (unsigned reg=1;reg<32;++reg)
+                if (!(reg>=16 && reg<=23) && reg!=28 && reg!=29 && reg!=30) origins[reg]=0;
+            pending.emplace_back(pc+8,origins);
+            continue;
+        }
+        if (i.op==Op::bltzal || i.op==Op::bgezal ||
             i.op==Op::bltzall || i.op==Op::bgezall) continue;
         const auto before_slot=origins;
         const auto slot=program.instructions.find(pc+4);
@@ -248,8 +258,11 @@ std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executa
         }
         if (!complete) continue;
         const auto& load=*prior[0]; const auto& add=*prior[1];
-        const auto& high=*prior[2]; const auto& scale=*prior[3];
+        const bool separate_low=prior[2]->op==Op::addiu;
+        const auto& high=*(separate_low ? prior[4] : prior[2]);
+        const auto& scale=*prior[3];
         const auto& branch=*prior[5];
+        if (separate_low && (prior[2]->rs!=high.rt || prior[2]->rt!=high.rt || high.rt==scale.rt)) continue;
         if (branch.op!=Op::beq || (branch.rs && branch.rt) || (!branch.rs && !branch.rt)) continue;
         const auto guard=branch.rs ? branch.rs : branch.rt;
         // A compiler can schedule register setup and stack saves between the
@@ -285,7 +298,8 @@ std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executa
             branch.target()<=pc) continue;
         // Candidate entries only: this is not a proof used to remove the guard
         // or to fold table contents. The compiled code retains both at runtime.
-        const auto base=(std::uint32_t(high.immediate)<<16)+std::uint32_t(load.immediate);
+        const auto base=(std::uint32_t(high.immediate)<<16)+std::uint32_t(load.immediate)+
+            (separate_low ? std::uint32_t(prior[2]->immediate) : 0U);
         std::set<std::uint32_t> entries;
         for (unsigned n=0;n<static_cast<unsigned>(bound.immediate);++n) {
             if (std::uint64_t(base)+4*n>0xffffffffULL) { entries.clear(); break; }
@@ -343,7 +357,7 @@ std::set<std::uint32_t> registered_code_pointers(ByteView bytes,const elf::Execu
     std::map<std::uint32_t,unsigned> summaries;
     for (const auto& [pc,call]:program.instructions) {
         if (call.op!=r5900::Op::jal || pc>0xfffffff7U) continue;
-        for (unsigned reg=4;reg<8;++reg) {
+        for (unsigned reg=4;reg<12;++reg) {
             unsigned fuel=128;
             const auto value=candidate(bytes,elf,program,pc+8,reg,fuel,pc);
             if (!value) continue;

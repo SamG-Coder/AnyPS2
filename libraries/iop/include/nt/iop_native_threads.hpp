@@ -175,7 +175,9 @@ public:
         }
         return returned();
     }
-    NativeResult run(NativeEntry entry,std::span<std::uint8_t> ram,std::uint64_t budget,NativeServices& services) {
+    enum class CompletionPolicy { report, continue_workers };
+    NativeResult run(NativeEntry entry,std::span<std::uint8_t> ram,std::uint64_t budget,NativeServices& services,
+                     CompletionPolicy completion=CompletionPolicy::report) {
         while (budget) {
             if (interrupts_.delivery_enabled()) {
                 const auto now=clock_();
@@ -212,7 +214,8 @@ public:
                         throw std::logic_error("Validated native exit stack changed during retirement");
                     threads_.erase(id);
                 }
-                return {NativeStop::unmapped_code,thread_return};
+                if (completion==CompletionPolicy::report) return {NativeStop::unmapped_code,thread_return};
+                continue;
             }
             if (stop.reason==NativeStop::thread_yield && thread.status==Status::ready) {
                 ready_.push_back(*current_); current_.reset(); continue;
@@ -223,7 +226,8 @@ public:
             if (stop.reason==NativeStop::unmapped_code && cpu.pc==thread_return && !cpu.delay_slot && !cpu.interrupt_depth) {
                 thread.status=Status::finished; current_.reset();
                 // Report explicit completion to the caller before running another entry.
-                return stop;
+                if (completion==CompletionPolicy::report) return stop;
+                continue;
             }
             return stop;
         }

@@ -153,6 +153,23 @@ int main() {
             check(idle_call(0x32).status==nt::ee::Stop::budget && idle.waiting());
             check(idle_call(0x34,1).value==1); idle.schedule(state);
             check(!idle.waiting() && state.executed==retired && idle_call(0x30,1).value==1);
+            // Semaphore queues are FIFO even when the later waiter has a higher
+            // scheduling priority. WakeupThread grants a sleep credit only.
+            threads.allow_idle=true;
+            check(threads.wait_semaphore(7)==nt::ee::Stop::budget);
+            threads.schedule(state);
+            check(call(0x2f).value==2 && threads.wait_semaphore(7)==nt::ee::Stop::budget);
+            check(threads.semaphore_waiters(7)==2 && threads.waiting());
+            check(call(0x34,1).value==1 && threads.semaphore_waiters(7)==2);
+            check(call(0x30,1,0x2100).value==4);
+            std::array<std::uint32_t,3> waiting{};
+            std::memcpy(waiting.data(),ram.data()+0x2100+36,sizeof(waiting));
+            check(waiting[0]==2 && waiting[1]==7 && waiting[2]==1);
+            check(!threads.signal_semaphore(8) && threads.signal_semaphore(7));
+            threads.schedule(state);
+            check(call(0x2f).value==1 && threads.semaphore_waiters(7)==1);
+            check(call(0x32).value==1); // Preserved sleep credit, no block.
+            check(threads.signal_semaphore(7) && !threads.signal_semaphore(7));
         }
         {
             std::vector<std::uint8_t> ram(0x10000);
@@ -170,6 +187,44 @@ int main() {
                   pumps==1 && state.executed==before+1 && state.pc==0x3a0004);
             services.idle_pump=[] { return nt::ee::Stop::unsupported_system; };
             check(nt::ee::run(nt_ee_generated_run,state,memory,16,services)==nt::ee::Stop::unsupported_system && state.executed==before+1);
+        }
+        {
+            std::vector<std::uint8_t> ram(0x10000);
+            nt::ee::Memory memory{ram.data(),ram.size()};
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
+            nt::runtime::State state;
+            const auto syscall=[&](unsigned number,unsigned a0=0,unsigned a1=0) {
+                state.pc=0x3a0000; state.set(3,number); state.set(4,a0); state.set(5,a1);
+                return nt::ee::run(nt_ee_generated_run,state,memory,1,services);
+            };
+            state.set(6,0x1000); state.set(7,0x6000); state.set(8,0x1100);
+            check(syscall(0x3c,0,0x8000)==nt::ee::Stop::budget);
+            const std::array<std::uint32_t,6> descriptor{0,1,0,0,0x1234,0x5678};
+            std::memcpy(ram.data()+0x2000,descriptor.data(),sizeof(descriptor));
+            check(syscall(0x40,0x2000)==nt::ee::Stop::budget);
+            const auto id=static_cast<unsigned>(state.gpr[2].lo);
+            unsigned pumps=0;
+            services.idle_pump=[&] { ++pumps; return nt::ee::Stop::budget; };
+            services.idle_timeout=std::chrono::milliseconds(0);
+            check(syscall(0x44,id)==nt::ee::Stop::budget);
+            const auto retired=state.executed;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,10,services)==nt::ee::Stop::thread_wait &&
+                  state.executed==retired && state.pc==0x3a0004 && pumps==1);
+            nt::runtime::State signal;
+            const auto native_call=[&](unsigned number,unsigned a0,unsigned a1=0) {
+                signal.pc=0x3a0000; signal.set(3,number); signal.set(4,a0); signal.set(5,a1);
+                return services.invoke(signal,memory);
+            };
+            check(native_call(0x47,id,0x2100)==nt::ee::Stop::budget);
+            std::array<std::uint32_t,6> status{};
+            std::memcpy(status.data(),ram.data()+0x2100,sizeof(status));
+            check(status[0]==0 && status[3]==1 && status[4]==0x1234 && status[5]==0x5678);
+            check(native_call(0x41,id)==nt::ee::Stop::unsupported_system);
+            check(native_call(0x43,id)==nt::ee::Stop::budget && !services.waiting(memory));
+            check(native_call(0x45,id)==nt::ee::Stop::budget && signal.gpr[2].lo==~std::uint64_t(0));
+            check(native_call(0x47,id,0x2100)==nt::ee::Stop::budget);
+            std::memcpy(status.data(),ram.data()+0x2100,sizeof(status));
+            check(status[0]==0 && status[3]==0); // Direct handoff did not create another token.
         }
         for (const auto slice : {1U,2U,64U}) {
             nt::runtime::State state; state.pc=0x1000;

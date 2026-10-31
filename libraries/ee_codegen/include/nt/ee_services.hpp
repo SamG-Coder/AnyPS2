@@ -179,17 +179,30 @@ private:
             if (protected_code_(address,24)) { memory.fault_address=raw; return Stop::code_write; }
             fields[0]=record->count; fields[1]=record->maximum;
             // The ABI leaves init_count untouched in a status query.
-            fields[3]=0; fields[4]=record->attributes; fields[5]=record->option;
+            fields[3]=threads_.semaphore_waiters(id); fields[4]=record->attributes; fields[5]=record->option;
             std::memcpy(memory.data+address,fields.data(),24);
         } else if (number==0x41) {
+            if (threads_.semaphore_waiters(id)) return Stop::unsupported_system;
             semaphores_.erase(id);
         } else if (number==0x42 || number==0x43) {
+            if (threads_.signal_semaphore(id)) {
+                returned(state,id);
+                if (number==0x42 && !handlers_.active() && !(memory.interrupts && memory.interrupts->active())) threads_.schedule(state);
+                return Stop::budget;
+            }
             // Overflow return semantics require a separate established contract.
             if (record->count==record->maximum) return Stop::syscall;
             semaphores_.signal(id);
         } else {
             if (!record->count) {
-                if (number==0x44) return Stop::syscall;
+                if (number==0x44) {
+                    if (handlers_.active() || (memory.interrupts && memory.interrupts->active())) return Stop::unsupported_system;
+                    threads_.allow_idle=static_cast<bool>(idle_pump);
+                    const auto blocked=threads_.wait_semaphore(id);
+                    if (blocked!=Stop::budget) return blocked;
+                    returned(state,id); threads_.schedule(state);
+                    return Stop::budget;
+                }
                 return returned(state,~std::uint64_t(0));
             }
             semaphores_.acquire(id);

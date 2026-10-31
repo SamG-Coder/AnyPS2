@@ -100,7 +100,7 @@ nt::ee::Stop execute(nt::runtime::State* state,nt::ee::Memory* memory,std::uint6
 }
 int main(int argc,char** argv) {
     if (argc<2) {
-        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--display-stop] [--strict-performance | --native-thread-cycles | --native-pmu] [--disc <image.iso>] [--capture-vu <new-private-directory>] [--capture-stop <new-private-directory>]\n";
+        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--headless | --display-stop] [--strict-performance | --native-thread-cycles | --native-pmu] [--disc <image.iso>] [--capture-vu <new-private-directory>] [--capture-stop <new-private-directory>]\n";
 #ifdef ANYPS2_NATIVE_IOP
         std::cerr<<"Linked IOP investigation: --probe-iop-reset <module.data> (stops without acknowledging reset)\n";
         std::cerr<<"Explicit selected-bundle execution: --iop-reset-session <module.data> --disc <image.iso>\n";
@@ -110,7 +110,7 @@ int main(int argc,char** argv) {
     try {
         std::uint64_t budget=1000000;
         std::filesystem::path disc,capture_directory,stop_directory;
-        bool has_budget=false,native_cycles=false,native_pmu=false,strict_performance=false,display_stopped=false;
+        bool has_budget=false,native_cycles=false,native_pmu=false,strict_performance=false,display_stopped=true;
 #ifdef ANYPS2_NATIVE_IOP
         std::filesystem::path iop_data;
         bool iop_session=false;
@@ -121,6 +121,7 @@ int main(int argc,char** argv) {
             if (text=="--native-pmu") { native_pmu=true; continue; }
             if (text=="--strict-performance") { strict_performance=true; continue; }
             if (text=="--display-stop") { display_stopped=true; continue; }
+            if (text=="--headless") { display_stopped=false; continue; }
             if (text=="--trace-services") { trace_services=true; continue; }
 #ifdef ANYPS2_NATIVE_IOP
             if (text=="--probe-iop-reset" || text=="--iop-reset-session") {
@@ -297,6 +298,10 @@ int main(int argc,char** argv) {
                      <<" load_bytes="<<iop_reset->load_bytes()
                      <<" load_hash="<<iop_reset->load_hash()
                      <<" load_path="<<iop_reset->load_path()<<'\n';
+            if (const auto& transfer=iop_reset->rejected_transfer())
+                std::cout<<"sif_rejected_descriptor="<<transfer->index
+                         <<" source="<<nt::hex32(transfer->source)<<" destination="<<nt::hex32(transfer->destination)
+                         <<" bytes="<<transfer->size<<" attributes="<<nt::hex32(transfer->attributes)<<'\n';
         }
 #endif
         if (!capture_directory.empty()) capture.save(capture_directory);
@@ -307,14 +312,12 @@ int main(int argc,char** argv) {
                 nt::write_file(stop_directory/"graphics-storage.bin",
                     {reinterpret_cast<const std::uint8_t*>(pixels.data()),pixels.size()*sizeof(pixels[0])});
                 const auto& draw=*gpu.drawing.last_draw();
-                std::ofstream image(stop_directory/"last-render-target.ppm",std::ios::binary);
-                image<<"P6\n"<<draw.right<<' '<<draw.bottom<<"\n255\n";
-                for (unsigned y=0;y<draw.bottom;++y) for (unsigned x=0;x<draw.right;++x) {
-                    const auto pixel=pixels[nt::graphics::rgba_word(draw.base,draw.pitch,x,y)];
-                    const char rgb[]{static_cast<char>(pixel),static_cast<char>(pixel>>8),static_cast<char>(pixel>>16)};
-                    image.write(rgb,3);
-                }
-                if (!image) throw std::runtime_error("Cannot save native render target");
+                probe::capture_image(stop_directory/"last-render-target.ppm",draw.right,draw.bottom,
+                    [&](unsigned x,unsigned y) { return pixels[nt::graphics::rgba_word(draw.base,draw.pitch,x,y)]; });
+                const auto& output=platform.graphics.output();
+                const auto frame=nt::graphics::scanout(pixels,output.control,output.buffers,output.displays);
+                if (frame) probe::capture_image(stop_directory/"selected-display.ppm",frame->width,frame->height,
+                    [&](unsigned x,unsigned y) { return frame->pixels[y*frame->width+x]; });
             }
         }
         std::cout<<"graphics_draws="<<gpu.drawing.submitted_draws()<<'\n';
@@ -381,9 +384,10 @@ int main(int argc,char** argv) {
         if (display_stopped) {
             const auto& output=platform.graphics.output();
             const auto frame=nt::graphics::scanout(gpu.drawing.pixels(),output.control,output.buffers,output.displays);
-            if (!frame) throw std::runtime_error("No game display circuit is enabled");
-            std::cout<<"native_display="<<frame->width<<'x'<<frame->height<<" execution=stopped\n"<<std::flush;
-            probe::display_stopped(*frame);
+            if (frame) {
+                std::cout<<"native_display="<<frame->width<<'x'<<frame->height<<" execution=stopped\n"<<std::flush;
+                probe::display_stopped(*frame);
+            }
         }
         return stop==nt::ee::Stop::budget ? 4 : 3;
     } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }

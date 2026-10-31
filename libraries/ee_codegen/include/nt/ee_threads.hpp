@@ -12,6 +12,30 @@ public:
     bool allow_idle=false;
     bool waiting() const { return current_ && records_.at(current_).status==4 && !has_ready(); }
     struct Result { Stop status; std::uint64_t value=0; };
+    Stop wait_semaphore(std::uint32_t id) {
+        if (!current_) return Stop::syscall;
+        if (!id || records_.at(current_).status!=1) return Stop::invalid_state;
+        if (!has_ready() && !allow_idle) return Stop::syscall;
+        auto& thread=records_.at(current_);
+        thread.status=4; thread.semaphore=id; thread.order=next_order_++;
+        return Stop::budget;
+    }
+    unsigned semaphore_waiters(std::uint32_t id) const {
+        return static_cast<unsigned>(std::count_if(records_.begin(),records_.end(),[id](const auto& item) {
+            return item.second.status==4 && item.second.semaphore==id;
+        }));
+    }
+    bool signal_semaphore(std::uint32_t id) {
+        auto selected=records_.end();
+        for (auto i=records_.begin();i!=records_.end();++i) {
+            const auto& thread=i->second;
+            if (thread.status!=4 || thread.semaphore!=id) continue;
+            if (selected==records_.end() || thread.order<selected->second.order) selected=i;
+        }
+        if (selected==records_.end()) return false;
+        selected->second.semaphore=0; selected->second.status=2; selected->second.order=next_order_++;
+        return true;
+    }
     void initialize(runtime::InitialStack stack,std::uint32_t gp,std::uint32_t root) {
         root_=physical(root);
         records_.emplace(1,Record{1,0,stack.base,stack.size,gp,0,0,0,0}); current_=1;
@@ -67,7 +91,7 @@ public:
         }
         if (call==0x33 || call==0x34) {
             if ((id==current_ && thread.status!=4) || thread.status==0x10) return fail();
-            if (thread.status==4) { thread.status=2; thread.order=next_order_++; }
+            if (thread.status==4 && !thread.semaphore) { thread.status=2; thread.order=next_order_++; }
             else {
                 if (thread.wakeups==0x7fffffffU) return {Stop::unsupported_system};
                 ++thread.wakeups;
@@ -93,7 +117,8 @@ public:
                 if (!protection) return {Stop::invalid_state};
                 if (protection(address,48)) { memory.fault_address=arg(1); return {Stop::code_write}; }
                 const std::array<std::uint32_t,12> words{thread.status,thread.entry,thread.stack,thread.size,thread.gp,
-                    thread.initial_priority,thread.priority,thread.attributes,thread.option,thread.status==4 ? 1U : 0U,0,thread.wakeups};
+                    thread.initial_priority,thread.priority,thread.attributes,thread.option,
+                    thread.status==4 ? (thread.semaphore ? 2U : 1U) : 0U,thread.semaphore,thread.wakeups};
                 std::memcpy(memory.data+address,words.data(),48);
             }
             return {Stop::budget,thread.status};
@@ -131,7 +156,7 @@ private:
     }
     struct Record {
         std::uint32_t status,entry,stack,size,gp,initial_priority,priority,attributes,option;
-        runtime::State context{}; std::uint64_t order=0; std::uint32_t wakeups=0;
+        runtime::State context{}; std::uint64_t order=0; std::uint32_t wakeups=0,semaphore=0;
     };
     std::map<std::uint32_t,Record> records_;
     std::uint32_t current_=0,root_=0; std::uint64_t next_order_=0;

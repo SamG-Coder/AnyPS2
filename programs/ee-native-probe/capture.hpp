@@ -6,6 +6,18 @@
 #include <stdexcept>
 
 namespace probe {
+template<class Pixel>
+void capture_image(const std::filesystem::path& path,unsigned width,unsigned height,Pixel pixel) {
+    std::ofstream image(path,std::ios::binary);
+    image.exceptions(std::ios::failbit|std::ios::badbit);
+    image<<"P6\n"<<width<<' '<<height<<"\n255\n";
+    for (unsigned y=0;y<height;++y) for (unsigned x=0;x<width;++x) {
+        const auto value=pixel(x,y);
+        const char rgb[]{static_cast<char>(value),static_cast<char>(value>>8),static_cast<char>(value>>16)};
+        image.write(rgb,3);
+    }
+    image.close();
+}
 // Diagnostic CPU/memory observation, not a resumable runtime save state.
 // The manifest is written last so partial captures cannot appear complete.
 inline void capture_stop(const std::filesystem::path& directory,

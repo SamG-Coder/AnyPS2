@@ -2038,8 +2038,8 @@ this is startup progress, not a rendered frame.
 The native LLVM executable now submits GT4's own packets through the Vulkan
 sprite path and produces the opening copyright/driving-warning image. Private
 readback inspection confirms game-generated text, not a cleared target or test
-pattern. This is an off-screen rendering milestone: the configured display
-surface still shows black at the stopping boundary. Continuous presentation,
+pattern. The configured 640 x 448 display surface now contains that same image
+and is presented in the diagnostic Vulkan window. Continuous presentation,
 the title screen, native input and gameplay are not established.
 
 GS initialization supports scanline parity masking in the shader, TEX2 masked
@@ -2057,9 +2057,17 @@ there is no DMA timing loop or runtime instruction decoding.
 
 `--capture-stop` keeps raw graphics storage and a last-render-target PPM under
 the requested private capture directory. That image is bounded by the last draw,
-not necessarily the display extent. `--display-stop` presents the game-selected
-24/32-bit surface in a diagnostic window at its configured resolution; closing
-it ends inspection. Execution is stopped throughout this diagnostic view.
+not necessarily the display extent. A separate selected-display PPM captures the
+game-selected surface when a display circuit is enabled. By default the executable
+presents that 24/32-bit surface in a diagnostic window at its configured resolution;
+closing it ends inspection. Execution is stopped throughout this diagnostic view.
+`--headless` disables the window for automated tests; `--display-stop` explicitly
+reenables it.
 
-The latest integration passes buffered SIO2 startup and reaches an empty EE
-WaitSema. That wait still needs connection to the native thread scheduler.
+EE semaphore waits now suspend native continuations, expose their waiter count
+and transfer signals directly to FIFO waiters. Interrupt-safe signals defer
+scheduling until interrupt return. The persistent IOP session continues after
+completed worker threads while module startup still observes individual entry
+returns. Word-aligned IOP transfers and extended EE callback/switch discovery
+advance GT4 past the former wait, transfer and RPC-dispatch boundaries. The
+current run stops at a further indirect EE target absent from the AOT code set.

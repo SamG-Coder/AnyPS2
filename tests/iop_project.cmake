@@ -157,18 +157,18 @@ checked("${CMAKE_COMMAND}" -S "${run}/ee-project" -B "${run}/lb" -G "${GENERATOR
     ${platform} "-DANYPS2_ROOT=${ROOT}" "-DANYPS2_IOP_PROJECT=${run}/project")
 checked("${CMAKE_COMMAND}" --build "${run}/lb" --config Release --target ps2-native --parallel 2)
 set(linked "${run}/lb/Release/ps2-native${EXE_SUFFIX}")
-execute_process(COMMAND "${linked}" "${run}/ee-project/program.data" --probe-iop-reset "${run}/project/module.data"
+execute_process(COMMAND "${linked}" "${run}/ee-project/program.data" --headless --probe-iop-reset "${run}/project/module.data"
     RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
 if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x0000102c executed=17 v0=43" OR out MATCHES "iop_reset_accepted")
     message(FATAL_ERROR "Linked IOP probe changed EE startup without reset: ${out} ${err}")
 endif()
-execute_process(COMMAND "${linked}" "${run}/ee-project/program.data" --iop-reset-session "${run}/project/module.data"
+execute_process(COMMAND "${linked}" "${run}/ee-project/program.data" --headless --iop-reset-session "${run}/project/module.data"
     RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
 if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x0000102c executed=17 v0=43" OR out MATCHES "iop_reset_accepted")
     message(FATAL_ERROR "Linked session ran before an EE reset request: ${out} ${err}")
 endif()
 file(WRITE "${run}/invalid-iop.data" "invalid")
-execute_process(COMMAND "${linked}" "${run}/ee-project/program.data" --probe-iop-reset "${run}/invalid-iop.data"
+execute_process(COMMAND "${linked}" "${run}/ee-project/program.data" --headless --probe-iop-reset "${run}/invalid-iop.data"
     RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
 if(NOT result EQUAL 1 OR NOT err MATCHES "Invalid linked IOP startup data")
     message(FATAL_ERROR "Linked IOP probe accepted mismatched data: ${out} ${err}")
