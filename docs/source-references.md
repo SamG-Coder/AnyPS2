@@ -341,6 +341,10 @@ code was copied. Timer gate/external-clock/toggle modes remain explicit unsuppor
 requests. Display callbacks use the native graphics owner's nominal display edges,
 not physical monitor timing. Suspended thread register-frame exposure is not yet
 implemented and stops rather than returning a fabricated pointer.
+The same pinned vblank source documents ordinals 4–7, edge versus phase event
+bits, multi-waiter semantics and base-handler priority. The independent native
+implementation reuses AnyPS2 event objects and scheduled continuations; it does
+not expose the reference kernel's private structures or copy its implementation.
 The pinned PS2SDK heaplib public interface/export table and its open-source
 service define heap flags, return codes, eight-byte allocation accounting and
 growth/release behavior. AnyPS2 uses an independently written map-based allocator

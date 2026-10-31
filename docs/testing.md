@@ -6,6 +6,13 @@ callback relocations and guarded indexed registry discovery. EE tests cover
 chronological display edges, bounded catch-up and idle waits that preserve the
 operation count. Commercial startup evidence remains separate and opt-in.
 
+`iop-llvm-execution` also compiles display-wait imports and checks initial blocking,
+masked delivery, edge versus phase readiness, multiple waiters, callback priority,
+wait cancellation and missing providers. Registry fixtures execute helper-returned
+and nested descriptor callbacks across module ownership, reject unknown runtime
+targets, and reject discovery after an unknown pointer overwrite. The affected
+native SIF reset tests cover construction of the shared display/event services.
+
 Native serial integration fixtures execute generated LLVM through the service
 router. They cover configuration, cached aliases, interrupt acknowledgment,
 independent sessions, reset, rejected START/FIFO/status operations, and load and

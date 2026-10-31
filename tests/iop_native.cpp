@@ -1337,6 +1337,80 @@ int main() {
             NativeHardTimers separate([&] { return ns; });
             check(separate.invoke({16,{handle},NativeServiceKind::timrman},ram).value==static_cast<std::uint32_t>(-151),"Timer leaked between contexts");
         }
+        {
+            std::vector<std::uint8_t> display_ram(0x20000);
+            NativeVblankServices blank;
+            NativeInterruptServices irq(0xf000,&blank);
+            NativeThreadServices workers(irq);
+            NativeEventServices events(&workers);
+            blank.connect(events,display_ram);
+            NativeServiceRouter services({&irq,&workers,&events,&blank});
+            const auto waiting=[&](unsigned ordinal) {
+                auto cpu=initial(); cpu.pc=0x11014+(ordinal-4)*8; cpu.registers[31]=0xfffffffc;
+                return cpu;
+            };
+            const auto run=[&] {
+                return workers.run(nt_iop_generated_run,display_ram,256,services,NativeThreadServices::CompletionPolicy::continue_workers);
+            };
+            const auto suspended=[&](std::uint32_t id) {
+                check(thread_status(workers,id).second==0,"Cannot inspect display waiter");
+                return load_native_word(ram,0xc388)==4;
+            };
+            std::array<std::uint32_t,4> ids;
+            for (unsigned index=0;index<4;++index) ids[index]=workers.admit(waiting(index+4));
+            check(run().reason==NativeStop::thread_wait,"Vblank waits did not block before the first display edge");
+            blank.post(false);
+            check(run().reason==NativeStop::thread_wait && suspended(ids[0]),
+                  "Masked vblank edge completed a waiter");
+            irq.invoke({9,{},NativeServiceKind::intrman},display_ram);
+            check(run().reason==NativeStop::thread_wait && !suspended(ids[0]) &&
+                  !suspended(ids[2]) && suspended(ids[1]) && suspended(ids[3]),
+                  "Vblank start did not complete only start and blank-phase waiters");
+            const auto next_start=workers.admit(waiting(4));
+            const auto another_start=workers.admit(waiting(4));
+            const auto phase=workers.admit(waiting(6));
+            check(run().reason==NativeStop::thread_wait && !suspended(phase) &&
+                  suspended(next_start),"Historical edge stayed ready or current phase was lost");
+            blank.post(true);
+            check(run().reason==NativeStop::thread_wait && !suspended(ids[1]) &&
+                  !suspended(ids[3]) && suspended(next_start),
+                  "Vblank end did not complete end and nonblank-phase waits");
+            // Base event publication follows handlers with priority below 128.
+            blank.invoke({8,{0,16,0x2140,0xc720},NativeServiceKind::vblank},display_ram);
+            blank.post(false);
+            const auto callback=blank.take();
+            check(callback && callback->address==0x2140 && suspended(next_start),
+                  "Vblank event publication overtook an earlier-priority handler");
+            blank.finish(0);
+            check(run().reason==NativeStop::thread_wait && !suspended(next_start) &&
+                  !suspended(another_start),"A display edge failed to complete all registered waiters");
+            const auto cancelled=workers.admit(waiting(5));
+            check(run().reason==NativeStop::thread_wait,"Next end wait reused a historical edge");
+            check(workers.invoke({8,{cancelled},NativeServiceKind::thbase},display_ram).value==0,"Vblank waiter termination failed");
+            blank.post(true);
+            check(run().reason==NativeStop::thread_wait,"Terminated vblank waiter remained queued");
+            auto interrupt_wait=waiting(4); interrupt_wait.interrupt_depth=1;
+            check(run_native(nt_iop_generated_run,interrupt_wait,display_ram,1,&services).reason==NativeStop::budget &&
+                  interrupt_wait.registers[2]==static_cast<std::uint32_t>(-100),"Vblank wait accepted interrupt context");
+            NativeVblankServices unconnected;
+            auto missing=waiting(4);
+            check(run_native(nt_iop_generated_run,missing,display_ram,4,&unconnected).reason==NativeStop::import_request,
+                  "Unconnected display wait fabricated completion");
+            for (auto target : {0x111a0U,0x12040U,0x111b0U,0U}) {
+                store_native_word(display_ram,0x18000,target);
+                auto cpu=initial(); cpu.pc=0x11100; cpu.registers[4]=0x18000; cpu.registers[5]=0;
+                const auto stop=run_native(nt_iop_generated_run,cpu,display_ram,64);
+                check(stop.reason==NativeStop::unmapped_code &&
+                      (target==0x111a0 || target==0x12040 ? cpu.pc==0x5000 && cpu.registers[2]==(target==0x111a0 ? 73U : 87U) :
+                       target ? stop.address==target && cpu.pc==0x11118 : cpu.pc==0x5000),
+                      "Returned registry callback did not execute or reject an unknown target");
+            }
+            store_native_word(display_ram,0x18000,0x18100);
+            store_native_word(display_ram,0x1810c,0x12040);
+            auto nested=initial(); nested.pc=0x11130; nested.registers[4]=0x18000; nested.registers[5]=0;
+            check(run_native(nt_iop_generated_run,nested,display_ram,64).reason==NativeStop::unmapped_code &&
+                  nested.pc==0x5000 && nested.registers[2]==87,"Nested registry callback did not enter compiled client code");
+        }
         std::uint64_t alarm_ticks=0;
         NativeAlarmServices alarms([&]{return alarm_ticks;});
         NativeInterruptServices alarm_interrupts(0xf000,&alarms);

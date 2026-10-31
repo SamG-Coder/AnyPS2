@@ -33,7 +33,7 @@ std::optional<Operation> native_operation(const elf::IopImport& import) {
         return Operation::native_import;
     if (import.library=="timrman" && (import.version>>8)==1 &&
         (import.ordinal==4 || (import.ordinal>=6 && import.ordinal<=12) || import.ordinal==16)) return Operation::native_import;
-    if (import.library=="vblank" && (import.version>>8)==1 && (import.ordinal==8 || import.ordinal==9)) return Operation::native_import;
+    if (import.library=="vblank" && (import.version>>8)==1 && import.ordinal>=4 && import.ordinal<=9) return Operation::native_import;
     if ((import.library=="thsemap" || import.library=="thmsgbx") && (import.version>>8)==1 && ((import.ordinal>=4 && import.ordinal<=9) || import.ordinal==11 || import.ordinal==12)) return Operation::native_import;
     if (import.library=="thevent" && (import.version>>8)==1 &&
         ((import.ordinal>=4 && import.ordinal<=11) || import.ordinal==13 || import.ordinal==14))
@@ -581,7 +581,11 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                 // Loaded-pointer callees start with unknown registers. The caller's
                 // post-delay constants are not a proof about the callee.
                 const bool loaded_pointer=pointer_transfers.contains(pc);
-                for (const auto target : instruction.targets) enqueue(target,loaded_pointer ? Constants{} : successor);
+                for (const auto target : instruction.targets) {
+                    if (external_callbacks && (target<module.base || target-module.base>=extent))
+                        discover_callback(target,pc,loaded_pointer);
+                    else enqueue(target,loaded_pointer ? Constants{} : successor);
+                }
             } else if (instruction.flow!=Flow::return_register) enqueue(instruction.target,successor);
             if (instruction.flow==Flow::conditional) enqueue(pc+8,successor);
             // A host import may enter a guest callback before it returns, so
@@ -626,15 +630,33 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         }
         const auto candidates=stored_code_candidates(program,states,data_modules);
         if (!module.code_addresses.empty()) {
+            std::vector<std::uint32_t> registry_sites;
+            for (const auto& [pc,instruction]:program.instructions)
+                if (states.contains(pc) && !states.at(pc).registers[instruction.source] &&
+                    (loaded_callback_call(program,instruction) || returned_callback_call(program,instruction))) registry_sites.push_back(pc);
             std::set<std::uint32_t> relocated(module.code_addresses.begin(),module.code_addresses.end());
+            // Clients can register descriptors whose callback fields belong to
+            // another compiled module. Import/export identity bounds this pool;
+            // it does not prove the values of the mutable registry at runtime.
+            const auto exports=elf::iop_exports(module);
+            for (const auto& client:data_modules) {
+                if (registry_sites.empty()) break;
+                if (client.base==module.base) continue;
+                const auto imports=elf::iop_imports(client);
+                const bool connected=std::any_of(imports.begin(),imports.end(),[&](const auto& import) {
+                    return std::any_of(exports.begin(),exports.end(),[&](const auto& library) {
+                        return library.name==import.library && library.version>>8==import.version>>8;
+                    });
+                });
+                if (connected) relocated.insert(client.code_addresses.begin(),client.code_addresses.end());
+            }
             const auto stored=stored_code_candidates(program,states,data_modules,false);
             relocated.insert(stored.begin(),stored.end());
             // Library descriptors can also be spilled to a stack, but their
             // validated export metadata identifies them as data, not callbacks.
             for (const auto& library:libraries) relocated.erase(library.address);
             if (relocated.size()>256) throw std::runtime_error("IOP conversion: relocated callback candidate limit exceeded");
-            for (const auto& [pc,instruction]:program.instructions) {
-                if (!states.contains(pc) || states.at(pc).registers[instruction.source] || !loaded_callback_call(program,instruction)) continue;
+            for (const auto pc:registry_sites) {
                 auto& targets=stack_transfers[pc];
                 const auto before=targets.size();
                 targets.insert(relocated.begin(),relocated.end());

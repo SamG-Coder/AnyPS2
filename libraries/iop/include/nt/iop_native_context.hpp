@@ -52,6 +52,7 @@ public:
           dmacman_(dmac_priority_),router(providers()),arena_(ram),packet_buffer_(layout.packet_buffer) {
         inbound.connect(commands,command_session,sif_control,&rpc_servers);
         hard_timers.connect(interrupts);
+        vblank.connect(events,ram);
         serial_.connect_disconnected_ports(interrupts);
         modload.attach_heap(heap);
         if (!disc.empty()) modload.attach_disc(disc);

@@ -2234,3 +2234,20 @@ helpers and finish synchronously, so VWAITQ observes completed native state;
 console pipeline latency is not modeled. Unsupported numeric domains stop before
 publishing results. Clip and random-register state use explicit integer LLVM
 operations, including the 23-bit random recurrence, rather than host randomness.
+
+IOP display waits (vblank ordinals 4–7) use the shared native event and thread
+services. Start/end waits suspend until a queued display edge is delivered;
+blank/nonblank waits can complete immediately only after the corresponding phase
+has been observed. Event publication follows earlier-priority compiled handlers
+and respects interrupt masking. Multiple waiters and termination reuse the event
+service's continuation ownership. The native graphics owner's nominal edges are
+not measurements of a physical PS2 or monitor. Private kernel data remains
+unsupported.
+
+IOP registry discovery follows indexed pointer loads through bounded nested
+descriptors and through a helper return to an indirect call. Relocation candidates
+include clients identified by matching import/export libraries; foreign callbacks
+are compiled by their owning module. These are compilation candidates, not proof
+that mutable registry values are constant. Actual loads and calls execute as LLVM
+AOT code and reject destinations outside their compiled candidate sets. No runtime
+decoder or additional pointer lookup table is introduced.

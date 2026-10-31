@@ -1073,7 +1073,59 @@ int main(int argc,char** argv) {
         for (unsigned i=0;i<std::size(escaped);++i) factory_word(0xb5a0+i*4,escaped[i]);
         factory_word(0xb5e8,0x03e00008); factory_word(0xb5ec,0x24020075);
         bundle_roots.push_back(0xb5a0);
-        const std::array bundle{module,provider,dispatch,factories,pointers};
+        nt::elf::IopModule display{0x11000,0x11014,nt::Bytes(0x200),0x200,{}};
+        const auto display_word=[&](unsigned pc,std::uint32_t word) { fixture::put32(display.memory,pc-display.base,word); };
+        display_word(0x11000,0x41e00000); display_word(0x11008,0x101);
+        constexpr char display_library[]="vblank";
+        std::copy(std::begin(display_library),std::end(display_library),display.memory.begin()+12);
+        for (unsigned ordinal=4;ordinal<=9;++ordinal) {
+            const auto pc=0x11014+(ordinal-4)*8;
+            display_word(pc,0x03e00008); display_word(pc+4,0x24000000|ordinal);
+            bundle_roots.push_back(pc);
+        }
+        // Runtime registry pointer returned by a compiled helper, copied to v1
+        // before invocation. The pointed-to code is a relocation candidate.
+        constexpr std::uint32_t registry_caller[]{0x03e08021,0x0c004458,0,0x00401821,
+            0x10600003,0,0x0060f809,0,0x0200f821,0x03e00008,0};
+        for (unsigned index=0;index<std::size(registry_caller);++index) display_word(0x11100+index*4,registry_caller[index]);
+        constexpr std::uint32_t nested_registry[]{0x03e08021,0x00851821,0x8c630000,0,0x8c62000c,0,
+            0x0040f809,0,0x0200f821,0x03e00008,0};
+        for (unsigned index=0;index<std::size(nested_registry);++index) display_word(0x11130+index*4,nested_registry[index]);
+        constexpr std::uint32_t registry_helper[]{0x00851021,0x8c420000,0,0x03e00008,0};
+        for (unsigned index=0;index<std::size(registry_helper);++index) display_word(0x11160+index*4,registry_helper[index]);
+        display_word(0x111a0,0x03e00008); display_word(0x111a4,0x24020049);
+        display_word(0x111c0,0x41c00000); display_word(0x111c8,0x101);
+        constexpr char registry_library[]="regtest";
+        std::copy(std::begin(registry_library),std::end(registry_library),display.memory.begin()+0x1cc);
+        display_word(0x111d4,0x111a0);
+        display.code_addresses={0x111a0};
+        bundle_roots.push_back(0x11100);
+        bundle_roots.push_back(0x11130);
+        nt::elf::IopModule registry_client{0x12000,0x12060,nt::Bytes(0x80),0x80,{}};
+        fixture::put32(registry_client.memory,0,0x41e00000);
+        fixture::put32(registry_client.memory,8,0x101);
+        std::copy(std::begin(registry_library),std::end(registry_library),registry_client.memory.begin()+12);
+        fixture::put32(registry_client.memory,0x14,0x03e00008); fixture::put32(registry_client.memory,0x18,0x24000000);
+        fixture::put32(registry_client.memory,0x40,0x03e00008); fixture::put32(registry_client.memory,0x44,0x24020057);
+        fixture::put32(registry_client.memory,0x60,0x03e00008);
+        registry_client.code_addresses={0x12040};
+        {
+            const std::array roots{0x11100U};
+            const auto discovered=nt::iop_codegen::ir::discover(display,roots);
+            if (!discovered.guarded_callback_sites.contains(0x11118) || !discovered.instructions.contains(0x111a0))
+                throw std::runtime_error("Returned indexed callback was not discovered and guarded");
+            auto overwritten=display; fixture::put32(overwritten.memory,0x10c,0x00c01821);
+            bool rejected=false;
+            try { nt::iop_codegen::ir::discover(overwritten,roots); } catch (const std::runtime_error&) { rejected=true; }
+            if (!rejected) throw std::runtime_error("Unknown overwrite retained a returned callback relationship");
+        }
+        const std::array bundle{module,provider,dispatch,factories,pointers,display,registry_client};
+        {
+            const auto discovered=nt::iop_codegen::ir::discover_bundle(bundle,bundle_roots);
+            const auto& targets=discovered.instructions.at(0x11118).targets;
+            if (!discovered.instructions.contains(0x12040) || std::find(targets.begin(),targets.end(),0x12040)==targets.end())
+                throw std::runtime_error("Registry client callback was not compiled in its owning module");
+        }
         {
             auto broken=bundle; fixture::put32(broken[3].memory,0x300,0);
             std::ostringstream partial; bool rejected=false;
@@ -1111,7 +1163,7 @@ int main(int argc,char** argv) {
             if (!failed_bundle || !partial.str().empty()) throw std::runtime_error("Invalid bundle emitted partial native code");
         }
         // Earlier owners must be revisited when a later module discovers a callback.
-        const std::array reversed{provider,module,dispatch,factories,pointers};
+        const std::array reversed{provider,module,dispatch,factories,pointers,display,registry_client};
         std::ostringstream reverse_code;
         nt::iop_codegen::emit_bundle(reverse_code,reversed,bundle_roots);
         for (const auto target : {0xa061U,0xa080U,0xb800U}) {
@@ -1147,7 +1199,7 @@ int main(int argc,char** argv) {
             put(0x8800,0x00401821);
             put(first+(count-2)*4,0x03e00008); put(first+(count-1)*4,0);
             std::vector<std::uint32_t> roots=bundle_roots; roots.push_back(first);
-            const std::array large_bundle{large,provider,dispatch,factories,pointers};
+            const std::array large_bundle{large,provider,dispatch,factories,pointers,display,registry_client};
             std::ostringstream llvm; nt::iop_codegen::emit_bundle(llvm,large_bundle,roots);
             const auto text=llvm.str();
             nt::write_file(argv[3],nt::ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));
