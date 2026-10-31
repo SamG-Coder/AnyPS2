@@ -34,6 +34,50 @@ int main() {
         for (const auto address:{0U,0x42fffcU,0x430001U,0x430008U,0x4300fcU,0x430108U,0xfffffff8U,0xffffffffU})
             check(!nt_ee_generated_contains(address));
         {
+            nt::ee::NativeVectorOwner owner;
+            auto& vectors=owner.storage;
+            nt::ee::Memory memory; memory.vectors=&vectors; memory.vector_control=owner.interface();
+            nt::runtime::State state;
+            const auto execute=[&](unsigned index) {
+                state={}; state.pc=0x460000+8*index;
+                return nt_ee_generated_run(&state,&memory,1);
+            };
+            vectors.values[0][1]=0x41400000; vectors.values[1][2]=0x40800000;
+            check(execute(0)==nt::ee::Stop::budget && vectors.quotient==0x40400000 && owner.read(22,false).value==0x40400000);
+            check(execute(1)==nt::ee::Stop::budget && vectors.quotient==0x40000000);
+            check(execute(2)==nt::ee::Stop::budget && vectors.quotient==0x40c00000);
+            check(execute(3)==nt::ee::Stop::budget);
+            vectors.values[1][2]=0x7f800000; vectors.status=123;
+            check(execute(0)==nt::ee::Stop::unsupported_numeric && !state.executed && vectors.quotient==0x40c00000 && vectors.status==123);
+            vectors.values[0]={0x40c00000,0xc0a00000,0x40000000,0}; vectors.values[1][3]=0x40800000; vectors.clip=3;
+            check(execute(4)==nt::ee::Stop::budget && vectors.clip==201 && owner.read(18,false).value==201);
+            vectors.values[0]={0x40000000,0x40400000,0x40800000,0};
+            vectors.values[1]={0x40a00000,0x40c00000,0x40e00000,0};
+            vectors.accumulator[3]=77; vectors.mac=0x11; vectors.values[2][3]=88;
+            check(execute(5)==nt::ee::Stop::budget && vectors.accumulator==std::array<std::uint32_t,4>{0x41a80000,0x41a00000,0x41400000,77});
+            check(execute(6)==nt::ee::Stop::budget && vectors.values[2]==std::array<std::uint32_t,4>{0xc0400000,0x40c00000,0xc0400000,88} && (vectors.mac&0x11)==0x11);
+            vectors.values[0][1]=0x3f800010; vectors.values[0][2]=0x007fffff;
+            vectors.values[2].fill(99); vectors.values[3].fill(88);
+            check(execute(7)==nt::ee::Stop::budget && vectors.random==0x3f800010);
+            check(execute(8)==nt::ee::Stop::budget && vectors.random==0x3f800021 &&
+                vectors.values[2]==std::array<std::uint32_t,4>{0x3f800021,99,0x3f800021,99});
+            check(execute(9)==nt::ee::Stop::budget && vectors.random==0x3f800021 &&
+                vectors.values[3]==std::array<std::uint32_t,4>{88,0x3f800021,88,0x3f800021});
+            check(execute(10)==nt::ee::Stop::budget && vectors.random==0x3fffffde && owner.read(20,false).value==vectors.random);
+            vectors.values[0]={0x40000000,0x40400000,0x40800000,0};
+            vectors.values[1]={0x40a00000,0x40c00000,0x40e00000,0x40a00000};
+            vectors.quotient=0x40400000; vectors.immediate=0x40000000; vectors.values[2][3]=88;
+            check(execute(11)==nt::ee::Stop::budget && vectors.values[2]==std::array<std::uint32_t,4>{0x40c00000,0x41100000,0x41400000,88});
+            check(execute(12)==nt::ee::Stop::budget && vectors.values[2]==std::array<std::uint32_t,4>{0x40800000,0x40c00000,0x41000000,88});
+            check(execute(13)==nt::ee::Stop::budget && vectors.accumulator==std::array<std::uint32_t,4>{0x40e00000,0x41000000,0x41100000,77});
+            check(execute(14)==nt::ee::Stop::budget && vectors.accumulator==std::array<std::uint32_t,4>{0xc0400000,0xc0000000,0xbf800000,77});
+            check(execute(15)==nt::ee::Stop::budget && vectors.accumulator==std::array<std::uint32_t,4>{0x40e00000,0x41100000,0x41300000,77});
+            check(execute(16)==nt::ee::Stop::budget && vectors.accumulator==std::array<std::uint32_t,4>{0xc0400000,0xc0400000,0xc0400000,77});
+            const auto previous=vectors;
+            vectors.active=true;
+            check(execute(7)==nt::ee::Stop::vector_pending && !state.executed && vectors.random==previous.random);
+        }
+        {
             // Non-fused scalar family, masked VU accumulator family, and native
             // index-invalidation ordering execute from generated LLVM.
             nt::ee::Memory memory; nt::runtime::State state;

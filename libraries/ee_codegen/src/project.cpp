@@ -6,9 +6,40 @@
 #include <algorithm>
 #include <sstream>
 #include <stdexcept>
+#include <fstream>
+#include <chrono>
+#include <memory>
 
 namespace nt::ee_codegen {
 namespace {
+// Publish only complete build artifacts. Every temporary directory is created
+// exclusively by this owner; an existing directory is never reused or removed.
+class StagedProject {
+public:
+    StagedProject(const StagedProject&)=delete;
+    StagedProject& operator=(const StagedProject&)=delete;
+    explicit StagedProject(std::filesystem::path destination) : destination_(std::move(destination)) {
+        if (std::filesystem::exists(destination_)) throw std::runtime_error("EE output directory already exists");
+        const auto parent=destination_.parent_path().empty() ? std::filesystem::path(".") : destination_.parent_path();
+        std::filesystem::create_directories(parent);
+        const auto stamp=std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        for (unsigned attempt=0;attempt<64;++attempt) {
+            const auto candidate=parent/(destination_.filename().string()+".pending-"+stamp+"-"+std::to_string(attempt));
+            if (std::filesystem::create_directory(candidate)) { path_=candidate; return; }
+        }
+        throw std::runtime_error("Cannot reserve a native conversion output directory");
+    }
+    ~StagedProject() {
+        if (!path_.empty()) { std::error_code error; std::filesystem::remove_all(path_,error); }
+    }
+    const std::filesystem::path& path() const { return path_; }
+    void publish() {
+        if (std::filesystem::exists(destination_)) throw std::runtime_error("EE output directory already exists");
+        std::filesystem::rename(path_,destination_); path_.clear();
+    }
+private:
+    std::filesystem::path destination_,path_;
+};
 struct Prepared {
     elf::Executable executable;
     analysis::Program discovered;
@@ -168,7 +199,7 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
     return result;
 }
 }
-void project(const std::filesystem::path& input,const std::filesystem::path& output,std::span<const PayloadMapping> mappings,std::span<const std::filesystem::path> images) {
+void project(const std::filesystem::path& input,const std::filesystem::path& destination,std::span<const PayloadMapping> mappings,std::span<const std::filesystem::path> images) {
     const auto bytes=read_file(input);
     auto prepared=prepare(bytes,mappings);
     if (images.size()>31) throw std::invalid_argument("Too many secondary executable images");
@@ -210,8 +241,20 @@ void project(const std::filesystem::path& input,const std::filesystem::path& out
         throw std::runtime_error("EE discovery reached unmapped code at "+hex32(*prepared.discovered.unresolved.begin()));
     std::vector<r5900::Instruction> instructions;
     for (const auto& [pc,instruction]:prepared.discovered.instructions) instructions.push_back(instruction);
-    std::ostringstream llvm;
-    emit_llvm(llvm,instructions,prepared.ranges,prepared.payloads,prepared.layouts,prepared.images);
+    StagedProject staged(destination);
+    const auto& output=staged.path();
+    std::ofstream llvm(output/"generated.ll",std::ios::binary);
+    llvm.exceptions(std::ios::badbit|std::ios::failbit);
+    std::vector<std::string> modules{"generated.ll"};
+    std::vector<std::unique_ptr<std::ofstream>> streams;
+    emit_llvm(llvm,instructions,prepared.ranges,prepared.payloads,prepared.layouts,prepared.images,[&](std::size_t index)->std::ostream& {
+        modules.push_back("generated-"+std::to_string(index)+".ll");
+        auto stream=std::make_unique<std::ofstream>(output/modules.back(),std::ios::binary);
+        stream->exceptions(std::ios::badbit|std::ios::failbit);
+        streams.push_back(std::move(stream)); return *streams.back();
+    });
+    llvm.close();
+    for (auto& stream:streams) stream->close();
     const auto& executable=prepared.executable;
     const auto& image=prepared.image;
     const auto syscall_table=prepared.syscall_table;
@@ -225,15 +268,28 @@ if(NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR NOT CMAKE_SYSTEM_PROCESSOR MAT
   message(FATAL_ERROR "Initial EE LLVM output supports Windows x86-64 with MSVC")
 endif()
 find_program(ANYPS2_CLANG NAMES clang REQUIRED)
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated.obj"
-  COMMAND "${ANYPS2_CLANG}" -target x86_64-pc-windows-msvc -Werror -Wno-override-module -O2 -c
-    "${CMAKE_CURRENT_SOURCE_DIR}/generated.ll" -o "${CMAKE_CURRENT_BINARY_DIR}/generated.obj"
-  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/generated.ll" VERBATIM)
+)cmake";
+    cmake<<"set(ANYPS2_EE_MODULES";
+    for (const auto& name:modules) cmake<<" \""<<name<<"\"";
+    cmake<<")\n";
+    cmake<<R"cmake(
+foreach(module IN LISTS ANYPS2_EE_MODULES)
+  get_filename_component(stem "${module}" NAME_WE)
+  set(object "${CMAKE_CURRENT_BINARY_DIR}/${stem}.obj")
+  add_custom_command(OUTPUT "${object}"
+    COMMAND "${ANYPS2_CLANG}" -target x86_64-pc-windows-msvc -Werror -Wno-override-module -O2 -c
+      "${CMAKE_CURRENT_SOURCE_DIR}/${module}" -o "${object}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${module}" VERBATIM)
+  add_custom_target(ee_module_${stem} DEPENDS "${object}")
+  list(APPEND ANYPS2_EE_OBJECTS "${object}")
+  list(APPEND ANYPS2_EE_TARGETS ee_module_${stem})
+endforeach()
 add_executable(ps2-native "${ANYPS2_ROOT}/programs/ee-native-probe/main.cpp"
   "${ANYPS2_ROOT}/libraries/binary/src/reader.cpp" "${ANYPS2_ROOT}/libraries/ee_native/src/numeric.cpp"
   "${ANYPS2_ROOT}/libraries/fileio/src/fileio.cpp"
   "${ANYPS2_ROOT}/libraries/disc/src/disc_files.cpp" "${ANYPS2_ROOT}/libraries/disc/src/iso9660.cpp"
-  "${ANYPS2_ROOT}/libraries/ee_native/src/io.cpp" "${ANYPS2_ROOT}/libraries/ee_native/src/vector.cpp" "${CMAKE_CURRENT_BINARY_DIR}/generated.obj")
+  "${ANYPS2_ROOT}/libraries/ee_native/src/io.cpp" "${ANYPS2_ROOT}/libraries/ee_native/src/vector.cpp" ${ANYPS2_EE_OBJECTS})
+add_dependencies(ps2-native ${ANYPS2_EE_TARGETS})
 include("${ANYPS2_ROOT}/libraries/graphics/vulkan.cmake")
 anyps2_add_vulkan(nt_vulkan)
 include("${ANYPS2_ROOT}/libraries/host_metrics/native.cmake")
@@ -252,8 +308,6 @@ target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codeg
 )cmake";
     cmake<<"target_compile_definitions(ps2-native PRIVATE ANYPS2_EE_ENTRY="<<executable.entry
          <<"U ANYPS2_EE_SYSCALL_TABLE="<<syscall_table<<"U ANYPS2_EE_DATA_SIZE="<<image.size()<<"U ANYPS2_EE_DATA_HASH="<<fingerprint(image)<<"ULL)\n";
-    if (!std::filesystem::create_directories(output)) throw std::runtime_error("EE output directory already exists");
-    save(output/"generated.ll",llvm.str());
     save(output/"CMakeLists.txt",cmake.str());
     std::ostringstream native_layout;
     for (const auto& record:prepared.layouts)
@@ -295,6 +349,7 @@ target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codeg
          "Indirect destinations must already belong to the discovered code set; other targets stop.\n"
          "Build with ps2-build, then run ps2-native <program.data> [operation-budget].\n"
          "Data contains private input material and must remain local. This is not game boot.\n");
+    staged.publish();
 }
 EeAssessment assess(ByteView bytes,std::span<const PayloadMapping> mappings) {
     EeAssessment result;

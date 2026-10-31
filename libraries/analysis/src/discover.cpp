@@ -107,29 +107,54 @@ std::optional<std::uint32_t> executable_pointer(const elf::Executable& elf,std::
 }
 // Track exact argument copies, not general data dependencies. A bounded callee
 // summary identifies arguments written to word-sized callback/data slots.
-unsigned stored_arguments(const Program& program,std::uint32_t entry) {
+struct ArgumentValue {
+    unsigned origin=0;
+    std::uint32_t offset=0;
+    bool loaded=false;
+    auto operator<=>(const ArgumentValue&) const=default;
+};
+struct ArgumentUses {
+    unsigned stored=0;
+    std::map<unsigned,std::set<std::uint32_t>> callable_fields;
+};
+ArgumentUses argument_uses(const Program& program,std::uint32_t entry) {
     using r5900::Op;
-    using Origins=std::array<unsigned,32>;
+    using Origins=std::array<ArgumentValue,32>;
     Origins initial{};
     // The EE ABI passes eight integer arguments in registers a0 through t3.
-    for (unsigned reg=4;reg<12;++reg) initial[reg]=1U<<(reg-4);
+    for (unsigned reg=4;reg<12;++reg) initial[reg].origin=1U<<(reg-4);
     std::deque<std::pair<std::uint32_t,Origins>> pending{{entry,initial}};
     std::set<std::pair<std::uint32_t,Origins>> visited;
-    unsigned stored=0,budget=256;
+    ArgumentUses uses;
+    unsigned budget=256;
     const auto transfer=[&](const r5900::Instruction& i,Origins& origins) {
-        unsigned destination=0,value=0;
+        unsigned destination=0;
+        ArgumentValue value;
         switch (i.op) {
-        case Op::sw: stored|=origins[i.rt]; return true;
+        case Op::sw:
+            if (!origins[i.rt].loaded && !origins[i.rt].offset) uses.stored|=origins[i.rt].origin;
+            return true;
         case Op::sb: case Op::sh: case Op::sd: case Op::sq: return true;
         case Op::addu: case Op::daddu: case Op::bit_or:
             destination=i.rd;
             if (!i.rt) value=origins[i.rs];
             else if (!i.rs) value=origins[i.rt];
             break;
-        case Op::addiu: case Op::daddiu: case Op::ori:
-            destination=i.rt; if (!i.immediate) value=origins[i.rs]; break;
+        case Op::addiu: case Op::daddiu:
+            destination=i.rt;
+            if (origins[i.rs].origin && !origins[i.rs].loaded) {
+                value=origins[i.rs]; value.offset+=static_cast<std::uint32_t>(i.immediate);
+            }
+            break;
+        case Op::ori: destination=i.rt; if (!i.immediate) value=origins[i.rs]; break;
         case Op::sll: destination=i.rd; if (!i.sa) value=origins[i.rt]; break;
-        case Op::lui: case Op::lw: case Op::lwu: case Op::ld: case Op::lq:
+        case Op::lw: case Op::lwu:
+            destination=i.rt;
+            if (origins[i.rs].origin && !origins[i.rs].loaded) {
+                value=origins[i.rs]; value.offset+=static_cast<std::uint32_t>(i.immediate); value.loaded=true;
+            }
+            break;
+        case Op::lui: case Op::ld: case Op::lq:
         case Op::lb: case Op::lbu: case Op::lh: case Op::lhu:
         case Op::andi: case Op::xori: case Op::slti: case Op::sltiu:
             destination=i.rt; break;
@@ -153,14 +178,16 @@ unsigned stored_arguments(const Program& program,std::uint32_t entry) {
             if (transfer(i,origins)) pending.emplace_back(pc+4,origins);
             continue;
         }
+        if (i.indirect() && origins[i.rs].loaded)
+            uses.callable_fields[origins[i.rs].origin].insert(origins[i.rs].offset);
         // ABI-preserved copies may reach registration after a helper call.
         // This only proposes compilation roots; it never folds runtime values.
         if (i.op==Op::jal || i.op==Op::jalr) {
-            origins[i.op==Op::jal ? 31 : i.rd]=0;
+            origins[i.op==Op::jal ? 31 : i.rd]={};
             const auto slot=program.instructions.find(pc+4);
             if (slot==program.instructions.end() || !transfer(slot->second,origins)) continue;
             for (unsigned reg=1;reg<32;++reg)
-                if (!(reg>=16 && reg<=23) && reg!=28 && reg!=29 && reg!=30) origins[reg]=0;
+                if (!(reg>=16 && reg<=23) && reg!=28 && reg!=29 && reg!=30) origins[reg]={};
             pending.emplace_back(pc+8,origins);
             continue;
         }
@@ -172,12 +199,13 @@ unsigned stored_arguments(const Program& program,std::uint32_t entry) {
         if (!i.indirect()) pending.emplace_back(i.target(),origins);
         if (i.op!=Op::j && i.op!=Op::jr) pending.emplace_back(pc+8,i.likely() ? before_slot : origins);
     }
-    return stored;
+    return uses;
 }
 // Bounded backward slicing is used only to propose code for compilation. A load
 // reads the initial ELF image, not a claim that writable data stays constant.
 std::optional<std::uint32_t> candidate(ByteView bytes,const elf::Executable& elf,const Program& program,
-                                     std::uint32_t before,unsigned reg,unsigned& fuel,std::uint32_t call_site,bool layout_candidate=false) {
+                                     std::uint32_t before,unsigned reg,unsigned& fuel,std::uint32_t call_site,bool layout_candidate=false,
+                                     std::uint32_t conditional_store=0) {
     using r5900::Op;
     if (!reg) return 0;
     while (before>=4 && fuel) {
@@ -192,6 +220,17 @@ std::optional<std::uint32_t> candidate(ByteView bytes,const elf::Executable& elf
             return {};
         }
         if (i.branch() || i.terminal() || i.op==Op::syscall) {
+            // A non-linking branch may skip the store entirely. On its
+            // fallthrough path it does not change this register. This is only
+            // a stored-code discovery candidate, never a folded runtime value
+            // or a native memory-layout assertion.
+            if (conditional_store && i.target()>conditional_store) {
+                switch (i.op) {
+                case Op::beq: case Op::bne: case Op::blez: case Op::bgtz:
+                case Op::bltz: case Op::bgez: case Op::bc1f: case Op::bc1t: continue;
+                default: break;
+                }
+            }
             if (layout_candidate && reg>=16 && reg<=23) continue;
             return {};
         }
@@ -211,7 +250,7 @@ std::optional<std::uint32_t> candidate(ByteView bytes,const elf::Executable& elf
         if (destination!=reg) continue;
         if (i.op==Op::slti || i.op==Op::sltiu || i.op==Op::slt || i.op==Op::sltu) return {};
         if (i.op==Op::lui) return static_cast<std::uint32_t>(i.immediate)<<16;
-        const auto a=candidate(bytes,elf,program,before,i.rs,fuel,call_site,layout_candidate);
+        const auto a=candidate(bytes,elf,program,before,i.rs,fuel,call_site,layout_candidate,conditional_store);
         if (!a) return {};
         if (i.op==Op::addiu || i.op==Op::daddiu) return *a+static_cast<std::uint32_t>(i.immediate);
         if (i.op==Op::ori) return *a|static_cast<std::uint16_t>(i.immediate);
@@ -219,7 +258,7 @@ std::optional<std::uint32_t> candidate(ByteView bytes,const elf::Executable& elf
             const auto width=i.op==Op::lb || i.op==Op::lbu ? 1U : i.op==Op::lh || i.op==Op::lhu ? 2U : 4U;
             return initial_word(bytes,elf,*a+static_cast<std::uint32_t>(i.immediate),width,i.op==Op::lb || i.op==Op::lh);
         }
-        const auto b=candidate(bytes,elf,program,before,i.rt,fuel,call_site,layout_candidate);
+        const auto b=candidate(bytes,elf,program,before,i.rt,fuel,call_site,layout_candidate,conditional_store);
         if (!b) return {};
         if (i.op==Op::sll) return *b<<i.sa;
         return i.op==Op::bit_or ? *a|*b : *a+*b;
@@ -334,7 +373,7 @@ std::set<std::uint32_t> stored_code_pointers(ByteView bytes,const elf::Executabl
         // A call delay-slot store consumes the value before the callee runs.
         const auto prior=pc>=4 ? program.instructions.find(pc-4) : program.instructions.end();
         const auto call_site=prior!=program.instructions.end() && prior->second.op==r5900::Op::jal ? pc-4 : 0xffffffffU;
-        const auto value=candidate(bytes,elf,program,pc,i.rt,fuel,call_site);
+        const auto value=candidate(bytes,elf,program,pc,i.rt,fuel,call_site,false,pc);
         if (!value || !*value) continue;
         if (const auto address=executable_pointer(elf,*value)) result.insert(*address);
     }
@@ -502,18 +541,43 @@ std::set<std::uint32_t> object_table_entries(ByteView bytes,const elf::Executabl
 }
 std::set<std::uint32_t> registered_code_pointers(ByteView bytes,const elf::Executable& elf,const Program& program) {
     std::set<std::uint32_t> result;
-    std::map<std::uint32_t,unsigned> summaries;
+    std::map<std::uint32_t,ArgumentUses> summaries;
     for (const auto& [pc,call]:program.instructions) {
         if (call.op!=r5900::Op::jal || pc>0xfffffff7U) continue;
+        auto found=summaries.find(call.target());
+        if (found==summaries.end()) found=summaries.emplace(call.target(),argument_uses(program,call.target())).first;
         for (unsigned reg=4;reg<12;++reg) {
             unsigned fuel=128;
             const auto value=candidate(bytes,elf,program,pc+8,reg,fuel,pc);
             if (!value) continue;
             const auto address=executable_pointer(elf,*value);
             if (!address) continue;
-            auto found=summaries.find(call.target());
-            if (found==summaries.end()) found=summaries.emplace(call.target(),stored_arguments(program,call.target())).first;
-            if (found->second&(1U<<(reg-4))) result.insert(*address);
+            if (found->second.stored&(1U<<(reg-4))) result.insert(*address);
+        }
+    }
+    // Multi-callback descriptor shapes come from actual indirect calls through
+    // one argument. Matching initialized records are compilation candidates,
+    // not assertions about mutable runtime data or an injected dispatch table.
+    std::set<std::set<std::uint32_t>> shapes;
+    for (const auto& [entry,uses]:summaries) for (const auto& [origin,fields]:uses.callable_fields)
+        if (fields.size()>=2 && fields.size()<=16 && *fields.rbegin()<256 &&
+            std::all_of(fields.begin(),fields.end(),[](auto offset) { return offset%4==0; })) shapes.insert(fields);
+    for (const auto& segment:elf.segments) {
+        if (segment.flags&1) continue;
+        for (const auto& fields:shapes) {
+            const auto extent=std::uint64_t(*fields.rbegin())+4;
+            for (std::uint64_t offset=(4U-(segment.address&3U))&3U;offset+extent<=segment.file_size;offset+=4) {
+                std::set<std::uint32_t> entries;
+                bool valid=true;
+                for (const auto field:fields) {
+                    const auto address=std::uint64_t(segment.address)+offset+field;
+                    const auto value=address<=0xfffffffcU ? initial_word(bytes,elf,static_cast<std::uint32_t>(address)) : std::nullopt;
+                    const auto target=value ? executable_pointer(elf,*value) : std::nullopt;
+                    if (!target) { valid=false; break; }
+                    entries.insert(*target);
+                }
+                if (valid && entries.size()>=2) result.insert(entries.begin(),entries.end());
+            }
         }
     }
     return result;

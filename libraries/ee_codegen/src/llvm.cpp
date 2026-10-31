@@ -66,8 +66,8 @@ bool supported(Op op) {
     }
 }
 
-void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> ranges,std::size_t index,std::span<const CodePayload> payloads,const NativeLayout& layout) {
-    w.out<<"define internal i32 @nt_ee_part_"<<index<<"(ptr %state, ptr %memory, i64 %budget) noinline {\nentry:\n"
+void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> ranges,std::size_t index,std::span<const CodePayload> payloads,const NativeLayout& layout,bool external=false) {
+    w.out<<"define "<<(external ? "" : "internal ")<<"i32 @nt_ee_part_"<<index<<"(ptr %state, ptr %memory, i64 %budget) noinline {\nentry:\n"
          <<"  %remaining = alloca i64\n  store i64 %budget, ptr %remaining\n  br label %dispatch\ndispatch:\n";
     const auto pc=w.load("i32",offsetof(runtime::State,pc));
     w.out<<"  switch i32 "<<pc<<", label %unmapped [\n";
@@ -283,7 +283,50 @@ EeRejection reject_unsupported(std::span<const r5900::Instruction> instructions)
     }
     return rejection;
 }
-void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> protected_code,std::span<const CodePayload> payloads,std::span<const LayoutDeclaration> layouts,std::span<const ExecutableImage> images) {
+void emit_declarations(Writer& w) {
+    w.out<<"declare i32 @memcmp(ptr, ptr, i64)\n";
+    w.out<<"declare i32 @nt_ee_validate_native_layout(ptr, i32, i32, i32, i32, i32, i32)\n";
+    w.out<<"declare i64 @nt_ee_address_space(ptr, i32, i32, i32)\n";
+    w.out<<"declare i64 @nt_ee_performance(ptr, i32, i32, i32, i32)\n";
+    w.out<<"declare i64 @nt_ee_io_read32(ptr, i32)\ndeclare i32 @nt_ee_io_write32(ptr, i32, i32)\ndeclare i32 @nt_ee_io_write8(ptr, i32, i32)\n";
+    w.out<<"declare i32 @nt_ee_io_read64(ptr, ptr, i32, i32)\ndeclare i32 @nt_ee_io_write64(ptr, i32, i64)\n";
+    declare_packed_intrinsics(w.out);
+    w.out<<"declare i64 @nt_ee_square_root_finite(i32)\n"
+         <<"declare i64 @nt_ee_reciprocal_square_root_finite(i32, i32)\n"
+         <<"declare i64 @nt_ee_multiply_accumulate_finite(i32, i32, i32, i32)\n";
+    w.out<<"declare i32 @nt_ee_vector_multiply_accumulate(ptr, i32, i32, i32, i32, i32, i32)\n"
+         <<"declare i32 @nt_ee_vector_quotient(ptr, i32, i32, i32, i32, i32)\n"
+         <<"declare i32 @nt_ee_vector_outer(ptr, i32, i32, i32, i32)\n"
+         <<"declare i32 @nt_vu_clip_flags(i32, i32, i32, i32)\n"
+         <<"declare i32 @nt_ee_vector_multiply(ptr, i32, i32, i32, i32, i32)\n"
+         <<"declare i32 @nt_ee_integer_to_scaled_scalar(i32, i32)\n"
+         <<"declare i32 @nt_ee_scaled_scalar_to_integer(i32, i32)\n";
+    w.out<<"declare i64 @nt_ee_add_finite(i32, i32, i32)\n";
+    w.out<<"declare i64 @nt_ee_vector_read(ptr, i32, i32)\n";
+    w.out<<"declare i32 @nt_ee_vector_launch(ptr, i32, i32)\n";
+    w.out<<"declare i32 @nt_ee_vector_memory(ptr, i32)\n";
+    w.out<<"declare i64 @nt_ee_vector_write(ptr, i32, i32, i32)\n";
+    w.out<<"declare i64 @nt_ee_multiply_finite(i32, i32)\n";
+    w.out<<"declare i64 @nt_ee_divide_finite(i32, i32)\n"
+         <<"declare i32 @nt_ee_integer_to_scalar(i32)\n"
+         <<"declare i32 @nt_ee_scalar_to_integer(i32)\n"
+         <<"declare i32 @nt_ee_min_max_scalar(i32, i32, i32)\n";
+
+    w.out<<"declare i32 @nt_ee_vector_add(ptr, i32, i32, i32, i32, i32, i32)\n";
+    w.out<<"declare <2 x i32> @llvm.ctlz.v2i32(<2 x i32>, i1 immarg)\n";
+    for (const auto width : {32,64}) for (const auto operation : {"sadd","ssub"})
+        w.out<<"declare { i"<<width<<", i1 } @llvm."<<operation<<".with.overflow.i"<<width<<"(i"<<width<<", i"<<width<<")\n";
+}
+void emit_payloads(Writer& w,std::span<const CodePayload> payloads) {
+    for (std::size_t n=0;n<payloads.size();++n) {
+        w.out<<"@nt_payload_"<<n<<" = private constant ["<<payloads[n].bytes.size()<<" x i8] [";
+        for (std::size_t b=0;b<payloads[n].bytes.size();++b)
+            w.out<<(b ? ", " : "")<<"i8 "<<static_cast<unsigned>(payloads[n].bytes[b]);
+        w.out<<"]\n";
+    }
+}
+void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> protected_code,std::span<const CodePayload> payloads,std::span<const LayoutDeclaration> layouts,std::span<const ExecutableImage> images,
+               const std::function<std::ostream&(std::size_t)>& module_output) {
     static_assert(std::is_standard_layout_v<runtime::State> && std::is_standard_layout_v<ee::Memory>);
     static_assert(sizeof(void*)==8 && std::endian::native==std::endian::little,
                   "EE LLVM currently requires a little-endian 64-bit host ABI");
@@ -361,16 +404,26 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
         parts.push_back(instructions.subspan(first,count)); first+=count;
     }
     const auto layout=prepare_native_layout(layouts);
-    Writer w;
-    if (!payloads.empty() || !images.empty()) w.out<<"declare i32 @memcmp(ptr, ptr, i64)\n";
+    Writer w{output};
     emit_images(w,images);
-    for (std::size_t n=0;n<payloads.size();++n) {
-        w.out<<"@nt_payload_"<<n<<" = private constant ["<<payloads[n].bytes.size()<<" x i8] [";
-        for (std::size_t b=0;b<payloads[n].bytes.size();++b)
-            w.out<<(b ? ", " : "")<<"i8 "<<static_cast<unsigned>(payloads[n].bytes[b]);
-        w.out<<"]\n";
+    if (module_output) {
+        constexpr std::size_t functions_per_module=32;
+        for (std::size_t first=0;first<parts.size();first+=functions_per_module) {
+            auto& stream=module_output(first/functions_per_module);
+            Writer unit{stream};
+            emit_declarations(unit);
+            emit_payloads(unit,payloads);
+            const auto end=std::min(first+functions_per_module,parts.size());
+            for (auto index=first;index<end;++index) {
+                emit_part(unit,parts[index],ranges,index,payloads,layout,true);
+                w.out<<"declare i32 @nt_ee_part_"<<index<<"(ptr, ptr, i64)\n";
+            }
+            if (!stream) throw std::runtime_error("Cannot finish EE LLVM module");
+        }
+    } else {
+        emit_payloads(w,payloads);
+        for (std::size_t index=0;index<parts.size();++index) emit_part(w,parts[index],ranges,index,payloads,layout);
     }
-    for (std::size_t index=0;index<parts.size();++index) emit_part(w,parts[index],ranges,index,payloads,layout);
     emit_dispatcher(w,parts);
     emit_contains(w,instructions);
 
@@ -382,34 +435,7 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
     const auto end=w.binary("add","i64",address,bytes);
     const auto overlap=code_overlap(w,address,end,ranges,"%image");
     w.out<<"  ret i1 "<<overlap<<"\n}\n";
-    w.out<<"declare i32 @nt_ee_validate_native_layout(ptr, i32, i32, i32, i32, i32, i32)\n";
-    w.out<<"declare i64 @nt_ee_address_space(ptr, i32, i32, i32)\n";
-    w.out<<"declare i64 @nt_ee_performance(ptr, i32, i32, i32, i32)\n";
-    w.out<<"declare i64 @nt_ee_io_read32(ptr, i32)\ndeclare i32 @nt_ee_io_write32(ptr, i32, i32)\ndeclare i32 @nt_ee_io_write8(ptr, i32, i32)\n";
-    w.out<<"declare i32 @nt_ee_io_read64(ptr, ptr, i32, i32)\ndeclare i32 @nt_ee_io_write64(ptr, i32, i64)\n";
-    declare_packed_intrinsics(w.out);
-    w.out<<"declare i64 @nt_ee_square_root_finite(i32)\n"
-         <<"declare i64 @nt_ee_reciprocal_square_root_finite(i32, i32)\n"
-         <<"declare i64 @nt_ee_multiply_accumulate_finite(i32, i32, i32, i32)\n";
-    w.out<<"declare i32 @nt_ee_vector_multiply_accumulate(ptr, i32, i32, i32, i32, i32, i32)\n"
-         <<"declare i32 @nt_ee_vector_multiply(ptr, i32, i32, i32, i32, i32)\n"
-         <<"declare i32 @nt_ee_integer_to_scaled_scalar(i32, i32)\n"
-         <<"declare i32 @nt_ee_scaled_scalar_to_integer(i32, i32)\n";
-    w.out<<"declare i64 @nt_ee_add_finite(i32, i32, i32)\n";
-    w.out<<"declare i64 @nt_ee_vector_read(ptr, i32, i32)\n";
-    w.out<<"declare i32 @nt_ee_vector_launch(ptr, i32, i32)\n";
-    w.out<<"declare i32 @nt_ee_vector_memory(ptr, i32)\n";
-    w.out<<"declare i64 @nt_ee_vector_write(ptr, i32, i32, i32)\n";
-    w.out<<"declare i64 @nt_ee_multiply_finite(i32, i32)\n";
-    w.out<<"declare i64 @nt_ee_divide_finite(i32, i32)\n"
-         <<"declare i32 @nt_ee_integer_to_scalar(i32)\n"
-         <<"declare i32 @nt_ee_scalar_to_integer(i32)\n"
-         <<"declare i32 @nt_ee_min_max_scalar(i32, i32, i32)\n";
-
-    w.out<<"declare i32 @nt_ee_vector_add(ptr, i32, i32, i32, i32, i32, i32)\n";
-    w.out<<"declare <2 x i32> @llvm.ctlz.v2i32(<2 x i32>, i1 immarg)\n";
-    for (const auto width : {32,64}) for (const auto operation : {"sadd","ssub"})
-        w.out<<"declare { i"<<width<<", i1 } @llvm."<<operation<<".with.overflow.i"<<width<<"(i"<<width<<", i"<<width<<")\n";
-    output<<w.out.str();
+    emit_declarations(w);
+    if (!output) throw std::runtime_error("Cannot finish EE LLVM output");
 }
 }

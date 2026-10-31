@@ -2128,7 +2128,7 @@ it is not replaced with a fabricated index or assumed to be an entropy source.
 ### Ahead-of-time image handoff
 
 `ps2-recompile --image secondary.elf` merges discovered code from disjoint input
-images into one LLVM module and one executable. Repeat the option for up to 31
+images into one LLVM project and one executable. Repeat the option for up to 31
 secondary images. The original boot data remains the sole launch-time RAM input;
 secondary data is not silently preloaded. Overlapping images, resident payloads,
 service metadata, ambiguous code targets and inconsistent instruction bytes are
@@ -2193,3 +2193,40 @@ Generated code-membership checks merge contiguous instruction addresses and use
 balanced native branches with immediate range bounds. Alignment and gaps remain
 checked, including the highest 32-bit aligned address. The converter shares this
 branch emitter with native entry routing; no runtime address table is installed.
+
+### Callback descriptors and bounded LLVM output
+
+A bounded analysis of direct callees recognizes argument-relative fields used as
+indirect call targets. A shape must contain between two and sixteen distinct,
+word-aligned callable offsets below 256 bytes. Complete records in file-backed,
+non-executable data contribute candidates only when every inferred callable field
+holds an aligned executable address and at least two targets differ. Malformed
+or truncated records contribute no partial roots. These are discovery candidates,
+not proof of immutable data or exhaustive callback coverage. Runtime loads and
+calls remain compiled instructions; no callback lookup table is added.
+
+Stored callback recovery also follows the fallthrough path of a non-linking
+conditional branch that skips the store. This includes a store in a later call's
+delay slot. Dynamic register overwrites and call clobbers still end the slice.
+This rule supplies compilation roots only; memory-layout recovery does not use
+it, and generated code retains the original condition and runtime store.
+
+Project generation streams checked LLVM output into a uniquely owned temporary
+directory and publishes the directory only after every artifact closes
+successfully. It refuses existing destinations. This avoids retaining the full
+LLVM text in memory and detecting output failure only after partial publication.
+Code is split into modules of at most 32 functions, each still bounded to 512
+instructions. A separate module owns dispatch and executable-image publication.
+The generated CMake project lists the modules explicitly and compiles them into
+objects linked into the same native executable. Build parallelism controls the
+number of concurrent LLVM compiler processes. There is no runtime linker, LLVM
+dependency, instruction decoding or alias lookup introduced by this split.
+
+VU macro quotient, square root, reciprocal square root, outer product,
+accumulator add/subtract, Q/I multiplication, clip history and random-register
+operations use shared native vector storage. Q, I, R and clip history transfer
+with VU0 launch ownership. Quotient operations use the existing finite numeric
+helpers and finish synchronously, so VWAITQ observes completed native state;
+console pipeline latency is not modeled. Unsupported numeric domains stop before
+publishing results. Clip and random-register state use explicit integer LLVM
+operations, including the 23-bit random recurrence, rather than host randomness.

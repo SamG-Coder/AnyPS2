@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <functional>
 
 namespace nt::ee_codegen {
 inline constexpr std::size_t function_instruction_limit=512;
@@ -19,11 +20,15 @@ struct CodeRange { std::uint32_t address,size,image=0; }; // image 0 is permanen
 struct ExecutableImage { std::uint32_t entry,id; std::vector<CodePayload> segments; };
 // Emits a sorted, bounded set of compiled instructions. Additional ranges protect
 // executable ELF contents that have not yet been reached by discovery.
+// An optional stream factory splits code into numbered, bounded LLVM modules;
+// output then contains shared metadata and dispatch. Streams must remain valid
+// until emission returns. Without the factory, output contains the whole module.
 void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instructions,
                std::span<const CodeRange> protected_code = {},
                std::span<const CodePayload> payloads = {},
                std::span<const LayoutDeclaration> layouts = {},
-               std::span<const ExecutableImage> images = {});
+               std::span<const ExecutableImage> images = {},
+               const std::function<std::ostream&(std::size_t)>& module_output = {});
 // Discover entry flow and recognized native syscall continuations, then emit a project.
 void project(const std::filesystem::path& input,const std::filesystem::path& output,
              std::span<const PayloadMapping> payloads = {},

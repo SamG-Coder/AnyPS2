@@ -13,6 +13,21 @@ void put(nt::Bytes& bytes, std::size_t offset, std::uint32_t word) {
 int main() {
     try {
         {
+            nt::Bytes image(176,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,160,160,5,4},{160,0x2000,16,16,6,4}}};
+            put(image,0,0x0c000404); put(image,8,12);
+            const std::uint32_t consumer[]{0x0080802d,0x8e190000,0x0320f809,0,0x8e190008,0x0320f809,0,0x03e00008,0};
+            for (unsigned n=0;n<std::size(consumer);++n) put(image,16+n*4,consumer[n]);
+            put(image,128,0x03e00008); put(image,144,0x03e00008);
+            put(image,160,0x1080); put(image,168,0x1090);
+            const auto program=nt::analysis::discover(image,fixture,128,{},true);
+            const auto entries=[&] { return nt::analysis::registered_code_pointers(image,fixture,program); };
+            check(entries()==std::set<std::uint32_t>{0x1080,0x1090},"Consumer-shaped callback record was not recovered");
+            put(image,168,0x2000); check(entries().empty(),"Malformed callback record contributed partial roots");
+            put(image,168,0x1090); fixture.segments[1].file_size=10;
+            check(entries().empty(),"Truncated callback record contributed roots");
+        }
+        {
             nt::Bytes image(96,0);
             nt::elf::Executable fixture{0x1000,0,{{0,0x1000,64,64,5,4},{64,0x2000,16,16,6,4}}};
             const std::array<unsigned,7> words{0x24032000,0x84640000,0x8c650004,0x00a0f809,0,12,0};
@@ -497,6 +512,10 @@ int main() {
             check(roots().empty(),"Dynamic stored callback guessed");
             put(image,0,0x24081060); put(image,12,0); put(image,16,0xac880010); put(image,20,12);
             check(roots().empty(),"Volatile pointer propagated across call");
+            put(image,4,0x10850003); put(image,8,0); put(image,12,0x0c000410); put(image,16,0xac880010);
+            check(roots()==std::set<std::uint32_t>{0x1060},"Conditional delay-slot callback store lost");
+            put(image,8,0x8ca80000);
+            check(roots().empty(),"Conditional store crossed a dynamic register overwrite");
         }
         {
             nt::Bytes image(0x100,0);

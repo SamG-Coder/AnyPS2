@@ -8,7 +8,7 @@
 namespace nt::ee_codegen {
 using r5900::Op;
 struct Writer {
-    std::ostringstream out;
+    std::ostream& out;
     unsigned next=0;
     std::string value(const std::string& expression) {
         const auto id="%v"+std::to_string(next++); out<<"  "<<id<<" = "<<expression<<"\n"; return id;

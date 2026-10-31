@@ -2488,3 +2488,20 @@ fresh initialization and cancellation of an old queued command. The test ISO,
 archive and code are original synthetic fixtures. Actual GT4 now completes its
 second reset and reaches another indirect callback; this is startup progress,
 not a title-screen result.
+
+### Descriptor recovery and modular native compilation
+
+`analysis` covers complete multi-callback descriptors, malformed fields and
+truncation without partial roots. `ee-native-images` converts original synthetic
+records and executes all three callbacks from linked LLVM output. A second
+synthetic program spans more than 32 native functions and executes across the
+LLVM module boundary. The output-stream regression rejects a failed stream,
+and project tests preserve an existing destination.
+The same pipeline executes a callback installed by a conditional delay-slot
+store into initially empty data; analysis rejects a dynamic source overwrite.
+
+`ee-llvm-execution` covers quotient operations and unsupported numeric rejection,
+clip history, outer products, random-register recurrence and lane masks,
+Q/I multiplication, accumulator arithmetic and pending VU ownership.
+`vu-llvm-execution` covers shared Q/I/R/clip state across VU0 launch. These tests
+establish behavior of compiled synthetic code, not a commercial title screen.

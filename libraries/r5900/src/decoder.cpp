@@ -82,9 +82,12 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
             if (fn==57) i.op=Op::vcallmsr;
             if (fn==41) i.op=Op::vmadd;
             if (fn==45) i.op=Op::vmsub;
+            if (fn==46) i.op=Op::vopmsub;
             if (fn>=8 && fn<12) i.op=Op::vmadd_bc;
             if (fn>=12 && fn<16) i.op=Op::vmsub_bc;
             if (fn==42) i.op=Op::vmul;
+            if (fn==28) i.op=Op::vmul_q;
+            if (fn==30) i.op=Op::vmul_i;
             if (fn>=24 && fn<28) i.op=Op::vmul_bc;
             if (fn==43) i.op=Op::vmax;
             if (fn>=16 && fn<20) i.op=Op::vmax_bc;
@@ -98,6 +101,12 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
             F(0x2bd,vmadda); F(0x2be,vmula); F(0x2fd,vmsuba);
             F(0x1bc,vmula_bc); F(0x1bd,vmula_bc); F(0x1be,vmula_bc); F(0x1bf,vmula_bc);
             F(0x1fd,vabs); F(0x2ff,vnop);
+            F(0x2fe,vopmula); F(0x1ff,vclip);
+            F(0x03c,vadda_bc); F(0x03d,vadda_bc); F(0x03e,vadda_bc); F(0x03f,vadda_bc);
+            F(0x07c,vsuba_bc); F(0x07d,vsuba_bc); F(0x07e,vsuba_bc); F(0x07f,vsuba_bc);
+            F(0x2bc,vadda); F(0x2fc,vsuba);
+            F(0x3bc,vdiv); F(0x3bd,vsqrt); F(0x3be,vrsqrt); F(0x3bf,vwaitq);
+            F(0x43c,vrnext); F(0x43d,vrget); F(0x43e,vrinit); F(0x43f,vrxor);
             }
         }
         if (i.rs >= 16 && fn == 44) i.op = Op::vsub;
@@ -240,6 +249,9 @@ std::string_view name(Op op) {
     N(eret); N(plzcw); N(cache);
     N(rsqrt_s); N(madd_s); N(msub_s); N(madda_s); N(msuba_s); N(vmula_bc); N(vmula); N(vmadd); N(vmsub); N(vmadd_bc); N(vmsub_bc);
     N(vmadda); N(vmsuba); N(vmadda_bc); N(vmsuba_bc);
+    N(vdiv); N(vsqrt); N(vrsqrt); N(vwaitq); N(vclip); N(vopmula); N(vopmsub);
+    N(vrnext); N(vrget); N(vrinit); N(vrxor);
+    N(vadda); N(vsuba); N(vadda_bc); N(vsuba_bc); N(vmul_q); N(vmul_i);
     N(sdl); N(sdr); N(lwl); N(lwr); N(swl); N(swr); N(add); N(sub); N(addi);
     N(pceqb); N(pceqh); N(pceqw);
     N(ppac5); N(pext5);

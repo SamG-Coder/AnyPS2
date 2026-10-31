@@ -626,6 +626,8 @@ int main() {
         macro_owner.storage.values[0].fill(0x3f800000);
         macro_owner.storage.values[1].fill(0xbf800000);
         macro_owner.storage.accumulator={11,22,33,44};
+        macro_owner.storage.quotient=0x40400000; macro_owner.storage.clip=0x123456;
+        macro_owner.storage.random=0x3f800321; macro_owner.storage.immediate=0x40000000;
         macro_owner.write(1,false,65535);
         nt::ee::NativeVuLaunch shared_launch(shared_binding,10,&macro_owner.storage);
         nt::ee::NativeVuSubmissions submissions;
@@ -635,6 +637,8 @@ int main() {
             macro_owner.storage.values[2]!=std::array<std::uint32_t,4>{} || macro_owner.read(17,false).value!=15 ||
             !(macro_owner.read(16,false).value&1) || shared_launch.state.input_itop!=0xab ||
             shared_launch.state.accumulator!=std::array<std::uint32_t,4>{11,22,33,44} ||
+            shared_launch.state.quotient!=macro_owner.storage.quotient || shared_launch.state.clip!=macro_owner.storage.clip ||
+            shared_launch.state.random!=0x3f800321 || shared_launch.state.immediate!=0x40000000 ||
             macro_owner.storage.accumulator!=shared_launch.state.accumulator || shared_launch.state.input_valid!=2 || (packets.read(0x10003800).value&0x80))
             throw std::runtime_error("Compiled VU0 failed shared vector, integer or flag handoff");
         macro_owner.storage.values[1].fill(0x40000000);

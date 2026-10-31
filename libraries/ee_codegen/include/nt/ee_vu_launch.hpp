@@ -31,6 +31,8 @@ public:
             if (shared_) {
                 next.vectors=shared_->values; next.integers=shared_->integers;
                 next.mac=shared_->mac; next.status=shared_->status; next.accumulator=shared_->accumulator;
+                next.quotient=shared_->quotient; next.clip=shared_->clip;
+                next.random=shared_->random; next.immediate=shared_->immediate;
             }
             next.input_top=static_cast<std::uint16_t>(request->top);
             next.input_itop=static_cast<std::uint16_t>(request->itop);
@@ -66,6 +68,8 @@ public:
         if (request && shared_) {
             shared_->values=state.vectors; shared_->integers=state.integers;
             shared_->mac=state.mac; shared_->status=state.status; shared_->accumulator=state.accumulator;
+            shared_->quotient=state.quotient; shared_->clip=state.clip;
+            shared_->random=state.random; shared_->immediate=state.immediate;
         }
         return Stop::budget;
     }

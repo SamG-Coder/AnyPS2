@@ -14,6 +14,10 @@ public:
         switch (selector) {
         case 16: return {VectorStatus::ready,storage.status};
         case 17: return {VectorStatus::ready,storage.mac};
+        case 18: return {VectorStatus::ready,storage.clip};
+        case 20: return {VectorStatus::ready,storage.random};
+        case 21: return {VectorStatus::ready,storage.immediate};
+        case 22: return {VectorStatus::ready,storage.quotient};
         case 27: return {VectorStatus::ready,storage.launch_address};
         case 28: return {VectorStatus::ready,break_control_};
         case 29: return {VectorStatus::ready,storage.active ? 1U : 0U};
@@ -27,6 +31,10 @@ public:
             return VectorStatus::ready;
         }
         if (selector==17 || selector==29) return VectorStatus::ready;
+        if (selector==18) { storage.clip=value&0xffffffU; return VectorStatus::ready; }
+        if (selector==20) { storage.random=(value&0x7fffffU)|0x3f800000U; return VectorStatus::ready; }
+        if (selector==21) { storage.immediate=value; return VectorStatus::ready; }
+        if (selector==22) { storage.quotient=value; return VectorStatus::ready; }
         if (selector==27) { storage.launch_address=static_cast<std::uint16_t>(value); return VectorStatus::ready; }
         if (selector!=28) return VectorStatus::unsupported;
         break_control_=value&0x0c0c;

@@ -1614,3 +1614,10 @@ the unsupported primitive path.
   terminator). Used as interface documentation for independent bounded AOT
   candidate recovery when ELF section metadata is absent. No GCC runtime code
   or manual text is copied.
+
+The pinned PCSX2 R5900OpcodeTables.cpp and VUops.cpp interfaces were consulted for
+VU macro opcode fields, clip history, Q/I operand selection, quotient flag
+updates, outer-product operand ordering and the 23-bit random-register recurrence
+(taps 4 and 22). Independent LLVM lowering reuses AnyPS2 numeric helpers and
+shared vector ownership; no upstream execution loop or instruction interpreter
+is copied into generated output.

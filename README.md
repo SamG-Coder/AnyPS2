@@ -513,9 +513,10 @@ presented frames and presentation FPS; the frame counter freezes when execution
 stops and does not count repeated inspection redraws. Use `--headless` for automated
 runs and `--run-seconds N` for a bounded diagnostic duration. `--capture-stop`
 saves separate render-target and selected-display evidence. Native startup now
-completes the warning thread and resumes the main thread; its next unsupported
-boundary is native address-space initialization. The title screen and gameplay
-are not established.
+completes the warning thread, uses statically compiled native memory aliases,
+hands off to the secondary executable image and completes a repeated native IOP
+reset. Further startup, service and control-flow gaps remain. The title screen
+and gameplay are not established.
 
 Scalar, V2, masked V3 and V4 uploads in 32-, 16- and 8-bit formats,
 plus packed V4-5 data, can populate

@@ -98,7 +98,7 @@ if(NOT result EQUAL 1 OR NOT err MATCHES "data mismatch")
 endif()
 
 checked("${CONVERTER}" "${run}/fixture.elf.startup" "${run}/startup")
-file(READ "${run}/startup/generated.ll" startup_ir)
+file(READ "${run}/startup/generated-0.ll" startup_ir)
 if(NOT startup_ir MATCHES "i32 4164, label")
     message(FATAL_ERROR "Unknown syscall wrapper return was not compiled")
 endif()

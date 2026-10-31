@@ -336,6 +336,20 @@ int main(int argc,char** argv) {
     }
     code.push_back(nt::r5900::decode(0x440200,(47U<<26)|(4U<<21)|(0x16U<<16)));
     code.push_back(nt::r5900::decode(0x440204,12));
+    const std::array<std::uint32_t,17> vector_special{
+        (25U<<21)|(2U<<16)|(1U<<11)|0x3bcU, (24U<<21)|(2U<<16)|0x3bdU,
+        (25U<<21)|(2U<<16)|(1U<<11)|0x3beU, (16U<<21)|0x3bfU,
+        (31U<<21)|(2U<<16)|(1U<<11)|0x1ffU, (30U<<21)|(2U<<16)|(1U<<11)|0x2feU,
+        (30U<<21)|(1U<<16)|(2U<<11)|(3U<<6)|46U, (17U<<21)|(1U<<11)|0x43eU,
+        (26U<<21)|(3U<<16)|0x43cU, (21U<<21)|(4U<<16)|0x43dU,
+        (18U<<21)|(1U<<11)|0x43fU,
+        (30U<<21)|(1U<<11)|(3U<<6)|28U, (30U<<21)|(1U<<11)|(3U<<6)|30U,
+        (30U<<21)|(2U<<16)|(1U<<11)|0x03fU, (30U<<21)|(2U<<16)|(1U<<11)|0x07fU,
+        (30U<<21)|(2U<<16)|(1U<<11)|0x2bcU, (30U<<21)|(2U<<16)|(1U<<11)|0x2fcU};
+    for (unsigned n=0;n<vector_special.size();++n) {
+        code.push_back(nt::r5900::decode(0x460000+n*8,(18U<<26)|vector_special[n]));
+        code.push_back(nt::r5900::decode(0x460004+n*8,12));
+    }
     code.push_back(nt::r5900::decode(0xfffffffcU,12));
     auto malformed=images; malformed[1].segments[0].bytes[0]^=1;
     failed=false;
@@ -346,6 +360,11 @@ int main(int argc,char** argv) {
     try { std::ostringstream discard; nt::ee_codegen::emit_llvm(discard,code,owned,payloads,layouts,malformed); }
     catch (const std::invalid_argument&) { failed=true; }
     if (!failed) throw std::runtime_error("Unknown image owner accepted");
+    std::ostringstream unavailable; unavailable.setstate(std::ios::badbit);
+    failed=false;
+    try { nt::ee_codegen::emit_llvm(unavailable,code,owned,payloads,layouts,images); }
+    catch (const std::runtime_error&) { failed=true; }
+    if (!failed) throw std::runtime_error("Failed LLVM output stream was accepted");
     std::ostringstream generated; nt::ee_codegen::emit_llvm(generated,code,owned,payloads,layouts,images);
     if (generated.str().find("fence seq_cst")==std::string::npos) throw std::runtime_error("Native SYNC ordering was omitted");
     const auto text=generated.str();
@@ -375,6 +394,41 @@ int main(int argc,char** argv) {
         word(0x160,0xac850008); word(0x164,0x03e00008); word(0x168,0);
         nt::write_file(argv[2],elf);
         const auto original=elf;
+        elf.resize(0x204,0); std::fill(elf.begin()+0x100,elf.end(),0);
+        word(68,0x90); word(72,0x90); word(88,0x200); word(100,4); word(104,4);
+        const std::uint32_t conditional[]{0x24021080,0x24042000,0x14000003,0,
+            0x0c000410,0xac820000,0x8c990000,0x0320f809,0,0x2403007b,12};
+        for (unsigned n=0;n<std::size(conditional);++n) word(0x100+n*4,conditional[n]);
+        word(0x140,0x03e00008); word(0x180,0x03e00008); word(0x184,0x24020049);
+        nt::write_file(std::string(argv[2])+".conditional-callback",elf);
+        elf=original;
+        // Cross the code-module boundary using original synthetic straight-line
+        // code. Both the final native function and its preceding module execute.
+        constexpr unsigned module_words=32*nt::ee_codegen::function_instruction_limit+3;
+        elf.resize(0x100+module_words*4,0);
+        std::fill(elf.begin()+0x100,elf.end(),0);
+        elf[44]=1; elf[45]=0;
+        word(68,module_words*4); word(72,module_words*4);
+        word(0x100,0x24020009);
+        word(0x100+(module_words-2)*4,0x2403007b);
+        word(0x100+(module_words-1)*4,12);
+        nt::write_file(std::string(argv[2])+".modules",elf);
+        elf=original;
+        elf.resize(0x258,0); std::fill(elf.begin()+0x100,elf.end(),0);
+        word(68,0x140); word(72,0x140); word(88,0x240); word(100,24); word(104,24);
+        const std::uint32_t descriptor_main[]{0x24042000,0x0c000410,0,0x2403007b,12};
+        for (unsigned n=0;n<std::size(descriptor_main);++n) word(0x100+n*4,descriptor_main[n]);
+        const std::uint32_t consumer[]{0x0080802d,0x03e0882d,0x24120000,
+            0x8e190000,0x0320f809,0,0x02429021,
+            0x8e190008,0x0320f809,0,0x02429021,
+            0x8e190010,0x0320f809,0,0x02429021,0x0240102d,0x02200008,0};
+        for (unsigned n=0;n<std::size(consumer);++n) word(0x140+n*4,consumer[n]);
+        for (unsigned n=0;n<3;++n) {
+            word(0x200+n*16,0x03e00008); word(0x204+n*16,0x24020001+n);
+            word(0x240+n*8,0x1100+n*16);
+        }
+        nt::write_file(std::string(argv[2])+".descriptors",elf);
+        elf=original;
         elf.resize(0x188,0); word(100,8);
         const std::uint32_t indirect[]{0x24100002,0x24032000,0x84640000,0x8c650004,0x00a0f809,
             0x02042021,0x2403007b,12};
