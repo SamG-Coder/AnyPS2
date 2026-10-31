@@ -14,6 +14,8 @@ struct Prepared {
     std::vector<CodeRange> ranges;
     std::vector<CodePayload> payloads;
     Bytes image;
+    std::set<std::uint32_t> registered_calls;
+    std::size_t wrapper_candidates=0;
     std::uint32_t syscall_table=0;
 };
 void save(const std::filesystem::path& path,const std::string& text) {
@@ -71,6 +73,8 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
     if (std::uint64_t(syscall_table)+1024>0x2000000U)
         throw std::runtime_error("No native syscall metadata extent available");
     std::vector<std::uint32_t> continuations=payload_entries;
+    const auto wrappers=analysis::syscall_wrappers(bytes,executable);
+    continuations.insert(continuations.end(),wrappers.begin(),wrappers.end());
     analysis::Program discovered;
     std::set<std::uint32_t> registered_calls;
     while (true) {
@@ -142,6 +146,8 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
     result.ranges=std::move(ranges);
     result.payloads=std::move(payloads);
     result.syscall_table=syscall_table;
+    result.registered_calls=std::move(registered_calls);
+    result.wrapper_candidates=wrappers.size();
     result.image.assign(end,0);
     for (const auto& segment:initial_executable.segments)
         std::copy_n(bytes.begin()+segment.offset,segment.file_size,result.image.begin()+segment.address);
@@ -211,7 +217,7 @@ target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codeg
     }
     write_file(output/"program.data",image);
     save(output/"conversion.txt","AnyPS2 EE LLVM entry-flow conversion\n"
-         "Discovery follows recognized native startup continuations. Other syscalls stop; only supported native bootstrap services are supplied.\n"
+         "Discovery includes leaf syscall-wrapper candidates and recognized startup continuations. Compiled wrappers do not implement missing services; runtime dispatch still validates them.\n"
          "Indirect destinations must already belong to the discovered code set; other targets stop.\n"
          "Build with ps2-build, then run ps2-native <program.data> [operation-budget].\n"
          "Data contains private input material and must remain local. This is not game boot.\n");
@@ -221,6 +227,8 @@ EeAssessment assess(ByteView bytes,std::span<const PayloadMapping> mappings) {
     try {
         const auto prepared=prepare(bytes,mappings);
         result.instructions=prepared.discovered.instructions.size();
+        result.wrapper_candidates=prepared.wrapper_candidates;
+        result.registered_calls.assign(prepared.registered_calls.begin(),prepared.registered_calls.end());
         for (const auto& segment:prepared.executable.segments)
             if (segment.flags&1) result.declared_executable_words+=segment.memory_size/4;
         result.unresolved_count=prepared.discovered.unresolved.size();
@@ -232,6 +240,14 @@ EeAssessment assess(ByteView bytes,std::span<const PayloadMapping> mappings) {
         instructions.reserve(prepared.discovered.instructions.size());
         for (const auto& [pc,instruction]:prepared.discovered.instructions) {
             instructions.push_back(instruction);
+            using r5900::Op;
+            const bool transfer=(instruction.op==Op::mtc0 || instruction.op==Op::mfc0) &&
+                (instruction.rd==0 || instruction.rd==2 || instruction.rd==3 || instruction.rd==5 || instruction.rd==6 || instruction.rd==10);
+            if (transfer || instruction.op==Op::tlbr || instruction.op==Op::tlbwi ||
+                instruction.op==Op::tlbwr || instruction.op==Op::tlbp) {
+                if (!result.address_space_requests) result.first_address_space_request=instruction.pc;
+                ++result.address_space_requests;
+            }
             if (!instruction.indirect()) continue;
             if (!result.indirect_sites) result.first_indirect=instruction.pc;
             ++result.indirect_sites;

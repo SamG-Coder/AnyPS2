@@ -297,6 +297,12 @@ unsupported module:
 The tool writes `report.txt` plus LLVM IR for modules the current converter
 accepts. Optional `--payloads` uses the same mapping file as `ps2-recompile`.
 `--no-compile` skips Clang. Unrecognized files are counted and not decoded.
+EE conversion also seeds complete leaf syscall-wrapper candidates found in executable
+segments, including wrappers not reached during startup. The report distinguishes
+native dispatch, statically recovered registered handlers, missing dispatch and
+native memory-lowering gaps. These are static candidates, not a list of calls
+proven necessary at runtime; dynamic syscall numbers and unrecovered code remain
+explicit gaps.
 Machine-code objects are not linked or executed. A completed inventory is not a
 boot, a frame, or gameplay. Keep the output under ignored `work/`.
 

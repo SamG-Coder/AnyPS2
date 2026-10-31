@@ -6,6 +6,28 @@
 #include <stdexcept>
 
 namespace nt::analysis {
+std::set<std::uint32_t> syscall_wrappers(ByteView bytes,const elf::Executable& executable) {
+    std::set<std::uint32_t> result;
+    for (const auto& segment:executable.segments) {
+        if (!(segment.flags&1)) continue;
+        if (std::uint64_t(segment.offset)+segment.file_size>bytes.size() ||
+            std::uint64_t(segment.address)+segment.file_size>0x100000000ULL)
+            throw std::invalid_argument("Invalid syscall-wrapper scan extent");
+        const auto first=(4U-(segment.address&3U))&3U;
+        for (std::uint64_t offset=first;offset+16<=segment.file_size;offset+=4) {
+            const auto pc=segment.address+static_cast<std::uint32_t>(offset);
+            const auto at=static_cast<std::size_t>(segment.offset+offset);
+            const auto setup=r5900::decode(pc,le32(bytes,at));
+            if (setup.rs || setup.rt!=3 ||
+                (setup.op!=r5900::Op::addiu && setup.op!=r5900::Op::daddiu && setup.op!=r5900::Op::ori)) continue;
+            if (r5900::decode(pc+4,le32(bytes,at+4)).op!=r5900::Op::syscall ||
+                le32(bytes,at+8)!=0x03e00008U || le32(bytes,at+12)!=0) continue;
+            result.insert(pc);
+        }
+    }
+    return result;
+}
+
 Program discover(ByteView bytes, const elf::Executable& elf, std::size_t limit,
                  std::span<const std::uint32_t> additional_entries, bool stop_at_syscall) {
     const auto word_at = [&](std::uint32_t pc) -> std::optional<std::uint32_t> {

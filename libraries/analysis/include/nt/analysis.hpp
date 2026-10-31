@@ -12,6 +12,9 @@ struct Program {
 // Follow direct flow from entry. Indirect targets require explicit future evidence.
 Program discover(ByteView bytes, const elf::Executable& executable, std::size_t limit = 100000,
                  std::span<const std::uint32_t> additional_entries = {}, bool stop_at_syscall = false);
+// Scan file-backed executable segments for leaf syscall-wrapper candidates.
+// Candidates are not proof that a service is implemented or used at runtime.
+std::set<std::uint32_t> syscall_wrappers(ByteView bytes,const elf::Executable& executable);
 // Candidate callback targets at direct calls to simple syscall wrappers. These
 // are compilation roots, never constant-folding facts about runtime state.
 std::set<std::uint32_t> syscall_callbacks(ByteView bytes,const elf::Executable& executable,

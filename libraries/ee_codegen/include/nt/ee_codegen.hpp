@@ -45,6 +45,10 @@ struct EeAssessment {
     std::uint32_t first_indirect=0;
     std::map<std::uint32_t,std::size_t> known_syscalls;
     std::size_t unknown_syscall_sites=0;
+    std::size_t wrapper_candidates=0;
+    std::vector<std::uint32_t> registered_calls;
+    std::size_t address_space_requests=0;
+    std::uint32_t first_address_space_request=0;
     EeRejection rejection;
     std::string layout_error;
     bool convertible=false;

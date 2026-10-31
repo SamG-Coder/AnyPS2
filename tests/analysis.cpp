@@ -13,6 +13,22 @@ void put(nt::Bytes& bytes, std::size_t offset, std::uint32_t word) {
 int main() {
     try {
         {
+            nt::Bytes image(64,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,64,64,5,4}}};
+            put(image,0,0x03e00008); // Wrapper is unreachable from the entry.
+            put(image,32,0x24030055); put(image,36,12); put(image,40,0x03e00008);
+            check(nt::analysis::syscall_wrappers(image,fixture)==std::set<std::uint32_t>{0x1020},
+                "Batch wrapper scan lost an unreachable syscall");
+            fixture.segments[0].flags=4;
+            check(nt::analysis::syscall_wrappers(image,fixture).empty(),"Data segment scanned as wrappers");
+            fixture.segments[0].flags=5; put(image,44,12);
+            check(nt::analysis::syscall_wrappers(image,fixture).empty(),"Malformed leaf wrapper accepted");
+            fixture.segments[0].file_size=68;
+            bool rejected=false;
+            try { nt::analysis::syscall_wrappers(image,fixture); } catch (const std::invalid_argument&) { rejected=true; }
+            check(rejected,"Out-of-file wrapper scan accepted");
+        }
+        {
             nt::Bytes image(20,0);
             nt::elf::Executable fixture{0x1000,0,{{0,0x1000,20,20,5,4}}};
             put(image,0,0x2403007b); put(image,4,12);

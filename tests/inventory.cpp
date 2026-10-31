@@ -93,6 +93,20 @@ nt::Bytes module_with(std::uint32_t instruction) {
 }
 int main() {
     try {
+        {
+            auto bytes=make_elf(); bytes.resize(320);
+            put32(bytes,68,64); put32(bytes,72,64);
+            put32(bytes,256,0x40840000); put32(bytes,260,12);
+            put32(bytes,272,0x24030055); put32(bytes,276,12);
+            put32(bytes,280,0x03e00008);
+            const auto coverage=nt::ee_codegen::assess(bytes);
+            check(coverage.wrapper_candidates==1 && coverage.known_syscalls.contains(0x55),
+                "Unreached syscall absent from batch coverage");
+            check(coverage.address_space_requests==1 && coverage.first_address_space_request==0x100000,
+                "Emitted address-space operation was mistaken for implemented native memory");
+            check(coverage.unknown_syscall_sites==1 && coverage.convertible,
+                "Unknown syscall boundary or structural compilation coverage lost");
+        }
         const auto image=fixture::memory_bootstrap_image();
         nt::Bytes good(image.begin()+80,image.end());
         auto bad=good;

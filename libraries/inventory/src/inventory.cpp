@@ -299,11 +299,18 @@ void record_ee(Accumulator& accumulator,const std::string& id,ByteView bytes,con
             "Compiled indirect sites stop at runtime when the destination was not discovered.");
     if (assessment.unknown_syscall_sites)
         accumulator.gap("ee-syscall","number encoding was not a recognized immediate",assessment.unknown_syscall_sites,0,id);
+    if (assessment.address_space_requests)
+        accumulator.gap("ee-native-memory","conversion-time native memory lowering required",
+            assessment.address_space_requests,assessment.first_address_space_request,id,
+            "LLVM instruction emission is available, but no production mapping implementation is supplied. No runtime MMU fallback.");
+    unit.detail="leaf syscall-wrapper candidates="+std::to_string(assessment.wrapper_candidates);
     for (const auto& [number,count]:assessment.known_syscalls) {
         std::ostringstream key;
-        key<<hex32(number)<<(ee::startup_syscall(number)?" recognized":" not-recognized");
+        const auto registered=std::find(assessment.registered_calls.begin(),assessment.registered_calls.end(),number)!=assessment.registered_calls.end();
+        key<<hex32(number)<<(registered ? " registered-handler-candidate" :
+            ee::startup_syscall(number) ? " native-dispatch" : " no-native-dispatch");
         accumulator.gap("ee-syscall",key.str(),count,number,id,
-            "recognized means the converter knows the number. It does not prove the runtime case succeeds.");
+            "Static candidate only, not proof of runtime use or success. Native dispatch still validates arguments and providers; registered handlers must execute compiled code. Missing dispatch needs a native implementation or a proven registered handler.");
     }
     for (const auto& family:assessment.rejection.families)
         accumulator.gap("ee-opcode",family.name,family.count,family.first,id);
