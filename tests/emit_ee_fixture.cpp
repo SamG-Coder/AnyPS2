@@ -291,7 +291,23 @@ int main(int argc,char** argv) {
             code.push_back(nt::r5900::decode(pc,word)); pc+=4;
         }
     }
-    std::ostringstream generated; nt::ee_codegen::emit_llvm(generated,code,{},payloads);
+    code.push_back(nt::r5900::decode(0x410020,0x40883000U)); // Native reservation request.
+    code.push_back(nt::r5900::decode(0x410024,0x40083000U)); // Readback remains unsupported.
+    const std::array<nt::ee_codegen::LayoutDeclaration,2> layouts{{
+        {0,0xd0000000U,0x87,0xc7}, // Two direct views of synthetic RAM.
+        {0,0x13000000U,0x004c0003U,0x004c0041U} // Read-only then inaccessible native port.
+    }};
+    auto conflicting=layouts; conflicting[1]={0,0xd0000000U,7,0x47};
+    failed=false;
+    try { std::ostringstream discard; nt::ee_codegen::emit_llvm(discard,code,{},payloads,conflicting); }
+    catch (const std::runtime_error&) { failed=true; }
+    if (!failed) throw std::runtime_error("Conflicting native aliases accepted");
+    conflicting[0]={0,0x13000000U,0x004c0007U,0x004c0041U}; conflicting[1]=layouts[1];
+    failed=false;
+    try { std::ostringstream discard; nt::ee_codegen::emit_llvm(discard,code,{},payloads,conflicting); }
+    catch (const std::runtime_error&) { failed=true; }
+    if (!failed) throw std::runtime_error("Conflicting native access permissions accepted");
+    std::ostringstream generated; nt::ee_codegen::emit_llvm(generated,code,{},payloads,layouts);
     if (generated.str().find("fence seq_cst")==std::string::npos) throw std::runtime_error("Native SYNC ordering was omitted");
     const auto text=generated.str();
     unsigned functions=0;

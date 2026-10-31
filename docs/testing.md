@@ -2455,3 +2455,13 @@ routine after cleanup and a loader diagnostic. No mapping provider is installed,
 so this is an explicit unsupported stop, not an accepted mapping or title screen.
 The new bounded switch layout is checked for index clobbering and malformed table
 entries, then compiled and executed by the generated-project test.
+
+### Static native allocation milestone
+
+Compiled synthetic EE fixtures check shared alias read/write visibility, backing
+bounds, changed mappings, read-only and invalid device views, native device-range
+bounds, reservation limits, unsupported readback, and clearing vacant versus live
+ranges. Conversion rejects conflicting backing and permissions. Analysis fixtures
+recover table pointers from original synthetic ELF data and reject truncated
+records and unrelated service calls. These are native-code acceptance tests;
+actual GT4 execution is separately required and does not imply a title screen.

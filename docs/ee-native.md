@@ -7,8 +7,8 @@ PCSX2, or device models. GT4 produces its opening warning image at the selected
 640 x 448 display size, with live Vulkan presentation during execution. Its
 warning thread now wakes from native idle, signals the main thread and exits
 through ExitDeleteThread. Native cleanup passes SBUS callback removal and GetMemorySize. Compiled debug
-byte output reaches the host log. The next unsupported path is address-space
-initialization;
+byte output reaches the host log. Static native layout initialization now completes. The next unsupported path is
+ExecPS2 handoff into a secondary executable image;
 the title screen and gameplay remain unestablished.
 
 Object-table discovery tolerates independent argument loads between a table base
@@ -2071,3 +2071,38 @@ completed worker threads while module startup still observes individual entry
 returns. Word-aligned IOP transfers and extended EE callback/switch discovery
 advance GT4 past the former wait, transfer and RPC-dispatch boundaries. The
 current run stops at a further indirect EE target absent from the AOT code set.
+
+## Static native layout conversion
+
+Conversion recovers bounded initial-data layout candidates at recognized public
+layout-service call sites. These are proposals, not a proof that writable input
+data is immutable. Conflicting backing or access permissions reject conversion.
+`native-layout-candidates.txt` records proposed records; `native-layout-plan.txt`
+records accepted relocations and restrictions in the private output directory.
+
+Supported extra RAM views become constant range comparisons and pointer-offset
+arithmetic in LLVM loads and stores. They share the original native allocation;
+there is no runtime mapping array, lookup loop, instruction interpreter, or JIT.
+The native allocation plan exists from process startup. This intentionally changes
+allocation availability: mapping declarations validate the fixed plan rather than
+create or evict mappings. Programs depending on dynamic remapping, address-space
+readback, or pre-initialization access faults are outside this conversion contract.
+
+Complete layout transactions compare all incoming declaration fields against the
+compiled plan and validate backing extents. Unrecognized mappings stop. Clearing
+an unallocated high-address range is permitted only when generated checks prove
+it is disjoint from compiled aliases; clearing a live allocation is unsupported.
+Allocation reservation requests within the plan require no eviction state, and
+reservation readback remains unsupported. Native device identity bindings retain
+compiled read/write restrictions. Binding a device address does not create BIOS
+storage, implement an unsupported operation, or report device readiness.
+
+Native C++ services still validate their own pointer domains. An extra alias is
+not automatically accepted by every service merely because generated loads and
+stores support it; service-boundary conversion must preserve the same backing
+before such pointers can be accepted there.
+
+Private GT4 validation completes the populated layout declarations and vacant
+entry cleanup, then reaches ExecPS2. The loaded secondary image has not yet been
+linked into the boot executable's AOT code set. The warning still renders before
+the black handoff screen; a title screen is not established.

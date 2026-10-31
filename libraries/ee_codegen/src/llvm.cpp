@@ -1,6 +1,7 @@
 #include <nt/ee_codegen.hpp>
 #include "llvm_writer.hpp"
 #include "memory.hpp"
+#include "native_layout.hpp"
 #include "packed.hpp"
 #include "vector.hpp"
 #include "floating.hpp"
@@ -64,7 +65,7 @@ bool supported(Op op) {
     }
 }
 
-void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> ranges,std::size_t index,std::span<const CodePayload> payloads) {
+void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> ranges,std::size_t index,std::span<const CodePayload> payloads,const NativeLayout& layout) {
     w.out<<"define internal i32 @nt_ee_part_"<<index<<"(ptr %state, ptr %memory, i64 %budget) noinline {\nentry:\n"
          <<"  %remaining = alloca i64\n  store i64 %budget, ptr %remaining\n  br label %dispatch\ndispatch:\n";
     const auto pc=w.load("i32",offsetof(runtime::State,pc));
@@ -117,7 +118,34 @@ void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::s
             const auto enough=w.value("icmp uge i64 "+remaining+", 7");
             w.out<<"  br i1 "<<enough<<", label %layout_call"<<suffix<<", label %budget_stop\nlayout_call"<<suffix<<":\n";
             std::string args;
-            for (unsigned field=0;field<5;++field) args+=", i32 "+w.narrow(w.reg(instructions[n+field].rt));
+            std::array<std::string,5> values;
+            for (unsigned field=0;field<5;++field) {
+                values[field]=w.narrow(w.reg(instructions[n+field].rt));
+                args+=", i32 "+values[field];
+            }
+            std::string planned="false";
+            for (const auto& declaration:layout.declarations) {
+                std::string matches="true";
+                for (unsigned field=0;field<4;++field)
+                    matches=w.binary("and","i1",matches,w.value("icmp eq i32 "+values[field+1]+", "+std::to_string(declaration[field])));
+                planned=w.binary("or","i1",planned,matches);
+            }
+            // Clearing an unallocated high-address view has no native resource
+            // to release. Prove it is disjoint from every compiled allocation.
+            const auto begin=w.value("zext i32 "+values[2]+" to i64");
+            const auto bytes=w.binary("add","i64",w.value("zext i32 "+values[1]+" to i64"),"8192");
+            const auto end=w.binary("add","i64",begin,bytes);
+            auto vacant=w.binary("and","i1",w.value("icmp eq i32 "+values[3]+", 0"),
+                w.value("icmp eq i32 "+values[4]+", 0"));
+            vacant=w.binary("and","i1",vacant,w.value("icmp uge i32 "+values[2]+", 3221225472"));
+            vacant=w.binary("and","i1",vacant,w.value("icmp ule i64 "+end+", 4294967296"));
+            for (const auto& view:layout.aliases) {
+                const auto before=w.value("icmp ule i64 "+end+", "+std::to_string(view.address));
+                const auto after=w.value("icmp uge i64 "+begin+", "+std::to_string(std::uint64_t(view.address)+view.bytes));
+                vacant=w.binary("and","i1",vacant,w.binary("or","i1",before,after));
+            }
+            planned=w.binary("or","i1",planned,vacant);
+            args+=", i32 "+w.value("zext i1 "+planned+" to i32");
             const auto result=w.value("call i32 @nt_ee_validate_native_layout(ptr %memory"+args+")");
             const auto layout_ready=w.value("icmp eq i32 "+result+", 0");
             w.out<<"  br i1 "<<layout_ready<<", label %layout_done"<<suffix<<", label %layout_stop"<<suffix
@@ -156,9 +184,9 @@ void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::s
             w.store("i32",w.binary("and","i32",status,mask),offsetof(runtime::State,cop0_status));
             w.store("i8","0",offsetof(runtime::State,delay_slot));
         } else {
-            if (const auto access=memory_operation(i.op)) emit_memory(w,i,*access,ranges);
+            if (const auto access=memory_operation(i.op)) emit_memory(w,i,*access,ranges,layout.aliases,layout.guards);
             else if (address_space_operation(i.op)) emit_address_space(w,i);
-            else if (i.op==Op::mfc0 || i.op==Op::mtc0) emit_system_transfer(w,i);
+            else if (i.op==Op::mfc0 || i.op==Op::mtc0) emit_system_transfer(w,i,layout.declarations.size());
             else if (const auto packed=packed_operation(i.op)) emit_packed(w,i,*packed);
             else if (const auto multiply=integer_multiply(i.op)) emit_integer_multiply(w,i,*multiply);
             else if (packed_accumulator_transfer(i.op)) emit_packed_accumulator_transfer(w,i);
@@ -245,7 +273,7 @@ EeRejection reject_unsupported(std::span<const r5900::Instruction> instructions)
     }
     return rejection;
 }
-void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> protected_code,std::span<const CodePayload> payloads) {
+void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> protected_code,std::span<const CodePayload> payloads,std::span<const LayoutDeclaration> layouts) {
     static_assert(std::is_standard_layout_v<runtime::State> && std::is_standard_layout_v<ee::Memory>);
     static_assert(sizeof(void*)==8 && std::endian::native==std::endian::little,
                   "EE LLVM currently requires a little-endian 64-bit host ABI");
@@ -316,6 +344,7 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
         if (instructions[first+count-1].branch()) --count;
         parts.push_back(instructions.subspan(first,count)); first+=count;
     }
+    const auto layout=prepare_native_layout(layouts);
     Writer w;
     if (!payloads.empty()) w.out<<"declare i32 @memcmp(ptr, ptr, i64)\n";
     for (std::size_t n=0;n<payloads.size();++n) {
@@ -324,7 +353,7 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
             w.out<<(b ? ", " : "")<<"i8 "<<static_cast<unsigned>(payloads[n].bytes[b]);
         w.out<<"]\n";
     }
-    for (std::size_t index=0;index<parts.size();++index) emit_part(w,parts[index],ranges,index,payloads);
+    for (std::size_t index=0;index<parts.size();++index) emit_part(w,parts[index],ranges,index,payloads,layout);
     emit_dispatcher(w,parts);
     w.out<<"define i1 @nt_ee_generated_contains(i32 %address) {\nentry:\n  switch i32 %address, label %missing [\n";
     for (const auto& i:instructions) w.out<<"    i32 "<<i.pc<<", label %present\n";
@@ -336,7 +365,7 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
     const auto end=w.binary("add","i64",address,bytes);
     const auto overlap=code_overlap(w,address,end,ranges);
     w.out<<"  ret i1 "<<overlap<<"\n}\n";
-    w.out<<"declare i32 @nt_ee_validate_native_layout(ptr, i32, i32, i32, i32, i32)\n";
+    w.out<<"declare i32 @nt_ee_validate_native_layout(ptr, i32, i32, i32, i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_address_space(ptr, i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_performance(ptr, i32, i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_io_read32(ptr, i32)\ndeclare i32 @nt_ee_io_write32(ptr, i32, i32)\ndeclare i32 @nt_ee_io_write8(ptr, i32, i32)\n";

@@ -1,5 +1,6 @@
 #pragma once
 #include "llvm_writer.hpp"
+#include "native_layout.hpp"
 #include <optional>
 
 namespace nt::ee_codegen {
@@ -64,7 +65,7 @@ inline std::string merge_word(Writer& w,const std::string& source,const std::str
     return w.binary("or",type,changed,w.binary("and",type,original,mask));
 }
 inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation access,
-                        std::span<const CodeRange> code) {
+                        std::span<const CodeRange> code,std::span<const NativeAlias> aliases={},std::span<const NativeAccessGuard> guards={}) {
     const auto suffix=std::to_string(i.pc);
     // DXLTG addresses a cache index, not RAM. Native coherent storage has no
     // private valid/dirty lines; TagLo reads the empty tag in system.hpp.
@@ -79,6 +80,17 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
         vectors=w.vector_storage(suffix);
     }
     const auto address=w.binary("add","i32",w.narrow(w.reg(i.rs)),std::to_string(i.immediate));
+    std::string denied="false";
+    for (const auto& guard:guards) if (access.write ? !guard.writable : !guard.readable) {
+        const auto relative=w.binary("sub","i32",address,std::to_string(guard.address));
+        denied=w.binary("or","i1",denied,w.value("icmp ult i32 "+relative+", "+std::to_string(guard.bytes)));
+    }
+    if (denied!="false") {
+        w.out<<"  br i1 "<<denied<<", label %native_guard_fault"<<suffix<<", label %native_guard_ready"<<suffix
+             <<"\nnative_guard_fault"<<suffix<<":\n";
+        w.store("i32",address,offsetof(ee::Memory,fault_address),"%memory");
+        w.out<<"  ret i32 4\nnative_guard_ready"<<suffix<<":\n";
+    }
     const auto segment=w.binary("and","i32",address,"3221225472");
     const auto alias=w.value("icmp eq i32 "+segment+", 2147483648");
     const auto masked=w.binary("and","i32",address,"536870911");
@@ -90,6 +102,13 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
     const auto user_alias=w.binary("or","i1",in_range(runtime::uncached_ram_begin,runtime::uncached_ram_end),
         in_range(runtime::accelerated_ram_begin,runtime::accelerated_ram_end));
     physical=w.value("select i1 "+user_alias+", i32 "+w.binary("and","i32",address,"268435455")+", i32 "+physical);
+    // Fixed native pointer relocations, emitted as arithmetic, never a runtime table.
+    for (const auto& view:aliases) {
+        const auto relative=w.binary("sub","i32",address,std::to_string(view.address));
+        const auto inside=w.value("icmp ult i32 "+relative+", "+std::to_string(view.bytes));
+        const auto relocated=w.binary("add","i32",relative,std::to_string(view.backing));
+        physical=w.value("select i1 "+inside+", i32 "+relocated+", i32 "+physical);
+    }
     const auto scratchpad=in_range(ee::scratchpad_begin,ee::scratchpad_begin+ee::scratchpad_size);
     const auto vector_range=[&](unsigned begin,unsigned end) {
         return w.binary("and","i1",w.value("icmp uge i32 "+physical+", "+std::to_string(begin)),
@@ -107,7 +126,8 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
     w.out<<"  ret i32 "<<ownership<<"\nregion_ready"<<suffix<<":\n";
     const bool native_io=(access.bytes==4 || access.bytes==8 || (access.bytes==1 && access.write)) && access.bank==RegisterBank::integer && access.merge==Merge::none;
     if (native_io) {
-        const auto device_address=w.value("icmp uge i32 "+physical+", 268435456");
+        const auto device_address=w.binary("and","i1",w.value("icmp uge i32 "+physical+", 268435456"),
+            w.value("icmp ult i32 "+physical+", 536870912"));
         const auto aligned=w.value("icmp eq i32 "+w.binary("and","i32",address,std::to_string(access.bytes-1))+", 0");
         const auto native_address=w.binary("and","i1",w.binary("and","i1",device_address,main_memory),aligned);
         w.out<<"  br i1 "<<native_address<<", label %io"<<suffix<<", label %ram"<<suffix

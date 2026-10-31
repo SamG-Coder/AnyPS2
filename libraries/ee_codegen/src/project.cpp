@@ -1,4 +1,5 @@
 #include <nt/ee_codegen.hpp>
+#include "native_layout.hpp"
 #include <nt/analysis.hpp>
 #include <nt/ee_address.hpp>
 #include <nt/ee_syscalls.hpp>
@@ -14,6 +15,7 @@ struct Prepared {
     std::vector<CodeRange> ranges;
     std::vector<CodePayload> payloads;
     Bytes image;
+    std::vector<LayoutDeclaration> layouts;
     std::set<std::uint32_t> registered_calls;
     std::size_t wrapper_candidates=0;
     std::uint32_t syscall_table=0;
@@ -142,6 +144,7 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
     }
     Prepared result;
     result.executable=std::move(executable);
+    for (const auto& record:analysis::layout_candidates(bytes,result.executable,discovered)) result.layouts.push_back(record.fields);
     result.discovered=std::move(discovered);
     result.ranges=std::move(ranges);
     result.payloads=std::move(payloads);
@@ -162,7 +165,7 @@ void project(const std::filesystem::path& input,const std::filesystem::path& out
     std::vector<r5900::Instruction> instructions;
     for (const auto& [pc,instruction]:prepared.discovered.instructions) instructions.push_back(instruction);
     std::ostringstream llvm;
-    emit_llvm(llvm,instructions,prepared.ranges,prepared.payloads);
+    emit_llvm(llvm,instructions,prepared.ranges,prepared.payloads,prepared.layouts);
     const auto& executable=prepared.executable;
     const auto& image=prepared.image;
     const auto syscall_table=prepared.syscall_table;
@@ -206,6 +209,21 @@ target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codeg
     if (!std::filesystem::create_directories(output)) throw std::runtime_error("EE output directory already exists");
     save(output/"generated.ll",llvm.str());
     save(output/"CMakeLists.txt",cmake.str());
+    std::ostringstream native_layout;
+    for (const auto& record:prepared.layouts)
+        native_layout<<hex32(record[0])<<' '<<hex32(record[1])<<' '<<hex32(record[2])<<' '<<hex32(record[3])<<'\n';
+    save(output/"native-layout-candidates.txt",native_layout.str());
+    const auto layout_plan=prepare_native_layout(prepared.layouts);
+    std::ostringstream accepted_layout;
+    accepted_layout<<"Static native allocations exist from process startup; declarations validate the compiled plan.\n"
+        "No mutable mappings, lookup tables, or address-space readback. Device bindings do not supply BIOS storage or device readiness.\n";
+    for (const auto& view:layout_plan.aliases)
+        accepted_layout<<"alias "<<hex32(view.address)<<" backing "<<hex32(view.backing)<<" bytes "<<hex32(view.bytes)<<'\n';
+    for (const auto& guard:layout_plan.guards)
+        accepted_layout<<"access "<<hex32(guard.address)<<" bytes "<<hex32(guard.bytes)
+            <<" read "<<guard.readable<<" write "<<guard.writable<<'\n';
+    accepted_layout<<"accepted declarations "<<layout_plan.declarations.size()<<'\n';
+    save(output/"native-layout-plan.txt",accepted_layout.str());
     if (!mappings.empty()) {
         std::ostringstream plan;
         for (const auto& mapping:mappings) {
@@ -226,6 +244,7 @@ EeAssessment assess(ByteView bytes,std::span<const PayloadMapping> mappings) {
     EeAssessment result;
     try {
         const auto prepared=prepare(bytes,mappings);
+        (void)prepare_native_layout(prepared.layouts);
         result.instructions=prepared.discovered.instructions.size();
         result.wrapper_candidates=prepared.wrapper_candidates;
         result.registered_calls.assign(prepared.registered_calls.begin(),prepared.registered_calls.end());

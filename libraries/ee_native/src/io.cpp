@@ -104,7 +104,7 @@ extern "C" std::uint64_t nt_ee_address_space(nt::ee::Memory* memory,std::uint32_
 // writes. It owns no simulated entries and cannot redirect individual accesses.
 // Unsupported aliases require a converter/native allocation implementation.
 extern "C" std::uint32_t nt_ee_validate_native_layout(nt::ee::Memory* memory,
-    std::uint32_t slot,std::uint32_t mask,std::uint32_t address,std::uint32_t first,std::uint32_t second) {
+    std::uint32_t slot,std::uint32_t mask,std::uint32_t address,std::uint32_t first,std::uint32_t second,std::uint32_t planned) {
     using nt::ee::Stop;
     const auto unsupported=static_cast<std::uint32_t>(Stop::unsupported_system);
     if (slot>=48 || (address&255)) return unsupported;
@@ -117,12 +117,20 @@ extern "C" std::uint32_t nt_ee_validate_native_layout(nt::ee::Memory* memory,
     for (const auto candidate:{0U,0x6000U,0x1e000U,0x7e000U,0x1fe000U,0x7fe000U,0x1ffe000U})
         valid_mask|=mask==candidate;
     if (!valid_mask || (address&(mask|0x1fffU))) return unsupported;
+    if (planned && !first && !second) return static_cast<std::uint32_t>(Stop::budget);
     const std::uint32_t page=(mask+0x2000U)/2,entries[]{first,second};
     for (unsigned half=0;half<2;++half) {
         const auto entry=entries[half];
-        if ((entry&0xfc000000U) || (entry&6)!=6) return unsupported;
+        if (entry&0xfc000000U) return unsupported;
         const auto physical=(entry&0x03ffffc0U)<<6;
-        if (physical%page || !memory->data || std::uint64_t(physical)+page>memory->size) return unsupported;
+        if (physical%page) return unsupported;
+        if (planned && physical>=0x10000000U && std::uint64_t(physical)+page<=0x20000000U &&
+            std::uint64_t(address)+std::uint64_t(half)*page==physical) {
+            if (!memory->io.read32 || !memory->io.write32) return unsupported;
+            continue; // Existing native device interfaces; generated guards preserve denied accesses.
+        }
+        if ((entry&6)!=6 || !memory->data || std::uint64_t(physical)+page>memory->size) return unsupported;
+        if (planned) continue; // Caller emitted an exact match to a validated static layout.
         for (std::uint64_t offset=0;offset<page;offset+=4096) {
             const auto logical=std::uint64_t(address)+std::uint64_t(half)*page+offset;
             if (logical>0xffffffffULL || nt::runtime::default_ram_address(static_cast<std::uint32_t>(logical))!=physical+offset)

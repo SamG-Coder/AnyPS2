@@ -311,11 +311,15 @@ void scalar_and_control() {
     for (const auto source : {0ULL,0x100000000ULL,1ULL,0xffffffffULL}) {
         State state; state.pc=ee_batch::scalar_pc("wired_write"); state.gpr[8].lo=source;
         const auto pc=state.pc;
-        const bool accepted=static_cast<std::uint32_t>(source)==0;
+        const bool accepted=static_cast<std::uint32_t>(source)<=2;
         check(execute(state)==(accepted ? Stop::syscall : Stop::unsupported_system));
         check(state.executed==(accepted ? 1U : 0U) && state.pc==pc+(accepted ? 4U : 0U));
     }
-    for (const auto name : {"wired_read","tag_read"}) {
+    {
+        State state; state.pc=ee_batch::scalar_pc("wired_read"); state.gpr[9]={99,123};
+        check(execute(state)==Stop::unsupported_system && !state.executed && state.gpr[9].lo==99);
+    }
+    for (const auto name : {"tag_read"}) {
         State state; state.pc=ee_batch::scalar_pc(name); state.gpr[9]={~0ULL,123};
         check(execute(state)==Stop::syscall && state.gpr[9].lo==0 && state.gpr[9].hi==123);
     }

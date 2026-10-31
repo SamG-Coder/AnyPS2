@@ -3,6 +3,7 @@
 #include <nt/r5900.hpp>
 #include <map>
 #include <set>
+#include <array>
 
 namespace nt::analysis {
 struct Program {
@@ -15,6 +16,9 @@ Program discover(ByteView bytes, const elf::Executable& executable, std::size_t 
 // Scan file-backed executable segments for leaf syscall-wrapper candidates.
 // Candidates are not proof that a service is implemented or used at runtime.
 std::set<std::uint32_t> syscall_wrappers(ByteView bytes,const elf::Executable& executable);
+struct LayoutCandidate { std::uint32_t source,call; std::array<std::uint32_t,4> fields; };
+// Initial-data candidates used only with exact runtime declaration guards.
+std::vector<LayoutCandidate> layout_candidates(ByteView bytes,const elf::Executable&,const Program&);
 // Candidate callback targets at direct calls to simple syscall wrappers. These
 // are compilation roots, never constant-folding facts about runtime state.
 std::set<std::uint32_t> syscall_callbacks(ByteView bytes,const elf::Executable& executable,

@@ -170,7 +170,7 @@ unsigned stored_arguments(const Program& program,std::uint32_t entry) {
 // Bounded backward slicing is used only to propose code for compilation. A load
 // reads the initial ELF image, not a claim that writable data stays constant.
 std::optional<std::uint32_t> candidate(ByteView bytes,const elf::Executable& elf,const Program& program,
-                                     std::uint32_t before,unsigned reg,unsigned& fuel,std::uint32_t call_site) {
+                                     std::uint32_t before,unsigned reg,unsigned& fuel,std::uint32_t call_site,bool layout_candidate=false) {
     using r5900::Op;
     if (!reg) return 0;
     while (before>=4 && fuel) {
@@ -184,30 +184,80 @@ std::optional<std::uint32_t> candidate(ByteView bytes,const elf::Executable& elf
             if (reg>=16 && reg<=23) continue;
             return {};
         }
-        if (i.branch() || i.terminal() || i.op==Op::syscall) return {};
+        if (i.branch() || i.terminal() || i.op==Op::syscall) {
+            if (layout_candidate && reg>=16 && reg<=23) continue;
+            return {};
+        }
+        if (layout_candidate && (i.op==Op::mtc0 || i.op==Op::sync)) continue;
         unsigned destination=0;
         switch (i.op) {
         case Op::sw: case Op::sd: case Op::sq: case Op::sb: case Op::sh: continue;
+        case Op::slti: case Op::sltiu:
         case Op::lui: case Op::addiu: case Op::daddiu: case Op::ori: case Op::lw: case Op::lwu:
             destination=i.rt; break;
+        case Op::slt: case Op::sltu:
         case Op::addu: case Op::daddu: case Op::bit_or: case Op::sll:
             destination=i.rd; break;
         default: return {};
         }
         if (destination!=reg) continue;
+        if (i.op==Op::slti || i.op==Op::sltiu || i.op==Op::slt || i.op==Op::sltu) return {};
         if (i.op==Op::lui) return static_cast<std::uint32_t>(i.immediate)<<16;
-        const auto a=candidate(bytes,elf,program,before,i.rs,fuel,call_site);
+        const auto a=candidate(bytes,elf,program,before,i.rs,fuel,call_site,layout_candidate);
         if (!a) return {};
         if (i.op==Op::addiu || i.op==Op::daddiu) return *a+static_cast<std::uint32_t>(i.immediate);
         if (i.op==Op::ori) return *a|static_cast<std::uint16_t>(i.immediate);
         if (i.op==Op::lw || i.op==Op::lwu) return initial_word(bytes,elf,*a+static_cast<std::uint32_t>(i.immediate));
-        const auto b=candidate(bytes,elf,program,before,i.rt,fuel,call_site);
+        const auto b=candidate(bytes,elf,program,before,i.rt,fuel,call_site,layout_candidate);
         if (!b) return {};
         if (i.op==Op::sll) return *b<<i.sa;
         return i.op==Op::bit_or ? *a|*b : *a+*b;
     }
     return {};
 }
+}
+std::vector<LayoutCandidate> layout_candidates(ByteView bytes,const elf::Executable& elf,const Program& program) {
+    using r5900::Op;
+    std::vector<LayoutCandidate> result;
+    std::set<std::uint32_t> sources;
+    for (const auto& [pc,call]:program.instructions) {
+        if (call.op!=Op::jal || pc<12) continue;
+        const auto setup=program.instructions.find(call.target()),trap=program.instructions.find(call.target()+4);
+        if (setup==program.instructions.end() || trap==program.instructions.end()) continue;
+        const auto& service=setup->second;
+        if (service.op!=Op::addiu || service.rs || service.rt!=3 || service.immediate!=0x56 || trap->second.op!=Op::syscall) continue;
+        unsigned base=0; bool matches=true;
+        for (unsigned n=0;n<3;++n) {
+            const auto load=program.instructions.find(pc-12+n*4);
+            if (load==program.instructions.end() || load->second.op!=Op::lw ||
+                load->second.rt!=6+n || load->second.immediate!=static_cast<std::int32_t>(4+4*n)) { matches=false; break; }
+            if (n && base!=load->second.rs) { matches=false; break; }
+            base=load->second.rs;
+        }
+        if (!matches || !base) continue;
+        unsigned fuel=512;
+        const auto pointer=candidate(bytes,elf,program,pc,base,fuel,pc,true);
+        if (!pointer || (*pointer&3)) continue;
+        for (unsigned row=0;row<48;++row) {
+            const auto at=std::uint64_t(*pointer)+16*row;
+            if (at+16>0x100000000ULL) break;
+            LayoutCandidate record{static_cast<std::uint32_t>(at),pc,{}};
+            bool complete=true;
+            for (unsigned n=0;n<4;++n) {
+                const auto value=initial_word(bytes,elf,record.source+4*n);
+                if (!value) { complete=false; break; }
+                record.fields[n]=*value;
+            }
+            if (!complete) break;
+            const auto [mask,address,lo0,lo1]=record.fields;
+            bool valid_mask=false;
+            for (auto value:{0U,0x6000U,0x1e000U,0x7e000U,0x1fe000U,0x7fe000U,0x1ffe000U}) valid_mask|=mask==value;
+            if (!valid_mask || (address&255) || (lo0&0x7c000000U) || (lo1&0xfc000000U)) break;
+            if (!(lo0&0x80000000U) && (address&(mask|0x1fffU))) break;
+            if (sources.insert(record.source).second) result.push_back(record);
+        }
+    }
+    return result;
 }
 std::set<std::uint32_t> syscall_callbacks(ByteView bytes,const elf::Executable& elf,
                                         const Program& program,std::uint32_t syscall,std::set<std::uint32_t>* registered_calls) {

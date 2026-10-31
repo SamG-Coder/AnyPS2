@@ -13,6 +13,27 @@ void put(nt::Bytes& bytes, std::size_t offset, std::uint32_t word) {
 int main() {
     try {
         {
+            // Original synthetic program: indirect initial-data pointer and
+            // ABI layout-table arguments, with a saved register across a branch.
+            nt::Bytes image(160,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,64,64,5,4},{64,0x2000,96,96,6,4}}};
+            const std::array<unsigned,12> words{0x24102000,0x8e100000,0x10000001,0,
+                0x8e060004,0x8e070008,0x8e08000c,0x0c00040c,0,12,0,0};
+            for (unsigned n=0;n<words.size();++n) put(image,n*4,words[n]);
+            put(image,48,0x24030056); put(image,52,12); put(image,56,0x03e00008);
+            put(image,64,0x2020);
+            put(image,96,0); put(image,100,0xd0000000U); put(image,104,0x87); put(image,108,0xc7);
+            put(image,112,1); // Invalid next mask terminates the bounded scan.
+            auto program=nt::analysis::discover(image,fixture,64,{},true);
+            auto records=nt::analysis::layout_candidates(image,fixture,program);
+            check(records.size()==1 && records[0].source==0x2020 && records[0].fields[1]==0xd0000000U,
+                "Native layout candidates lost pointer indirection");
+            put(image,64,0x2058); // Truncated descriptor is not accepted.
+            check(nt::analysis::layout_candidates(image,fixture,program).empty(),"Truncated layout accepted");
+            put(image,64,0x2020); program.instructions.at(0x1030)=nt::r5900::decode(0x1030,0x24030055);
+            check(nt::analysis::layout_candidates(image,fixture,program).empty(),"Unrelated service treated as layout declaration");
+        }
+        {
             nt::Bytes image(64,0);
             nt::elf::Executable fixture{0x1000,0,{{0,0x1000,64,64,5,4}}};
             put(image,0,0x03e00008); // Wrapper is unreachable from the entry.

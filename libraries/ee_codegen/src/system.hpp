@@ -54,7 +54,18 @@ inline void emit_performance_transfer(Writer& w,const r5900::Instruction& i) {
          <<"\nmetric_stop"<<suffix<<":\n  ret i32 "<<status<<"\nmetric_ready"<<suffix<<":\n";
     if (!write && i.rt) w.store("i64",w.extend(w.narrow(packed)),offsetof(runtime::State,gpr)+i.rt*sizeof(runtime::Register));
 }
-inline void emit_system_transfer(Writer& w,const r5900::Instruction& i) {
+inline void emit_system_transfer(Writer& w,const r5900::Instruction& i,std::size_t native_declarations=0) {
+    // Converted native allocations have fixed lifetime and no eviction policy.
+    // A reservation within the compiled plan needs no console register state.
+    // Readback is deliberately unsupported, rather than fabricating a value.
+    if (i.rd==6 && native_declarations) {
+        if (i.op==Op::mfc0) { w.out<<"  ret i32 10\nnative_reserve_unreachable"<<i.pc<<":\n"; return; }
+        const auto fits=w.value("icmp ule i32 "+w.narrow(w.reg(i.rt))+", "+std::to_string(native_declarations));
+        const auto suffix=std::to_string(i.pc);
+        w.out<<"  br i1 "<<fits<<", label %native_reserve_ready"<<suffix<<", label %native_reserve_stop"<<suffix
+             <<"\nnative_reserve_stop"<<suffix<<":\n  ret i32 10\nnative_reserve_ready"<<suffix<<":\n";
+        return;
+    }
     if (i.rd==0 || i.rd==2 || i.rd==3 || i.rd==5 || i.rd==10) { emit_address_space(w,i); return; }
     // Native RAM has no reserved guest TLB entries or private cache lines.
     // Reject attempts to establish a reservation rather than silently losing it.
