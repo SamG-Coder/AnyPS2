@@ -485,13 +485,20 @@ Compiled synthetic programs verify this path. Private GT4 startup now passes
 performance-counter configuration and recovered object/switch-table calls, then
 accepts split GIF image transfers and schedules native threads through sleep and
 wakeup. Disc-backed CD/DVD RPC initialization now succeeds; the current native
-run completes the linked IOP reset and PADMAN initialization, then reaches an
-unmeasured performance-counter read in the EE interrupt path. The explicit
-`--native-thread-cycles` option supplies real Windows thread-cycle measurements
-with different native profiling semantics; the following cache-miss read still
-stops as unavailable. See [native measurement limitations](docs/ee-native.md#explicit-native-thread-cycle-profiling).
-No measurement values are fabricated. Native GT4 boot
-has not been established.
+run completes the linked IOP reset and PADMAN initialization, then reaches
+native graphics initialization. The default Windows profiling replacement uses
+`QueryPerformanceCounter`, without administrator access. Cycle and cache profiling
+slots accumulate elapsed clock ticks, not PS2 cycles or cache-miss events. The
+runtime reports the clock frequency; waits and native services contribute to elapsed
+time. `--strict-performance` retains diagnostic stops for unmeasured events.
+Hardware profiling remains an optional diagnostic mode, not a startup requirement.
+See [native measurement limitations](docs/ee-native.md#native-elapsed-time-profiling).
+GT4 now produces its opening copyright/driving-warning image through Vulkan.
+The private render-target readback contains actual game-generated text. Display
+presentation is still incomplete: the game-selected buffer remains black at the
+current stop, an empty EE semaphore wait. Title-screen and gameplay support are
+not established. `--capture-stop` saves private render evidence; `--display-stop`
+opens a diagnostic Vulkan window at the game-selected resolution after execution stops.
 
 Scalar, V2, masked V3 and V4 uploads in 32-, 16- and 8-bit formats,
 plus packed V4-5 data, can populate

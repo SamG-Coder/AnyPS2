@@ -71,6 +71,7 @@ int blend_channel(uint select,int source,int destination) {
 }
 void main() {
     uint x=draw.left+gl_GlobalInvocationID.x, y=draw.top+gl_GlobalInvocationID.y;
+    if ((draw.flags&4096)!=0 && (y&1)==((draw.flags>>13)&1)) return;
     if (x>=draw.right || y>=draw.bottom) return;
     uint output_address=address(draw.base,draw.pitch,x,y);
     uint color=draw.color;

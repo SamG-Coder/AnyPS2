@@ -14,8 +14,12 @@ void CounterIntervals::fail(CounterStatus status) { if (!failure_) failure_=stat
 void CounterIntervals::lost_events() { fail(CounterStatus::lost_events); }
 void CounterIntervals::consume(const SwitchSample& sample) {
     if (failure_) return;
-    if (sample.processor>=processors_ || sample.counters.size()!=totals_.size() ||
-        sample.outgoing_thread==sample.incoming_thread) { fail(CounterStatus::invalid_sample); return; }
+    if (sample.processor>=processors_ || sample.counters.size()!=totals_.size()) {
+        fail(CounterStatus::invalid_sample); return;
+    }
+    // Windows can report a scheduling boundary with the same outgoing and
+    // incoming thread. Close and reopen its measured interval normally; this
+    // neither drops the boundary nor counts its preceding work twice.
     if (timestamp_ && sample.timestamp<*timestamp_) { fail(CounterStatus::discontinuity); return; }
     timestamp_=sample.timestamp;
     if (active_ && *active_==sample.processor && sample.outgoing_thread!=thread_) {

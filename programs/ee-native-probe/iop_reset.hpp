@@ -74,6 +74,7 @@ public:
     bool accepted() const { return accepted_; }
     std::uint32_t last_server() const { return last_server_; }
     bool cdvd_initialized() const { return cdvd_ && cdvd_->initialized(); }
+    const nt::iop::NativeSerialServices& serial() const { return services_->serial(); }
     std::uint32_t cdvd_command() const { return scmd_ ? scmd_->last_method() : 0; }
     std::uint32_t cdvd_media() const { return cdvd_ ? cdvd_->media_mode() : 0; }
     std::uint32_t cdvd_argument() const { return scmd_ ? scmd_->last_argument() : 0; }

@@ -52,12 +52,14 @@ public:
           dmacman_(dmac_priority_),router(providers()),arena_(ram),packet_buffer_(layout.packet_buffer) {
         inbound.connect(commands,command_session,sif_control,&rpc_servers);
         hard_timers.connect(interrupts);
+        serial_.connect_disconnected_ports(interrupts);
         modload.attach_heap(heap);
         if (!disc.empty()) modload.attach_disc(disc);
     }
     NativeServiceContext(const NativeServiceContext&)=delete;
     NativeServiceContext& operator=(const NativeServiceContext&)=delete;
     NativeSifCommandEndpoint* endpoint() const { return peer_.get(); }
+    const NativeSerialServices& serial() const { return serial_; }
     // Explicit native replacement for command-module startup. The EE owner must
     // publish its link first. This installs our reserved receive mailbox, but
     // neither acknowledges the EE handshake nor declares RPC/reset completion.
@@ -123,7 +125,7 @@ private:
     std::vector<NativeServices*> providers() {
         std::vector<NativeServices*> result{&boot_callbacks,&heaplib,&prnt,&sysclib,&drivers,&driver_files,&archives,&heap,&libraries,
             &boot,&modload,&interrupts,&events,&semaphores,&mailboxes,&threads,&system,&alarms,&sif,&sif_control,&stdio,
-            &commands,&command_session,&rpc_servers,&rpc_data,&dmacman_,&cdvdman,&secrman,&serial_,&hard_timers,&vblank};
+            &commands,&command_session,&rpc_servers,&rpc_data,&serial_,&dmacman_,&cdvdman,&secrman,&hard_timers,&vblank};
         if (disc_service) result.push_back(disc_service.get());
         return result;
     }

@@ -1,5 +1,6 @@
 #include <nt/ee_vu_launch.hpp>
 #include <nt/native_drawing.hpp>
+#include <nt/native_scanout.hpp>
 #include <nt/ee_graphics.hpp>
 #include <iostream>
 
@@ -127,8 +128,34 @@ int main() {
         transport.clear(); word(0x50000000|cursor); payload(); word(0x11000000);
         if (direct.consume(1,transport,false)!=nt::ee::Stop::unsupported_system || consumer.drawing.pixels()!=before_flush)
             throw std::runtime_error("Native flush was reordered across an uncommitted draw");
+        direct.graphics.synchronous=true;
+        const nt::graphics::Packet dither_setup{{0x8002,0x10000000,14,0},
+            {0x76543210,0x01234567,0x44,0},{1,0,0x45,0}};
+        consumer.drawing.submit(consumer.renderer,std::array{dither_setup});
+        if (direct.consume(1,transport,false)!=nt::ee::Stop::budget ||
+            consumer.drawing.pixels()[0]!=0x80201008 || consumer.renderer.validation_errors())
+            throw std::runtime_error("Synchronous DIRECT/FLUSH batch did not finish real Vulkan work");
+        const auto before_dither_rejection=consumer.drawing.pixels();
+        const nt::graphics::Packet dithered_16{{0x8003,0x10000000,14,0},
+            {(2U<<24)|(1U<<16),0,0x4c,0},{0,0,5,0},{32U|(32U<<16),0,5,0}};
+        bool dither_rejected=false;
+        try { consumer.drawing.submit(consumer.renderer,std::array{dithered_16}); }
+        catch (const std::invalid_argument&) { dither_rejected=true; }
+        if (!dither_rejected || consumer.drawing.pixels()!=before_dither_rejection)
+            throw std::runtime_error("Unsupported dithered target published pixels");
+        transport.clear(); word(0x50000000|cursor); payload(); word(0x11000000); word(0x7b000000);
+        const auto committed=consumer.drawing.pixels();
+        if (direct.consume(1,transport,false)!=nt::ee::Stop::unsupported_system || consumer.drawing.pixels()!=committed)
+            throw std::runtime_error("Malformed trailing command partially published fenced graphics");
 
         nt::ee::NativeGraphics lifecycle;
+        if (lifecycle.write(0x12000000,0x62)!=nt::ee::Stop::budget ||
+            lifecycle.write(0x12000090,0x12345678)!=nt::ee::Stop::budget ||
+            lifecycle.write(0x120000a0,0xabcdef)!=nt::ee::Stop::budget ||
+            lifecycle.read(0x12000090).value!=0x12345678 || lifecycle.output().displays[1]!=0xabcdef ||
+            lifecycle.write(0x120000e0,0xff123456)!=nt::ee::Stop::budget ||
+            lifecycle.output().background!=0x123456)
+            throw std::runtime_error("Native output selection lost display configuration");
         lifecycle.context=&consumer;
         lifecycle.synchronize=[](void* raw) {
             static_cast<Consumer*>(raw)->renderer.synchronize(); return nt::ee::Stop::budget;
@@ -142,7 +169,8 @@ int main() {
         const auto before_reset=consumer.drawing.pixels();
         if (lifecycle.configure(1,2,1)!=nt::ee::Stop::budget ||
             lifecycle.write(0x12001000,0x200)!=nt::ee::Stop::budget || lifecycle.mode() ||
-            lifecycle.resets()!=1 || consumer.drawing.pixels()!=before_reset)
+            lifecycle.resets()!=1 || lifecycle.output().control || lifecycle.output().buffers[1] ||
+            consumer.drawing.pixels()!=before_reset)
             throw std::runtime_error("Native graphics reset did not preserve image storage");
         const nt::graphics::Packet stale_image{{0x8001,0x08000000,0,0},{1,2,3,4}};
         bool rejected=false;
@@ -158,6 +186,57 @@ int main() {
         launch.state.integers[0]=0; // Re-submit the packet at its original data offset.
         if (launch.submit(1,{},&request)!=nt::ee::Stop::budget || consumer.drawing.pixels()[0]!=0x80201008)
             throw std::runtime_error("Compiled VU drawing did not recover after reset");
+        nt::graphics::NativeDrawing masked;
+        const auto masked_packet=[](unsigned mask,unsigned color) {
+            return nt::graphics::Packet{{0x800a,0x10000000,14,0},
+                {1,0,0x1a,0},{14,0,0,0},{1U<<16,0,0x4c,0},
+                {3U<<16,3U<<16,0x40,0},{mask,0,0x22,0},
+                {color^0xffffffU,0,1,0},{0,0,5,0},{color,0,1,0},
+                {64U|(64U<<16),0,4,0},{0,0,0x3f,0}};
+        };
+        masked.submit(consumer.renderer,std::array{masked_packet(2,0xff112233)});
+        for (unsigned y=0;y<4;++y) for (unsigned x=0;x<4;++x)
+            if (masked.pixels()[nt::graphics::rgba_word(0,1,x,y)]!=(y&1 ? 0xff112233U : 0U))
+                throw std::runtime_error("Even scanline suppression or flat sprite color differs");
+        masked.submit(consumer.renderer,std::array{masked_packet(3,0xff445566)});
+        for (unsigned y=0;y<4;++y) for (unsigned x=0;x<4;++x)
+            if (masked.pixels()[nt::graphics::rgba_word(0,1,x,y)]!=(y&1 ? 0xff112233U : 0xff445566U))
+                throw std::runtime_error("Odd scanline suppression changed preserved rows");
+        const auto mask_before=masked.pixels();
+        rejected=false;
+        try { masked.submit(consumer.renderer,std::array{masked_packet(1,0xffffffff)}); }
+        catch (const std::invalid_argument&) { rejected=true; }
+        if (!rejected || masked.pixels()!=mask_before || masked.submitted_draws()!=2)
+            throw std::runtime_error("Reserved scanline mode committed drawing");
+        masked.submit(consumer.renderer,std::array{masked_packet(0,0xff778899)});
+        for (unsigned y=0;y<4;++y) for (unsigned x=0;x<4;++x)
+            if (masked.pixels()[nt::graphics::rgba_word(0,1,x,y)]!=0xff778899)
+                throw std::runtime_error("Scanline mask disable did not restore full coverage");
+        const auto empty_before=consumer.drawing.submitted_draws();
+        if (direct.consume(2,{},false)!=nt::ee::Stop::budget ||
+            consumer.drawing.submitted_draws()!=empty_before)
+            throw std::runtime_error("Empty GIF submission invented drawing work");
+        const auto tex0=(1ULL<<14)|(2ULL<<26)|(2ULL<<30)|(1ULL<<34)|(1ULL<<35);
+        const nt::graphics::Packet texture_update{{0x800a,0x10000000,14,0},
+            {0x116,0,0,0},{(1U<<16)|8U,0,0x4c,0},
+            {std::uint32_t(tex0),std::uint32_t(tex0>>32),6,0},{0,0,0x16,0},
+            {123,456,0x34,0},{789,123,0x36,0},
+            {0,0,3,0},{0,0,5,0},{64U|(64U<<16),0,3,0},{64U|(64U<<16),0,5,0}};
+        masked.submit(consumer.renderer,std::array{texture_update});
+        for (unsigned y=0;y<4;++y) for (unsigned x=0;x<4;++x)
+            if (masked.pixels()[nt::graphics::rgba_word(256,1,x,y)]!=0xff778899)
+                throw std::runtime_error("TEX2 changed preserved texture layout or mip setup changed base sampling");
+        const std::array<std::uint64_t,2> display_buffers{0,8U|(1U<<9)};
+        const std::array<std::uint64_t,2> display_extents{0,(3ULL<<32)|(3ULL<<44)};
+        const auto frame=nt::graphics::scanout(masked.pixels(),2,display_buffers,display_extents);
+        if (!frame || frame->width!=4 || frame->height!=4 ||
+            !std::all_of(frame->pixels.begin(),frame->pixels.end(),[](auto p) { return p==0xff778899; }) ||
+            nt::graphics::scanout(masked.pixels(),0,display_buffers,display_extents))
+            throw std::runtime_error("Scanout did not use the selected game's surface and extent");
+        rejected=false;
+        try { nt::graphics::scanout(masked.pixels(),3,display_buffers,display_extents); }
+        catch (const std::invalid_argument&) { rejected=true; }
+        if (!rejected) throw std::runtime_error("Unsupported dual-circuit composition was hidden");
         std::cout<<"Compiled VU to Vulkan sprite integration passed\n";
         return 0;
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }

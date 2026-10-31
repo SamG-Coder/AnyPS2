@@ -93,6 +93,9 @@ public:
     Stop consume(unsigned channel,std::span<const std::uint8_t> bytes,bool vector_active) {
         if (channel==2) {
             if (gif_paused_ || !graphics.submit) return Stop::unsupported_system;
+            // Descriptor-only submissions carry no GIF data. They complete
+            // without inventing a packet or disturbing a partial stream.
+            if (bytes.empty()) return Stop::budget;
             std::vector<graphics::Packet> packets;
             auto next=gif_stream_;
             try { next.append(bytes,packets); }
@@ -136,7 +139,7 @@ public:
             case 7: next.mark=code&0xffffU; break;
             case 0x10: break; // FLUSHE: no outstanding compiled vector work.
             case 0x11: case 0x13:
-                if (!channel || !graphics.wait || !drawing.empty()) return Stop::unsupported_system;
+                if (!channel || !graphics.wait || (!drawing.empty() && !graphics.synchronous)) return Stop::unsupported_system;
                 wait_command=command;
                 break;
             case 0x14: case 0x15: case 0x17:
@@ -234,6 +237,9 @@ public:
         }
         // Validation precedes the host wait. No current-batch effects have
         // occurred yet, and a retry cannot replay a previously submitted draw.
+        // A fence after DIRECT is coalesced only for a synchronous consumer:
+        // the final ordered batch completes before any state is published.
+        // Mixed drawing/vector launches remain rejected above.
         if (wait_command && !graphics.wait(graphics.context)) {
             rejected_command_=wait_command;
             return Stop::unsupported_system;

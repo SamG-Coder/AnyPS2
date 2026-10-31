@@ -12,6 +12,7 @@ constexpr bool settings_syscall(std::uint32_t number) { return number==0x4a || n
 constexpr bool sif_control_syscall(std::uint32_t number) { return number==0x6b || number==0x78 || number==0x79 || number==0x7a; }
 constexpr std::uint32_t native_syscall_number(std::uint32_t number) {
     switch (number) {
+    case 0xffffffd1U: // Interrupt-context GetThreadId.
     case 0xffffffccU: case 0xffffffcaU: // Interrupt-safe thread wake/cancel.
     case 0xffffff90U: case 0xffffff8fU: // Interrupt-safe GS mask access.
     case 0xffffffbdU: case 0xffffffbaU: case 0xffffffb8U: // Interrupt-safe semaphore services.

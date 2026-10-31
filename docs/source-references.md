@@ -1502,3 +1502,27 @@ and user work, without frequency scaling. Windows warns against converting this
 quantity to elapsed time. Hardware-counter profiling requires configured counters;
 unconfigured zero readings are not accepted as measurements. No Microsoft
 implementation code or additional driver is incorporated.
+
+Live sampled PMU collection reuses the original AnyPS2 ETW adapter and interval
+accumulator with the Microsoft ETW interfaces cited above. The owner-thread
+same-ID scheduling boundary was observed in live Windows records; the accumulator
+now closes and reopens that interval with the same measured counter baseline.
+No event count is inferred from elapsed time. The collector uses an owned system
+session, validates loss/error state and exposes only completed measured intervals.
+
+Interrupt-context GetThreadId normalization uses the already pinned PS2SDK public
+`ee/kernel/include/syscallnr.h` and `kernel.h` declarations. The IOP callback change
+is original conservative AOT discovery of code-valued arguments escaping to
+compiled libraries; it does not copy a module's implementation or patch a game
+address. Synthetic fixtures are original.
+`GS/GSRegs.h` SCANMSK and `GS/Renderers/SW/GSRasterizer.cpp` at the pinned PCSX2 revision establish scanline parity masking. The native sprite shader independently rejects masked rows before pixel work; reserved mode 1 stops explicitly. DIMX/DTHE affect only 16-bit targets, which remain unsupported, and fog-enabled primitives remain rejected.
+
+At the existing pinned PCSX2 revision, GSRegs.h defines TEX2 and the display
+configuration fields; GSRendererSW.cpp restricts interpolated color to lines and
+triangles. SIO/SioTypes.h and SIO/Sio2.cpp supply the public serial packet fields,
+missing-device status, response padding and completion cause. The original
+native adapter has explicitly disconnected endpoints and synchronous native
+completion, not a serial timing model. The pinned PS2SDK dmacman.h and dmacman.c
+provide sceSetSliceDMA's five-argument ABI and success return. Native descriptors,
+owned buffers, validation and typed LLVM transfer metadata are original AnyPS2
+code. No commercial code, SDK source or game-derived fixtures are incorporated.

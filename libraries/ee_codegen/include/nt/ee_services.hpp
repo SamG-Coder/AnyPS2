@@ -102,11 +102,11 @@ public:
         if (thread_syscall(number)) {
             threads_.allow_idle=static_cast<bool>(idle_pump);
             const bool interrupt=memory.interrupts && memory.interrupts->active();
-            if (handlers_.active() || (interrupt && number!=0x34 && number!=0x36)) return Stop::unsupported_system;
+            if (handlers_.active() || (interrupt && number!=0x2f && number!=0x34 && number!=0x36)) return Stop::unsupported_system;
             const auto result=threads_.invoke(number,state,memory,compiled_,protected_code_);
             if (result.status!=Stop::budget) return result.status;
             returned(state,result.value);
-            if (!interrupt && number!=0x34 && number!=0x36) threads_.schedule(state);
+            if (!interrupt && number!=0x2f && number!=0x34 && number!=0x36) threads_.schedule(state);
             return Stop::budget;
         }
         if (intc_syscall(number)) {

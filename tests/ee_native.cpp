@@ -32,7 +32,7 @@ int main() {
             // samples; these samples are test input, never a runtime fallback.
             std::uint64_t sample=100;
             bool available=true;
-            nt::ee::NativeThreadCycles cycles([&]() -> std::optional<std::uint64_t> {
+            nt::ee::NativePerformanceCounters cycles([&]() -> std::optional<std::uint64_t> {
                 if (!available) return std::nullopt;
                 return sample;
             });
@@ -45,7 +45,7 @@ int main() {
             check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.gpr[12].lo==16);
             check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system &&
                   state.pc==0x1490 && state.executed==5 &&
-                  cycles.error()==nt::ee::NativeThreadCycles::Error::unavailable_event);
+                  cycles.error()==nt::ee::NativePerformanceCounters::Error::unavailable_event);
             // Failed acquisition must not consume a transfer or mutate values.
             state.pc=0x148c; available=false;
             const auto before=memory.performance.counters[0];
@@ -53,7 +53,7 @@ int main() {
                   memory.performance.counters[0]==before && state.executed==5);
             available=true; sample=1;
             check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system &&
-                  cycles.error()==nt::ee::NativeThreadCycles::Error::regressed_sample);
+                  cycles.error()==nt::ee::NativePerformanceCounters::Error::regressed_sample);
             sample=140;
             check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.gpr[12].lo==24);
             // Disable latches the real count, but does not erase an unmeasured
@@ -73,10 +73,50 @@ int main() {
                   state.pc==0x148c); // no mode attribution from the read's mode
             nt::ee::Memory existing;
             existing.performance.control=0x8000003eU;
-            nt::ee::NativeThreadCycles late([&] { return std::optional<std::uint64_t>(sample); });
+            nt::ee::NativePerformanceCounters late([&] { return std::optional<std::uint64_t>(sample); });
             late.attach(existing); state={}; state.pc=0x148c;
             check(nt_ee_generated_run(&state,&existing,1)==nt::ee::Stop::unsupported_system &&
                   !state.executed); // attaching cannot recover unmeasured history
+            nt::ee::NativePerformanceCounters::Values counts{100,10};
+            nt::ee::NativePerformanceCounters pmu([&] {
+                return std::optional<nt::ee::NativePerformanceCounters::Values>(counts);
+            },true);
+            nt::ee::Memory measured; pmu.attach(measured);
+            state={}; state.pc=0x147c; state.gpr[8].lo=0x8003783eU;
+            check(nt_ee_generated_run(&state,&measured,4)==nt::ee::Stop::budget);
+            counts={180,17};
+            check(nt_ee_generated_run(&state,&measured,8)==nt::ee::Stop::syscall &&
+                  state.gpr[12].lo==80 && state.gpr[13].lo==7);
+            counts={190,16}; state.pc=0x148c;
+            check(nt_ee_generated_run(&state,&measured,1)==nt::ee::Stop::unsupported_system &&
+                  pmu.error()==nt::ee::NativePerformanceCounters::Error::regressed_sample &&
+                  measured.performance.counters[0]==80);
+            // Native clock policy deliberately replaces both profiling events
+            // with elapsed ticks; it never presents them as hardware misses.
+            sample=1000; available=true;
+            nt::ee::NativePerformanceCounters clock([&]() -> std::optional<std::uint64_t> {
+                return available ? std::optional(sample) : std::nullopt;
+            },nt::ee::NativePerformanceCounters::ClockPolicy::elapsed_time);
+            nt::ee::Memory timed; clock.attach(timed);
+            state={}; state.pc=0x147c; state.gpr[8].lo=0x8003783eU;
+            state.gpr[9].lo=0xfffffff0U; state.gpr[10].lo=7;
+            check(nt_ee_generated_run(&state,&timed,4)==nt::ee::Stop::budget);
+            sample+=32;
+            check(nt_ee_generated_run(&state,&timed,8)==nt::ee::Stop::syscall &&
+                  state.gpr[12].lo==16 && state.gpr[13].lo==39);
+            state.pc=0x148c; available=false;
+            check(nt_ee_generated_run(&state,&timed,1)==nt::ee::Stop::unsupported_system &&
+                  timed.performance.counters[0]==16 && timed.performance.counters[1]==39);
+            available=true; sample=999;
+            check(nt_ee_generated_run(&state,&timed,1)==nt::ee::Stop::unsupported_system &&
+                  clock.error()==nt::ee::NativePerformanceCounters::Error::regressed_sample);
+            sample=1100; state.pc=0x147c; state.gpr[8].lo=0;
+            check(nt_ee_generated_run(&state,&timed,1)==nt::ee::Stop::budget);
+            state.pc=0x1498;
+            check(nt_ee_generated_run(&state,&timed,8)==nt::ee::Stop::syscall);
+            sample+=1000; state.pc=0x148c;
+            check(nt_ee_generated_run(&state,&timed,2)==nt::ee::Stop::budget &&
+                  state.gpr[12].lo==0 && state.gpr[13].lo==0);
         }
         {
             std::vector<std::uint8_t> ram(0x10000);
@@ -595,6 +635,7 @@ int main() {
             std::memcpy(ram.data()+0x5000,descriptor.data(),36);
             check(call(0x20,0xa0005000)==nt::ee::Stop::budget && state.gpr[2].lo==2);
             check(call(0x2f)==nt::ee::Stop::budget && state.gpr[2].lo==1);
+            check(call(0xffffffd1U)==nt::ee::Stop::budget && state.gpr[2].lo==1);
             check(call(0x30,2,0x5100)==nt::ee::Stop::budget && state.gpr[2].lo==0x10);
             std::array<std::uint32_t,12> status{}; std::memcpy(status.data(),ram.data()+0x5100,48);
             check(status[1]==0x390000 && status[2]==0x24000 && status[5]==10 && status[8]==7);

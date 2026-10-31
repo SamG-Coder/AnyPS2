@@ -189,6 +189,10 @@ int main() {
             check(nt_iop_generated_run(callback,data,8).reason==NativeStop::unmapped_code &&
                   callback.pc==0x5000 && callback.registers[2]==0x74,
                   "Callback stored in a call delay slot was not compiled");
+            callback=initial(); callback.pc=0xb5e8;
+            check(nt_iop_generated_run(callback,data,8).reason==NativeStop::unmapped_code &&
+                  callback.pc==0x5000 && callback.registers[2]==0x75,
+                  "Callback passed to a compiled library was not compiled");
         }
         {
             std::vector<std::uint8_t> data(0x10000);
@@ -2557,9 +2561,68 @@ int main() {
                 check(load.pc==0x101c0 && load.load_register==2 && load.load_value==0x3bc && load.registers[2]==0x9f808268,
                       "Serial read did not preserve the load delay");
                 serial.reset();
+                serial.invoke({1,{0x1f808200,2U<<8},NativeServiceKind::serial},sio2_ram);
+                auto transmit=initial(); transmit.pc=0x10220; transmit.registers[4]=0x1234ab;
+                const auto sent=run_native(nt_iop_generated_run,transmit,sio2_ram,8,&serial);
+                check(sent.reason==NativeStop::unmapped_code && serial.pending_output().size()==1 &&
+                      serial.pending_output()[0]==0xab,"Compiled serial byte write did not preserve byte width");
+                transmit=initial(); transmit.pc=0x10220; transmit.registers[4]=0xcd;
+                run_native(nt_iop_generated_run,transmit,sio2_ram,8,&serial);
+                transmit=initial(); transmit.pc=0x10220;
+                const auto excess=run_native(nt_iop_generated_run,transmit,sio2_ram,8,&serial);
+                check(excess.reason==NativeStop::serial_request && transmit.pc==0x10228 &&
+                      serial.pending_output().size()==2,"Serial byte write exceeded declared transaction");
+                serial.reset();
+                check(serial.pending_output().empty(),"Serial reset retained pending output");
+                NativeInterruptServices serial_events(0x8000);
+                serial.connect_disconnected_ports(serial_events);
+                serial.invoke({1,{0x1f808200,(2U<<8)|(2U<<18)},NativeServiceKind::serial},sio2_ram);
+                const auto short_start=serial.invoke({1,{0x1f808268,1},NativeServiceKind::serial},sio2_ram);
+                check(short_start.status==NativeServiceStatus::unavailable &&
+                      serial.invoke({0,{0x1f808280},NativeServiceKind::serial},sio2_ram).value==0,
+                      "Incomplete serial transaction posted completion");
+                for (unsigned byte_value : {0x21U,0x12U}) {
+                    transmit=initial(); transmit.pc=0x10220; transmit.registers[4]=byte_value;
+                    run_native(nt_iop_generated_run,transmit,sio2_ram,8,&serial);
+                }
+                check(serial.invoke({1,{0x1f808268,1},NativeServiceKind::serial},sio2_ram).status==NativeServiceStatus::returned &&
+                      serial.invoke({0,{0x1f808268},NativeServiceKind::serial},sio2_ram).value==0 &&
+                      serial.invoke({0,{0x1f808280},NativeServiceKind::serial},sio2_ram).value==1 &&
+                      serial.invoke({0,{0x1f80826c},NativeServiceKind::serial},sio2_ram).value==0x1d100,
+                      "Disconnected serial completion did not publish missing-device state");
+                for (unsigned i=0;i<2;++i)
+                    check(serial.invoke({0,{0x1f808264,0,1},NativeServiceKind::serial},sio2_ram).value==255,
+                          "Disconnected serial response acknowledged a device");
+                check(serial.invoke({0,{0x1f808264,0,1},NativeServiceKind::serial},sio2_ram).status==NativeServiceStatus::unavailable,
+                      "Serial response underflow was hidden");
+                serial.invoke({1,{0x1f808280,1},NativeServiceKind::serial},sio2_ram);
+                check(serial.invoke({0,{0x1f808280},NativeServiceKind::serial},sio2_ram).value==0,
+                      "Serial completion acknowledgement was lost");
+                serial.reset();
                 check(serial.invoke({0,{0x1f808200},NativeServiceKind::serial},sio2_ram).value==0 &&
                       serial.invoke({0,{0x1f808268},NativeServiceKind::serial},sio2_ram).value==0,
                       "Serial reset retained configuration");
+                serial.invoke({1,{0x1f808200,(2U<<8)|(3U<<18)},NativeServiceKind::serial},sio2_ram);
+                const auto configure_buffer=[&](unsigned channel,unsigned address,unsigned words) {
+                    store_native_word(sio2_ram,0x110,channel==11 ? 1U : 0U);
+                    NativeServiceRequest r{28,{channel,address,words,1},NativeServiceKind::dmacman};
+                    r.stack_pointer=0x100; return serial.invoke(r,sio2_ram);
+                };
+                sio2_ram[0x124]=0x21; sio2_ram[0x125]=0x12;
+                std::fill_n(sio2_ram.begin()+0x204,8,0x55);
+                check(configure_buffer(11,0x124,2).value==1 && configure_buffer(12,0x204,2).value==1,
+                      "Native serial buffers required block-size alignment instead of word alignment");
+                check(serial.invoke({32,{11},NativeServiceKind::dmacman},sio2_ram).status==NativeServiceStatus::returned &&
+                      serial.invoke({32,{12},NativeServiceKind::dmacman},sio2_ram).status==NativeServiceStatus::returned &&
+                      sio2_ram[0x204]==0x55,"Arming serial receive fabricated a completed response");
+                check(serial.invoke({1,{0x1f808268,1},NativeServiceKind::serial},sio2_ram).status==NativeServiceStatus::returned,
+                      "Buffered disconnected transaction did not complete");
+                for (unsigned i=0;i<8;++i) check(sio2_ram[0x204+i]==(i<3 ? 255 : 0),
+                    "Serial response or block padding was not published");
+                serial.reset();
+                check(serial.invoke({32,{11},NativeServiceKind::dmacman},sio2_ram).status==NativeServiceStatus::unavailable &&
+                      configure_buffer(12,0x1ffc,2).status==NativeServiceStatus::address_fault,
+                      "Serial buffer reset or range validation failed");
             }
             NativeResult stop{};
             auto pointers=initial(); pointers.pc=0x10020; store_native_word(dma_ram,0x10180,0);

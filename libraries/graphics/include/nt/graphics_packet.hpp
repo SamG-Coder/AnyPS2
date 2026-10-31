@@ -16,6 +16,9 @@ struct BatchConsumer {
     // Complete all previously accepted native graphics work. Failure may drain
     // prior work, but must not publish a new batch or alter drawing configuration.
     bool (*wait)(void*)=nullptr;
+    // True only when successful submit has completed every operation before
+    // publishing its result. Allows a trailing fence within an atomic batch.
+    bool synchronous=false;
 };
 inline std::size_t payload_words(const Quadword& tag) {
     const auto low=std::uint64_t(tag[0])|(std::uint64_t(tag[1])<<32);

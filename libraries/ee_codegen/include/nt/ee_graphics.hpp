@@ -3,6 +3,7 @@
 #include <nt/ee_clock.hpp>
 #include <optional>
 #include <algorithm>
+#include <array>
 
 namespace nt::ee {
 // Native graphics lifecycle and nominal application display deadlines. These
@@ -11,6 +12,8 @@ class NativeGraphics {
 public:
     explicit NativeGraphics(NativeClock clock=nullptr) : clock_(clock ? clock : native_now) {}
     struct DisplayMode { std::uint32_t interlace,standard,frame; };
+    struct Output { std::uint64_t control=0,background=0; std::array<std::uint64_t,2> buffers{},displays{}; };
+    const Output& output() const { return output_; }
     void* context=nullptr;
     Stop (*synchronize)(void*)=nullptr;
     // Optional drawing owner. Rejection must preserve that owner's state.
@@ -29,16 +32,31 @@ public:
     }
     const std::optional<DisplayMode>& mode() const { return mode_; }
     static bool maps(std::uint32_t address) {
-        return address==0x12000020 || address==0x12001000 || address==0x12001010;
+        return address==0x12000000 || address==0x12000020 ||
+            (address>=0x12000070 && address<=0x120000a0 && address%16==0) ||
+            address==0x120000e0 || address==0x12001000 || address==0x12001010;
     }
     IoRead64 read(std::uint32_t address) {
         if (!maps(address)) return {Stop::unsupported_system};
         advance();
+        if (address==0x12000000) return {Stop::budget,output_.control};
+        if (address==0x120000e0) return {Stop::budget,output_.background};
+        if (address>=0x12000070 && address<=0x120000a0) {
+            const auto slot=(address-0x12000070)/16;
+            return {Stop::budget,slot&1 ? output_.displays[slot/2] : output_.buffers[slot/2]};
+        }
         if (address==0x12000020) return {Stop::budget,mode_ ? mode_->interlace|(mode_->frame<<1) : 0};
         if (address==0x12001000) return {Stop::budget,0x4000U|field_|flags_};
         return {Stop::budget,mask_};
     }
     Stop write(std::uint32_t address,std::uint64_t value) {
+        if (address==0x12000000) { output_.control=value&0xffffU; return Stop::budget; }
+        if (address==0x120000e0) { output_.background=value&0xffffffU; return Stop::budget; }
+        if (address>=0x12000070 && address<=0x120000a0 && address%16==0) {
+            const auto slot=(address-0x12000070)/16;
+            (slot&1 ? output_.displays[slot/2] : output_.buffers[slot/2])=value;
+            return Stop::budget;
+        }
         if (address==0x12000020) {
             return mode_ && value==(mode_->interlace|(mode_->frame<<1)) ? Stop::budget : Stop::unsupported_system;
         }
@@ -52,7 +70,7 @@ public:
                         const auto reset=reset_drawing(context);
                         if (reset!=Stop::budget) return reset;
                     }
-                    mask_=0x7f00; flags_=0; field_=0; events_=0; mode_.reset(); ++resets_;
+                    mask_=0x7f00; flags_=0; field_=0; events_=0; mode_.reset(); output_={}; ++resets_;
                     return Stop::budget;
                 }
             }
@@ -118,6 +136,7 @@ private:
         ticks_=ticks;
     }
     NativeClock clock_;
+    Output output_;
     bool edge_lost_=false;
     std::optional<DisplayMode> mode_;
     std::uint32_t mask_=0x7f00,flags_=0,field_=0,events_=0;

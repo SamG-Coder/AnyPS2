@@ -239,7 +239,7 @@ std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executa
     std::set<std::uint32_t> result;
     for (const auto& [pc,jump]:program.instructions) {
         if (jump.op!=Op::jr || !jump.rs || pc<28) continue;
-        std::array<const r5900::Instruction*,7> prior{};
+        std::array<const r5900::Instruction*,6> prior{};
         bool complete=true;
         for (unsigned n=0;n<prior.size();++n) {
             const auto found=program.instructions.find(pc-4*(n+1));
@@ -249,7 +249,32 @@ std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executa
         if (!complete) continue;
         const auto& load=*prior[0]; const auto& add=*prior[1];
         const auto& high=*prior[2]; const auto& scale=*prior[3];
-        const auto& branch=*prior[5]; const auto& bound=*prior[6];
+        const auto& branch=*prior[5];
+        if (branch.op!=Op::beq || (branch.rs && branch.rt) || (!branch.rs && !branch.rt)) continue;
+        const auto guard=branch.rs ? branch.rs : branch.rt;
+        // A compiler can schedule register setup and stack saves between the
+        // range comparison and its branch. Search a bounded straight-line
+        // suffix, rejecting writes to either the guard or switch index.
+        const r5900::Instruction* comparison=nullptr;
+        for (unsigned distance=4;distance<=64 && distance<=branch.pc;distance+=4) {
+            const auto found=program.instructions.find(branch.pc-distance);
+            if (found==program.instructions.end()) break;
+            const auto& instruction=found->second;
+            if (instruction.op==Op::sltiu && instruction.rt==guard) { comparison=&instruction; break; }
+            unsigned destination=0;
+            switch (instruction.op) {
+            case Op::sb: case Op::sh: case Op::sw: case Op::sd: case Op::sq: break;
+            case Op::lui: case Op::ori: case Op::andi: case Op::xori: case Op::addiu: case Op::daddiu:
+                destination=instruction.rt; break;
+            case Op::addu: case Op::daddu: case Op::subu: case Op::dsubu:
+            case Op::bit_or: case Op::bit_and: case Op::bit_xor: case Op::sll: case Op::srl: case Op::sra:
+                destination=instruction.rd; break;
+            default: destination=guard; break;
+            }
+            if (destination && (destination==guard || destination==scale.rt)) break;
+        }
+        if (!comparison) continue;
+        const auto& bound=*comparison;
         if (load.op!=Op::lw || load.rt!=jump.rs || add.op!=Op::addu || add.rd!=load.rs ||
             high.op!=Op::lui || !high.rt || scale.op!=Op::sll || scale.sa!=2 || !scale.rd ||
             high.rt==scale.rd ||

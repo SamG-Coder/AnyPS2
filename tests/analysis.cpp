@@ -473,6 +473,14 @@ int main() {
             put(image,0x84,0x1071); check(roots().empty(),"Malformed switch accepted partially");
             put(image,0x84,0x1070); put(image,0,0x2ca20002);
             check(roots().empty(),"Unrelated bound supplied switch extent");
+            put(image,0,0x2c820002);
+            for (unsigned offset=32;offset>=4;offset-=4)
+                put(image,offset+12,nt::le32(image,offset));
+            put(image,4,0xffb00000); // save s0 without changing index or guard
+            put(image,8,0x3c107000); put(image,12,0x36102000);
+            check(roots()==std::set<std::uint32_t>{0x1060,0x1070},"Scheduled bound comparison lost switch entries");
+            put(image,12,0x34020000);
+            check(roots().empty(),"Overwritten guard supplied a switch bound");
         }
         std::cout << "Control-flow discovery and address-boundary tests passed\n";
         return 0;

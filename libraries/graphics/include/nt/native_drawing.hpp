@@ -13,6 +13,8 @@ class NativeDrawing {
 public:
     using Packet=graphics::Packet;
     const std::vector<std::uint32_t>& pixels() const { return pixels_; }
+    std::uint64_t submitted_draws() const { return submitted_draws_; }
+    const std::optional<Sprite>& last_draw() const { return last_draw_; }
     void reset() { state_={}; }
     void submit(VulkanRenderer& renderer,std::span<const Packet> packets) {
         auto candidate=state_;
@@ -32,6 +34,9 @@ public:
         }
         // Pixel/state publication is atomic even if validation or GPU work fails.
         pixels_.swap(pixels); state_=candidate;
+        for (const auto& operation:draws) if (const auto* draw=std::get_if<Draw>(&operation)) {
+            ++submitted_draws_; last_draw_=draw->sprite;
+        }
     }
 private:
     using ImageWrites=std::vector<PixelWrite>;
@@ -39,14 +44,19 @@ private:
     using Operation=std::variant<Draw,ImageWrites,PaletteLoad>;
     struct Context {
         std::uint64_t frame=0,offset=0,scissor=0,test=0,depth=0,texture=0,filter=0,clamp=0,alpha=0;
+        std::array<std::uint64_t,2> mipmap_bases{};
         bool force_alpha=false;
     };
     struct State {
         std::array<Context,2> contexts;
         unsigned primitive=0,attributes=0,color=0,x=0,y=0;
+        unsigned scan_mask=0;
         std::uint32_t uv=0,first_uv=0,texa=0;
+        std::uint32_t fog_color=0;
         bool use_primitive=false,first=false;
         bool color_clamp=false,per_pixel_blend=false;
+        std::uint64_t dither_matrix=0;
+        bool dither_enabled=false;
         std::uint64_t transfer_buffer=0,transfer_position=0,transfer_extent=0;
         ImageUpload upload;
         std::array<std::uint32_t,256> palette{};
@@ -54,6 +64,8 @@ private:
         std::uint64_t palette_config=0;
     } state_;
     std::vector<std::uint32_t> pixels_=std::vector<std::uint32_t>(1024*1024);
+    std::uint64_t submitted_draws_=0;
+    std::optional<Sprite> last_draw_;
     static std::uint64_t half(const Quadword& q,unsigned index) {
         return std::uint64_t(q[index*2])|(std::uint64_t(q[index*2+1])<<32);
     }
@@ -65,16 +77,31 @@ private:
         case 6: case 7:
             if (const auto load=plan_palette(value,state.palette_config,state.palette_bases)) draws.push_back(*load);
             state.contexts[reg-6].texture=value; return;
+        case 0x16: case 0x17: {
+            constexpr std::uint64_t fields=(63ULL<<20)|(~0ULL<<37);
+            const auto texture=(state.contexts[reg-0x16].texture&~fields)|(value&fields);
+            command(state,reg-0x16+6,texture,draws); return;
+        }
         case 0x1c: state.palette_config=value; return;
+        case 0x22:
+            if ((value&3)==1) throw std::invalid_argument("Reserved native scan mask");
+            state.scan_mask=unsigned(value&3); return;
         case 8: case 9: state.contexts[reg-8].clamp=value; return;
         case 0x14: case 0x15: state.contexts[reg-0x14].filter=value; return;
+        case 0x34: case 0x35: case 0x36: case 0x37:
+            // Mipmap sampling remains checked by plan_sprite_texture; setup
+            // alone does not require fetching any mip level.
+            state.contexts[reg&1].mipmap_bases[(reg-0x34)/2]=value; return;
         case 0x3b: state.texa=std::uint32_t(value); return;
+        case 0x3d: state.fog_color=std::uint32_t(value)&0xffffffU; return;
         case 0x3f: return; // Coherent native texture storage has no deferred cache contents.
         case 0x1a: state.use_primitive=(value&1)!=0; return;
         case 0x1b: state.attributes=unsigned(value&2040); return;
         case 0x18: case 0x19: state.contexts[reg-0x18].offset=value; return;
         case 0x40: case 0x41: state.contexts[reg-0x40].scissor=value; return;
         case 0x42: case 0x43: state.contexts[reg-0x42].alpha=value; return;
+        case 0x44: state.dither_matrix=value&0x7777777777777777ULL; return;
+        case 0x45: state.dither_enabled=(value&1)!=0; return;
         case 0x46: state.color_clamp=(value&1)!=0; return;
         case 0x49: state.per_pixel_blend=(value&1)!=0; return;
         case 0x47: case 0x48: state.contexts[reg-0x47].test=value; return;
@@ -87,22 +114,34 @@ private:
         case 0x53:
             state.upload=ImageUpload::begin(state.transfer_buffer,state.transfer_position,state.transfer_extent,unsigned(value&3)); return;
         case 0xf: case 0x7f: return;
-        case 5: case 13: break;
+        case 4: case 5: case 12: case 13: break;
         default: throw std::invalid_argument("Unsupported native graphics command: "+std::to_string(reg));
         }
         const auto attributes=state.use_primitive ? state.primitive : state.attributes;
-        if ((state.primitive&7)!=6 || (attributes&~0x357U))
-            throw std::invalid_argument("Unsupported native sprite attributes");
         const unsigned x=value&65535,y=(value>>16)&65535;
+        if ((state.primitive&7)!=6 || (attributes&~0x35fU)) {
+            if (reg==12 || reg==13) {
+                // Vertex writes with a suppressed kick initialize the latch;
+                // unsupported primitives still stop when a draw is requested.
+                state.x=x; state.y=y; state.first_uv=state.uv; state.first=true; return;
+            }
+            throw std::invalid_argument("Unsupported native primitive/attributes: "+
+                std::to_string(state.primitive&7)+"/"+std::to_string(attributes));
+        }
         if (!state.first) { state.x=x; state.y=y; state.first_uv=state.uv; state.first=true; return; }
         state.first=false;
-        if (reg==13) return;
+        if (reg==12 || reg==13) return;
         const auto& context=state.contexts[(attributes>>9)&1];
+        // Dithering affects 16-bit targets only. Their quantization and matrix
+        // application are not supported by the current 24/32-bit sprite path.
+        if (state.dither_enabled && ((context.frame>>24)&63)>1)
+            throw std::invalid_argument("Unsupported native dithered surface format");
         if ((context.test&0x10000U) &&
             (!(context.depth&(1ULL<<32)) || ((context.test>>17)&3)!=1))
             throw std::invalid_argument("Unsupported native sprite depth test");
         auto draw=plan_sprite(context.frame,context.offset,context.scissor,state.x,state.y,x,y,state.color);
         if (draw) {
+            if (state.scan_mask&2) draw->flags|=4096|((state.scan_mask&1)*8192);
             draw->test=std::uint32_t(context.test)&65535;
             if (((context.frame>>24)&63)==1) draw->flags|=512;
             if (attributes&64) {
@@ -146,8 +185,8 @@ private:
                 else if (reg==0) command(state,0,q[0]&2047,draws);
                 else if (reg==1) command(state,1,(q[0]&255)|((q[1]&255)<<8)|((q[2]&255)<<16)|((q[3]&255)<<24),draws);
                 else if (reg==3) command(state,3,(q[0]&16383)|((q[1]&16383)<<16),draws);
-                else if (reg==5 || reg==13) {
-                    const auto target=reg==13 || (q[3]&0x8000U) ? 13U : 5U;
+                else if (reg==4 || reg==5 || reg==12 || reg==13) {
+                    const auto target=reg>=12 || (q[3]&0x8000U) ? (reg&1)+12U : reg;
                     command(state,target,(q[0]&65535)|(std::uint64_t(q[1]&65535)<<16),draws);
                 } else throw std::invalid_argument("Unsupported packed native graphics register");
             }

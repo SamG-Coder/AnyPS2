@@ -29,6 +29,10 @@ int main() {
         if (intervals.snapshot().status!=CounterStatus::running) throw std::runtime_error("Active interval fabricated a sample");
         event(intervals,0,7,8,4,180,13);
         event(intervals,1,10,7,5,20000,1000); // Migration establishes a new CPU baseline.
+        const auto pending=intervals.snapshot();
+        if (pending.completed_intervals!=1 || pending.totals!=std::vector<std::uint64_t>{80,3} ||
+            pending.end_timestamp!=4 || pending.status!=CounterStatus::running)
+            throw std::runtime_error("Sampled profiling extrapolated an unfinished interval");
         event(intervals,1,7,10,6,20040,1002);
         const auto complete=intervals.snapshot();
         if (complete.status!=CounterStatus::ready || complete.completed_intervals!=2 || complete.end_timestamp!=6 ||
@@ -55,6 +59,15 @@ int main() {
         event(overflow,0,7,8,2,std::numeric_limits<std::uint64_t>::max(),0);
         event(overflow,1,8,7,3,0,0); event(overflow,1,7,8,4,1,0);
         if (overflow.snapshot().status!=CounterStatus::overflow) throw std::runtime_error("Counter total overflow accepted");
+        CounterIntervals same_thread(7,2,2);
+        event(same_thread,1,9,9,1,10,1); // unrelated scheduling boundary
+        event(same_thread,0,8,7,2,100,10);
+        event(same_thread,0,7,7,3,130,12);
+        event(same_thread,0,7,8,4,180,15);
+        if (same_thread.snapshot().status!=CounterStatus::ready ||
+            same_thread.snapshot().completed_intervals!=2 ||
+            same_thread.snapshot().totals!=std::vector<std::uint64_t>{80,5})
+            throw std::runtime_error("Same-thread boundary lost or duplicated measurement");
         CounterIntervals malformed(7,2,2);
         malformed.consume({0,8,7,1,{}});
         if (malformed.snapshot().status!=CounterStatus::invalid_sample) throw std::runtime_error("Missing counters read as zero");

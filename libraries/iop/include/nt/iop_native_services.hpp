@@ -54,9 +54,11 @@ inline NativeResult run_native(NativeEntry entry,Cpu& cpu,std::span<std::uint8_t
             if (!services || !budget) return result;
             const auto operand=result.trap_code&31U;
             const bool writing=(result.trap_code&256U)!=0;
+            const bool byte=(result.trap_code&512U)!=0;
             const auto address=0x1f808200U+(result.trap_code>>16);
             const auto resume=cpu.delay_slot ? cpu.branch_target : cpu.pc+4;
-            const NativeServiceRequest access{writing ? 1U : 0U,{address,cpu.registers[operand],0,0},
+            const NativeServiceRequest access{writing ? 1U : 0U,
+                {address,byte ? cpu.registers[operand]&255U : cpu.registers[operand],byte ? 1U : 4U,0},
                 NativeServiceKind::serial,cpu.pc,cpu.interrupt_depth!=0,cpu.registers[28],cpu.registers[29],&cpu,resume};
             const auto reply=services->invoke(access,ram);
             if (reply.status!=NativeServiceStatus::returned) {
@@ -67,7 +69,7 @@ inline NativeResult run_native(NativeEntry entry,Cpu& cpu,std::span<std::uint8_t
             if (cpu.load_register && (writing || cpu.load_register!=operand))
                 cpu.registers[cpu.load_register]=cpu.load_value;
             cpu.load_register=writing ? 0U : operand;
-            cpu.load_value=writing ? 0U : reply.value;
+            cpu.load_value=writing ? 0U : byte ? reply.value&255U : reply.value;
             cpu.registers[0]=0;
             cpu.pc=resume;
             cpu.delay_slot=false;

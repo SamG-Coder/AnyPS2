@@ -560,6 +560,22 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                     discover_stack_thread(pc,local);
                 }
                 if (target!=native_imports.end()) discover_loader_callbacks(pc,target->second.immediate,successor);
+                if (target!=native_imports.end() && (target->second.immediate>>16)==2) {
+                    // Code pointers escaping to a compiled library can be
+                    // retained as callbacks in that library's private state.
+                    // Discover their owners now; this is candidate compilation,
+                    // not a proof of the later indirect destination.
+                    for (unsigned reg=4;reg<8;++reg) if (successor.registers[reg])
+                        for (const auto value:*successor.registers[reg]) {
+                            const auto address=physical_address(value);
+                            std::size_t owner=0;
+                            if (!module_owner(data_modules,address,owner)) continue;
+                            if (std::any_of(libraries.begin(),libraries.end(),[&](const auto& lib) {
+                                    return lib.address==address;
+                                })) continue;
+                            discover_callback(address,pc,false);
+                        }
+                }
             }
             if (indirect) {
                 // Loaded-pointer callees start with unknown registers. The caller's

@@ -274,16 +274,19 @@ void instruction(Writer& w,const ir::Instruction& i,bool has_successor,bool open
         // Return typed access metadata to the session-owned native service.
         // No guest instruction is fetched or decoded by the service dispatcher.
         const bool sio2_word=!merge && (i.operation==Operation::load_word || i.operation==Operation::store_word);
-        if (!sio2_word) w.text<<"  br label %fault"<<label<<"\n";
+        const bool sio2_byte=!merge && (i.operation==Operation::load_byte_unsigned || i.operation==Operation::store_byte);
+        if (!sio2_word && !sio2_byte) w.text<<"  br label %fault"<<label<<"\n";
         else {
             constexpr std::uint32_t sio2_base=0x1f808200;
             const auto above=w.binary("icmp uge",offset,std::to_string(sio2_base));
             const auto below=w.binary("icmp ule",offset,std::to_string(sio2_base+32*4));
-            const auto inside=w.value("and i1 "+above+", "+below);
+            const auto inside=sio2_byte ? w.binary("icmp eq",offset,std::to_string(sio2_base+
+                (i.operation==Operation::store_byte ? 0x60 : 0x64))) : w.value("and i1 "+above+", "+below);
             w.text<<"  br i1 "<<inside<<", label %mmio_hit"<<label<<", label %fault"<<label<<"\nmmio_hit"<<label<<":\n";
             const auto relative=w.binary("sub",offset,std::to_string(sio2_base));
             const auto access=w.binary("or",w.binary("shl",relative,"16"),
-                std::to_string(i.operand|(i.operation==Operation::store_word ? 256U : 0U)));
+                std::to_string(i.operand|((i.operation==Operation::store_word || i.operation==Operation::store_byte) ? 256U : 0U)|
+                    (sio2_byte ? 512U : 0U)));
             w.store(37,access);
             w.text<<"  ret i32 12\n";
         }

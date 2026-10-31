@@ -1030,7 +1030,7 @@ int main(int argc,char** argv) {
         }
         // Constant-address loads. The jump's delay slot writes the pointer register
         // and must not fall through into the jalr.
-        nt::elf::IopModule pointers{0x10000,0x10000,nt::Bytes(0x220),0x220,{}};
+        nt::elf::IopModule pointers{0x10000,0x10000,nt::Bytes(0x240),0x240,{}};
         const auto pointer_word=[&](unsigned pc,std::uint32_t word) { fixture::put32(pointers.memory,pc-pointers.base,word); };
         pointer_word(0x10000,0x03e00008); pointer_word(0x10004,0x24020021);
         pointer_word(0x10008,0x03e00008); pointer_word(0x1000c,0x24020022);
@@ -1059,8 +1059,20 @@ int main(int argc,char** argv) {
         for (unsigned index=0;index<std::size(sio2_miss);++index) pointer_word(0x101ec+index*4,sio2_miss[index]);
         constexpr std::uint32_t sio2_byte[]{0x3c02bf80,0x34428268,0xa0440000,0x03e00008,0};
         for (unsigned index=0;index<std::size(sio2_byte);++index) pointer_word(0x10200+index*4,sio2_byte[index]);
+        constexpr std::uint32_t serial_output[]{0x3c02bf80,0x34428260,0xa0440000,0x03e00008,0};
+        for (unsigned index=0;index<std::size(serial_output);++index) pointer_word(0x10220+index*4,serial_output[index]);
+        bundle_roots.push_back(0x10220);
         bundle_roots.insert(bundle_roots.end(),{0x4860U,0x48a0U,0x48b0U,0x48c0U,0x48d0U,0x10020U,0x10060U,0x100b0U,0x100d0U,0x10100U,
             0x101a0U,0x101ccU,0x101ecU,0x10200U});
+        // A callback address escapes only through a compiled-library argument.
+        // The callback itself is deliberately absent from explicit roots.
+        factory_word(0xb5c0,0x41e00000); factory_word(0xb5c8,0x100);
+        std::copy(std::begin(worker_name),std::end(worker_name),factories.memory.begin()+0x5cc);
+        factory_word(0xb5d4,0x03e00008); factory_word(0xb5d8,0x24000000);
+        constexpr std::uint32_t escaped[]{0x03e08021,0x0c002d75,0x3404b5e8,0x0200f821,0x03e00008,0};
+        for (unsigned i=0;i<std::size(escaped);++i) factory_word(0xb5a0+i*4,escaped[i]);
+        factory_word(0xb5e8,0x03e00008); factory_word(0xb5ec,0x24020075);
+        bundle_roots.push_back(0xb5a0);
         const std::array bundle{module,provider,dispatch,factories,pointers};
         {
             auto broken=bundle; fixture::put32(broken[3].memory,0x300,0);

@@ -1970,7 +1970,7 @@ profiling with measured CPU work on the native owner thread, including native
 services and Windows kernel work on that thread. It is not an R5900 cycle model,
 wall-clock time, or a conversion to PS2 frequency. It can affect applications
 which interpret profiling values as console time; no such equivalence is claimed.
-The default remains strict and stops on unmeasured active reads.
+Use `--strict-performance` to stop on unmeasured active reads instead of selecting a native provider.
 
 The provider supports event 1 only when all four guest mode enables are set.
 Mode-selective counters and other events remain unavailable: the mode at a read
@@ -1986,5 +1986,80 @@ at the following instruction-cache-miss read. No cache values are substituted.
 This is three additional retired EE operations, not a frame or a completed wakeup.
 The native dependency audit still passes. Compiled synthetic transfer tests cover
 wraparound, unavailable events, disable/reset, failed/regressed acquisition,
-mode restrictions and late attachment. Live cache collection remains unresolved;
-ETW source enumeration is not proof of a valid measurement.
+mode restrictions and late attachment. ETW source enumeration alone is not proof of a valid measurement.
+
+`--native-pmu` selects a separate sampled native profiling policy backed by a
+private Windows ETW system session. It configures the advertised `TotalCycles`
+and `IcacheMisses` sources and attributes their deltas only to completed on-CPU
+intervals of the native execution thread. It requires Windows system-tracing
+permission. No driver is installed and no other trace session is modified.
+
+Samples are asynchronous: reads expose the latest delivered completed intervals,
+including native service work, and resets start a new delta from that observed
+snapshot. They are not synchronous PS2 performance-register measurements. The
+active interval is never extrapolated; the first sample waits for a real interval,
+then reads do not block the display handler awaiting a new context switch. This
+avoids profiling itself creating a permanent display-interrupt backlog. Lost or
+malformed events, discontinuities, counter regression and failed capture stop
+execution. A missing measurement never becomes a successful zero reading.
+
+Windows can emit scheduling records with equal incoming/outgoing thread IDs.
+The accumulator closes and reopens that measured interval, preserving its actual
+delta without double-counting. Synthetic tests cover this and reading a completed
+prefix while another interval is active. A live collection probe has now measured
+both sources with no reported loss; this establishes host measurement availability,
+not PS2 timing equivalence or a game boot.
+
+## Native elapsed-time profiling
+
+The generated Windows executable defaults to `QueryPerformanceCounter`. No
+administrator access, ETW session or hardware-counter configuration is required.
+The native service replaces all-mode cycle profiling (event 1) and the secondary
+instruction-cache profiling slot (event 6) with elapsed clock ticks. Both slots
+use the same monotonic clock with independent reset values. This is an explicit
+change of profiling semantics, not a PS2 cycle/cache model. It does not establish
+that game calculations based on the original units are equivalent.
+
+The runtime reports `QueryPerformanceFrequency` and identifies the units as
+elapsed ticks, including time spent waiting and in native services. No synthetic
+rate, PS2-frequency conversion or cache-miss estimate is used. Disabled counters
+retain their values; writes reset the sampled baseline; addition wraps at 32 bits.
+Unavailable or regressed samples stop without committing the transfer. Unknown
+selectors and mode-selective measurements still stop. `--strict-performance`,
+`--native-thread-cycles` and `--native-pmu` are mutually exclusive diagnostic
+alternatives to the default clock.
+
+Compiled synthetic counter transfers cover both clock-backed slots, wrapping,
+reset/disable behavior and failed/regressed acquisition. The actual GT4 native
+executable passes both reads without elevation and reaches graphics initialization;
+this is startup progress, not a rendered frame.
+## First GT4 render-target milestone
+
+The native LLVM executable now submits GT4's own packets through the Vulkan
+sprite path and produces the opening copyright/driving-warning image. Private
+readback inspection confirms game-generated text, not a cleared target or test
+pattern. This is an off-screen rendering milestone: the configured display
+surface still shows black at the stopping boundary. Continuous presentation,
+the title screen, native input and gameplay are not established.
+
+GS initialization supports scanline parity masking in the shader, TEX2 masked
+texture updates, mip-level base configuration, suppressed vertex kicks and flat
+sprite color with IIP set. Unsupported mip sampling, fogged drawing, dithered
+16-bit targets and dual-circuit display blending remain diagnostic stops.
+Descriptor-only GIF submissions complete without inventing drawing work.
+
+The native serial adapter supports compiled byte transfers, bounded buffered
+transactions and completion interrupts for explicitly disconnected ports. It
+reports missing devices, fills response bytes from the unacknowledged line state,
+and publishes receive buffers before completion. It does not provide a working
+controller or memory card. Slice descriptors become native buffer operations;
+there is no DMA timing loop or runtime instruction decoding.
+
+`--capture-stop` keeps raw graphics storage and a last-render-target PPM under
+the requested private capture directory. That image is bounded by the last draw,
+not necessarily the display extent. `--display-stop` presents the game-selected
+24/32-bit surface in a diagnostic window at its configured resolution; closing
+it ends inspection. Execution is stopped throughout this diagnostic view.
+
+The latest integration passes buffered SIO2 startup and reaches an empty EE
+WaitSema. That wait still needs connection to the native thread scheduler.
