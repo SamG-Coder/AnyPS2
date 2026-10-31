@@ -497,11 +497,13 @@ GT4 now produces its opening copyright/driving-warning image through Vulkan.
 The private render-target readback contains actual game-generated text. Display
 selection now reaches the same image at the configured 640 x 448 resolution.
 The executable opens a Vulkan window during execution and keeps the final image
-visible at a diagnostic stop, labelled in its title. Use `--headless` for automated
+visible at a diagnostic stop, labelled in its title. The title also reports
+presented frames and presentation FPS; the frame counter freezes when execution
+stops and does not count repeated inspection redraws. Use `--headless` for automated
 runs and `--run-seconds N` for a bounded diagnostic duration. `--capture-stop`
 saves separate render-target and selected-display evidence. Native startup now
 completes the warning thread and resumes the main thread; its next unsupported
-service is system-bus interrupt-handler removal. The title screen and gameplay
+boundary is native address-space initialization. The title screen and gameplay
 are not established.
 
 Scalar, V2, masked V3 and V4 uploads in 32-, 16- and 8-bit formats,

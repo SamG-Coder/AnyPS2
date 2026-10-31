@@ -13,6 +13,9 @@ class NativeInterrupts {
 public:
     static constexpr std::uint32_t return_gate=0xffffffe0U;
     void raise(unsigned line) { if (line<16) pending_|=1U<<line; }
+    void raise_sbus(unsigned cause) {
+        if (cause<16) { sbus_pending_|=1U<<cause; raise(1); }
+    }
     void publish(Memory& memory) const {
         memory.pending_interrupts=(memory.pending_interrupts&~0x400U)|((pending_&enabled_) ? 0x400U : 0U);
     }
@@ -41,6 +44,19 @@ public:
         if (dma && !completions) return {Stop::unsupported_system};
         const auto line=static_cast<std::uint32_t>(state.gpr[4].lo);
         if (line>=(dma ? 10U : 16U)) return {Stop::budget,~std::uint64_t(0)};
+        if (number==0x0a || number==0x0b) {
+            if (interrupted_) return {Stop::unsupported_system};
+            if (number==0x0b) {
+                sbus_[line]={};
+                return {Stop::budget,0};
+            }
+            const auto raw=static_cast<std::uint32_t>(state.gpr[5].lo);
+            const auto address=runtime::default_ram_address(raw);
+            if (!address || address%4 || address>=0x2000000U) return {Stop::invalid_state};
+            if (!compiled || !compiled(address)) return {Stop::unmapped_code};
+            sbus_[line]={0,line,address,0,static_cast<std::uint32_t>(state.gpr[28].lo),false,true};
+            return {Stop::budget,0};
+        }
         if (number==0x10 || number==0x11 || number==0x12 || number==0x13) {
             if (interrupted_) return {Stop::unsupported_system};
             if (number==0x11 || number==0x13) {
@@ -87,6 +103,10 @@ public:
         std::vector<Record> callbacks;
         for (const auto& record:records_) if (record.line==line && record.dma==dma) callbacks.push_back(record);
         if (!dma && handlers_[line]) callbacks.push_back({0,line,handlers_[line],0,0});
+        if (!dma && line==1) {
+            for (unsigned cause=0;cause<16;++cause)
+                if ((sbus_pending_&(1U<<cause)) && sbus_[cause].address) callbacks.push_back(sbus_[cause]);
+        }
         if (callbacks.empty()) return Stop::interrupt_pending;
         const auto stack=static_cast<std::uint32_t>(state.gpr[29].lo);
         if (stack<0x2a0 || stack%16 || stack>0x2000000U) return Stop::invalid_state;
@@ -98,12 +118,12 @@ public:
         callbacks_=std::move(callbacks); callback_=0;
         start(state);
         if (dma) { memory.completions->acknowledge(1U<<line); memory.completions->publish(memory); }
-        else { pending_&=~(1U<<line); publish(memory); }
+        else { pending_&=~(1U<<line); if (line==1) sbus_pending_=0; publish(memory); }
         return Stop::budget;
     }
     Stop finish(runtime::State& state) {
         if (!returning(state) || state.delay_slot || state.gpr[29].lo!=stack_) return Stop::invalid_state;
-        if (!(state.gpr[2].lo>>63) && ++callback_<callbacks_.size()) {
+        if ((callbacks_[callback_].sbus || !(state.gpr[2].lo>>63)) && ++callback_<callbacks_.size()) {
             start(state); return Stop::budget;
         }
         const auto executed=state.executed;
@@ -111,7 +131,7 @@ public:
         return Stop::budget;
     }
 private:
-    struct Record { std::uint32_t id,line,address,argument,gp; bool dma=false; };
+    struct Record { std::uint32_t id,line,address,argument,gp; bool dma=false,sbus=false; };
     void start(runtime::State& state) const {
         const auto& record=callbacks_[callback_];
         const auto signed_word=[](std::uint32_t value) { return static_cast<std::uint64_t>(static_cast<std::int64_t>(std::bit_cast<std::int32_t>(value))); };
@@ -119,6 +139,8 @@ private:
         state.set(28,signed_word(record.gp)); state.set(29,stack_); state.set(31,0xffffffffffffffe0ULL);
         state.cop0_status=(state.cop0_status|2U)&~1U;
     }
+    std::array<Record,16> sbus_{};
+    std::uint32_t sbus_pending_=0;
     std::vector<Record> records_,callbacks_;
     std::size_t callback_=0;
     std::array<std::uint32_t,16> handlers_{};

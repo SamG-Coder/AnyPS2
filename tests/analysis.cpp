@@ -520,7 +520,16 @@ int main() {
             check(roots()==std::set<std::uint32_t>{0x1060,0x1070},"Split table-address switch lost");
             put(image,16,0x24822000);
             check(roots().empty(),"Unrelated table low-address source accepted");
-            put(image,16,0x24422000); put(image,0x84,0x1071);
+            put(image,16,0x24422000);
+            for (unsigned at=28;at>=8;at-=4) {
+                std::uint32_t word=0; std::memcpy(&word,image.data()+at,4); put(image,at+4,word);
+            }
+            put(image,8,0x00a03021); // Independent argument move in the delay slot.
+            check(roots()==std::set<std::uint32_t>{0x1060,0x1070},"Separate branch-delay move hid switch table");
+            put(image,8,0x00a02021);
+            check(roots().empty(),"Delay-slot index clobber was ignored");
+            put(image,8,0); check(roots()==std::set<std::uint32_t>{0x1060,0x1070},"NOP delay slot hid switch table");
+            put(image,0x84,0x1071);
             check(roots().empty(),"Split switch accepted a malformed entry");
         }
         std::cout << "Control-flow discovery and address-boundary tests passed\n";

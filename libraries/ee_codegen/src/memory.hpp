@@ -105,7 +105,7 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
     w.out<<"  br i1 "<<available<<", label %region_ready"<<suffix<<", label %vu_stop"<<suffix<<"\nvu_stop"<<suffix<<":\n";
     w.store("i32",address,offsetof(ee::Memory,fault_address),"%memory");
     w.out<<"  ret i32 "<<ownership<<"\nregion_ready"<<suffix<<":\n";
-    const bool native_io=(access.bytes==4 || access.bytes==8) && access.bank==RegisterBank::integer && access.merge==Merge::none;
+    const bool native_io=(access.bytes==4 || access.bytes==8 || (access.bytes==1 && access.write)) && access.bank==RegisterBank::integer && access.merge==Merge::none;
     if (native_io) {
         const auto device_address=w.value("icmp uge i32 "+physical+", 268435456");
         const auto aligned=w.value("icmp eq i32 "+w.binary("and","i32",address,std::to_string(access.bytes-1))+", 0");
@@ -116,7 +116,7 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
         if (access.bytes==8) {
             status=access.write ? w.value("call i32 @nt_ee_io_write64(ptr %memory, i32 "+physical+", i64 "+w.reg(i.rt)+")") :
                 w.value("call i32 @nt_ee_io_read64(ptr %state, ptr %memory, i32 "+physical+", i32 "+std::to_string(i.rt)+")");
-        } else if (access.write) status=w.value("call i32 @nt_ee_io_write32(ptr %memory, i32 "+physical+", i32 "+w.narrow(w.reg(i.rt))+")");
+        } else if (access.write) status=w.value(std::string("call i32 @nt_ee_io_write")+(access.bytes==1 ? "8" : "32")+"(ptr %memory, i32 "+physical+", i32 "+w.narrow(w.reg(i.rt))+")");
         else {
             const auto packed=w.value("call i64 @nt_ee_io_read32(ptr %memory, i32 "+physical+")");
             status=w.narrow(w.binary("lshr","i64",packed,"32"));

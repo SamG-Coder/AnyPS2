@@ -6,7 +6,9 @@ and startup services; it does not link the R5900 decoder, diagnostic interpreter
 PCSX2, or device models. GT4 produces its opening warning image at the selected
 640 x 448 display size, with live Vulkan presentation during execution. Its
 warning thread now wakes from native idle, signals the main thread and exits
-through ExitDeleteThread. The next unsupported service is RemoveSbusIntcHandler;
+through ExitDeleteThread. Native cleanup passes SBUS callback removal and GetMemorySize. Compiled debug
+byte output reaches the host log. The next unsupported path is address-space
+initialization;
 the title screen and gameplay remain unestablished.
 
 Object-table discovery tolerates independent argument loads between a table base

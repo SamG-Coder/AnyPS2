@@ -2440,3 +2440,18 @@ real wakeup of a sleeping continuation, interrupt activity without foreground
 progress, and ExitDeleteThread handoff with handle reuse. Private GT4 execution
 now completes the warning thread and reaches system-bus handler removal in the
 main thread. This is startup progress, not title-screen or gameplay acceptance.
+
+### Native cleanup and byte-output milestone
+
+Compiled EE tests exercise SBUS callback installation, malformed registration,
+multiple cause delivery with void callback returns, removal, absent handlers,
+and invalid causes. GetMemorySize reads actual configured backing size and
+rejects an invalid allocation. Native byte stores preserve their access width,
+deliver the low byte to a host debug sink, and retain PC on sink failure.
+These tests execute generated LLVM code; they do not establish a title screen.
+
+The actual private run now reaches the compiled address-space initialization
+routine after cleanup and a loader diagnostic. No mapping provider is installed,
+so this is an explicit unsupported stop, not an accepted mapping or title screen.
+The new bounded switch layout is checked for index clobbering and malformed table
+entries, then compiled and executed by the generated-project test.

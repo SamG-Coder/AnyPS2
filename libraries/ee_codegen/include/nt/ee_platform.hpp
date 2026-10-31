@@ -21,6 +21,10 @@ public:
         state.cop0_status=0xc01;
         return state;
     }
+    // Optional synchronous host debug-byte sink. With no pending host writes,
+    // the transmit-full flag is clear; no console serial timing is simulated.
+    void* debug_context=nullptr;
+    Stop (*debug_byte)(void*,std::uint8_t)=nullptr;
     NativeVectorOwner vector_owner;
     NativeGraphics graphics;
     NativePacketSetup packet_setup;
@@ -31,7 +35,7 @@ public:
     NativeSifReceive sif_receive;
     NativeSifLink sif_link{sif_receive};
     NativeSifOutbound sif_outbound;
-    void attach(Memory& memory) { memory_=&memory; memory.vector_control=vector_owner.interface(); memory.vectors=&vector_owner.storage; memory.graphics=&graphics; memory.scratchpad=scratchpad_.data(); memory.scratchpad_bytes=scratchpad_.size(); memory.interrupts=&interrupts; memory.completions=&completions; memory.sif_link=&sif_link; memory.sif_outbound=&sif_outbound; memory.io={this,read,write,poll,read64,write64}; }
+    void attach(Memory& memory) { memory_=&memory; memory.vector_control=vector_owner.interface(); memory.vectors=&vector_owner.storage; memory.graphics=&graphics; memory.scratchpad=scratchpad_.data(); memory.scratchpad_bytes=scratchpad_.size(); memory.interrupts=&interrupts; memory.completions=&completions; memory.sif_link=&sif_link; memory.sif_outbound=&sif_outbound; memory.io={this,read,write,poll,read64,write64,write8}; }
 private:
     static Stop consume_packet(void* context,unsigned channel,std::span<const std::uint8_t> bytes) {
         auto& self=*static_cast<NativePlatform*>(context);
@@ -58,6 +62,8 @@ private:
     static bool event_address(std::uint32_t address) { return address==0x1000f000 || address==0x1000f010; }
     static IoRead read(void* context,std::uint32_t address) {
         auto& self=*static_cast<NativePlatform*>(context);
+        if (address==0x1000f130)
+            return {self.debug_byte ? Stop::budget : Stop::unsupported_system,0};
         if (NativeGraphics::maps(address)) {
             const auto value=self.graphics.read(address); return {value.status,static_cast<std::uint32_t>(value.value)};
         }
@@ -69,8 +75,15 @@ private:
         if (event_address(address)) return self.interrupts.read(address);
         const auto io=self.timers.interface(); return io.read32(io.context,address);
     }
+    static Stop write8(void* context,std::uint32_t address,std::uint8_t value) {
+        auto& self=*static_cast<NativePlatform*>(context);
+        if (address!=0x1000f180) return Stop::memory_fault;
+        return self.debug_byte ? self.debug_byte(self.debug_context,value) : Stop::unsupported_system;
+    }
     static Stop write(void* context,std::uint32_t address,std::uint32_t value) {
         auto& self=*static_cast<NativePlatform*>(context);
+        if (address==0x1000f180)
+            return self.debug_byte ? self.debug_byte(self.debug_context,static_cast<std::uint8_t>(value)) : Stop::unsupported_system;
         if (NativeGraphics::maps(address)) return self.graphics.write(address,value);
         if (NativePacketSetup::maps(address)) return self.packet_setup.write(address,value);
         if (NativeSubmissionPolicy::maps(address)) return self.packet_submission.policy.write(address,value);

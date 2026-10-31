@@ -219,6 +219,10 @@ int main(int argc,char** argv) {
         }
         NativeGpu gpu;
         nt::ee::NativePlatform platform; platform.attach(memory);
+        platform.debug_byte=[](void*,std::uint8_t byte) {
+            std::cerr.put(static_cast<char>(byte));
+            return std::cerr ? nt::ee::Stop::budget : nt::ee::Stop::unsupported_system;
+        };
         platform.packet_setup.graphics={&gpu,NativeGpu::submit,[](void* raw) {
             return NativeGpu::synchronize(raw)==nt::ee::Stop::budget;
         },true};

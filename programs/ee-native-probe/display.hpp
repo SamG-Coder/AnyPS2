@@ -2,6 +2,8 @@
 #include <nt/native_scanout.hpp>
 #include <nt/vulkan_renderer.hpp>
 #include <memory>
+#include <string>
+#include <chrono>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -23,7 +25,7 @@ public:
         if (!RegisterClassW(&wc) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)
             throw std::runtime_error("Cannot register native output window");
         RECT bounds{0,0,640,448}; AdjustWindowRect(&bounds,style,FALSE);
-        window_.handle=CreateWindowW(wc.lpszClassName,L"AnyPS2 - native game output (running)",style,
+        window_.handle=CreateWindowW(wc.lpszClassName,L"AnyPS2 - presented frames: 0 (running)",style,
             CW_USEDEFAULT,CW_USEDEFAULT,bounds.right-bounds.left,bounds.bottom-bounds.top,
             nullptr,nullptr,wc.hInstance,nullptr);
         if (!window_.handle) throw std::runtime_error("Cannot create native output window");
@@ -56,11 +58,21 @@ public:
         }
         renderer_->present(frame.pixels,frame.width,frame.height);
         if (renderer_->validation_errors()) throw std::runtime_error("Native output presentation validation failed");
+        if (!stopped_) {
+            ++frames_;
+            const auto now=std::chrono::steady_clock::now();
+            const auto elapsed=std::chrono::duration<double>(now-rate_started_).count();
+            if (elapsed>=1.0) {
+                fps_=static_cast<unsigned>((frames_-rate_frames_)/elapsed+0.5);
+                rate_frames_=frames_; rate_started_=now;
+            }
+            update_title();
+        }
 #endif
     }
     void hold(const std::optional<nt::graphics::Scanout>& frame) {
 #ifdef _WIN32
-        SetWindowTextW(window_.handle,L"AnyPS2 - native game output (execution stopped)");
+        stopped_=true; update_title();
         while (poll()) {
             if (frame) present(*frame);
             Sleep(16);
@@ -69,6 +81,16 @@ public:
     }
 private:
 #ifdef _WIN32
+    void update_title() const {
+        const auto title=L"AnyPS2 - presented frames: "+std::to_wstring(frames_)+
+            L" | presentation FPS: "+std::to_wstring(stopped_ ? 0 : fps_)+
+            (stopped_ ? L" (execution stopped)" : L" (running)");
+        SetWindowTextW(window_.handle,title.c_str());
+    }
+    std::chrono::steady_clock::time_point rate_started_=std::chrono::steady_clock::now();
+    std::uint64_t frames_=0,rate_frames_=0;
+    unsigned fps_=0;
+    bool stopped_=false;
     static constexpr DWORD style=WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX;
     struct Window {
         HWND handle=nullptr;

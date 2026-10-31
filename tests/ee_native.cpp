@@ -256,6 +256,23 @@ int main() {
             std::memcpy(status.data(),ram.data()+0x2100,sizeof(status));
             check(status[0]==0 && status[3]==0); // Direct handoff did not create another token.
         }
+        {
+            nt::ee::Memory memory; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::runtime::State state; state.pc=0x360008; state.set(4,0x1000f130);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system);
+            std::vector<std::uint8_t> output;
+            platform.debug_context=&output;
+            platform.debug_byte=[](void* context,std::uint8_t byte) {
+                static_cast<std::vector<std::uint8_t>*>(context)->push_back(byte);
+                return nt::ee::Stop::budget;
+            };
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.gpr[8].lo==0);
+            state.pc=0x3d0030; state.set(4,0x1000f180); state.set(8,0x158);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && output==std::vector<std::uint8_t>{'X'});
+            platform.debug_byte=[](void*,std::uint8_t) { return nt::ee::Stop::unsupported_system; };
+            state.pc=0x3d0030;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system && state.pc==0x3d0030);
+        }
         for (const auto slice : {1U,2U,64U}) {
             nt::runtime::State state; state.pc=0x1000;
             state.gpr[0]={99,77};
@@ -620,6 +637,32 @@ int main() {
                 state.gpr[5].lo=a; state.gpr[6].lo=b; state.gpr[7].lo=c; state.gpr[28].lo=0x4000;
                 return nt::ee::run(nt_ee_generated_run,state,memory,1,services);
             };
+            check(service(0x7f,0)==nt::ee::Stop::budget && state.gpr[2].lo==ram.size());
+            const auto saved_size=memory.size; memory.size=0;
+            check(service(0x7f,0)==nt::ee::Stop::invalid_state);
+            memory.size=saved_size;
+            check(service(0x0a,16,0x367000)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
+            check(service(0x0a,2,0x367001)==nt::ee::Stop::invalid_state);
+            check(service(0x0a,2,0x4000)==nt::ee::Stop::unmapped_code);
+            check(service(0x0a,2,0x367000)==nt::ee::Stop::budget);
+            check(service(0x0a,4,0x367000)==nt::ee::Stop::budget);
+            check(service(0x14,1)==nt::ee::Stop::budget);
+            const auto bus=[&] {
+                state={}; state.pc=0x360004; state.cop0_status=0x10401; state.set(29,0x8000);
+                interrupts.raise_sbus(2); interrupts.raise_sbus(4);
+                return nt::ee::run(nt_ee_generated_run,state,memory,64,services);
+            };
+            const auto recorded=[&](unsigned cause) {
+                std::uint32_t value=0; std::memcpy(&value,ram.data()+0x4000+cause*4,4); return value;
+            };
+            check(bus()==nt::ee::Stop::syscall && recorded(2)==2 && recorded(4)==4 && state.executed==10);
+            check(service(0x0b,2)==nt::ee::Stop::budget);
+            std::fill(ram.begin()+0x4000,ram.begin()+0x4040,0);
+            check(bus()==nt::ee::Stop::syscall && recorded(2)==0 && recorded(4)==4 && state.executed==5);
+            check(service(0x0b,2)==nt::ee::Stop::budget); // Idempotent native unsubscribe.
+            check(service(0x0b,4)==nt::ee::Stop::budget);
+            check(bus()==nt::ee::Stop::interrupt_pending && state.executed==0);
+            check(interrupts.write(0x1000f000,2)==nt::ee::Stop::budget);
             check(service(0x10,11,0x80365000,0xffffffff,1)==nt::ee::Stop::budget && state.gpr[2].lo==1);
             check(service(0x10,11,0x365000,0xffffffff,2)==nt::ee::Stop::budget && state.gpr[2].lo==2);
             check(service(0x10,11,0x365000,2,3)==nt::ee::Stop::budget && state.gpr[2].lo==3);

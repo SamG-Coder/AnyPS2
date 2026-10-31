@@ -1551,3 +1551,25 @@ for the host idle continuation; it executes no console idle program. Unsupported
 queries or mutations of that internal continuation stop explicitly. Interrupts
 retain the interrupted identity until native scheduling resumes an application
 thread. No upstream implementation was copied.
+
+SBUS callback registration/removal uses the pinned PS2SDK kernel.h public ABI
+and syscallnr.h numbers. The public ps2rd EE syscall notes describe sixteen
+causes and a cause argument to each callback:
+https://github.com/mlafeldt/ps2rd/blob/b433fa34bed0edb2665d5d6bd4f45585606aed74/Documentation/technical/ee-syscalls.txt
+The implementation independently reuses the native interrupt continuation owner.
+Native registration/removal returns zero after a completed slot update and -1
+for an invalid cause; the public notes do not specify retail return values, so
+exact numeric return compatibility remains unverified. SBUS callbacks are void
+and do not use the INTC handler-chain return convention. Event injection requires
+an explicit native producer; registration does not manufacture a bus event.
+
+GetMemorySize follows pinned PS2SDK syscall 0x7f and Play! PS2OS.cpp
+sc_GetMemorySize: it returns the configured application RAM size. The native
+service validates its actual backing allocation rather than supplying a game
+constant. Synthetic end-of-test sentinels use unimplemented syscall 0x7b.
+
+The pinned PCSX2 Hw.h SIO_ISR/SIO_TXFIFO addresses and HwWrite.cpp byte-output
+behavior identify the debug serial path. The native adapter sends bytes to an
+explicit synchronous host sink; a completed write has no pending transmit queue.
+An absent or failed sink stops. It does not model serial baud timing or receive
+traffic. The CLI owns diagnostic output, not the reusable library.

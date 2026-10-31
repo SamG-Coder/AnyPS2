@@ -103,7 +103,7 @@ checked("${CMAKE_COMMAND}" -S "${run}/startup" -B "${run}/startup-build" -G "${G
 checked("${CMAKE_COMMAND}" --build "${run}/startup-build" --config Release --target ps2-native --parallel 2)
 execute_process(COMMAND "${run}/startup-build/Release/ps2-native${EXE_SUFFIX}" "${run}/startup/program.data" --headless
     RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
-if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00001040 executed=16 v0=16384 syscall=127")
+if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00001040 executed=16 v0=16384 syscall=123")
     message(FATAL_ERROR "Compiled startup service continuation differs: ${out} ${err}")
 endif()
 
@@ -133,7 +133,7 @@ checked("${CMAKE_COMMAND}" -S "${run}/switch" -B "${run}/switch-build" -G "${GEN
 checked("${CMAKE_COMMAND}" --build "${run}/switch-build" --config Release --target ps2-native --parallel 2)
 execute_process(COMMAND "${run}/switch-build/Release/ps2-native${EXE_SUFFIX}" "${run}/switch/program.data" --headless
     RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
-if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00001054 executed=11 v0=44")
+if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00001054 executed=12 v0=44")
     message(FATAL_ERROR "Compiled indexed switch differs: ${out} ${err}")
 endif()
 

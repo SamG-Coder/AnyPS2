@@ -40,8 +40,8 @@ int main(int argc,char** argv) {
     append(15); append((16U<<6)|15U); append(12);
     for (const auto word : {0x44c8f800U,0x4449f800U,12U,0x44c0f800U,0x4440f800U,12U}) append(word);
     for (const auto word : {0x7c880000U,0x78890000U,0x7c800010U,0x78800000U,12U,0x78840000U,12U}) append(word);
-    for (const auto word : {0x2403003cU,12U,0x0040e821U,0x2403007fU,12U}) append(word);
-    for (const auto word : {0x2403003dU,12U,0x00408021U,0x2403003eU,12U,0x00408821U,0x2403007fU,12U}) append(word);
+    for (const auto word : {0x2403003cU,12U,0x0040e821U,0x2403007bU,12U}) append(word);
+    for (const auto word : {0x2403003dU,12U,0x00408021U,0x2403003eU,12U,0x00408821U,0x2403007bU,12U}) append(word);
     auto invalid=code; invalid[3]=nt::r5900::decode(0x100c,0x4c000000);
     std::ostringstream rejected; bool failed=false;
     try { nt::ee_codegen::emit_llvm(rejected,invalid); } catch (const std::runtime_error&) { failed=true; }
@@ -230,6 +230,10 @@ int main(int argc,char** argv) {
         {0,0x2403ffd1U},{4,12U},{8,0xaf820000U},{12,0x10450004U},{16,0U},
         {20,0x00a02021U},{24,0x2403ffccU},{28,12U},{32,0x03e00008U},{36,0x00001021U}}})
         code.push_back(nt::r5900::decode(0x366000+offset,word));
+    // Original SBUS callback records its cause and leaves a negative incidental v0.
+    for (const auto [offset,word] : std::array<std::pair<unsigned,std::uint32_t>,5>{{
+        {0,0x00044080U},{4,0x011c4021U},{8,0xad040000U},{12,0x03e00008U},{16,0x2402ffffU}}})
+        code.push_back(nt::r5900::decode(0x367000+offset,word));
     nt::ee_codegen::CodePayload payload{0x370000,{}};
     for (const auto word : {0x24020007U,0x03e00008U,0U}) {
         code.push_back(nt::r5900::decode(payload.address+static_cast<std::uint32_t>(payload.bytes.size()),word));
@@ -316,8 +320,8 @@ int main(int argc,char** argv) {
         nt::write_file(std::string(argv[2])+".table",elf);
         elf=original;
         elf.resize(0x188,0); word(100,8);
-        const std::uint32_t switch_call[]{0x24040001,0x2c820002,0x10400009,0,
-            0x00041080,0x3c030000,0x00621821,0x8c632000,0x00600008,0};
+        const std::uint32_t switch_call[]{0x24040001,0x2c820002,0x10400009,0x00a03021,
+            0x3c030000,0x00041080,0x24632000,0x00621821,0x8c630000,0x00600008,0};
         for (unsigned i=0;i<std::size(switch_call);++i) word(0x100+i*4,switch_call[i]);
         word(0x130,12); word(0x140,0x2402002b); word(0x144,12);
         word(0x150,0x2402002c); word(0x154,12); word(0x180,0x1040); word(0x184,0x1050);
@@ -325,11 +329,11 @@ int main(int argc,char** argv) {
         elf=original;
         const std::uint32_t startup[]{0x24040000,0x24054000,0x24061000,0x24072000,0x24081040,
             0x2403003c,12,0x0040e821,0x24043000,0x2405ffff,0x2403003d,12,
-            0x00408021,0x2403003e,12,0x2403007f,12};
+            0x00408021,0x2403003e,12,0x2403007b,12};
         for (unsigned i=0;i<std::size(startup);++i) word(0x100+i*4,startup[i]);
         nt::write_file(std::string(argv[2])+".startup",elf);
         word(0x110,0x24081070); word(0x13c,0x01000008); word(0x140,0);
-        word(0x170,0x2402004d); word(0x174,0x2403007f); word(0x178,12);
+        word(0x170,0x2402004d); word(0x174,0x2403007b); word(0x178,12);
         nt::write_file(std::string(argv[2])+".thread-root",elf);
         elf=original;
         elf.resize(0x300,0);
@@ -348,11 +352,11 @@ int main(int argc,char** argv) {
         word(68,0x140); word(72,0x140); word(88,0x300); word(100,0x100); word(104,0x100);
         const std::uint32_t sleep_main[]{0x24040000,0x34058000,0x24061000,0x24072000,0x24081120,
             0x2403003c,12,0x0040e821,0x24042040,0x0c00044c,0,0x00402021,
-            0x24030022,12,0x24030032,12,0x8c022080,0x2442004d,0x2403007f,12};
+            0x24030022,12,0x24030032,12,0x8c022080,0x2442004d,0x2403007b,12};
         for (unsigned i=0;i<std::size(sleep_main);++i) word(0x100+i*4,sleep_main[i]);
         word(0x200,0x24040001); word(0x204,0x24030033); word(0x208,12);
         word(0x20c,0x24020001); word(0x210,0xac022080); word(0x214,0x03e00008); word(0x218,0);
-        word(0x220,0x24030023); word(0x224,12); word(0x228,0x2403007f); word(0x22c,12);
+        word(0x220,0x24030023); word(0x224,12); word(0x228,0x2403007b); word(0x22c,12);
         word(0x230,0x24030020); word(0x234,12); word(0x238,0x03e00008); word(0x23c,0);
         word(0x344,0x1100); word(0x348,0x9000); word(0x34c,0x1000); word(0x354,10);
         nt::write_file(std::string(argv[2])+".sleep",elf);

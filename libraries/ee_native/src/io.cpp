@@ -66,6 +66,11 @@ extern "C" std::uint64_t nt_ee_io_read32(nt::ee::Memory* memory,std::uint32_t ad
     publish(*memory,result.status,address);
     return (std::uint64_t(result.status)<<32)|result.value;
 }
+extern "C" std::uint32_t nt_ee_io_write8(nt::ee::Memory* memory,std::uint32_t address,std::uint32_t value) {
+    const auto result=memory->io.write8 ? memory->io.write8(memory->io.context,address,static_cast<std::uint8_t>(value)) : nt::ee::Stop::memory_fault;
+    publish(*memory,result,address);
+    return static_cast<std::uint32_t>(result);
+}
 extern "C" std::uint32_t nt_ee_io_write32(nt::ee::Memory* memory,std::uint32_t address,std::uint32_t value) {
     const auto result=memory->io.write32 ? memory->io.write32(memory->io.context,address,value) : nt::ee::Stop::memory_fault;
     publish(*memory,result,address);

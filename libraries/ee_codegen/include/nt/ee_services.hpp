@@ -56,6 +56,10 @@ public:
         if (view!=Stop::budget) return view;
         auto number=static_cast<std::uint32_t>(state.gpr[3].lo);
         if (handlers_.registered(number)) return handlers_.enter(state,memory,number);
+        if (number==0x7f) {
+            if (!memory.data || !memory.size || memory.size>0x2000000U) return Stop::invalid_state;
+            return returned(state,memory.size);
+        }
         if (number==0x74) {
             if (static_cast<std::uint32_t>(state.gpr[4].lo)==0x12c) {
                 if (!memory.interrupts) return Stop::unsupported_system;

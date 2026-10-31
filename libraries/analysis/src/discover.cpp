@@ -261,7 +261,18 @@ std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executa
         const bool separate_low=prior[2]->op==Op::addiu;
         const auto& high=*(separate_low ? prior[4] : prior[2]);
         const auto& scale=*prior[3];
-        const auto& branch=*prior[5];
+        const auto* branch_instruction=prior[5];
+        if (separate_low && branch_instruction->op!=Op::beq) {
+            // The table high half may follow an independent branch-delay move.
+            // Reject delay slots that change the index before scaling it.
+            const auto& delay=*prior[5];
+            const bool move=(delay.op==Op::addu || delay.op==Op::daddu || delay.op==Op::bit_or) && (!delay.rs || !delay.rt);
+            const bool nop=delay.op==Op::sll && !delay.rd;
+            const auto earlier=program.instructions.find(pc-28);
+            if ((!move && !nop) || (delay.rd && delay.rd==scale.rt) || earlier==program.instructions.end()) continue;
+            branch_instruction=&earlier->second;
+        }
+        const auto& branch=*branch_instruction;
         if (separate_low && (prior[2]->rs!=high.rt || prior[2]->rt!=high.rt || high.rt==scale.rt)) continue;
         if (branch.op!=Op::beq || (branch.rs && branch.rt) || (!branch.rs && !branch.rt)) continue;
         const auto guard=branch.rs ? branch.rs : branch.rt;
