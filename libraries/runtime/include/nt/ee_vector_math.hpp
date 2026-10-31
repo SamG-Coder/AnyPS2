@@ -22,7 +22,7 @@ inline VectorResult binary_vector(Vector original,Vector left,Vector right,unsig
     for (unsigned lane=0;lane<4;++lane) {
         const auto bit=1U<<(3-lane);
         if (!(mask&bit)) continue;
-        const auto value=arithmetic(left[lane],right[broadcast<4 ? broadcast : lane]);
+        const auto value=arithmetic(left[lane],right[broadcast<4 ? broadcast : lane],lane);
         if (!value.supported) { result.supported=false; return result; }
         result.value[lane]=value.bits;
         result.mac|=vector_lane_flags(value.bits,value.underflow,lane);
@@ -33,10 +33,10 @@ inline VectorResult binary_vector(Vector original,Vector left,Vector right,unsig
 inline VectorResult add_subtract_vector(Vector original,Vector left,Vector right,unsigned mask,
                                         bool subtract,unsigned broadcast,std::uint32_t previous_status) {
     return binary_vector(original,left,right,mask,broadcast,previous_status,
-        [subtract](auto a,auto b) { return add_subtract_finite(a,b,subtract); });
+        [subtract](auto a,auto b,unsigned) { return add_subtract_finite(a,b,subtract); });
 }
 inline VectorResult multiply_vector(Vector original,Vector left,Vector right,unsigned mask,
                                     unsigned broadcast,std::uint32_t previous_status) {
-    return binary_vector(original,left,right,mask,broadcast,previous_status,multiply_finite);
+    return binary_vector(original,left,right,mask,broadcast,previous_status,[](auto a,auto b,unsigned) { return multiply_finite(a,b); });
 }
 }

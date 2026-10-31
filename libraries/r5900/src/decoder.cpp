@@ -44,6 +44,9 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
         }
     } else if (opcode == 17) {
         switch (i.rs) { F(0,mfc1); F(2,cfc1); F(4,mtc1); F(6,ctc1); }
+        if (i.rs==16) {
+            switch (fn) { F(22,rsqrt_s); F(28,madd_s); F(29,msub_s); F(30,madda_s); F(31,msuba_s); }
+        }
         if (i.rs == 16 && fn == 25) i.op = Op::suba_s;
         if (i.rs == 16 && fn == 26) i.op = Op::mula_s;
         if (i.rs == 16 && fn == 24) i.op = Op::adda_s;
@@ -77,6 +80,10 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
         if (i.rs >= 16) {
             if (fn==56) i.op=Op::vcallms;
             if (fn==57) i.op=Op::vcallmsr;
+            if (fn==41) i.op=Op::vmadd;
+            if (fn==45) i.op=Op::vmsub;
+            if (fn>=8 && fn<12) i.op=Op::vmadd_bc;
+            if (fn>=12 && fn<16) i.op=Op::vmsub_bc;
             if (fn==42) i.op=Op::vmul;
             if (fn>=24 && fn<28) i.op=Op::vmul_bc;
             if (fn==43) i.op=Op::vmax;
@@ -86,6 +93,10 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
             switch (w&0x7ff) {
             F(0x13c,vitof0); F(0x13d,vitof4); F(0x13e,vitof12); F(0x13f,vitof15);
             F(0x17c,vftoi0); F(0x17d,vftoi4); F(0x17e,vftoi12); F(0x17f,vftoi15);
+            F(0x0bc,vmadda_bc); F(0x0bd,vmadda_bc); F(0x0be,vmadda_bc); F(0x0bf,vmadda_bc);
+            F(0x0fc,vmsuba_bc); F(0x0fd,vmsuba_bc); F(0x0fe,vmsuba_bc); F(0x0ff,vmsuba_bc);
+            F(0x2bd,vmadda); F(0x2be,vmula); F(0x2fd,vmsuba);
+            F(0x1bc,vmula_bc); F(0x1bd,vmula_bc); F(0x1be,vmula_bc); F(0x1bf,vmula_bc);
             F(0x1fd,vabs); F(0x2ff,vnop);
             }
         }
@@ -153,7 +164,7 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
             }
         }
     } else if (opcode == 47) {
-        if (i.rt == 0x07 || i.rt == 0x0c || i.rt == 0x10 || i.rt == 0x14 || i.rt == 0x18 || i.rt == 0x1a || i.rt == 0x1c) i.op = Op::cache;
+        if (i.rt == 0x07 || i.rt == 0x0c || i.rt == 0x10 || i.rt == 0x14 || i.rt == 0x16 || i.rt == 0x18 || i.rt == 0x1a || i.rt == 0x1c) i.op = Op::cache;
     } else {
         switch (opcode) {
         F(51,pref);
@@ -227,6 +238,8 @@ std::string_view name(Op op) {
     N(tlbr); N(tlbwi); N(tlbwr); N(tlbp);
     N(pcpyh); N(pcpyld); N(pcpyud); N(ei); N(di); N(mfc0); N(mtc0);
     N(eret); N(plzcw); N(cache);
+    N(rsqrt_s); N(madd_s); N(msub_s); N(madda_s); N(msuba_s); N(vmula_bc); N(vmula); N(vmadd); N(vmsub); N(vmadd_bc); N(vmsub_bc);
+    N(vmadda); N(vmsuba); N(vmadda_bc); N(vmsuba_bc);
     N(sdl); N(sdr); N(lwl); N(lwr); N(swl); N(swr); N(add); N(sub); N(addi);
     N(pceqb); N(pceqh); N(pceqw);
     N(ppac5); N(pext5);

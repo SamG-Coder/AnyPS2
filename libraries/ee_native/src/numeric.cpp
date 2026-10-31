@@ -70,3 +70,12 @@ extern "C" std::uint64_t nt_ee_multiply_accumulate_finite(std::uint32_t accumula
                                                        std::uint32_t right,std::uint32_t subtract) {
     return pack(nt::numeric::multiply_accumulate_finite(accumulator,left,right,subtract!=0));
 }
+
+extern "C" std::uint64_t nt_ee_reciprocal_square_root_finite(std::uint32_t left,std::uint32_t right) {
+    // Preserve the finite-domain contract. Exceptional denominator semantics
+    // require separate validation rather than a fabricated quotient.
+    if ((right>>31) || !(right&0x7f800000U)) return pack_flags({0,0,false});
+    const auto root=nt::numeric::square_root_finite(right);
+    if (!root.supported) return pack_flags(root);
+    return pack_flags(nt::numeric::divide_finite(left,root.bits));
+}

@@ -2153,3 +2153,30 @@ executes the loader's stores and native handoff, and checks the dependency audit
 Execution tests cover failed publication, active-code writes, retired code,
 unknown targets and preservation of ownership on failure. These are subsystem
 tests, not evidence of commercial-game title-screen rendering.
+
+### Referenced constructor lists and arithmetic coverage
+
+When section metadata is absent, conversion can recover a bounded legacy
+lifecycle list from a discovered load of its initial-data header. Counted and
+sentinel lists require complete file-backed framing, executable aligned targets,
+and a zero terminator; a malformed list contributes no partial candidates.
+The recovered functions enter normal control-flow discovery and LLVM lowering.
+Runtime list reads, ordering, branches and callbacks remain compiled program
+behavior. The converter does not inject constructor calls or report them complete.
+The overall instruction bound is 1,048,576; individual LLVM functions remain
+bounded to 512 instructions.
+
+Scalar MADD/MSUB and their accumulator destinations reuse the existing separate
+multiply/accumulate rounding primitives. RSQRT supports the finite positive
+normal denominator domain through the existing rounded square-root and division
+primitives; zero, negative and extended denominators stop explicitly. Intermediate
+multiply underflow and unsupported overflow retain the existing numeric stop
+contract, with no partial register or flag publication.
+
+VU macro multiply and multiply-accumulate families support accumulator destinations,
+masked lanes, vector operands and component broadcasts. They reuse the same
+finite arithmetic and lane flags as the compiled VU pipeline. VU0 launch ownership
+now transfers the accumulator with vector/integer/flag state. Indexed data-cache
+invalidation becomes a native ordering fence; it does not fetch memory using the
+index or maintain cache lines. Synthetic LLVM execution covers these families,
+failed numeric publication, lane preservation and shared VU state.

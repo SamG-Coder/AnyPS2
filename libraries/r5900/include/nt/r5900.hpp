@@ -22,7 +22,7 @@ enum class Op {
     vmul, vmul_bc, vmax, vmax_bc, vmini, vmini_bc, vabs, vnop, vitof0, vitof4, vitof12, vitof15, vftoi0,
     vftoi4, vftoi12, vftoi15, suba_s, mula_s, tge, tgeu, tlt, tltu, teq, tne, tgei, tgeiu, tlti, tltiu,
     teqi, tnei, pref, pmfhl, pmthl, sqrt_s,
-    pmulth, pmaddh, pmsubh, phmadh, phmsbh, pdivbw, tlbr, tlbwi, tlbwr, tlbp, vcallms, vcallmsr
+    pmulth, pmaddh, pmsubh, phmadh, phmsbh, pdivbw, tlbr, tlbwi, tlbwr, tlbp, vcallms, vcallmsr, rsqrt_s, madd_s, msub_s, madda_s, msuba_s, vmula_bc, vmula, vmadd, vmsub, vmadd_bc, vmsub_bc, vmadda, vmsuba, vmadda_bc, vmsuba_bc
 };
 struct Instruction {
     std::uint32_t pc, word;

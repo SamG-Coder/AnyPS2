@@ -30,6 +30,50 @@ void run_ee_file_rpc_tests();
 int main() {
     try {
         {
+            // Non-fused scalar family, masked VU accumulator family, and native
+            // index-invalidation ordering execute from generated LLVM.
+            nt::ee::Memory memory; nt::runtime::State state;
+            for (unsigned n=0;n<4;++n) {
+                state={}; state.pc=0x440000+n*8; state.fpr[1]=0x40000000; state.fpr[2]=0x40400000;
+                state.accumulator=0x41200000; state.fpr[3]=0xdeadbeef;
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+                const auto expected=(n&1) ? 0x40800000U : 0x41800000U;
+                check((n<2 ? state.fpr[3] : state.accumulator)==expected);
+                check((n<2 ? state.accumulator : state.fpr[3])==(n<2 ? 0x41200000U : 0xdeadbeefU));
+                state={}; state.pc=0x440000+n*8; state.fpr[1]=0x7f800000; state.fpr[2]=0x40400000;
+                state.accumulator=0x41200000; state.fpr[3]=0xdeadbeef; state.fcr31=123;
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_numeric && !state.executed &&
+                    state.fpr[3]==0xdeadbeef && state.accumulator==0x41200000 && state.fcr31==123);
+            }
+            state={}; state.pc=0x440020; state.fpr[1]=0x40c00000; state.fpr[2]=0x40800000;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.fpr[3]==0x40400000);
+            for (const auto invalid:{0U,0xbf800000U,0x7f800000U}) {
+                state={}; state.pc=0x440020; state.fpr[1]=0x40c00000; state.fpr[2]=invalid; state.fpr[3]=7; state.fcr31=123;
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_numeric && !state.executed && state.fpr[3]==7 && state.fcr31==123);
+            }
+            nt::ee::VectorStorage vectors; memory.vectors=&vectors;
+            for (unsigned n=0;n<13;++n) {
+                vectors={}; vectors.values[0].fill(0x40000000); vectors.values[1].fill(0x40400000);
+                vectors.values[2].fill(0xdeadbeef); vectors.accumulator.fill(0x41200000);
+                if (n<4) vectors.values[1]={0x40400000,0x40800000,0x40a00000,0x40c00000};
+                state={}; state.pc=0x440100+n*8;
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+                const bool product=n<4 || n==8,subtract=n==5 || n==7 || n==10 || n==12;
+                const auto expected=n<4 ? std::array{0x40c00000U,0x41000000U,0x41200000U,0x41400000U}[n] : product ? 0x40c00000U : subtract ? 0x40800000U : 0x41800000U;
+                const auto& output=n<9 ? vectors.accumulator : vectors.values[2];
+                check(output[0]==expected && output[1]==expected && output[2]==expected && output[3]==(n<9 ? 0x41200000U : 0xdeadbeefU));
+            }
+            vectors.values[0][1]=0x7f800000; vectors.accumulator.fill(77);
+            const auto previous=vectors.accumulator; const auto mac=vectors.mac,status=vectors.status;
+            state={}; state.pc=0x440120;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_numeric && !state.executed &&
+                vectors.accumulator==previous && vectors.mac==mac && vectors.status==status);
+            vectors.active=true; state={}; state.pc=0x440100;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::vector_pending && !state.executed);
+            state={}; state.pc=0x440200; state.set(4,0xffffffff);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.executed==1);
+        }
+        {
             // Loader writes inactive native code, then publishes verified bytes
             // atomically through the actual image-handoff service.
             std::vector<std::uint8_t> ram(0x440000);

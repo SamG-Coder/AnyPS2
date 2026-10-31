@@ -13,6 +13,26 @@ void put(nt::Bytes& bytes, std::size_t offset, std::uint32_t word) {
 int main() {
     try {
         {
+            nt::Bytes image(96,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,64,64,5,4},{64,0x2000,16,16,6,4}}};
+            put(image,0,0x24102000); put(image,4,0x8e020000); put(image,8,12);
+            put(image,32,0x03e00008); put(image,48,0x03e00008);
+            put(image,64,0xffffffff); put(image,68,0x1020); put(image,72,0x1030);
+            const auto program=nt::analysis::discover(image,fixture,64,{},true);
+            const auto entries=[&] { return nt::analysis::referenced_lifecycle_entries(image,fixture,program); };
+            check(entries()==std::set<std::uint32_t>{0x1020,0x1030},"Referenced sentinel lifecycle list lost callbacks");
+            put(image,64,2); check(entries().size()==2,"Counted lifecycle list lost callbacks");
+            put(image,64,1); check(entries().empty(),"Inconsistent lifecycle count accepted");
+            put(image,64,0xffffffff); put(image,72,0x2000);
+            check(entries().empty(),"Data pointer accepted as a lifecycle callback");
+            put(image,72,0x1031); check(entries().empty(),"Misaligned lifecycle target accepted");
+            put(image,72,0x1030); fixture.segments[1].file_size=12;
+            check(entries().empty(),"Unterminated lifecycle list accepted");
+            fixture.segments[1].file_size=16;
+            auto unreferenced=program; unreferenced.instructions.erase(0x1000);
+            check(nt::analysis::referenced_lifecycle_entries(image,fixture,unreferenced).empty(),"Unreferenced data scanned as callbacks");
+        }
+        {
             // Original synthetic program: indirect initial-data pointer and
             // ABI layout-table arguments, with a saved register across a branch.
             nt::Bytes image(160,0);

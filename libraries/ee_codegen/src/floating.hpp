@@ -4,6 +4,7 @@
 namespace nt::ee_codegen {
 inline bool floating_operation(Op op) {
     switch (op) {
+    case Op::rsqrt_s: case Op::madd_s: case Op::msub_s: case Op::madda_s: case Op::msuba_s:
     case Op::cvt_s_w: case Op::cvt_w_s: case Op::min_s: case Op::max_s:
     case Op::div_s: case Op::sqrt_s: case Op::suba_s: case Op::mula_s:
     case Op::adda_s: case Op::add_s: case Op::sub_s: case Op::mul_s:
@@ -30,11 +31,11 @@ inline void emit_floating(Writer& w,const r5900::Instruction& i) {
 
         return;
     }
-    case Op::sqrt_s: case Op::div_s: {
+    case Op::rsqrt_s: case Op::sqrt_s: case Op::div_s: {
         const auto left=w.load("i32",offsetof(runtime::State,fpr)+i.rd*sizeof(std::uint32_t));
         const auto right=w.load("i32",offsetof(runtime::State,fpr)+i.rt*sizeof(std::uint32_t));
         const auto divided=w.value(i.op==Op::sqrt_s ? "call i64 @nt_ee_square_root_finite(i32 "+right+")" :
-                                   "call i64 @nt_ee_divide_finite(i32 "+left+", i32 "+right+")");
+                                   (i.op==Op::rsqrt_s ? "call i64 @nt_ee_reciprocal_square_root_finite(i32 " : "call i64 @nt_ee_divide_finite(i32 ")+left+", i32 "+right+")");
         const auto unsupported=w.value("icmp slt i64 "+divided+", 0");
         const auto suffix=std::to_string(i.pc);
         w.out<<"  br i1 "<<unsupported<<", label %divide_stop"<<suffix<<", label %divide_result"<<suffix
@@ -45,10 +46,14 @@ inline void emit_floating(Writer& w,const r5900::Instruction& i) {
         w.store("i32",w.binary("or","i32",w.binary("and","i32",flags,"4294770687"),added),offsetof(runtime::State,fcr31));
         return;
     }
+    case Op::madd_s: case Op::msub_s: case Op::madda_s: case Op::msuba_s:
     case Op::suba_s: case Op::mula_s: case Op::adda_s: case Op::add_s: case Op::sub_s: case Op::mul_s: {
         const auto left=w.load("i32",offsetof(runtime::State,fpr)+i.rd*sizeof(std::uint32_t));
         const auto right=w.load("i32",offsetof(runtime::State,fpr)+i.rt*sizeof(std::uint32_t));
-        const auto sum=w.value(i.op==Op::mul_s || i.op==Op::mula_s ? "call i64 @nt_ee_multiply_finite(i32 "+left+", i32 "+right+")" : "call i64 @nt_ee_add_finite(i32 "+left+", i32 "+right+", i32 "+(i.op==Op::sub_s || i.op==Op::suba_s ? "1" : "0")+")");
+        const bool accumulate=i.op==Op::madd_s || i.op==Op::msub_s || i.op==Op::madda_s || i.op==Op::msuba_s;
+        const auto sum=accumulate ? w.value("call i64 @nt_ee_multiply_accumulate_finite(i32 "+
+            w.load("i32",offsetof(runtime::State,accumulator))+", i32 "+left+", i32 "+right+", i32 "+
+            (i.op==Op::msub_s || i.op==Op::msuba_s ? "1" : "0")+")") : w.value(i.op==Op::mul_s || i.op==Op::mula_s ? "call i64 @nt_ee_multiply_finite(i32 "+left+", i32 "+right+")" : "call i64 @nt_ee_add_finite(i32 "+left+", i32 "+right+", i32 "+(i.op==Op::sub_s || i.op==Op::suba_s ? "1" : "0")+")");
         const auto unsupported=w.value("icmp uge i64 "+sum+", 8589934592");
         const auto suffix=std::to_string(i.pc);
         w.out<<"  br i1 "<<unsupported<<", label %numeric_stop"<<suffix<<", label %numeric_result"<<suffix
@@ -57,7 +62,7 @@ inline void emit_floating(Writer& w,const r5900::Instruction& i) {
         const auto flags=w.load("i32",offsetof(runtime::State,fcr31));
         const auto cleared=w.binary("and","i32",flags,"4294918143");
         const auto added=w.value("select i1 "+underflow+", i32 16392, i32 0");
-        w.store("i32",w.narrow(sum),(i.op==Op::adda_s || i.op==Op::suba_s || i.op==Op::mula_s) ? offsetof(runtime::State,accumulator) :
+        w.store("i32",w.narrow(sum),(i.op==Op::adda_s || i.op==Op::suba_s || i.op==Op::mula_s || i.op==Op::madda_s || i.op==Op::msuba_s) ? offsetof(runtime::State,accumulator) :
               offsetof(runtime::State,fpr)+i.sa*sizeof(std::uint32_t));
         w.store("i32",w.binary("or","i32",cleared,added),offsetof(runtime::State,fcr31));
         return;

@@ -36,3 +36,14 @@ file(READ "${executable}.audit.txt" audit)
 if(NOT audit MATCHES "dependency audit passed")
     message(FATAL_ERROR "Native image output failed dependency audit")
 endif()
+
+# No ELF section names or manually supplied callback addresses: recover the
+# referenced list, compile both callbacks and observe their combined writes.
+checked("${CONVERTER}" "${run}/fixture.elf.constructors" "${run}/constructors")
+checked("${CMAKE_COMMAND}" -S "${run}/constructors" -B "${run}/constructors-build" -G "${GENERATOR}" ${platform} "-DANYPS2_ROOT=${ROOT}")
+checked("${CMAKE_COMMAND}" --build "${run}/constructors-build" --config Release --target ps2-native --parallel 2)
+execute_process(COMMAND "${run}/constructors-build/Release/ps2-native${EXE_SUFFIX}" "${run}/constructors/program.data" --headless
+    RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
+if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00001028.*v0=8")
+    message(FATAL_ERROR "Recovered lifecycle callbacks did not execute: ${out} ${err}")
+endif()

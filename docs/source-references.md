@@ -1608,3 +1608,9 @@ the unsupported primitive path.
   handoff: snapshot arguments, retire the old main continuation, clear process
   INTC callbacks, mask INTC delivery, and initialize the next main thread.
   No reference implementation or console instructions were copied.
+
+- GCC 3.0.4 public manual, [Initialization](https://gcc.gnu.org/onlinedocs/gcc-3.0.4/gcc/Initialization.html):
+  legacy constructor/destructor list framing (header, function pointers, zero
+  terminator). Used as interface documentation for independent bounded AOT
+  candidate recovery when ELF section metadata is absent. No GCC runtime code
+  or manual text is copied.

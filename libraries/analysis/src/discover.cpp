@@ -408,6 +408,33 @@ std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executa
     }
     return result;
 }
+std::set<std::uint32_t> referenced_lifecycle_entries(ByteView bytes,const elf::Executable& elf,const Program& program) {
+    std::set<std::uint32_t> result,visited;
+    constexpr unsigned maximum=4096;
+    for (const auto& [pc,load]:program.instructions) {
+        if (load.op!=r5900::Op::lw || load.immediate || !load.rs) continue;
+        unsigned fuel=128;
+        const auto base=candidate(bytes,elf,program,pc,load.rs,fuel,0xffffffffU);
+        if (!base || *base%4 || !visited.insert(*base).second) continue;
+        const auto header=initial_word(bytes,elf,*base);
+        if (!header || (*header!=0xffffffffU && (!*header || *header>maximum))) continue;
+        std::set<std::uint32_t> entries;
+        bool terminated=false;
+        for (unsigned index=1;index<=maximum+1;++index) {
+            const auto address=std::uint64_t(*base)+4*index;
+            if (address>0xfffffffcU) break;
+            const auto word=initial_word(bytes,elf,static_cast<std::uint32_t>(address));
+            if (!word) break;
+            if (!*word) { terminated=*header==0xffffffffU || index-1==*header; break; }
+            if (index>maximum || (*header!=0xffffffffU && index>*header)) break;
+            const auto entry=executable_pointer(elf,*word);
+            if (!entry) break;
+            entries.insert(*entry);
+        }
+        if (terminated) result.insert(entries.begin(),entries.end());
+    }
+    return result;
+}
 std::set<std::uint32_t> object_table_entries(ByteView bytes,const elf::Executable& elf,const Program& program) {
     using r5900::Op;
     std::set<std::pair<std::int32_t,std::uint32_t>> slots;

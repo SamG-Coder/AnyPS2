@@ -36,5 +36,8 @@ std::set<std::uint32_t> registered_code_pointers(ByteView bytes,const elf::Execu
 std::set<std::uint32_t> object_table_entries(ByteView bytes,const elf::Executable& executable,const Program& program);
 // Bounded indexed switch-table candidates; no runtime guard is removed.
 std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executable& executable,const Program& program);
+// Recover bounded legacy lifecycle lists whose headers are explicitly loaded
+// from initial file data. Candidates only; do not fold runtime callback reads.
+std::set<std::uint32_t> referenced_lifecycle_entries(ByteView bytes,const elf::Executable&,const Program&);
 void describe(std::ostream& out, const Program& program);
 }

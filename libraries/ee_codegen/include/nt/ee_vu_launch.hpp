@@ -30,7 +30,7 @@ public:
         if (request) {
             if (shared_) {
                 next.vectors=shared_->values; next.integers=shared_->integers;
-                next.mac=shared_->mac; next.status=shared_->status;
+                next.mac=shared_->mac; next.status=shared_->status; next.accumulator=shared_->accumulator;
             }
             next.input_top=static_cast<std::uint16_t>(request->top);
             next.input_itop=static_cast<std::uint16_t>(request->itop);
@@ -65,7 +65,7 @@ public:
         if (request) completed_=true;
         if (request && shared_) {
             shared_->values=state.vectors; shared_->integers=state.integers;
-            shared_->mac=state.mac; shared_->status=state.status;
+            shared_->mac=state.mac; shared_->status=state.status; shared_->accumulator=state.accumulator;
         }
         return Stop::budget;
     }

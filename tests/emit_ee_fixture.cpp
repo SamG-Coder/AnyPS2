@@ -326,6 +326,16 @@ int main(int argc,char** argv) {
         }
         owned[n]={address,8,n+1}; images[n]={address,n+1,{segment}};
     }
+    for (unsigned n=0;const auto function:{28U,29U,30U,31U,22U}) {
+        code.push_back(nt::r5900::decode(0x440000+n*8,(17U<<26)|(16U<<21)|(2U<<16)|(1U<<11)|(3U<<6)|function));
+        code.push_back(nt::r5900::decode(0x440004+n++*8,12));
+    }
+    for (unsigned n=0;const auto operation:{0x1bcU,0x1bdU,0x1beU,0x1bfU,0xbcU,0xfcU,0x2bdU,0x2fdU,0x2beU,0xc8U,0xccU,0xe9U,0xedU}) {
+        code.push_back(nt::r5900::decode(0x440100+n*8,(18U<<26)|(30U<<21)|(2U<<16)|(1U<<11)|operation));
+        code.push_back(nt::r5900::decode(0x440104+n++*8,12));
+    }
+    code.push_back(nt::r5900::decode(0x440200,(47U<<26)|(4U<<21)|(0x16U<<16)));
+    code.push_back(nt::r5900::decode(0x440204,12));
     auto malformed=images; malformed[1].segments[0].bytes[0]^=1;
     failed=false;
     try { std::ostringstream discard; nt::ee_codegen::emit_llvm(discard,code,owned,payloads,layouts,malformed); }
@@ -364,6 +374,18 @@ int main(int argc,char** argv) {
         word(0x160,0xac850008); word(0x164,0x03e00008); word(0x168,0);
         nt::write_file(argv[2],elf);
         const auto original=elf;
+        elf.resize(0x190,0); word(100,16); word(104,36);
+        const std::uint32_t constructors[]{0x24102000,0x8e020000,0x8e190004,0x0320f809,0,
+            0x8e190008,0x0320f809,0,0x8e020020,0x2403007b,12};
+        for (unsigned i=0;i<std::size(constructors);++i) word(0x100+i*4,constructors[i]);
+        for (unsigned n=0;n<2;++n) {
+            const auto at=0x140+n*0x20;
+            word(at,0x8e020020); word(at+4,0x24420003+n*2); word(at+8,0xae020020);
+            word(at+12,0x03e00008); word(at+16,0);
+        }
+        word(0x180,0xffffffff); word(0x184,0x1040); word(0x188,0x1060); word(0x18c,0);
+        nt::write_file(std::string(argv[2])+".constructors",elf);
+        elf=original;
         // Native loader stores an original synthetic image and hands off via ExecPS2.
         const std::uint32_t loader[]{0x24040000,0x34058000,0x24061000,0x24072000,0x24081000,
             0x2403003c,12,0x0040e821,

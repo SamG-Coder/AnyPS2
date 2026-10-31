@@ -73,7 +73,7 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
     // private valid/dirty lines; TagLo reads the empty tag in system.hpp.
     // Indexed invalidation and branch-target flush only order native work.
     // All writes to converted code remain forbidden, including after a flush.
-    if (i.op==Op::cache && (i.rt==0x07 || i.rt==0x0c || i.rt==0x10 || i.rt==0x14)) {
+    if (i.op==Op::cache && (i.rt==0x07 || i.rt==0x0c || i.rt==0x10 || i.rt==0x14 || i.rt==0x16)) {
         w.out<<"  fence seq_cst\n";
         return;
     }

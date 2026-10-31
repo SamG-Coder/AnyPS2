@@ -390,8 +390,11 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
     w.out<<"declare i64 @nt_ee_io_read32(ptr, i32)\ndeclare i32 @nt_ee_io_write32(ptr, i32, i32)\ndeclare i32 @nt_ee_io_write8(ptr, i32, i32)\n";
     w.out<<"declare i32 @nt_ee_io_read64(ptr, ptr, i32, i32)\ndeclare i32 @nt_ee_io_write64(ptr, i32, i64)\n";
     declare_packed_intrinsics(w.out);
-    w.out<<"declare i64 @nt_ee_square_root_finite(i32)\n";
-    w.out<<"declare i32 @nt_ee_vector_multiply(ptr, i32, i32, i32, i32, i32)\n"
+    w.out<<"declare i64 @nt_ee_square_root_finite(i32)\n"
+         <<"declare i64 @nt_ee_reciprocal_square_root_finite(i32, i32)\n"
+         <<"declare i64 @nt_ee_multiply_accumulate_finite(i32, i32, i32, i32)\n";
+    w.out<<"declare i32 @nt_ee_vector_multiply_accumulate(ptr, i32, i32, i32, i32, i32, i32)\n"
+         <<"declare i32 @nt_ee_vector_multiply(ptr, i32, i32, i32, i32, i32)\n"
          <<"declare i32 @nt_ee_integer_to_scaled_scalar(i32, i32)\n"
          <<"declare i32 @nt_ee_scaled_scalar_to_integer(i32, i32)\n";
     w.out<<"declare i64 @nt_ee_add_finite(i32, i32, i32)\n";
