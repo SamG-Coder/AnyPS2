@@ -13,6 +13,18 @@ void put(nt::Bytes& bytes, std::size_t offset, std::uint32_t word) {
 int main() {
     try {
         {
+            nt::Bytes image(20,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,20,20,5,4}}};
+            put(image,0,0x2403007b); put(image,4,12);
+            put(image,8,0x03e00008);
+            auto program=nt::analysis::discover(image,fixture,64,{},true);
+            check(program.instructions.contains(0x1008) && program.instructions.contains(0x100c) &&
+                !program.instructions.contains(0x1010),"Leaf syscall return epilogue missing or fell through");
+            put(image,12,12);
+            program=nt::analysis::discover(image,fixture,64,{},true);
+            check(!program.instructions.contains(0x1008),"Unrecognized syscall epilogue accepted");
+        }
+        {
             nt::Bytes image(40,0);
             nt::elf::Executable fixture{0x1000,0,{{0,0x1000,40,40,5,4}}};
             put(image,0,(16U<<26)|(8U<<16)|(25U<<11)|1U); // Read counter to r8.

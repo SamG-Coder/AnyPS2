@@ -33,7 +33,20 @@ Program discover(ByteView bytes, const elf::Executable& elf, std::size_t limit,
         const auto instruction = r5900::decode(pc, *word);
         result.instructions.emplace(pc, instruction);
         if (result.instructions.size() > limit) throw std::runtime_error("Analysis instruction limit exceeded");
-        if (delay || instruction.terminal() || (stop_at_syscall && instruction.op==r5900::Op::syscall)) continue;
+        if (delay || instruction.terminal()) continue;
+        if (stop_at_syscall && instruction.op==r5900::Op::syscall) {
+            // A leaf syscall wrapper can return through a dynamically registered
+            // compiled handler even when its service number is not known here.
+            // Discover its return epilogue without assuming syscall success.
+            if (pc<=0xfffffff7U) {
+                const auto tail=word_at(pc+4),slot=word_at(pc+8);
+                if (tail && slot && *slot==0) {
+                    const auto next=r5900::decode(pc+4,*tail);
+                    if (next.op==r5900::Op::jr && next.rs==31) pending.emplace_back(pc+4,false);
+                }
+            }
+            continue;
+        }
         if (instruction.branch()) {
             pending.emplace_back(pc + 4, true);
             if (!instruction.indirect()) pending.emplace_back(instruction.target(), false);

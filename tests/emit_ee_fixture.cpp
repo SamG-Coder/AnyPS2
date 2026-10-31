@@ -329,7 +329,7 @@ int main(int argc,char** argv) {
         elf=original;
         const std::uint32_t startup[]{0x24040000,0x24054000,0x24061000,0x24072000,0x24081040,
             0x2403003c,12,0x0040e821,0x24043000,0x2405ffff,0x2403003d,12,
-            0x00408021,0x2403003e,12,0x2403007b,12};
+            0x00408021,0x2403003e,12,0x2403007b,12,0x03e00008,0};
         for (unsigned i=0;i<std::size(startup);++i) word(0x100+i*4,startup[i]);
         nt::write_file(std::string(argv[2])+".startup",elf);
         word(0x110,0x24081070); word(0x13c,0x01000008); word(0x140,0);

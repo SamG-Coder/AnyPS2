@@ -98,6 +98,10 @@ if(NOT result EQUAL 1 OR NOT err MATCHES "data mismatch")
 endif()
 
 checked("${CONVERTER}" "${run}/fixture.elf.startup" "${run}/startup")
+file(READ "${run}/startup/generated.ll" startup_ir)
+if(NOT startup_ir MATCHES "i32 4164, label")
+    message(FATAL_ERROR "Unknown syscall wrapper return was not compiled")
+endif()
 checked("${CMAKE_COMMAND}" -S "${run}/startup" -B "${run}/startup-build" -G "${GENERATOR}"
     ${platform} "-DANYPS2_ROOT=${ROOT}")
 checked("${CMAKE_COMMAND}" --build "${run}/startup-build" --config Release --target ps2-native --parallel 2)
