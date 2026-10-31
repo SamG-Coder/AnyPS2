@@ -1,5 +1,6 @@
 #pragma once
 #include <nt/iop_ir.hpp>
+#include "constants.hpp"
 #include <optional>
 #include <array>
 #include <stdexcept>
@@ -43,14 +44,27 @@ std::optional<std::set<std::uint32_t>> initial_jump_table(const elf::IopModule& 
             guard=decode(pc-32,le32(module.memory,pc-module.base-32));
             branch=code[0];
             if (code[1].flow!=Flow::sequential) return {};
+            // A stack spill between the comparison and its branch preserves
+            // both the tested index and predicate registers.
+            if (guard.operation==Operation::store_word && guard.source==29 && pc-module.base>=36)
+                guard=decode(pc-36,le32(module.memory,pc-module.base-36));
         }
     } catch (const std::runtime_error&) { return {}; }
     // Hoisted saved-register bases are address candidates, not proof that the
     // register or initial table stays immutable. Runtime target guards remain.
-    if (code[1].operation==Operation::less_immediate_unsigned &&
-        code[2].operation==Operation::equal && code[2].source==code[1].operand && code[2].operand==0 &&
-        (code[2].target<pc-16 || code[2].target>pc+4) &&
-        code[3].operation==Operation::shift_left && code[3].shift==2 && code[3].operand==code[1].source &&
+    const auto guard_index=code[0].operation==Operation::less_immediate_unsigned ? 0U : 1U;
+    const auto& hoisted_guard=code[guard_index];
+    const auto& hoisted_branch=code[guard_index+1];
+    bool preserved_index=true;
+    if (!guard_index) {
+        Constants marker; marker.registers[hoisted_guard.source]=constant(0x6d800001);
+        marker=transfer(code[2],std::move(marker));
+        preserved_index=code[2].flow==Flow::sequential && marker.registers[hoisted_guard.source]==constant(0x6d800001);
+    }
+    if (hoisted_guard.operation==Operation::less_immediate_unsigned && preserved_index &&
+        hoisted_branch.operation==Operation::equal && hoisted_branch.source==hoisted_guard.operand && hoisted_branch.operand==0 &&
+        (hoisted_branch.target<pc-16 || hoisted_branch.target>pc+4) &&
+        code[3].operation==Operation::shift_left && code[3].shift==2 && code[3].operand==hoisted_guard.source &&
         code[4].operation==Operation::add && code[5].operation==Operation::load_word &&
         code[5].source==code[4].destination &&
         (code[7].flow==Flow::indirect || code[7].flow==Flow::indirect_call) && code[7].source==code[5].operand &&
@@ -58,7 +72,7 @@ std::optional<std::set<std::uint32_t>> initial_jump_table(const elf::IopModule& 
         const auto& add=code[4];
         const auto index=code[3].destination;
         const auto base_register=add.source==index ? add.operand : add.operand==index ? add.source : 0;
-        if (base_register>=16 && base_register<=23 && code[1].immediate && code[1].immediate<=256) {
+        if (base_register>=16 && base_register<=23 && hoisted_guard.immediate && hoisted_guard.immediate<=256) {
             std::set<std::uint32_t> candidates;
             const auto first=pc-module.base>512 ? pc-512 : module.base;
             for (auto at=first;at+4<pc-24;at+=4) {
@@ -69,7 +83,7 @@ std::optional<std::set<std::uint32_t>> initial_jump_table(const elf::IopModule& 
                 } catch (const std::runtime_error&) { continue; }
                 if (upper.operation!=Operation::upper_immediate || upper.operand!=base_register ||
                     lower.operation!=Operation::add_immediate || lower.source!=base_register || lower.operand!=base_register) continue;
-                if (const auto targets=table_targets(data,(upper.immediate<<16)+lower.immediate+code[5].immediate,code[1].immediate))
+                if (const auto targets=table_targets(data,(upper.immediate<<16)+lower.immediate+code[5].immediate,hoisted_guard.immediate))
                     candidates.insert(targets->begin(),targets->end());
                 if (candidates.size()>256) return {};
             }

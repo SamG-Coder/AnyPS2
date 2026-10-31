@@ -12,6 +12,10 @@ wait cancellation and missing providers. Registry fixtures execute helper-return
 and nested descriptor callbacks across module ownership, reject unknown runtime
 targets, and reject discovery after an unknown pointer overwrite. The affected
 native SIF reset tests cover construction of the shared display/event services.
+Jump-table regressions compile and execute stack spills between a range comparison
+and its branch, and saved table bases with the index shift after the branch delay
+slot. They reject unknown index overwrites, malformed tables and runtime targets
+outside the generated candidate set.
 
 Native serial integration fixtures execute generated LLVM through the service
 router. They cover configuration, cached aliases, interrupt acknowledgment,

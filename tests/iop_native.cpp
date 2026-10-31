@@ -197,7 +197,7 @@ int main() {
         {
             std::vector<std::uint8_t> data(0x10000);
             for (unsigned i=0;i<3;++i) store_native_word(data,0xb300+i*4,0xb080+i*16);
-            for (const auto entry : {0xb000U,0xb180U}) for (unsigned selector=0;selector<4;++selector) {
+            for (const auto entry : {0xb000U,0xb180U,0xb320U,0xb380U}) for (unsigned selector=0;selector<4;++selector) {
                 auto cpu=initial(); cpu.pc=entry; cpu.registers[4]=selector;
                 check(nt_iop_generated_run(cpu,data,128).reason==NativeStop::unmapped_code && cpu.pc==0x5000,
                       "Compiled callback selector did not return");
@@ -209,9 +209,11 @@ int main() {
                       "Returned callback was not discovered and executed as LLVM code");
             }
             store_native_word(data,0xb300,0xb100); // Compiled, but not an allowed table destination.
-            auto changed=initial(); changed.pc=0xb180; changed.registers[4]=0;
-            check(nt_iop_generated_run(changed,data,128).reason==NativeStop::unmapped_code && changed.pc!=0x5000,
-                  "Hoisted table accepted a mutated destination outside its candidate set");
+            for (auto entry : {0xb180U,0xb320U,0xb380U}) {
+                auto changed=initial(); changed.pc=entry; changed.registers[4]=0;
+                check(nt_iop_generated_run(changed,data,128).reason==NativeStop::unmapped_code && changed.pc!=0x5000,
+                      "Jump table accepted a mutated destination outside its candidate set");
+            }
         }
         // No guest instruction bytes are present in RAM. Only LLVM-compiled code runs.
         for (const auto alias : {0U,0x80000000U,0xa0000000U}) for (const auto budget : {1U,2U,7U,100U}) {

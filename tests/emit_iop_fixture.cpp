@@ -987,6 +987,13 @@ int main(int argc,char** argv) {
             0x00041080,0x00521021,0x8c420000,0,0x00400008,0,0,0,0x03e00008,0x00001021};
         for (unsigned i=0;i<std::size(hoisted);++i) factory_word(0xb180+i*4,hoisted[i]);
         bundle_roots.push_back(0xb180);
+        constexpr std::uint32_t hoisted_after_delay[]{0x3c120001,0x2652b300,0x2c820003,0x1040000a,
+            0x00008821,0x00041080,0x00521021,0x8c420000,0,0x00400008,0,0,0,0,0x03e00008,0x00001021};
+        constexpr std::uint32_t spilled_predicate[]{0x2c820003,0xafbf0000,0x1040000b,0,0x00041080,
+            0x3c010001,0x00220821,0x8c22b300,0,0x00400008,0,0,0,0,0x03e00008,0x00001021};
+        for (unsigned i=0;i<std::size(hoisted_after_delay);++i) factory_word(0xb320+i*4,hoisted_after_delay[i]);
+        for (unsigned i=0;i<std::size(spilled_predicate);++i) factory_word(0xb380+i*4,spilled_predicate[i]);
+        bundle_roots.insert(bundle_roots.end(),{0xb320,0xb380});
         factory_word(0xb400,0x41e00000); factory_word(0xb408,0x107);
         constexpr char modload_name[]="modload";
         std::copy(std::begin(modload_name),std::end(modload_name),factories.memory.begin()+0x40c);
@@ -1120,6 +1127,12 @@ int main(int argc,char** argv) {
             if (!rejected) throw std::runtime_error("Unknown overwrite retained a returned callback relationship");
         }
         const std::array bundle{module,provider,dispatch,factories,pointers,display,registry_client};
+        {
+            auto overwritten=bundle; fixture::put32(overwritten[3].memory,0x330,0x00a02021);
+            bool rejected=false;
+            try { nt::iop_codegen::ir::discover_bundle(overwritten,bundle_roots); } catch (const std::runtime_error&) { rejected=true; }
+            if (!rejected) throw std::runtime_error("Hoisted table ignored an overwritten index in the branch delay slot");
+        }
         {
             const auto discovered=nt::iop_codegen::ir::discover_bundle(bundle,bundle_roots);
             const auto& targets=discovered.instructions.at(0x11118).targets;
