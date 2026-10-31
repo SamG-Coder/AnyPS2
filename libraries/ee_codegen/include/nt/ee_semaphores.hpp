@@ -4,8 +4,7 @@
 #include <optional>
 
 namespace nt::ee {
-// Owned by the cooperative native runner. No host blocking or guest scheduler
-// is hidden here: a contended wait remains pending at its syscall boundary.
+// Counts are owned by the cooperative native runner; NativeThreads owns waits.
 class Semaphores {
 public:
     struct Record { std::uint32_t count,maximum,attributes,option; };
@@ -26,7 +25,9 @@ public:
     }
     bool signal(std::uint32_t id) {
         const auto value=find(id);
-        if (!value || value->count==value->maximum) return false;
+        // Retail EE preserves max_count as metadata, not a saturation limit.
+        // Keep signed-count exhaustion explicit until its ABI is established.
+        if (!value || value->count==0x7fffffffU) return false;
         ++records_[id-1]->count; return true;
     }
     bool acquire(std::uint32_t id) {

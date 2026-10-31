@@ -4,7 +4,7 @@
 #include <nt/ee_vector.hpp>
 
 namespace nt::ee {
-enum class Stop : std::uint32_t { budget, syscall, unmapped_code, invalid_state, memory_fault, code_write, unsupported_numeric, interrupt_pending, vector_pending, unsupported_vector, unsupported_system, breakpoint, arithmetic_overflow, trap, unpublished_code, thread_wait };
+enum class Stop : std::uint32_t { budget, syscall, unmapped_code, invalid_state, memory_fault, code_write, unsupported_numeric, interrupt_pending, vector_pending, unsupported_vector, unsupported_system, breakpoint, arithmetic_overflow, trap, unpublished_code, thread_wait, host_stop };
 // Counter configuration and last explicit writes. Unmeasured accumulated values
 // are tracked separately and must never be returned as measurements.
 struct PerformanceState { std::uint32_t control=0; std::uint32_t counters[2]{}; };

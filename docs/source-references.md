@@ -1535,3 +1535,19 @@ reference game-specific stack modifications are used. The pinned PS2SDK IOP
 sifman.c describes word-based source transfers; native SIF copies now accept
 word-aligned source buffers while retaining complete-quadword length and EE
 destination checks. Tail-lane and interrupt-tag behavior remains unsupported.
+
+Retail EE semaphore maximum-count behavior was cross-checked against the pinned
+Play! PS2OS.cpp SignalSema implementation and SP193's firsthand EE/TOOL behavior
+report (2020-01-19):
+https://www.psx-place.com/threads/newlib-porting-challenges.26821/page-2
+The retail count can exceed max_count; that field remains observable metadata.
+AnyPS2 increments the actual native count rather than saturating or discarding a
+signal. Signed-count exhaustion remains an explicit unsupported boundary. No
+firmware implementation, debug disassembly or reference game workaround is used.
+
+Native EE idle identity follows the distinct idle-thread selection in the pinned
+Play! PS2OS.cpp scheduler and its GetThreadId contract. AnyPS2 reserves handle 255
+for the host idle continuation; it executes no console idle program. Unsupported
+queries or mutations of that internal continuation stop explicitly. Interrupts
+retain the interrupted identity until native scheduling resumes an application
+thread. No upstream implementation was copied.

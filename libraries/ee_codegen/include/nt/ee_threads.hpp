@@ -2,6 +2,7 @@
 #include <nt/ee_handlers.hpp>
 #include <nt/ee_startup.hpp>
 #include <map>
+#include <vector>
 #include <bit>
 #include <algorithm>
 
@@ -9,8 +10,26 @@ namespace nt::ee {
 // Cooperative native continuations: all runnable entry PCs must be compiled.
 class NativeThreads {
 public:
+    // A host-owned idle continuation has an identity, but no console code.
+    static constexpr std::uint32_t idle_id=255;
     bool allow_idle=false;
     bool waiting() const { return current_ && records_.at(current_).status==4 && !has_ready(); }
+    struct Current { std::uint32_t id,status,semaphore; };
+    std::optional<Current> current() const {
+        if (!current_) return {};
+        const auto& thread=records_.at(current_);
+        return Current{current_,thread.status,thread.semaphore};
+    }
+    struct Snapshot { std::uint32_t id,status,semaphore,priority,wakeups,pc,return_address,stack; };
+    std::vector<Snapshot> snapshot(const runtime::State& state) const {
+        std::vector<Snapshot> result;
+        for (const auto& [id,thread]:records_) {
+            const auto& context=id==current_ ? state : thread.context;
+            result.push_back({id,thread.status,thread.semaphore,thread.priority,thread.wakeups,
+                context.pc,static_cast<std::uint32_t>(context.gpr[31].lo),static_cast<std::uint32_t>(context.gpr[29].lo)});
+        }
+        return result;
+    }
     struct Result { Stop status; std::uint64_t value=0; };
     Stop wait_semaphore(std::uint32_t id) {
         if (!current_) return Stop::syscall;
@@ -44,7 +63,7 @@ public:
         if (!current_) return {Stop::syscall};
         const auto arg=[&](unsigned n) { return static_cast<std::uint32_t>(state.gpr[4+n].lo); };
         const auto fail=[] { return Result{Stop::budget,~std::uint64_t(0)}; };
-        if (call==0x2f) return {Stop::budget,current_};
+        if (call==0x2f) return {Stop::budget,records_.at(current_).status==1 ? current_ : idle_id};
         if (call==0x20) {
             const auto address=physical(arg(0));
             if (!range(memory,arg(0),36,4)) { memory.fault_address=arg(0); return {Stop::memory_fault}; }
@@ -56,12 +75,13 @@ public:
             if (!protection) return {Stop::invalid_state};
             if (protection(stack,size)) { memory.fault_address=words[2]; return {Stop::code_write}; }
             std::uint32_t id=1; while (records_.contains(id)) ++id;
-            if (id>=256) return fail();
+            if (id>=idle_id) return fail();
             records_.emplace(id,Record{0x10,words[1],words[2],size,words[4],words[5],words[5],words[7],words[8]});
             return {Stop::budget,id};
         }
         auto id=arg(0);
-        if (call==0x23 || call==0x32 || (!id && (call==0x29 || call==0x30 || call==0x31))) id=current_;
+        if (call==0x23 || call==0x24 || call==0x32 || (!id && (call==0x29 || call==0x30 || call==0x31))) id=current_;
+        if (id==idle_id) return {Stop::unsupported_system}; // Native idle status/mutation is not exposed yet.
         const auto found=records_.find(id);
         if (found==records_.end()) return (call==0x30 || call==0x31) && id<256 ? Result{Stop::budget,0} : fail();
         auto& thread=found->second;
@@ -106,9 +126,10 @@ public:
             const auto previous=thread.priority; thread.priority=arg(1);
             return {Stop::budget,previous};
         }
-        if (call==0x23) {
+        if (call==0x23 || call==0x24) {
             if (!has_ready()) return {Stop::syscall};
-            thread.status=0x10; return {Stop::budget,state.gpr[2].lo};
+            thread.status=0x10; thread.delete_on_exit=call==0x24;
+            return {Stop::budget,state.gpr[2].lo};
         }
         if (call==0x30 || call==0x31) {
             if (arg(1)) {
@@ -142,7 +163,9 @@ public:
         const auto epc=state.cop0_epc,error_epc=state.cop0_error_epc;
         state=selected->second.context; state.executed=executed; state.cop0_status=status;
         state.cop0_epc=epc; state.cop0_error_epc=error_epc;
+        const auto previous=current_; const bool erase=current.delete_on_exit;
         selected->second.status=1; current_=selected->first;
+        if (erase) records_.erase(previous);
     }
 private:
     bool has_ready() const {
@@ -156,7 +179,7 @@ private:
     }
     struct Record {
         std::uint32_t status,entry,stack,size,gp,initial_priority,priority,attributes,option;
-        runtime::State context{}; std::uint64_t order=0; std::uint32_t wakeups=0,semaphore=0;
+        runtime::State context{}; std::uint64_t order=0; std::uint32_t wakeups=0,semaphore=0; bool delete_on_exit=false;
     };
     std::map<std::uint32_t,Record> records_;
     std::uint32_t current_=0,root_=0; std::uint64_t next_order_=0;

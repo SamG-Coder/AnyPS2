@@ -465,6 +465,13 @@ int main() {
                 return nt::analysis::object_table_entries(image,fixture,nt::analysis::discover(image,fixture,128,{},true));
             };
             check(roots()==std::set<std::uint32_t>{0x1060},"Object table target lost");
+            for (const auto word:{0x8c850004U,0x8c450008U,0xdc850004U,0x94850004U}) {
+                put(image,16,word);
+                check(roots()==std::set<std::uint32_t>{0x1060},"Argument load hid object table dispatch");
+            }
+            put(image,16,0x8c820004);
+            check(roots().empty(),"Argument load clobbering the table base was ignored");
+            put(image,16,0x84450000);
             for (auto invalid:{0U,0x1061U,0x2000U}) {
                 put(image,0x9c,invalid); check(roots().empty(),"Invalid object table target accepted");
             }

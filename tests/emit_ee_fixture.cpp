@@ -225,6 +225,11 @@ int main(int argc,char** argv) {
         {0,0x8f880000U},{4,0x00084100U},{8,0x01054021U},{12,0xaf880000U},
         {16,0x00a0102dU},{20,0x03e00008U},{24,0U}}})
         code.push_back(nt::r5900::decode(0x365000+offset,word));
+    // Original interrupt fixture: record interrupted identity and wake a different sleeper.
+    for (const auto [offset,word] : std::array<std::pair<unsigned,std::uint32_t>,10>{{
+        {0,0x2403ffd1U},{4,12U},{8,0xaf820000U},{12,0x10450004U},{16,0U},
+        {20,0x00a02021U},{24,0x2403ffccU},{28,12U},{32,0x03e00008U},{36,0x00001021U}}})
+        code.push_back(nt::r5900::decode(0x366000+offset,word));
     nt::ee_codegen::CodePayload payload{0x370000,{}};
     for (const auto word : {0x24020007U,0x03e00008U,0U}) {
         code.push_back(nt::r5900::decode(payload.address+static_cast<std::uint32_t>(payload.bytes.size()),word));
@@ -304,7 +309,7 @@ int main(int argc,char** argv) {
         const auto original=elf;
         elf.resize(0x280,0); word(100,0x100); word(104,0x100);
         const std::uint32_t table_call[]{0x24042040,0x24082000,0xac880044,0x8c820044,
-            0x24420018,0x84450000,0x8c430004,0x0060f809,0x00852021,12};
+            0x24420018,0x8c450000,0x8c430004,0x0060f809,0x00852021,12};
         for (unsigned i=0;i<std::size(table_call);++i) word(0x100+i*4,table_call[i]);
         word(0x160,0x2402002b); word(0x164,0x03e00008); word(0x168,0);
         word(0x198,4); word(0x19c,0x1060);

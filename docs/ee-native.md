@@ -3,22 +3,20 @@
 AnyPS2 converts a bounded, statically discovered EE instruction set into LLVM IR
 and compiles it ahead of time. The generated executable links native arithmetic
 and startup services; it does not link the R5900 decoder, diagnostic interpreter,
-PCSX2, or device models. GT4 visible boot and gameplay remain unestablished. The latest larger local
-startup region emits and compiles successfully; its native execution reaches
-an undiscovered command callback after 3,802,999 operations
-with an explicit private copied-payload plan. The run includes native semaphore
-creation, callback registration, table introspection, native timer initialization,
-cache services, application settings, thread creation, ID lookup, priority change and execution of the
-ahead-of-time compiled copied payload.
-Native event delivery and public INTC handler chains are implemented; gated timer
-modes and reset-on-compare remain unfinished. The expanded private payload entry
-plan now compiles address-space routines into native requests; no production
-mapping provider is connected. The latest run registers these routines without
-executing a mapping request, initializes the native SIF receiver, and reaches DMA
-handler registration and enablement, then exchanges command-buffer initialization
-with the native bootstrap peer, receives the RPC initialization reply and enters
-its compiled SIF0 handler, resolves its uncached buffers and rearms reception.
-The next missing ahead-of-time target is a command-table callback.
+PCSX2, or device models. GT4 produces its opening warning image at the selected
+640 x 448 display size, with live Vulkan presentation during execution. Its
+warning thread now wakes from native idle, signals the main thread and exits
+through ExitDeleteThread. The next unsupported service is RemoveSbusIntcHandler;
+the title screen and gameplay remain unestablished.
+
+Object-table discovery tolerates independent argument loads between a table base
+and callback slot load without folding mutable data. Native idle has a reserved
+identity distinct from suspended application threads; it runs no console idle
+code. Queries and mutations of that internal continuation remain unsupported.
+ExitDeleteThread transfers execution to a ready continuation before releasing
+its record. Retail semaphore counts may exceed their declared maximum, while
+signed count exhaustion remains unsupported. Interrupt activity alone does not
+reset the bounded foreground idle diagnostic timeout.
 
 ## Conversion and execution boundaries
 

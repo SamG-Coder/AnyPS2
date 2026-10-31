@@ -100,7 +100,7 @@ nt::ee::Stop execute(nt::runtime::State* state,nt::ee::Memory* memory,std::uint6
 }
 int main(int argc,char** argv) {
     if (argc<2) {
-        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--headless | --display-stop] [--strict-performance | --native-thread-cycles | --native-pmu] [--disc <image.iso>] [--capture-vu <new-private-directory>] [--capture-stop <new-private-directory>]\n";
+        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--run-seconds N] [--headless | --display-stop] [--strict-performance | --native-thread-cycles | --native-pmu] [--disc <image.iso>] [--capture-vu <new-private-directory>] [--capture-stop <new-private-directory>]\n";
 #ifdef ANYPS2_NATIVE_IOP
         std::cerr<<"Linked IOP investigation: --probe-iop-reset <module.data> (stops without acknowledging reset)\n";
         std::cerr<<"Explicit selected-bundle execution: --iop-reset-session <module.data> --disc <image.iso>\n";
@@ -109,6 +109,7 @@ int main(int argc,char** argv) {
     }
     try {
         std::uint64_t budget=1000000;
+        unsigned run_seconds=0;
         std::filesystem::path disc,capture_directory,stop_directory;
         bool has_budget=false,native_cycles=false,native_pmu=false,strict_performance=false,display_stopped=true;
 #ifdef ANYPS2_NATIVE_IOP
@@ -123,6 +124,14 @@ int main(int argc,char** argv) {
             if (text=="--display-stop") { display_stopped=true; continue; }
             if (text=="--headless") { display_stopped=false; continue; }
             if (text=="--trace-services") { trace_services=true; continue; }
+            if (text=="--run-seconds") {
+                if (run_seconds || index+1==argc) throw std::runtime_error("Expected one diagnostic duration");
+                const std::string_view value=argv[++index];
+                const auto parsed=std::from_chars(value.data(),value.data()+value.size(),run_seconds);
+                if (parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size() || !run_seconds || run_seconds>86400)
+                    throw std::runtime_error("Diagnostic duration must be 1..86400 seconds");
+                continue;
+            }
 #ifdef ANYPS2_NATIVE_IOP
             if (text=="--probe-iop-reset" || text=="--iop-reset-session") {
                 if (!iop_data.empty() || index+1==argc) throw std::runtime_error("Expected one linked IOP data path");
@@ -270,7 +279,33 @@ int main(int argc,char** argv) {
 #ifdef ANYPS2_NATIVE_IOP
         if (iop_reset) services.idle_pump=[&] { return iop_reset->pump(); };
 #endif
+        std::unique_ptr<probe::NativeWindow> window;
+        if (display_stopped) window=std::make_unique<probe::NativeWindow>();
+        const auto started=std::chrono::steady_clock::now();
+        auto next_present=started;
+        bool timed_out=false,window_closed=false;
+        if (window || run_seconds) services.stop_requested=[&] {
+            const auto now=std::chrono::steady_clock::now();
+            timed_out=run_seconds && now-started>=std::chrono::seconds(run_seconds);
+            if (timed_out) return true;
+            if (window && now>=next_present) {
+                next_present=now+std::chrono::milliseconds(16);
+                if (!window->poll()) { window_closed=true; return true; }
+                const auto& output=platform.graphics.output();
+                if (const auto frame=nt::graphics::scanout(gpu.drawing.pixels(),output.control,output.buffers,output.displays))
+                    window->present(*frame);
+            }
+            return false;
+        };
         const auto stop=nt::ee::run(execute,state,memory,budget,services);
+        if (timed_out || window_closed)
+            std::cout<<"host_stop="<<(timed_out ? "diagnostic-deadline" : "window-closed")<<'\n';
+        if (const auto thread=services.current_thread())
+            std::cout<<"ee_thread="<<thread->id<<" status="<<thread->status<<" wait_semaphore="<<thread->semaphore<<'\n';
+        for (const auto& thread:services.thread_snapshot(state))
+            std::cout<<"ee_thread_state="<<thread.id<<" status="<<thread.status<<" semaphore="<<thread.semaphore
+                     <<" priority="<<thread.priority<<" wakeups="<<thread.wakeups<<" pc="<<nt::hex32(thread.pc)
+                     <<" return="<<nt::hex32(thread.return_address)<<" stack="<<nt::hex32(thread.stack)<<'\n';
 #ifdef ANYPS2_NATIVE_IOP
         if (iop_reset && iop_reset->invoked()) {
             const auto result=iop_reset->result();
@@ -381,13 +416,13 @@ int main(int argc,char** argv) {
                      <<" a1="<<nt::hex32(static_cast<std::uint32_t>(state.gpr[5].lo));
         }
         std::cout<<'\n';
-        if (display_stopped) {
+        if (window) {
             const auto& output=platform.graphics.output();
             const auto frame=nt::graphics::scanout(gpu.drawing.pixels(),output.control,output.buffers,output.displays);
             if (frame) {
                 std::cout<<"native_display="<<frame->width<<'x'<<frame->height<<" execution=stopped\n"<<std::flush;
-                probe::display_stopped(*frame);
             }
+            window->hold(frame);
         }
         return stop==nt::ee::Stop::budget ? 4 : 3;
     } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }

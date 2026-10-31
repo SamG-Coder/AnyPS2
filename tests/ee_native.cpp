@@ -187,6 +187,36 @@ int main() {
                   pumps==1 && state.executed==before+1 && state.pc==0x3a0004);
             services.idle_pump=[] { return nt::ee::Stop::unsupported_system; };
             check(nt::ee::run(nt_ee_generated_run,state,memory,16,services)==nt::ee::Stop::unsupported_system && state.executed==before+1);
+            services.stop_requested=[] { return true; };
+            const auto saved_pc=state.pc;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,16,services)==nt::ee::Stop::host_stop &&
+                  state.executed==before+1 && state.pc==saved_pc);
+            services.stop_requested={};
+            check(nt::ee::run(nt_ee_generated_run,state,memory,16,services)==nt::ee::Stop::unsupported_system);
+            nt::ee::NativeInterrupts interrupts; memory.interrupts=&interrupts;
+            nt::runtime::State registration;
+            registration.set(4,2); registration.set(5,0x366000); registration.set(6,0xffffffff);
+            registration.set(7,1); registration.set(28,0x4000);
+            check(interrupts.service(0x10,registration,nt_ee_generated_contains).status==nt::ee::Stop::budget);
+            check(interrupts.write(0x1000f010,1U<<2)==nt::ee::Stop::budget);
+            state.cop0_status=0x10401; state.set(29,0x8000);
+            registration.set(4,3); registration.set(5,0x365000);
+            check(interrupts.service(0x10,registration,nt_ee_generated_contains).status==nt::ee::Stop::budget);
+            check(interrupts.write(0x1000f010,1U<<3)==nt::ee::Stop::budget);
+            services.idle_timeout=std::chrono::milliseconds(1); pumps=0;
+            services.idle_pump=[&] {
+                if (++pumps==1) { std::this_thread::sleep_for(std::chrono::milliseconds(2)); interrupts.raise(3); }
+                return pumps>2 ? nt::ee::Stop::unsupported_system : nt::ee::Stop::budget;
+            };
+            check(nt::ee::run(nt_ee_generated_run,state,memory,32,services)==nt::ee::Stop::thread_wait && pumps==2);
+            services.idle_timeout=std::chrono::milliseconds(0);
+            services.idle_pump=[&] { interrupts.raise(2); return nt::ee::Stop::budget; };
+            check(nt::ee::run(nt_ee_generated_run,state,memory,10,services)==nt::ee::Stop::budget);
+            std::uint32_t interrupted_id=0; std::memcpy(&interrupted_id,ram.data()+0x4000,4);
+            check(interrupted_id==nt::ee::NativeThreads::idle_id && !services.waiting(memory));
+            check(state.pc==saved_pc && state.gpr[29].lo==0x8000 && !interrupts.active());
+            nt::runtime::State query; query.pc=0x3a0000; query.set(3,0x2f);
+            check(services.invoke(query,memory)==nt::ee::Stop::budget && query.gpr[2].lo==1);
         }
         {
             std::vector<std::uint8_t> ram(0x10000);
@@ -482,13 +512,16 @@ int main() {
             check(call(0x42,1)==nt::ee::Stop::budget && state.gpr[2].lo==1);
             state.cop0_status=0x10c02; // Service entered from an interrupt callback.
             check(call(0xffffffbdU,1)==nt::ee::Stop::budget && state.cop0_status==0x10c02);
-            check(call(0x42,1)==nt::ee::Stop::syscall && ram==original);
+            check(call(0x42,1)==nt::ee::Stop::budget && ram==original);
             check(call(0x47,1,0x1000)==nt::ee::Stop::code_write && ram==original);
             check(call(0xffffffb8U,1,0xfffffff0)==nt::ee::Stop::memory_fault && ram==original);
             check(call(0xffffffb8U,1,0x4000)==nt::ee::Stop::budget);
             std::memcpy(fields.data(),ram.data()+0x4000,24);
-            check(fields==std::array<std::uint32_t,6>{2,2,1,0,0,123});
+            check(fields==std::array<std::uint32_t,6>{3,2,1,0,0,123});
             check(call(0xffffffbaU,1)==nt::ee::Stop::budget && state.cop0_status==0x10c02);
+            check(call(0x45,1)==nt::ee::Stop::budget && state.gpr[2].lo==1);
+            check(call(0x45,1)==nt::ee::Stop::budget && state.gpr[2].lo==1);
+            check(call(0x45,1)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
             check(call(0x41,1)==nt::ee::Stop::budget);
             check(call(0x45,1)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
             check(call(0x40,0x4001)==nt::ee::Stop::memory_fault);
@@ -705,6 +738,11 @@ int main() {
                   state.cop0_status==0x400 && state.cop0_epc==0x1234);
             std::uint32_t result=0; std::memcpy(&result,ram.data()+0x6000,4); check(result==0x12345678);
             check(call(0x21,2)==nt::ee::Stop::budget && state.gpr[2].lo==2);
+            check(call(0x20,0x5000)==nt::ee::Stop::budget && state.gpr[2].lo==2);
+            // ExitDeleteThread must switch back before erasing its continuation.
+            check(call(0x22,2,77)==nt::ee::Stop::budget && state.pc==0x390000);
+            check(call(0x24)==nt::ee::Stop::budget && state.pc==0x11f0);
+            check(call(0x30,2)==nt::ee::Stop::budget && state.gpr[2].lo==0);
             check(call(0x20,0x5000)==nt::ee::Stop::budget && state.gpr[2].lo==2);
             const auto before=ram;
             check(call(0x30,2,0x1000)==nt::ee::Stop::code_write && ram==before);

@@ -496,11 +496,13 @@ See [native measurement limitations](docs/ee-native.md#native-elapsed-time-profi
 GT4 now produces its opening copyright/driving-warning image through Vulkan.
 The private render-target readback contains actual game-generated text. Display
 selection now reaches the same image at the configured 640 x 448 resolution.
-The executable opens a Vulkan window by default after execution stops; its title
-labels that stopped state. Use `--headless` for automated runs. `--capture-stop`
-saves separate render-target and selected-display evidence. Continuous
-presentation, the title screen and gameplay are not established. The current
-startup boundary is another undiscovered indirect EE target.
+The executable opens a Vulkan window during execution and keeps the final image
+visible at a diagnostic stop, labelled in its title. Use `--headless` for automated
+runs and `--run-seconds N` for a bounded diagnostic duration. `--capture-stop`
+saves separate render-target and selected-display evidence. Native startup now
+completes the warning thread and resumes the main thread; its next unsupported
+service is system-bus interrupt-handler removal. The title screen and gameplay
+are not established.
 
 Scalar, V2, masked V3 and V4 uploads in 32-, 16- and 8-bit formats,
 plus packed V4-5 data, can populate

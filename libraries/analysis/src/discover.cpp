@@ -327,12 +327,16 @@ std::set<std::uint32_t> object_table_entries(ByteView bytes,const elf::Executabl
             }
             if (i.op==Op::lw && i.rs==load.rt && i.rt) {
                 const auto call=program.instructions.find(i.pc+4);
-                if (call!=program.instructions.end() && call->second.op==Op::jalr && call->second.rs==i.rt)
+                if (call!=program.instructions.end() && call->second.op==Op::jalr && call->second.rs==i.rt) {
                     slots.emplace(load.immediate,offset+std::uint32_t(i.immediate));
-                break;
+                    break;
+                }
             }
             if (i.op==Op::sw || i.op==Op::sd || i.op==Op::sq || i.op==Op::sb || i.op==Op::sh) continue;
-            if (i.op==Op::lh && i.rt!=load.rt) continue;
+            // Argument loads can be scheduled between the table pointer and
+            // its slot load. They do not invalidate a distinct base register.
+            if ((i.op==Op::lb || i.op==Op::lbu || i.op==Op::lh || i.op==Op::lhu ||
+                 i.op==Op::lw || i.op==Op::lwu || i.op==Op::ld || i.op==Op::lq) && i.rt!=load.rt) continue;
             break;
         }
     }

@@ -25,10 +25,13 @@ public:
     // Owner pumps external native completions. A bounded idle wait preserves
     // resumable state and never consumes the compiled operation budget.
     std::function<Stop()> idle_pump;
+    // Owner-thread UI/cancellation hook, including during native idle waits.
+    std::function<bool()> stop_requested;
     std::chrono::milliseconds idle_timeout{1000};
     bool waiting(const Memory& memory) const {
         return threads_.waiting() && !(memory.interrupts && memory.interrupts->active());
     }
+    bool foreground_waiting() const { return threads_.waiting(); }
     explicit StartupServices(CodeOverlap protected_code,CompiledCode compiled=nullptr,std::uint32_t syscall_table=0,ApplicationSettings settings={})
         : settings_(settings),handlers_(compiled,protected_code,syscall_table),protected_code_(protected_code),compiled_(compiled) {}
     bool returning(const runtime::State& state) const { return handlers_.returning(state); }
@@ -44,6 +47,8 @@ public:
         return memory.interrupts ? memory.interrupts->enter(state,memory,protected_code_) : Stop::interrupt_pending;
     }
     const std::optional<MainThread>& main_thread() const { return main_; }
+    std::optional<NativeThreads::Current> current_thread() const { return threads_.current(); }
+    auto thread_snapshot(const runtime::State& state) const { return threads_.snapshot(state); }
     const std::optional<runtime::InitialHeap>& heap() const { return heap_; }
     Stop invoke(runtime::State& state,Memory& memory) {
         if (state.delay_slot || state.pc>0xfffffffbU) return Stop::invalid_state;
@@ -190,9 +195,7 @@ private:
                 if (number==0x42 && !handlers_.active() && !(memory.interrupts && memory.interrupts->active())) threads_.schedule(state);
                 return Stop::budget;
             }
-            // Overflow return semantics require a separate established contract.
-            if (record->count==record->maximum) return Stop::syscall;
-            semaphores_.signal(id);
+            if (!semaphores_.signal(id)) return Stop::unsupported_system;
         } else {
             if (!record->count) {
                 if (number==0x44) {
@@ -225,6 +228,7 @@ private:
 inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t budget,StartupServices& services) {
     std::optional<std::chrono::steady_clock::time_point> idle_since;
     while (budget) {
+        if (services.stop_requested && services.stop_requested()) return Stop::host_stop;
         if (memory.sif_outbound) {
             const auto transfer=memory.sif_outbound->pump(memory);
             if (transfer!=Stop::budget) return transfer;
@@ -260,7 +264,9 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
-        idle_since.reset();
+        // An interrupt that does not wake a native continuation is not
+        // foreground progress and must not restart the bounded idle timeout.
+        if (!services.foreground_waiting()) idle_since.reset();
         const auto before=state.executed;
         const auto slice=memory.io.poll && budget>4096 ? 4096 : budget;
         const auto result=entry(&state,&memory,slice);

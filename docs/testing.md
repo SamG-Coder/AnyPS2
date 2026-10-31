@@ -2430,3 +2430,13 @@ and whole-run budgets, retire both continuations, and reach an actual idle wait.
 Unknown executable targets still stop. Module-startup completion reporting is
 unchanged. Generated EE/IOP project tests use the explicit --headless option so
 Vulkan inspection windows cannot stall automation.
+
+### Warning-thread continuation milestone
+
+Related Release analysis and generated-project tests cover callback discovery
+across independent word argument loads. Compiled EE execution checks semaphore
+counts above the declared maximum, host cancellation, idle interrupt identity,
+real wakeup of a sleeping continuation, interrupt activity without foreground
+progress, and ExitDeleteThread handoff with handle reuse. Private GT4 execution
+now completes the warning thread and reaches system-bus handler removal in the
+main thread. This is startup progress, not title-screen or gameplay acceptance.
