@@ -36,6 +36,9 @@ std::set<std::uint32_t> registered_code_pointers(ByteView bytes,const elf::Execu
 std::set<std::uint32_t> object_table_entries(ByteView bytes,const elf::Executable& executable,const Program& program);
 // Bounded indexed switch-table candidates; no runtime guard is removed.
 std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executable& executable,const Program& program);
+// Initial-data candidates for indirect transfers through any register.
+// Native execution keeps its original loads and indirect branch.
+std::set<std::uint32_t> initial_indirect_entries(ByteView bytes,const elf::Executable&,const Program&);
 // Recover bounded legacy lifecycle lists whose headers are explicitly loaded
 // from initial file data. Candidates only; do not fold runtime callback reads.
 std::set<std::uint32_t> referenced_lifecycle_entries(ByteView bytes,const elf::Executable&,const Program&);

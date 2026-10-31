@@ -336,6 +336,7 @@ int main(int argc,char** argv) {
     }
     code.push_back(nt::r5900::decode(0x440200,(47U<<26)|(4U<<21)|(0x16U<<16)));
     code.push_back(nt::r5900::decode(0x440204,12));
+    code.push_back(nt::r5900::decode(0xfffffffcU,12));
     auto malformed=images; malformed[1].segments[0].bytes[0]^=1;
     failed=false;
     try { std::ostringstream discard; nt::ee_codegen::emit_llvm(discard,code,owned,payloads,layouts,malformed); }
@@ -374,6 +375,14 @@ int main(int argc,char** argv) {
         word(0x160,0xac850008); word(0x164,0x03e00008); word(0x168,0);
         nt::write_file(argv[2],elf);
         const auto original=elf;
+        elf.resize(0x188,0); word(100,8);
+        const std::uint32_t indirect[]{0x24100002,0x24032000,0x84640000,0x8c650004,0x00a0f809,
+            0x02042021,0x2403007b,12};
+        for (unsigned i=0;i<std::size(indirect);++i) word(0x100+i*4,indirect[i]);
+        word(0x140,0x0080102d); word(0x144,0x03e00008); word(0x148,0);
+        word(0x180,7); word(0x184,0x1040);
+        nt::write_file(std::string(argv[2])+".indirect",elf);
+        elf=original;
         elf.resize(0x190,0); word(100,16); word(104,36);
         const std::uint32_t constructors[]{0x24102000,0x8e020000,0x8e190004,0x0320f809,0,
             0x8e190008,0x0320f809,0,0x8e020020,0x2403007b,12};

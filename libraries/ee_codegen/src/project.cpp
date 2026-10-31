@@ -122,6 +122,11 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
                 std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;
             continuations.push_back(address); added=true;
         }
+        for (const auto address:analysis::initial_indirect_entries(bytes,executable,discovered)) {
+            if (discovered.instructions.contains(address) ||
+                std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;
+            continuations.push_back(address); added=true;
+        }
         for (const auto address:analysis::referenced_lifecycle_entries(bytes,executable,discovered)) {
             if (discovered.instructions.contains(address) ||
                 std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;

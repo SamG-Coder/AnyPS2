@@ -47,3 +47,12 @@ execute_process(COMMAND "${run}/constructors-build/Release/ps2-native${EXE_SUFFI
 if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00001028.*v0=8")
     message(FATAL_ERROR "Recovered lifecycle callbacks did not execute: ${out} ${err}")
 endif()
+
+checked("${CONVERTER}" "${run}/fixture.elf.indirect" "${run}/indirect")
+checked("${CMAKE_COMMAND}" -S "${run}/indirect" -B "${run}/indirect-build" -G "${GENERATOR}" ${platform} "-DANYPS2_ROOT=${ROOT}")
+checked("${CMAKE_COMMAND}" --build "${run}/indirect-build" --config Release --target ps2-native --parallel 2)
+execute_process(COMMAND "${run}/indirect-build/Release/ps2-native${EXE_SUFFIX}" "${run}/indirect/program.data" --headless
+    RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
+if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x0000101c.*v0=9")
+    message(FATAL_ERROR "Recovered argument-register callback did not execute: ${out} ${err}")
+endif()

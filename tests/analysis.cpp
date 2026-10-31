@@ -15,6 +15,24 @@ int main() {
         {
             nt::Bytes image(96,0);
             nt::elf::Executable fixture{0x1000,0,{{0,0x1000,64,64,5,4},{64,0x2000,16,16,6,4}}};
+            const std::array<unsigned,7> words{0x24032000,0x84640000,0x8c650004,0x00a0f809,0,12,0};
+            for (unsigned n=0;n<words.size();++n) put(image,n*4,words[n]);
+            put(image,32,0x03e00008); put(image,64,7); put(image,68,0x1020);
+            const auto program=nt::analysis::discover(image,fixture,64,{},true);
+            check(nt::analysis::initial_indirect_entries(image,fixture,program)==std::set<std::uint32_t>{0x1020},
+                "Argument-register callback was lost across unrelated halfword load");
+            put(image,68,0x2000);
+            check(nt::analysis::initial_indirect_entries(image,fixture,program).empty(),"Data target accepted as code");
+            put(image,68,0x1021);
+            check(nt::analysis::initial_indirect_entries(image,fixture,program).empty(),"Unaligned indirect target accepted");
+            put(image,68,0x1020); fixture.segments[1].file_size=6;
+            check(nt::analysis::initial_indirect_entries(image,fixture,program).empty(),"Truncated indirect pointer accepted");
+            fixture.segments[1].file_size=16; image.resize(70);
+            check(nt::analysis::initial_indirect_entries(image,fixture,program).empty(),"Missing initial-data bytes accepted");
+        }
+        {
+            nt::Bytes image(96,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,64,64,5,4},{64,0x2000,16,16,6,4}}};
             put(image,0,0x24102000); put(image,4,0x8e020000); put(image,8,12);
             put(image,32,0x03e00008); put(image,48,0x03e00008);
             put(image,64,0xffffffff); put(image,68,0x1020); put(image,72,0x1030);

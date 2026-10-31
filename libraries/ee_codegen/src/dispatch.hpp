@@ -3,6 +3,37 @@
 #include <vector>
 
 namespace nt::ee_codegen {
+// Shared constant-address routing for native entry dispatch and membership.
+// Emitted branches contain no runtime address table.
+template<class Last,class Leaf>
+void emit_address_routes(Writer& w,std::size_t count,const std::string& pc,const std::string& prefix,Last last,Leaf leaf) {
+    const auto route=[&](auto&& self,std::size_t first,std::size_t end)->void {
+        w.out<<prefix<<first<<"_"<<end<<":\n";
+        if (end-first==1) { leaf(first); return; }
+        const auto mid=first+(end-first)/2;
+        const auto left=w.value("icmp ule i32 "+pc+", "+std::to_string(last(mid-1)));
+        w.out<<"  br i1 "<<left<<", label %"<<prefix<<first<<"_"<<mid<<", label %"<<prefix<<mid<<"_"<<end<<"\n";
+        self(self,first,mid); self(self,mid,end);
+    };
+    route(route,0,count);
+}
+inline void emit_contains(Writer& w,std::span<const r5900::Instruction> instructions) {
+    std::vector<std::pair<std::uint32_t,std::uint32_t>> ranges;
+    for (const auto& i:instructions) {
+        if (!ranges.empty() && std::uint64_t(ranges.back().second)+4==i.pc) ranges.back().second=i.pc;
+        else ranges.emplace_back(i.pc,i.pc);
+    }
+    w.out<<"define i1 @nt_ee_generated_contains(i32 %address) {\nentry:\n";
+    const auto aligned=w.value("icmp eq i32 "+w.binary("and","i32","%address","3")+", 0");
+    w.out<<"  br i1 "<<aligned<<", label %contains_route0_"<<ranges.size()<<", label %missing\n";
+    emit_address_routes(w,ranges.size(),"%address","contains_route",[&](auto index) { return ranges[index].second; },[&](auto index) {
+        const auto [first,last]=ranges[index];
+        const auto offset=w.binary("sub","i32","%address",std::to_string(first));
+        const auto present=w.value("icmp ule i32 "+offset+", "+std::to_string(last-first));
+        w.out<<"  ret i1 "<<present<<"\n";
+    });
+    w.out<<"missing:\n  ret i1 false\n}\n";
+}
 inline void emit_dispatcher(Writer& w,const std::vector<std::span<const r5900::Instruction>>& parts) {
     w.out<<"define i32 @nt_ee_generated_run(ptr %state, ptr %memory, i64 %budget) {\nentry:\n"
          <<"  %remaining = alloca i64\n  store i64 %budget, ptr %remaining\n  br label %dispatch\ndispatch:\n";
@@ -10,21 +41,12 @@ inline void emit_dispatcher(Writer& w,const std::vector<std::span<const r5900::I
     const auto before=w.load("i64",offsetof(runtime::State,executed));
     const auto budget=w.value("load i64, ptr %remaining");
     w.out<<"  br label %route0_"<<parts.size()<<"\n";
-    const auto route=[&](auto&& self,std::size_t first,std::size_t end)->void {
-        w.out<<"route"<<first<<"_"<<end<<":\n";
-        if (end-first==1) {
-            const auto low=w.value("icmp uge i32 "+pc+", "+std::to_string(parts[first].front().pc));
-            const auto high=w.value("icmp ule i32 "+pc+", "+std::to_string(parts[first].back().pc));
-            const auto inside=w.binary("and","i1",low,high);
-            w.out<<"  br i1 "<<inside<<", label %call"<<first<<", label %unmapped\n";
-            return;
-        }
-        const auto mid=first+(end-first)/2;
-        const auto left=w.value("icmp ule i32 "+pc+", "+std::to_string(parts[mid-1].back().pc));
-        w.out<<"  br i1 "<<left<<", label %route"<<first<<"_"<<mid<<", label %route"<<mid<<"_"<<end<<"\n";
-        self(self,first,mid); self(self,mid,end);
-    };
-    route(route,0,parts.size());
+    emit_address_routes(w,parts.size(),pc,"route",[&](auto index) { return parts[index].back().pc; },[&](auto first) {
+        const auto low=w.value("icmp uge i32 "+pc+", "+std::to_string(parts[first].front().pc));
+        const auto high=w.value("icmp ule i32 "+pc+", "+std::to_string(parts[first].back().pc));
+        const auto inside=w.binary("and","i1",low,high);
+        w.out<<"  br i1 "<<inside<<", label %call"<<first<<", label %unmapped\n";
+    });
     for (std::size_t index=0;index<parts.size();++index) {
         w.out<<"call"<<index<<":\n  %result"<<index<<" = call i32 @nt_ee_part_"<<index
              <<"(ptr %state, ptr %memory, i64 "<<budget<<")\n  br label %returned\n";

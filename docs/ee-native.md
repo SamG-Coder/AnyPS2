@@ -2104,8 +2104,9 @@ before such pointers can be accepted there.
 
 Private GT4 validation completes layout initialization, validates the loaded
 secondary image and executes its LLVM-compiled entry in the same executable.
-Startup reaches an undiscovered constructor callback in that image. The warning
-still renders before a black screen; a title screen is not established.
+Startup passes the recovered constructor entry and reaches a further indirect
+call in that image. The warning still renders before a black screen; a title
+screen is not established.
 
 Count-register reads are lowered to the same native elapsed clock selected for
 profiling, returning the low 32 bits with the required signed register extension.
@@ -2180,3 +2181,15 @@ now transfers the accumulator with vector/integer/flag state. Indexed data-cache
 invalidation becomes a native ordering fence; it does not fetch memory using the
 index or maintain cache lines. Synthetic LLVM execution covers these families,
 failed numeric publication, lane preservation and shared VU state.
+
+Initial-data indirect call recovery also tracks callable registers other than
+the conventional call register. Bounded backward analysis tolerates unrelated
+byte and halfword loads and reads complete file-backed values. Only aligned
+executable candidates become compilation roots. This does not replace dynamic
+loads with constants or assert that mutable data keeps its initial value;
+runtime transfers still require an actually compiled destination.
+
+Generated code-membership checks merge contiguous instruction addresses and use
+balanced native branches with immediate range bounds. Alignment and gaps remain
+checked, including the highest 32-bit aligned address. The converter shares this
+branch emitter with native entry routing; no runtime address table is installed.

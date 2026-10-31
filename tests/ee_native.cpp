@@ -29,6 +29,10 @@ void run_ee_batch_tests();
 void run_ee_file_rpc_tests();
 int main() {
     try {
+        for (const auto address:{0x430000U,0x430004U,0x430100U,0x430104U,0xfffffffcU})
+            check(nt_ee_generated_contains(address));
+        for (const auto address:{0U,0x42fffcU,0x430001U,0x430008U,0x4300fcU,0x430108U,0xfffffff8U,0xffffffffU})
+            check(!nt_ee_generated_contains(address));
         {
             // Non-fused scalar family, masked VU accumulator family, and native
             // index-invalidation ordering execute from generated LLVM.

@@ -372,9 +372,7 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
     }
     for (std::size_t index=0;index<parts.size();++index) emit_part(w,parts[index],ranges,index,payloads,layout);
     emit_dispatcher(w,parts);
-    w.out<<"define i1 @nt_ee_generated_contains(i32 %address) {\nentry:\n  switch i32 %address, label %missing [\n";
-    for (const auto& i:instructions) w.out<<"    i32 "<<i.pc<<", label %present\n";
-    w.out<<"  ]\npresent:\n  ret i1 true\nmissing:\n  ret i1 false\n}\n";
+    emit_contains(w,instructions);
 
     w.out<<"define i1 @nt_ee_generated_code_overlap(i32 %address, i32 %bytes) {\nentry:\n"
          <<"  %result = call i1 @nt_ee_generated_active_code_overlap(i32 %address, i32 %bytes, i32 1)\n  ret i1 %result\n}\n";

@@ -82,12 +82,19 @@ Program discover(ByteView bytes, const elf::Executable& elf, std::size_t limit,
     return result;
 }
 namespace {
-std::optional<std::uint32_t> initial_word(ByteView bytes,const elf::Executable& elf,std::uint32_t address) {
+std::optional<std::uint32_t> initial_word(ByteView bytes,const elf::Executable& elf,std::uint32_t address,
+                                          unsigned width=4,bool sign=false) {
     if (address>=0x80000000U && address<0xc0000000U) address&=0x1fffffffU;
-    if (address%4) return {};
-    for (const auto& segment:elf.segments)
-        if (address>=segment.address && std::uint64_t(address)+4<=std::uint64_t(segment.address)+segment.file_size)
-            return le32(bytes,std::size_t(segment.offset)+address-segment.address);
+    if ((width!=1 && width!=2 && width!=4) || address%width) return {};
+    for (const auto& segment:elf.segments) {
+        if (address<segment.address || std::uint64_t(address)+width>std::uint64_t(segment.address)+segment.file_size) continue;
+        const auto offset=std::size_t(segment.offset)+address-segment.address;
+        if (offset>bytes.size() || width>bytes.size()-offset) return {};
+        std::uint32_t value=0;
+        for (unsigned n=0;n<width;++n) value|=std::uint32_t(bytes[offset+n])<<(8*n);
+        const auto high=1U<<(width*8-1);
+        return sign ? (value^high)-high : value;
+    }
     return {};
 }
 std::optional<std::uint32_t> executable_pointer(const elf::Executable& elf,std::uint32_t value) {
@@ -194,6 +201,7 @@ std::optional<std::uint32_t> candidate(ByteView bytes,const elf::Executable& elf
         case Op::sw: case Op::sd: case Op::sq: case Op::sb: case Op::sh: continue;
         case Op::slti: case Op::sltiu:
         case Op::lui: case Op::addiu: case Op::daddiu: case Op::ori: case Op::lw: case Op::lwu:
+        case Op::lb: case Op::lbu: case Op::lh: case Op::lhu:
             destination=i.rt; break;
         case Op::slt: case Op::sltu:
         case Op::addu: case Op::daddu: case Op::bit_or: case Op::sll:
@@ -207,7 +215,10 @@ std::optional<std::uint32_t> candidate(ByteView bytes,const elf::Executable& elf
         if (!a) return {};
         if (i.op==Op::addiu || i.op==Op::daddiu) return *a+static_cast<std::uint32_t>(i.immediate);
         if (i.op==Op::ori) return *a|static_cast<std::uint16_t>(i.immediate);
-        if (i.op==Op::lw || i.op==Op::lwu) return initial_word(bytes,elf,*a+static_cast<std::uint32_t>(i.immediate));
+        if (i.op==Op::lw || i.op==Op::lwu || i.op==Op::lb || i.op==Op::lbu || i.op==Op::lh || i.op==Op::lhu) {
+            const auto width=i.op==Op::lb || i.op==Op::lbu ? 1U : i.op==Op::lh || i.op==Op::lhu ? 2U : 4U;
+            return initial_word(bytes,elf,*a+static_cast<std::uint32_t>(i.immediate),width,i.op==Op::lb || i.op==Op::lh);
+        }
         const auto b=candidate(bytes,elf,program,before,i.rt,fuel,call_site,layout_candidate);
         if (!b) return {};
         if (i.op==Op::sll) return *b<<i.sa;
@@ -405,6 +416,16 @@ std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executa
             entries.insert(*entry);
         }
         result.insert(entries.begin(),entries.end());
+    }
+    return result;
+}
+std::set<std::uint32_t> initial_indirect_entries(ByteView bytes,const elf::Executable& elf,const Program& program) {
+    std::set<std::uint32_t> result;
+    for (const auto& [pc,call]:program.instructions) {
+        if (!call.indirect() || !call.rs || (call.op==r5900::Op::jr && call.rs==31)) continue;
+        unsigned fuel=128;
+        const auto value=candidate(bytes,elf,program,pc,call.rs,fuel,0xffffffffU);
+        if (value) if (const auto entry=executable_pointer(elf,*value)) result.insert(*entry);
     }
     return result;
 }
