@@ -51,6 +51,33 @@ int main() {
             std::uint32_t wait=0; std::memcpy(&wait,ram.data()+0x2100+36,4); check(wait==1);
             check(call(0x33,1).value==1); threads.schedule(state);
             check(call(0x2f).value==1 && call(0x33,0).value==~std::uint64_t(0));
+            nt::ee::NativeThreads idle;
+            idle.initialize({0x8000,0x1000,0x8d60},0,0x1100); idle.allow_idle=true;
+            const auto idle_call=[&](unsigned number,unsigned id=0) {
+                state.set(4,id);
+                return idle.invoke(number,state,memory,nt_ee_generated_contains,nt_ee_generated_code_overlap);
+            };
+            const auto retired=state.executed;
+            check(idle_call(0x32).status==nt::ee::Stop::budget && idle.waiting());
+            check(idle_call(0x34,1).value==1); idle.schedule(state);
+            check(!idle.waiting() && state.executed==retired && idle_call(0x30,1).value==1);
+        }
+        {
+            std::vector<std::uint8_t> ram(0x10000);
+            nt::ee::Memory memory{ram.data(),ram.size()};
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
+            nt::runtime::State state; state.pc=0x3a0000;
+            state.set(3,0x3c); state.set(4,0); state.set(5,0x8000); state.set(6,0x1000); state.set(7,0x6000); state.set(8,0x1100);
+            check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::budget);
+            unsigned pumps=0;
+            services.idle_pump=[&] { ++pumps; return nt::ee::Stop::budget; };
+            services.idle_timeout=std::chrono::milliseconds(0);
+            state.pc=0x3a0000; state.set(3,0x32);
+            const auto before=state.executed;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,16,services)==nt::ee::Stop::thread_wait &&
+                  pumps==1 && state.executed==before+1 && state.pc==0x3a0004);
+            services.idle_pump=[] { return nt::ee::Stop::unsupported_system; };
+            check(nt::ee::run(nt_ee_generated_run,state,memory,16,services)==nt::ee::Stop::unsupported_system && state.executed==before+1);
         }
         for (const auto slice : {1U,2U,64U}) {
             nt::runtime::State state; state.pc=0x1000;
@@ -1821,6 +1848,9 @@ int main() {
             nt::ee::Memory memory{ram.data(),ram.size()};
             nt::ee::NativePlatform platform(timer_clock); platform.attach(memory);
             bool fail=false; platform.graphics.context=&fail;
+            std::vector<bool> edges_seen;
+            platform.graphics.edge_context=&edges_seen;
+            platform.graphics.display_edge=[](void* raw,bool end) { static_cast<std::vector<bool>*>(raw)->push_back(end); };
             platform.graphics.synchronize=[](void* p) { return *static_cast<bool*>(p) ? nt::ee::Stop::unsupported_system : nt::ee::Stop::budget; };
             nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
             nt::runtime::State state;
@@ -1845,6 +1875,7 @@ int main() {
             platform.graphics.write(0x12001000,8); timer_now=edge(525); poll();
             check(platform.interrupts.read(0x1000f000).value==8 && !(platform.graphics.read(0x12001000).value&8));
             platform.interrupts.write(0x1000f000,8); timer_now=edge(1012); poll();
+            check(edges_seen==std::vector<bool>({false,true,false}));
             check((platform.graphics.read(0x12001000).value&0x2008)==8);
             const auto before=platform.graphics.read(0x12001000).value;
             timer_now-=100; poll(); check(platform.graphics.read(0x12001000).value==before);
@@ -1855,6 +1886,7 @@ int main() {
             check(configure(3,0)==nt::ee::Stop::budget && platform.graphics.read(0x12000020).value==1);
             timer_now=epoch+576*32000ULL; poll(); check(platform.interrupts.read(0x1000f000).value==4);
             timer_now=epoch+625*32000ULL*1000000; poll();
+            check(edges_seen.size()<300 && platform.graphics.edge_overflow());
             check((platform.interrupts.read(0x1000f000).value&12)==12);
             check(platform.graphics.write(0x12001000,0x200)==nt::ee::Stop::budget && !platform.graphics.mode());
             platform.interrupts.write(0x1000f000,15); timer_now+=1000000000; poll(); check(!memory.pending_interrupts);

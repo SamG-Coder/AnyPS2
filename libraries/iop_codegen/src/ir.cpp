@@ -29,8 +29,11 @@ std::optional<Operation> native_operation(const elf::IopImport& import) {
         (import.ordinal==2 || (import.ordinal>=5 && import.ordinal<=8) || (import.ordinal>=21 && import.ordinal<=27) || (import.ordinal>=29 && import.ordinal<=32)))
         return Operation::native_import;
     if (import.library=="thbase" && (import.version>>8)==1 &&
-        ((import.ordinal>=4 && import.ordinal<=10) || import.ordinal==14 || import.ordinal==20 || import.ordinal==21 || import.ordinal==22 || import.ordinal==41 || (import.ordinal>=33 && import.ordinal<=40) || (import.ordinal>=24 && import.ordinal<=28)))
+        ((import.ordinal>=4 && import.ordinal<=10) || import.ordinal==14 || (import.ordinal>=20 && import.ordinal<=23) || import.ordinal==41 || (import.ordinal>=33 && import.ordinal<=40) || (import.ordinal>=24 && import.ordinal<=28)))
         return Operation::native_import;
+    if (import.library=="timrman" && (import.version>>8)==1 &&
+        (import.ordinal==4 || (import.ordinal>=6 && import.ordinal<=12) || import.ordinal==16)) return Operation::native_import;
+    if (import.library=="vblank" && (import.version>>8)==1 && (import.ordinal==8 || import.ordinal==9)) return Operation::native_import;
     if ((import.library=="thsemap" || import.library=="thmsgbx") && (import.version>>8)==1 && ((import.ordinal>=4 && import.ordinal<=9) || import.ordinal==11 || import.ordinal==12)) return Operation::native_import;
     if (import.library=="thevent" && (import.version>>8)==1 &&
         ((import.ordinal>=4 && import.ordinal<=11) || import.ordinal==13 || import.ordinal==14))
@@ -258,7 +261,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         }
         Instruction call; call.address=module.base+import.offset;
         call.operation=*operation; call.flow=Flow::native_return;
-        call.immediate=import.ordinal|(!host ? 0x20000U : import.library=="loadcore" ? 0x10000U : import.library=="ioman" ? 0x30000U : import.library=="intrman" ? 0x40000U : import.library=="thevent" ? 0x50000U : import.library=="thbase" ? 0x60000U : import.library=="sifman" ? 0x70000U : import.library=="stdio" ? 0x80000U : import.library=="sifcmd" ? 0x90000U : import.library=="thsemap" ? 0xa0000U : import.library=="thmsgbx" ? 0xb0000U : import.library=="sysclib" ? 0xc0000U : import.library=="heaplib" ? 0xd0000U : import.library=="modload" ? 0xe0000U : import.library=="romdrv" ? 0xf0000U : import.library=="dmacman" ? 0x100000U : import.library=="cdvdman" ? 0x110000U : import.library=="secrman" ? 0x120000U : 0U);
+        call.immediate=import.ordinal|(!host ? 0x20000U : import.library=="loadcore" ? 0x10000U : import.library=="ioman" ? 0x30000U : import.library=="intrman" ? 0x40000U : import.library=="thevent" ? 0x50000U : import.library=="thbase" ? 0x60000U : import.library=="sifman" ? 0x70000U : import.library=="stdio" ? 0x80000U : import.library=="sifcmd" ? 0x90000U : import.library=="thsemap" ? 0xa0000U : import.library=="thmsgbx" ? 0xb0000U : import.library=="sysclib" ? 0xc0000U : import.library=="heaplib" ? 0xd0000U : import.library=="modload" ? 0xe0000U : import.library=="romdrv" ? 0xf0000U : import.library=="dmacman" ? 0x100000U : import.library=="cdvdman" ? 0x110000U : import.library=="secrman" ? 0x120000U : import.library=="timrman" ? 0x130000U : import.library=="vblank" ? 0x140000U : 0U);
         native_imports.emplace(call.address,call);
         if (!host) {
             auto bound=import; bound.offset+=module.base; bound.table_offset+=module.base;
@@ -440,6 +443,8 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
             const auto after=transfer(instruction,input);
             if (instruction.flow==Flow::trap) continue;
             if (instruction.flow==Flow::native_return) {
+                if (instruction.operation==Operation::native_import && instruction.immediate==0x140008 && input.registers[6])
+                    for (const auto address : *input.registers[6]) if (address) discover_callback(address,pc,false);
                 if (instruction.operation==Operation::native_import) discover_loader_callbacks(pc,instruction.immediate,input);
                 if (instruction.operation==Operation::native_import && instruction.immediate==0x90011 && input.registers[6])
                     for (const auto address : *input.registers[6]) if (address) discover_callback(address,pc,false);
@@ -604,6 +609,23 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
             }
         }
         const auto candidates=stored_code_candidates(program,states,data_modules);
+        if (!module.code_addresses.empty()) {
+            std::set<std::uint32_t> relocated(module.code_addresses.begin(),module.code_addresses.end());
+            const auto stored=stored_code_candidates(program,states,data_modules,false);
+            relocated.insert(stored.begin(),stored.end());
+            // Library descriptors can also be spilled to a stack, but their
+            // validated export metadata identifies them as data, not callbacks.
+            for (const auto& library:libraries) relocated.erase(library.address);
+            if (relocated.size()>256) throw std::runtime_error("IOP conversion: relocated callback candidate limit exceeded");
+            for (const auto& [pc,instruction]:program.instructions) {
+                if (!states.contains(pc) || states.at(pc).registers[instruction.source] || !loaded_callback_call(program,instruction)) continue;
+                auto& targets=stack_transfers[pc];
+                const auto before=targets.size();
+                targets.insert(relocated.begin(),relocated.end());
+                if (targets.size()>256) throw std::runtime_error("IOP conversion: callback candidate limit exceeded");
+                if (targets.size()!=before) pending.insert(pc);
+            }
+        }
         if (!candidates.empty()) for (const auto& [pc,instruction] : program.instructions) {
             if (states.contains(pc) && !states.at(pc).registers[instruction.source] && stack_callback_call(program,instruction)) {
                 auto& targets=stack_transfers[pc];

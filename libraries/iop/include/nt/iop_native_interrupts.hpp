@@ -14,6 +14,10 @@ public:
         if (stack_top<16 || stack_top>0x200000 || stack_top%16) throw std::invalid_argument("Invalid native callback stack");
     }
     bool delivery_enabled() const { return enabled_; }
+    void clear_pending(unsigned irq) {
+        if (!(irq<=45 || irq==62 || irq==63)) throw std::out_of_range("Invalid native interrupt cause");
+        lines_[irq].pending=false;
+    }
     void post(unsigned irq) {
         if (!(irq<=45 || irq==62 || irq==63)) throw std::out_of_range("Invalid native interrupt cause");
         lines_[irq].pending=true;

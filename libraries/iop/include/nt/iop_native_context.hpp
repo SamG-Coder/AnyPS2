@@ -19,6 +19,8 @@
 #include <nt/iop_native_cdvdman.hpp>
 #include <nt/iop_native_secrman.hpp>
 #include <nt/iop_native_archive.hpp>
+#include <nt/iop_native_hard_timers.hpp>
+#include <nt/iop_native_vblank.hpp>
 #include <memory>
 
 namespace nt::iop {
@@ -42,13 +44,14 @@ public:
         : heap(checked_size(ram,layout,destination || !delivery),layout.heap_begin,layout.heap_end),heaplib(heap),boot_callbacks(heap),
           libraries(std::move(exports),std::move(imports)),archives(descriptors),driver_files(drivers,descriptors,heap),
           sif(destination),peer_(destination ? std::make_unique<NativeSifCommandEndpoint>(*destination,command_buffer,sif,std::move(delivery)) : nullptr),
-          commands(peer_.get()),inbound(ram,layout.packet_buffer),callbacks({&alarms,&sif,&inbound}),
+          commands(peer_.get()),inbound(ram,layout.packet_buffer),callbacks({&alarms,&sif,&inbound,&hard_timers,&vblank}),
           interrupts(layout.interrupt_stack,&callbacks),sif_control(interrupts,&sif),threads(interrupts,&heap),
           rpc_servers(peer_.get(),&threads),rpc_data(peer_.get()),events(&threads),semaphores(&threads),mailboxes(&threads),
           system(events,boot,ram),command_session(events,system,sif_control,peer_.get()),stdio(std::move(output)),
           disc_service(disc.empty() ? nullptr : std::make_unique<NativeDiscServices>(disc,&descriptors,&events)),
           dmacman_(dmac_priority_),router(providers()),arena_(ram),packet_buffer_(layout.packet_buffer) {
         inbound.connect(commands,command_session,sif_control,&rpc_servers);
+        hard_timers.connect(interrupts);
         modload.attach_heap(heap);
         if (!disc.empty()) modload.attach_disc(disc);
     }
@@ -86,6 +89,8 @@ public:
     NativeBootServices boot; // Empty until the owner supplies real boot metadata.
     NativeModloadServices modload;
     NativeAlarmServices alarms;
+    NativeHardTimers hard_timers;
+    NativeVblankServices vblank;
     NativeCdvdmanServices cdvdman;
     NativeSecrmanServices secrman;
     NativeSifTransfers sif;
@@ -118,7 +123,7 @@ private:
     std::vector<NativeServices*> providers() {
         std::vector<NativeServices*> result{&boot_callbacks,&heaplib,&prnt,&sysclib,&drivers,&driver_files,&archives,&heap,&libraries,
             &boot,&modload,&interrupts,&events,&semaphores,&mailboxes,&threads,&system,&alarms,&sif,&sif_control,&stdio,
-            &commands,&command_session,&rpc_servers,&rpc_data,&dmacman_,&cdvdman,&secrman,&serial_};
+            &commands,&command_session,&rpc_servers,&rpc_data,&dmacman_,&cdvdman,&secrman,&serial_,&hard_timers,&vblank};
         if (disc_service) result.push_back(disc_service.get());
         return result;
     }

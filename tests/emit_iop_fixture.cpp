@@ -483,6 +483,20 @@ int main(int argc,char** argv) {
             if (!program.instructions.contains(0xC00E0))
                 throw std::runtime_error("Merged caller stacks hid a local thread descriptor");
         }
+        // Indexed callback registries use relocation candidates, not a claimed
+        // immutable table. An unrelated runtime address must still be guarded.
+        {
+            nt::elf::IopModule registry{0xD0000,0xD0000,nt::Bytes(0x80),0x80,{}};
+            const auto put=[&](unsigned offset,std::uint32_t word) { fixture::put32(registry.memory,offset,word); };
+            put(0,0x00851021); put(4,0x8c420000); put(8,0);
+            put(12,0x0040f809); put(16,0); put(20,0x03e00008); put(24,0);
+            put(0x60,0x03e00008); put(0x64,0x24020003);
+            registry.code_addresses={0xD0060};
+            const auto program=nt::iop_codegen::ir::discover(registry);
+            if (!program.instructions.contains(0xD0060) || program.instructions.at(0xD000c).targets!=registry.code_addresses ||
+                !program.guarded_callback_sites.contains(0xD000c))
+                throw std::runtime_error("Indexed callback relocation candidates were not guarded");
+        }
         // A host import keeps a descriptor that lives in a saved register.
         // The following AddDrv receives it from the delay slot.
         {

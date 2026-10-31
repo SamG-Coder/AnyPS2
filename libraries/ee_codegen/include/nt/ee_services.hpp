@@ -14,11 +14,21 @@
 #include <cstring>
 #include <atomic>
 #include <optional>
+#include <functional>
+#include <thread>
+#include <chrono>
 
 namespace nt::ee {
 struct MainThread { runtime::InitialStack stack; std::uint32_t global_pointer,root; };
 class StartupServices {
 public:
+    // Owner pumps external native completions. A bounded idle wait preserves
+    // resumable state and never consumes the compiled operation budget.
+    std::function<Stop()> idle_pump;
+    std::chrono::milliseconds idle_timeout{1000};
+    bool waiting(const Memory& memory) const {
+        return threads_.waiting() && !(memory.interrupts && memory.interrupts->active());
+    }
     explicit StartupServices(CodeOverlap protected_code,CompiledCode compiled=nullptr,std::uint32_t syscall_table=0,ApplicationSettings settings={})
         : settings_(settings),handlers_(compiled,protected_code,syscall_table),protected_code_(protected_code),compiled_(compiled) {}
     bool returning(const runtime::State& state) const { return handlers_.returning(state); }
@@ -90,6 +100,7 @@ public:
             return result==Stop::budget ? returned(state,state.gpr[2].lo) : result;
         }
         if (thread_syscall(number)) {
+            threads_.allow_idle=static_cast<bool>(idle_pump);
             const bool interrupt=memory.interrupts && memory.interrupts->active();
             if (handlers_.active() || (interrupt && number!=0x34 && number!=0x36)) return Stop::unsupported_system;
             const auto result=threads_.invoke(number,state,memory,compiled_,protected_code_);
@@ -199,6 +210,7 @@ private:
     std::optional<runtime::InitialHeap> heap_;
 };
 inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t budget,StartupServices& services) {
+    std::optional<std::chrono::steady_clock::time_point> idle_since;
     while (budget) {
         if (memory.sif_outbound) {
             const auto transfer=memory.sif_outbound->pump(memory);
@@ -217,6 +229,25 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
             const auto result=services.finish(state,memory);
             if (result!=Stop::budget) return result;
         }
+        if (services.waiting(memory)) {
+            if (!idle_since) idle_since=std::chrono::steady_clock::now();
+            if (services.idle_pump) {
+                const auto pumped=services.idle_pump();
+                if (pumped!=Stop::budget) return pumped;
+            }
+            if (memory.io.poll) memory.io.poll(memory.io.context);
+            if (memory.completions) memory.completions->publish(memory);
+            if (memory.interrupts) memory.interrupts->publish(memory);
+            if ((state.cop0_status&0x10007U)==0x10001U && (state.cop0_status&memory.pending_interrupts&0xff00U)) {
+                const auto delivered=services.interrupt(state,memory);
+                if (delivered!=Stop::budget) return delivered;
+                continue;
+            }
+            if (std::chrono::steady_clock::now()-*idle_since>=services.idle_timeout) return Stop::thread_wait;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        idle_since.reset();
         const auto before=state.executed;
         const auto slice=memory.io.poll && budget>4096 ? 4096 : budget;
         const auto result=entry(&state,&memory,slice);

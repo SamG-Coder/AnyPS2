@@ -42,6 +42,12 @@ public:
         install_sealed(data);
         startup_=std::make_unique<nt::iop::NativeModuleStartup>(nt::iop::run_llvm,*services_,ram_,module_,nt_iop_generated_entries(),0x1ff000);
         incoming_=std::make_unique<nt::ee::NativeIopCommands>(services_->sif_control,services_->inbound);
+        platform_.graphics.edge_context=this;
+        platform_.graphics.display_edge=[](void* context,bool end) {
+            auto& self=*static_cast<IopReset*>(context);
+            if (self.accepted_) self.services_->vblank.post(end);
+        };
+        platform_.graphics.display_overflow=[](void* context) { static_cast<IopReset*>(context)->services_->vblank.overflow(); };
         if (!disc.empty()) {
             cdvd_=std::make_unique<nt::ee::NativeCdvdInitRpc>(disc,0x1ee000,0x1ee010);
             scmd_=std::make_unique<nt::ee::NativeCdvdScmdRpc>(*cdvd_,0x1ed000,0x1ed010);
@@ -55,6 +61,11 @@ public:
         }
     }
     nt::ee::NativeSifResetOwner owner() { return {this,reset,{this,commands}}; }
+    ~IopReset() {
+        if (platform_.graphics.edge_context==this) {
+            platform_.graphics.display_edge=nullptr; platform_.graphics.display_overflow=nullptr; platform_.graphics.edge_context=nullptr;
+        }
+    }
     bool invoked() const { return invoked_; }
     nt::iop::NativeResult result() const { return result_; }
     std::uint64_t executed() const { return startup_->executed(); }

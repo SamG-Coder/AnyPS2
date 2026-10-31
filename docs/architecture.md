@@ -1845,6 +1845,21 @@ replay at most 64 preceding straight-line instructions with a fresh symbolic
 stack. This retains locally constructed descriptor entries without assuming
 that arbitrary caller memory or register values are known.
 
+Indexed IOP callback registries retain bounded candidates from executable-address
+relocations and constant code pointers stored by reachable instructions. Validated
+library descriptor addresses are excluded. These are guarded AOT candidates, not
+immutable-table proofs; an address outside the compiled candidate set stops.
+
+Native PADMAN dependencies use session-owned services. Hard-timer allocation owns
+a compatible handle and interrupt cause; count/compare updates use an injectable
+monotonic clock, and supported ungated modes post native interrupt events.
+Gate, external-clock and toggle modes stop without changing configuration.
+Vblank registration queues compiled callbacks from nominal native display edges,
+in priority order, removes zero-return handlers and cancels released queued work.
+Queue/catch-up overflow is explicit. Display deadlines are not physical monitor
+timing. Interrupt-context thread status supports running and dormant continuations;
+suspended register-frame exposure remains an explicit stop.
+
 The converter recognizes bounded unsigned switch dispatch through a scaled
 index, constant upper address, word table load and register jump or call. The
 index shift may occupy the guard branch's delay slot. Calls retain their link

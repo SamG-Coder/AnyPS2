@@ -155,6 +155,12 @@ void test_iop_module() {
     check(module.info && module.info->name==name && module.info->version==0x102 &&
           module.info->global_pointer==0x17ff0 && module.info->text_size==16 &&
           module.info->data_size==16 && module.info->bss_size==32,"IRX module metadata differs");
+    auto callback_image=described;
+    put32(callback_image,256,8);
+    const auto callback_module=nt::elf::load_iop_module(callback_image,0x18000);
+    check(callback_module.code_addresses==std::vector<std::uint32_t>{0x18008},
+          "IRX code-address relocation was not retained for AOT discovery");
+    check(module.code_addresses.empty(),"Data relocation was classified as executable");
     for (const auto offset : {368U,424U,428U,432U,436U}) {
         bad=described; put32(bad,offset,0xffffffff);
         rejects([&] { nt::elf::load_iop_module(bad,0x10000); });

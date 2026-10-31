@@ -202,6 +202,9 @@ int main(int argc,char** argv) {
         if (!command_peer.connect(platform.sif_outbound)) throw std::runtime_error("Cannot connect native command peer");
         auto state=nt::ee::NativePlatform::initial_state(ANYPS2_EE_ENTRY);
         nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains,ANYPS2_EE_SYSCALL_TABLE);
+#ifdef ANYPS2_NATIVE_IOP
+        if (iop_reset) services.idle_pump=[&] { return iop_reset->pump(); };
+#endif
         const auto stop=nt::ee::run(execute,state,memory,budget,services);
 #ifdef ANYPS2_NATIVE_IOP
         if (iop_reset && iop_reset->invoked()) {

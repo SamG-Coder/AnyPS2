@@ -333,6 +333,14 @@ time, BCD, with status and pad clear, and returns 1. A year outside
 handlers, and a zero argument clears the stored pointer. Those handlers are
 not called. Ordinal 6 returns 0 because no card is authenticated. Download
 and card-data ordinals stay unsupported. No PS2SDK implementation is copied.
+The same pinned PS2SDK `timrman.h`, `vblank.h`, `thbase.h` and public service
+implementations were consulted for timer handle/interrupt identifiers, callback
+ordering/removal, and interrupt-context status fields. New native implementations
+use monotonic time and the existing compiled callback dispatcher; no implementation
+code was copied. Timer gate/external-clock/toggle modes remain explicit unsupported
+requests. Display callbacks use the native graphics owner's nominal display edges,
+not physical monitor timing. Suspended thread register-frame exposure is not yet
+implemented and stops rather than returning a fabricated pointer.
 The pinned PS2SDK heaplib public interface/export table and its open-source
 service define heap flags, return codes, eight-byte allocation accounting and
 growth/release behavior. AnyPS2 uses an independently written map-based allocator

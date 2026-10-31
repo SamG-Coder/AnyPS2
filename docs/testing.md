@@ -1,5 +1,11 @@
 # Testing AnyPS2
 
+PADMAN service regressions exercise timer ownership, elapsed-time compare events,
+compiled interrupt callbacks, vblank registration/removal, thread status, IRX
+callback relocations and guarded indexed registry discovery. EE tests cover
+chronological display edges, bounded catch-up and idle waits that preserve the
+operation count. Commercial startup evidence remains separate and opt-in.
+
 Native serial integration fixtures execute generated LLVM through the service
 router. They cover configuration, cached aliases, interrupt acknowledgment,
 independent sessions, reset, rejected START/FIFO/status operations, and load and

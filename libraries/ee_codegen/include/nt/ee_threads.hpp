@@ -9,6 +9,8 @@ namespace nt::ee {
 // Cooperative native continuations: all runnable entry PCs must be compiled.
 class NativeThreads {
 public:
+    bool allow_idle=false;
+    bool waiting() const { return current_ && records_.at(current_).status==4 && !has_ready(); }
     struct Result { Stop status; std::uint64_t value=0; };
     void initialize(runtime::InitialStack stack,std::uint32_t gp,std::uint32_t root) {
         root_=physical(root);
@@ -57,14 +59,14 @@ public:
         }
         if (call==0x32) {
             if (thread.wakeups) { --thread.wakeups; return {Stop::budget,id}; }
-            // No native idle/event wait owner exists yet. Preserve the caller
-            // rather than reporting a sleep which cannot select runnable work.
-            if (!has_ready())
+            // Without an explicit event owner, preserve the caller when no
+            // replacement continuation can run.
+            if (!has_ready() && !allow_idle)
                 return {Stop::syscall};
             thread.status=4; return {Stop::budget,id};
         }
         if (call==0x33 || call==0x34) {
-            if (id==current_ || thread.status==0x10) return fail();
+            if ((id==current_ && thread.status!=4) || thread.status==0x10) return fail();
             if (thread.status==4) { thread.status=2; thread.order=next_order_++; }
             else {
                 if (thread.wakeups==0x7fffffffU) return {Stop::unsupported_system};
@@ -108,6 +110,7 @@ public:
                 (next.priority==selected->second.priority && next.order<selected->second.order)) selected=i;
         }
         if (selected==records_.end()) return;
+        if (selected->first==current_) { current.status=1; return; }
         current.context=state;
         if (current.status==1) { current.status=2; current.order=next_order_++; }
         const auto executed=state.executed; const auto status=state.cop0_status;

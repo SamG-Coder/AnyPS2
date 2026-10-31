@@ -1,5 +1,7 @@
 #include <nt/iop_native.hpp>
 #include <nt/iop_native_serial.hpp>
+#include <nt/iop_native_hard_timers.hpp>
+#include <nt/iop_native_vblank.hpp>
 #include <nt/iop_native_heap.hpp>
 #include <nt/iop_native_heaplib.hpp>
 #include <nt/iop_native_libraries.hpp>
@@ -1200,6 +1202,12 @@ int main() {
         check(args_threads.run(nt_iop_generated_run,ram,32,args_services).reason==NativeStop::unmapped_code,
               "Argument-block worker creation failed");
         const auto args_worker=args_threads.state(args_creator).registers[2];
+        const auto dormant=args_threads.invoke({23,{args_worker,0xcc00},NativeServiceKind::thbase,0,true},ram);
+        check(dormant.status==NativeServiceStatus::returned && dormant.value==0 &&
+              load_native_word(ram,0xcc08)==0x10 && load_native_word(ram,0xcc30)==0,
+              "Interrupt-context dormant status did not expose its actual state");
+        check(args_threads.invoke({23,{args_worker,0xcc00},NativeServiceKind::thbase},ram).value==static_cast<std::uint32_t>(-100),
+              "Interrupt-only thread status accepted foreground context");
         auto args_start=initial(); args_start.pc=0x196c; args_start.registers[31]=0xfffffffc;
         args_start.registers[4]=args_worker; args_start.registers[5]=3; args_start.registers[6]=0xffff;
         auto bad_args=args_start;
@@ -1262,6 +1270,49 @@ int main() {
         check(empty_system_events.invoke({13,{empty_system_id,0xc620,0,0},NativeServiceKind::thevent},ram).value==0 &&
               load_native_word(ram,0xc628)==0 && load_native_word(ram,0xc62c)==0,
               "Empty native boot context fabricated system-status bits");
+        {
+            NativeVblankServices blank;
+            NativeInterruptServices irq(0xf000,&blank);
+            NativeServiceRouter services({&irq,&blank});
+            auto reg=blank.invoke({8,{0,16,0x2100,0xc720},NativeServiceKind::vblank},ram);
+            check(reg.status==NativeServiceStatus::returned && reg.value==0,"Vblank registration failed");
+            check(blank.invoke({8,{0,16,0x2100,0xc720},NativeServiceKind::vblank},ram).value==static_cast<std::uint32_t>(-104),"Duplicate vblank registration accepted");
+            check(!blank.take(),"Vblank registration invented a display edge");
+            store_native_word(ram,0xc720,0);
+            blank.post(false);
+            auto cpu=initial(); cpu.pc=0xfffffffc;
+            check(irq.run(nt_iop_generated_run,cpu,ram,32,services).reason==NativeStop::unmapped_code && load_native_word(ram,0xc720)==0,"Masked display callback executed");
+            irq.invoke({9,{},NativeServiceKind::intrman},ram);
+            check(irq.run(nt_iop_generated_run,cpu,ram,32,services).reason==NativeStop::unmapped_code && load_native_word(ram,0xc720)==1,"Compiled vblank callback did not execute");
+            blank.post(false);
+            check(!blank.take(),"Zero-return vblank handler was not removed");
+            blank.invoke({8,{1,16,0x2140,0xc720},NativeServiceKind::vblank},ram);
+            blank.post(true);
+            blank.invoke({9,{1,0x2140},NativeServiceKind::vblank},ram);
+            check(!blank.take(),"Released display callback remained queued");
+            std::uint64_t ns=0;
+            NativeHardTimers timers([&] { return ns; }); timers.connect(irq);
+            const auto call=[&](unsigned op,std::uint32_t a=0,std::uint32_t b=0,std::uint32_t c=0) {
+                return timers.invoke({op,{a,b,c},NativeServiceKind::timrman},ram);
+            };
+            const auto handle=call(4,1,16,8).value;
+            const auto line=call(16,handle).value;
+            check(line==6 && call(4,1,16,8).value==static_cast<std::uint32_t>(-150),"Timer allocation did not own a compatible slot");
+            irq.invoke({4,{line,2,0x2100,0xc720},NativeServiceKind::intrman},ram);
+            irq.invoke({6,{line},NativeServiceKind::intrman},ram);
+            call(11,handle,100);
+            check(call(7,handle,0x58).status==NativeServiceStatus::returned,"Periodic native timer setup failed");
+            check(call(7,handle,1).status==NativeServiceStatus::unavailable && call(8,handle).value==0x58,"Unsupported gated timer changed state");
+            ns=1000; timers.take();
+            check(call(10,handle).value==36,"Native timer did not advance from its clock");
+            ns=3000; timers.take();
+            check(call(10,handle).value==10,"Compare reset lost fractional timer ticks");
+            cpu=initial(); cpu.pc=0xfffffffc;
+            check(irq.run(nt_iop_generated_run,cpu,ram,32,services).reason==NativeStop::unmapped_code && load_native_word(ram,0xc720)==2,"Timer did not deliver a compiled interrupt handler");
+            check(call(6,handle).value==0 && call(16,handle).value==static_cast<std::uint32_t>(-151),"Timer release retained a live handle");
+            NativeHardTimers separate([&] { return ns; });
+            check(separate.invoke({16,{handle},NativeServiceKind::timrman},ram).value==static_cast<std::uint32_t>(-151),"Timer leaked between contexts");
+        }
         std::uint64_t alarm_ticks=0;
         NativeAlarmServices alarms([&]{return alarm_ticks;});
         NativeInterruptServices alarm_interrupts(0xf000,&alarms);

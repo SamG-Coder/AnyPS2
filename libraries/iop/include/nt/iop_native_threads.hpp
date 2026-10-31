@@ -58,7 +58,7 @@ public:
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
         if (request.kind!=NativeServiceKind::thbase) return {};
         const auto op=request.selector;
-        if (!((op>=4 && op<=10) || op==14 || op==20 || op==21 || op==22 || op==33 || (op>=24 && op<=28))) return {};
+        if (!((op>=4 && op<=10) || op==14 || op==20 || op==21 || op==22 || op==23 || op==33 || (op>=24 && op<=28))) return {};
         const auto returned=[](std::int32_t value=0) { return NativeServiceReply{NativeServiceStatus::returned,static_cast<std::uint32_t>(value)}; };
         if (op==21) {
             if (request.interrupt_context) return returned();
@@ -72,7 +72,7 @@ public:
                 return {NativeServiceStatus::address_fault,0,request.stack_pointer};
             return returned(static_cast<std::int32_t>(*pointer-thread.stack));
         }
-        const bool interrupt_call=op==26 || op==28;
+        const bool interrupt_call=op==23 || op==26 || op==28;
         if (interrupt_call!=request.interrupt_context) return returned(-100);
         if (op==4) return create(request,ram);
         if (op==10) {
@@ -91,7 +91,7 @@ public:
             return returned();
         }
         if (op==14) return change_priority(request);
-        if (op==22) return refer_status(request,ram);
+        if (op==22 || op==23) return refer_status(request,ram);
         if (op==33) {
             if (!current_) return {};
             const auto now=clock_();
@@ -242,6 +242,10 @@ private:
         const auto checked=writable(ram,address,68);
         if (checked.status!=NativeServiceStatus::returned) return checked;
         const auto& thread=found->second;
+        // A suspended thread requires a guest-visible saved register frame.
+        // Do not pretend a native continuation has a compatible frame pointer.
+        if (request.selector==23 && thread.status!=Status::finished && current_!=id)
+            return {NativeServiceStatus::unavailable};
         const auto status=thread.status==Status::finished ? 0x10U :
             thread.status==Status::sleeping || thread.status==Status::waiting || thread.status==Status::delayed ? 4U : current_==id ? 1U : 2U;
         const auto wait_type=thread.status==Status::sleeping ? 1U : thread.status==Status::waiting ? static_cast<std::uint32_t>(thread.wait_kind) : thread.status==Status::delayed ? 2U : 0U;

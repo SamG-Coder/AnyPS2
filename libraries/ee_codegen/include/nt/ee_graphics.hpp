@@ -2,6 +2,7 @@
 #include <nt/ee_native.hpp>
 #include <nt/ee_clock.hpp>
 #include <optional>
+#include <algorithm>
 
 namespace nt::ee {
 // Native graphics lifecycle and nominal application display deadlines. These
@@ -14,13 +15,16 @@ public:
     Stop (*synchronize)(void*)=nullptr;
     // Optional drawing owner. Rejection must preserve that owner's state.
     Stop (*reset_drawing)(void*)=nullptr;
+    void* edge_context=nullptr;
+    void (*display_edge)(void*,bool)=nullptr;
+    void (*display_overflow)(void*)=nullptr;
     Stop configure(std::uint32_t interlace,std::uint32_t standard,std::uint32_t frame) {
         if (interlace!=1 || (standard!=2 && standard!=3) || frame>1) return Stop::unsupported_system;
         if (!synchronize) return Stop::unsupported_system;
         const auto ready=synchronize(context);
         if (ready!=Stop::budget) return ready;
         mode_=DisplayMode{interlace,standard,frame}; epoch_=clock_(); ticks_=0;
-        flags_=0; field_=0; events_=0;
+        flags_=0; field_=0; events_=0; edge_lost_=false;
         return Stop::budget;
     }
     const std::optional<DisplayMode>& mode() const { return mode_; }
@@ -64,6 +68,7 @@ public:
     }
     std::uint32_t poll() { advance(); const auto result=events_; events_=0; return result; }
     std::uint64_t resets() const { return resets_; }
+    bool edge_overflow() const { return edge_lost_; }
 private:
     static std::uint64_t edges(std::uint64_t ticks,std::uint32_t period,std::uint32_t offset) {
         return ticks<offset ? 0 : (ticks-offset)/period+1;
@@ -86,6 +91,25 @@ private:
         const auto period=mode_->standard==2 ? 525U : 625U;
         const auto blank=mode_->standard==2 ? 480U : 576U;
         const auto sync=mode_->standard==2 ? 487U : 582U;
+        if (display_edge) {
+            // Deliver chronological edges to native IOP subscribers. Bound
+            // catch-up work; the recipient reports overflow rather than losing
+            // callback completions silently.
+            auto start=(ticks_/period)*period+blank;
+            if (start<=ticks_) start+=period;
+            auto end=(ticks_/period+1)*period;
+            unsigned emitted=0;
+            while (std::min(start,end)<=ticks && emitted<258) {
+                const bool ending=end<start;
+                display_edge(edge_context,ending);
+                if (ending) end+=period; else start+=period;
+                ++emitted;
+            }
+            if (std::min(start,end)<=ticks) {
+                edge_lost_=true;
+                if (display_overflow) display_overflow(edge_context);
+            }
+        }
         if (ticks/2>ticks_/2) event(4);
         if (edges(ticks,period,blank)>edges(ticks_,period,blank)) events_|=1U<<2;
         if (edges(ticks,period,sync)>edges(ticks_,period,sync)) event(8);
@@ -94,6 +118,7 @@ private:
         ticks_=ticks;
     }
     NativeClock clock_;
+    bool edge_lost_=false;
     std::optional<DisplayMode> mode_;
     std::uint32_t mask_=0x7f00,flags_=0,field_=0,events_=0;
     std::uint64_t epoch_=0,ticks_=0,resets_=0;

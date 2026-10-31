@@ -1891,9 +1891,11 @@ the interrupt chain restores its interrupted context. Ordinary wakeups may
 preempt at the native service boundary. No host threads or PS2 instruction
 execution are created: all continuations execute compiled LLVM code.
 
-Sleep with no queued wakeup and no ready replacement still stops without retiring
-the syscall or changing the thread state. Native event-driven idle waiting is not
-yet implemented. This is an explicit limitation, not a successful simulated wait.
+An explicit native idle-pump owner permits sleep with no ready replacement. The
+event loop pumps external completions and display events, dispatches compiled
+interrupt handlers, and resumes only after a real wakeup. Idle polls do not retire
+guest operations. A bounded wait returns a resumable `thread_wait` diagnostic;
+without an owner, sleep still stops before changing the thread state.
 
 
 ### Counter selector handling and reference limitations

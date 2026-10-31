@@ -25,8 +25,32 @@ inline bool stack_callback_call(const Program& program,const Instruction& call) 
     }
     return false;
 }
+// An indirect call fed by a word load may use a dynamically populated registry.
+// Relocation candidates retain possible callees without proving the loaded value.
+inline bool loaded_callback_call(const Program& program,const Instruction& call) {
+    if (call.flow!=Flow::indirect_call) return false;
+    for (unsigned distance=8;distance<=48 && distance<=call.address;distance+=4) {
+        const auto found=program.instructions.find(call.address-distance);
+        if (found==program.instructions.end()) continue;
+        const auto& load=found->second;
+        if (load.operation!=Operation::load_word || load.operand!=call.source || load.source==29) continue;
+        const auto indexed=program.instructions.find(load.address-4);
+        if (indexed==program.instructions.end() || indexed->second.operation!=Operation::add ||
+            indexed->second.destination!=load.source || !indexed->second.source || !indexed->second.operand) continue;
+        Constants marker; marker.registers[call.source]=constant(1);
+        bool valid=true;
+        for (auto pc=load.address+4;pc<call.address;pc+=4) {
+            const auto at=program.instructions.find(pc);
+            if (at==program.instructions.end() ||
+                (at->second.flow!=Flow::sequential && at->second.flow!=Flow::conditional)) { valid=false; break; }
+            marker=transfer(at->second,std::move(marker));
+        }
+        if (valid && marker.registers[call.source]==constant(1)) return true;
+    }
+    return false;
+}
 inline std::set<std::uint32_t> stored_code_candidates(const Program& program,
-    const std::map<std::uint32_t,Constants>& states,std::span<const elf::IopModule> modules) {
+    const std::map<std::uint32_t,Constants>& states,std::span<const elf::IopModule> modules,bool include_arguments=true) {
     std::set<std::uint32_t> result;
     const auto add=[&](const Constant& values) {
         if (!values) return;
@@ -50,7 +74,7 @@ inline std::set<std::uint32_t> stored_code_candidates(const Program& program,
                 if (delay->second.operation==Operation::store_word) add(arguments.registers[delay->second.operand]);
                 arguments=transfer(delay->second,std::move(arguments));
             }
-            for (unsigned reg=4;reg<=7;++reg) add(arguments.registers[reg]);
+            if (include_arguments) for (unsigned reg=4;reg<=7;++reg) add(arguments.registers[reg]);
         }
         if (result.size()>256) return {};
     }

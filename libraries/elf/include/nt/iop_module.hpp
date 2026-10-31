@@ -14,6 +14,8 @@ struct IopModule {
     Bytes memory;
     std::uint32_t initialized_size = 0;
     std::optional<IopModuleInfo> info;
+    // Relocated data words that explicitly take an address inside module text.
+    std::vector<std::uint32_t> code_addresses;
 };
 // Prepare a relocatable IRX in private storage. The caller owns allocation,
 // import binding and execution; errors never partially modify guest RAM.

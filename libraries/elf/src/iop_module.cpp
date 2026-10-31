@@ -82,7 +82,11 @@ IopModule load_iop_module(ByteView file, std::uint32_t base) {
             if (target%4 || target>size || size-target<4) invalid("relocation target outside file-backed segment");
             const auto word=le32(result.memory,target);
             switch (kind) {
-            case 2: put32(result.memory,target,word+base); break;
+            case 2:
+                put32(result.memory,target,word+base);
+                if (result.info && word%4==0 && word<result.info->text_size)
+                    result.code_addresses.push_back(word+base);
+                break;
             case 4:
                 put32(result.memory,target,(word&0xfc000000U)|(((word&0x03ffffffU)+(base>>2))&0x03ffffffU));
                 break;
