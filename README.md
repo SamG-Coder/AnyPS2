@@ -485,8 +485,12 @@ Compiled synthetic programs verify this path. Private GT4 startup now passes
 performance-counter configuration and recovered object/switch-table calls, then
 accepts split GIF image transfers and schedules native threads through sleep and
 wakeup. Disc-backed CD/DVD RPC initialization now succeeds; the current native
-run reaches an unsupported SIF IOP-reset command. Unmeasured counter reads also
-remain unresolved and stop explicitly; no measurement values are fabricated. Native GT4 boot
+run completes the linked IOP reset and PADMAN initialization, then reaches an
+unmeasured performance-counter read in the EE interrupt path. The explicit
+`--native-thread-cycles` option supplies real Windows thread-cycle measurements
+with different native profiling semantics; the following cache-miss read still
+stops as unavailable. See [native measurement limitations](docs/ee-native.md#explicit-native-thread-cycle-profiling).
+No measurement values are fabricated. Native GT4 boot
 has not been established.
 
 Scalar, V2, masked V3 and V4 uploads in 32-, 16- and 8-bit formats,

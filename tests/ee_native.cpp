@@ -2,6 +2,7 @@
 #include <nt/ee_services.hpp>
 #include <nt/ee_timers.hpp>
 #include <nt/ee_platform.hpp>
+#include <nt/ee_performance.hpp>
 #include <iostream>
 #include <stdexcept>
 #include <array>
@@ -26,6 +27,57 @@ void run_ee_batch_tests();
 void run_ee_file_rpc_tests();
 int main() {
     try {
+        {
+            // Execute original LLVM counter transfers against deterministic
+            // samples; these samples are test input, never a runtime fallback.
+            std::uint64_t sample=100;
+            bool available=true;
+            nt::ee::NativeThreadCycles cycles([&]() -> std::optional<std::uint64_t> {
+                if (!available) return std::nullopt;
+                return sample;
+            });
+            nt::ee::Memory memory; cycles.attach(memory);
+            nt::runtime::State state; state.pc=0x147c;
+            state.gpr[8].lo=0x8003783eU; // all-mode cycles plus unsupported cache event
+            state.gpr[9].lo=0xfffffff0U; state.gpr[10].lo=29;
+            check(nt_ee_generated_run(&state,&memory,4)==nt::ee::Stop::budget);
+            sample+=32;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.gpr[12].lo==16);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system &&
+                  state.pc==0x1490 && state.executed==5 &&
+                  cycles.error()==nt::ee::NativeThreadCycles::Error::unavailable_event);
+            // Failed acquisition must not consume a transfer or mutate values.
+            state.pc=0x148c; available=false;
+            const auto before=memory.performance.counters[0];
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system &&
+                  memory.performance.counters[0]==before && state.executed==5);
+            available=true; sample=1;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system &&
+                  cycles.error()==nt::ee::NativeThreadCycles::Error::regressed_sample);
+            sample=140;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.gpr[12].lo==24);
+            // Disable latches the real count, but does not erase an unmeasured
+            // cache interval. Explicit disabled writes recover counter state.
+            state.pc=0x147c; state.gpr[8].lo=0;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+            state.pc=0x1490;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system);
+            state.pc=0x1498;
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall &&
+                  memory.performance.control==0 && memory.performance.counters[0]==0);
+            state.pc=0x148c; sample+=10000;
+            check(nt_ee_generated_run(&state,&memory,2)==nt::ee::Stop::budget &&
+                  state.gpr[12].lo==0 && state.gpr[13].lo==0);
+            state.pc=0x147c; state.gpr[8].lo=0x80000024U;
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::unsupported_system &&
+                  state.pc==0x148c); // no mode attribution from the read's mode
+            nt::ee::Memory existing;
+            existing.performance.control=0x8000003eU;
+            nt::ee::NativeThreadCycles late([&] { return std::optional<std::uint64_t>(sample); });
+            late.attach(existing); state={}; state.pc=0x148c;
+            check(nt_ee_generated_run(&state,&existing,1)==nt::ee::Stop::unsupported_system &&
+                  !state.executed); // attaching cannot recover unmeasured history
+        }
         {
             std::vector<std::uint8_t> ram(0x10000);
             nt::ee::Memory memory{ram.data(),ram.size()}; nt::runtime::State state;

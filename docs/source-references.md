@@ -1491,3 +1491,14 @@ public event classification and `R5900.h` control fields. The independent native
 implementation recognizes explicit selector disable without adopting PCSX2's
 virtual-cycle accumulation or unsupported-event zero approximation. Regression
 fixtures execute original counter transfers compiled through LLVM.
+
+The explicit native thread-cycle policy uses Microsoft's public Windows API
+contracts, consulted 2026-10-31:
+- https://learn.microsoft.com/en-us/windows/win32/api/realtimeapiset/nf-realtimeapiset-querythreadcycletime
+- https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-enablethreadprofiling
+
+The original adapter measures owner-thread CPU cycles including native kernel
+and user work, without frequency scaling. Windows warns against converting this
+quantity to elapsed time. Hardware-counter profiling requires configured counters;
+unconfigured zero readings are not accepted as measurements. No Microsoft
+implementation code or additional driver is incorporated.

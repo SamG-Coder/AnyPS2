@@ -1,6 +1,7 @@
 #include <nt/ee_native.hpp>
 #include <nt/ee_interrupts.hpp>
 #include <nt/ee_completions.hpp>
+#include <nt/ee_performance.hpp>
 extern "C" std::uint64_t nt_ee_performance(nt::ee::Memory* memory,std::uint32_t operation,
     std::uint32_t counter,std::uint32_t value,std::uint32_t execution_mode) {
     using namespace nt::ee;
@@ -17,15 +18,12 @@ extern "C" std::uint64_t nt_ee_performance(nt::ee::Memory* memory,std::uint32_t 
         // disabling counting does not recover a value that was never measured.
         auto unavailable=memory->metrics.unavailable_counters;
         const auto active=[](std::uint32_t control) -> std::uint8_t {
-            if (!(control&0x80000000U)) return 0;
             std::uint8_t mask=0;
             for (unsigned index=0;index<2;++index) {
-                const auto event=(control>>(5+10*index))&31U;
                 // Selector 16 explicitly disables an individual counter. The
                 // primary counter also has an unused zero selector. Reserved
                 // selectors remain unknown rather than acquiring semantics.
-                if (event==16 || (!index && !event)) continue;
-                if (control&(0x1eU<<(10*index))) mask|=1U<<index;
+                if (performance_active(control,index)) mask|=1U<<index;
             }
             return mask;
         };

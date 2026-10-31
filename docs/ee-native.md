@@ -1961,3 +1961,30 @@ ISO with no transfer returns command-complete for the blocking and polling
 modes, and status byte `0x40` for the status query. A closed session polls as
 not ready. The blocking mode does not wait, because there is no transfer to
 finish.
+
+## Explicit native thread-cycle profiling
+
+The native executable accepts `--native-thread-cycles` to opt into host CPU-cycle
+measurements through Windows `QueryThreadCycleTime`. This replaces all-mode cycle
+profiling with measured CPU work on the native owner thread, including native
+services and Windows kernel work on that thread. It is not an R5900 cycle model,
+wall-clock time, or a conversion to PS2 frequency. It can affect applications
+which interpret profiling values as console time; no such equivalence is claimed.
+The default remains strict and stops on unmeasured active reads.
+
+The provider supports event 1 only when all four guest mode enables are set.
+Mode-selective counters and other events remain unavailable: the mode at a read
+cannot attribute an earlier interval. Unsupported intervals remain unavailable
+across disable/reconfigure operations until an explicit counter write resets
+that history. Disabled counters retain their written or measured values. Counter
+addition wraps at the guest 32-bit width. Missing or regressed samples stop without
+retiring the transfer or committing counter state. Attaching to an already active
+counter does not recover measurements from before attachment.
+
+The real GT4 integration passes the first cycle read with this policy, then stops
+at the following instruction-cache-miss read. No cache values are substituted.
+This is three additional retired EE operations, not a frame or a completed wakeup.
+The native dependency audit still passes. Compiled synthetic transfer tests cover
+wraparound, unavailable events, disable/reset, failed/regressed acquisition,
+mode restrictions and late attachment. Live cache collection remains unresolved;
+ETW source enumeration is not proof of a valid measurement.

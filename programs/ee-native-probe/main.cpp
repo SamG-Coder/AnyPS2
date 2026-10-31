@@ -5,6 +5,13 @@
 #include <nt/binary.hpp>
 #include <nt/ee_file_rpc.hpp>
 #include <nt/ee_cdvd_rpc.hpp>
+#include <nt/ee_performance.hpp>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include <memory>
 #include <nt/vulkan_renderer.hpp>
 #include <nt/native_drawing.hpp>
@@ -12,6 +19,7 @@
 #include <iostream>
 #include <fstream>
 #include <stdexcept>
+#include <thread>
 #ifdef ANYPS2_NATIVE_IOP
 #include "iop_reset.hpp"
 #endif
@@ -90,7 +98,7 @@ nt::ee::Stop execute(nt::runtime::State* state,nt::ee::Memory* memory,std::uint6
 }
 int main(int argc,char** argv) {
     if (argc<2) {
-        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--disc <image.iso>] [--capture-vu <new-private-directory>] [--capture-stop <new-private-directory>]\n";
+        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--native-thread-cycles] [--disc <image.iso>] [--capture-vu <new-private-directory>] [--capture-stop <new-private-directory>]\n";
 #ifdef ANYPS2_NATIVE_IOP
         std::cerr<<"Linked IOP investigation: --probe-iop-reset <module.data> (stops without acknowledging reset)\n";
         std::cerr<<"Explicit selected-bundle execution: --iop-reset-session <module.data> --disc <image.iso>\n";
@@ -100,13 +108,14 @@ int main(int argc,char** argv) {
     try {
         std::uint64_t budget=1000000;
         std::filesystem::path disc,capture_directory,stop_directory;
-        bool has_budget=false;
+        bool has_budget=false,native_cycles=false;
 #ifdef ANYPS2_NATIVE_IOP
         std::filesystem::path iop_data;
         bool iop_session=false;
 #endif
         for (int index=2;index<argc;++index) {
             const std::string_view text=argv[index];
+            if (text=="--native-thread-cycles") { native_cycles=true; continue; }
             if (text=="--trace-services") { trace_services=true; continue; }
 #ifdef ANYPS2_NATIVE_IOP
             if (text=="--probe-iop-reset" || text=="--iop-reset-session") {
@@ -143,6 +152,19 @@ int main(int argc,char** argv) {
             throw std::runtime_error("Converted program data mismatch");
         ram.resize(0x2000000,0);
         nt::ee::Memory memory{ram.data(),ram.size()};
+        const auto owner_thread=std::this_thread::get_id();
+        nt::ee::NativeThreadCycles cycles([owner_thread]() -> std::optional<std::uint64_t> {
+            if (std::this_thread::get_id()!=owner_thread) return std::nullopt;
+#ifdef _WIN32
+            ULONG64 value=0;
+            if (QueryThreadCycleTime(GetCurrentThread(),&value)) return value;
+#endif
+            return std::nullopt;
+        });
+        if (native_cycles) {
+            cycles.attach(memory);
+            std::cout<<"metrics=native-thread-cycles units=host-cpu-cycles includes=native-services cache-events=unsupported\n";
+        }
         NativeGpu gpu;
         nt::ee::NativePlatform platform; platform.attach(memory);
         platform.packet_setup.graphics={&gpu,NativeGpu::submit,[](void* raw) {
@@ -246,6 +268,8 @@ int main(int argc,char** argv) {
                      <<" metric_operation="<<static_cast<unsigned>(memory.metrics.rejected_operation)
                      <<" metric_counter="<<static_cast<unsigned>(memory.metrics.rejected_counter);
         }
+        if (native_cycles) std::cout<<" native_metric_samples="<<cycles.samples()
+            <<" native_metric_error="<<static_cast<unsigned>(cycles.error());
         if (stop==nt::ee::Stop::unmapped_code && state.gpr[3].lo==0x74)
             std::cout<<" requested_syscall="<<state.gpr[4].lo
                      <<" uncompiled_handler="<<nt::hex32(static_cast<std::uint32_t>(state.gpr[5].lo));
