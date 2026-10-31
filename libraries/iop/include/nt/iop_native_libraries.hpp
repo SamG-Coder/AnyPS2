@@ -51,6 +51,14 @@ public:
         if (!selected || ordinal>=selected->functions.size()) return {};
         return selected->functions[ordinal];
     }
+    std::optional<std::uint32_t> declaration_for_entry(std::string_view name,unsigned major,std::uint32_t entry) const {
+        const auto address=ram_offset(entry,4,0x200000);
+        if (!address) return {};
+        for (const auto& library:libraries_)
+            if (library.name==name && (library.version>>8)==major && !library.functions.empty() && library.functions.front()==*address)
+                return library.address;
+        return {};
+    }
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
         if (request.kind==NativeServiceKind::library_call) {
             const auto site=ram_offset(request.call_site,4,0x200000);

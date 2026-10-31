@@ -1126,7 +1126,29 @@ int main(int argc,char** argv) {
             try { nt::iop_codegen::ir::discover(overwritten,roots); } catch (const std::runtime_error&) { rejected=true; }
             if (!rejected) throw std::runtime_error("Unknown overwrite retained a returned callback relationship");
         }
-        const std::array bundle{module,provider,dispatch,factories,pointers,display,registry_client};
+        nt::elf::IopModule sound{0x13000,0x13100,nt::Bytes(0x300),0x300,{}};
+        fixture::put32(sound.memory,0,0x41c00000); fixture::put32(sound.memory,8,0x104);
+        constexpr char sound_name[]="libsd";
+        std::copy(std::begin(sound_name),std::end(sound_name),sound.memory.begin()+12);
+        for (unsigned ordinal=0;ordinal<28;++ordinal) {
+            const auto offset=0x100+(ordinal==3 ? 1U : ordinal)*8;
+            fixture::put32(sound.memory,20+ordinal*4,sound.base+offset);
+            fixture::put32(sound.memory,offset,0xfc000000); // Must never decode a replaced public entry.
+        }
+        {
+            const auto replaced=nt::iop_codegen::ir::discover(sound);
+            if (replaced.instructions.size()!=27 || replaced.instructions.at(0x13100).immediate!=0x150000)
+                throw std::runtime_error("Native sound public entries were not lowered to service calls");
+            auto invalid=sound; fixture::put32(invalid.memory,8,0x204);
+            bool rejected=false;
+            try { nt::iop_codegen::ir::discover(invalid); } catch (const std::runtime_error&) { rejected=true; }
+            if (!rejected) throw std::runtime_error("Unknown sound ABI accepted a native replacement");
+            rejected=false;
+            const std::array private_entry{0x132f0U};
+            try { nt::iop_codegen::ir::discover(sound,private_entry); } catch (const std::runtime_error&) { rejected=true; }
+            if (!rejected) throw std::runtime_error("Native sound replacement exposed private console implementation code");
+        }
+        const std::array bundle{module,provider,dispatch,factories,pointers,display,registry_client,sound};
         {
             auto overwritten=bundle; fixture::put32(overwritten[3].memory,0x330,0x00a02021);
             bool rejected=false;
@@ -1176,7 +1198,7 @@ int main(int argc,char** argv) {
             if (!failed_bundle || !partial.str().empty()) throw std::runtime_error("Invalid bundle emitted partial native code");
         }
         // Earlier owners must be revisited when a later module discovers a callback.
-        const std::array reversed{provider,module,dispatch,factories,pointers,display,registry_client};
+        const std::array reversed{provider,module,dispatch,factories,pointers,display,registry_client,sound};
         std::ostringstream reverse_code;
         nt::iop_codegen::emit_bundle(reverse_code,reversed,bundle_roots);
         for (const auto target : {0xa061U,0xa080U,0xb800U}) {
@@ -1212,7 +1234,7 @@ int main(int argc,char** argv) {
             put(0x8800,0x00401821);
             put(first+(count-2)*4,0x03e00008); put(first+(count-1)*4,0);
             std::vector<std::uint32_t> roots=bundle_roots; roots.push_back(first);
-            const std::array large_bundle{large,provider,dispatch,factories,pointers,display,registry_client};
+            const std::array large_bundle{large,provider,dispatch,factories,pointers,display,registry_client,sound};
             std::ostringstream llvm; nt::iop_codegen::emit_bundle(llvm,large_bundle,roots);
             const auto text=llvm.str();
             nt::write_file(argv[3],nt::ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));

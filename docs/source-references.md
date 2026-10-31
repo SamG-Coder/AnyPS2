@@ -352,6 +352,16 @@ with host-owned metadata and real guest-sysmem backing, rather than copying the
 linked-list implementation or a proprietary heap layout. Private chunk-helper
 exports are not implemented. The Play! heaplib reference was inspected but its
 placeholder-handle implementation is not used.
+
+The same pinned PS2SDK LIBSD export table, `libsd-common.h` and initialization
+interface were consulted for public ordinals, two cores of 24 voices, and voice
+reset on both initialization modes. No sound-hardware implementation is copied.
+Windows output uses the Windows SDK XAudio2 API, following Microsoft's
+[initialization contract](https://learn.microsoft.com/en-us/windows/win32/xaudio2/how-to--initialize-xaudio2)
+and [mastering-voice contract](https://learn.microsoft.com/en-us/windows/win32/api/xaudio2/nf-xaudio2-ixaudio2-createmasteringvoice).
+The backend creates a stereo 48 kHz output and stopped mono PCM voices. It does not
+yet implement sample upload, ADPCM playback, pitch/volume controls or effects;
+those LIBSD requests remain explicit unsupported boundaries.
 Startup planning uses the public import/export version fields and loadcore's
 major/minor version organization. Its minimum-minor and ordinal checks are a
 conservative static policy, not a complete implementation of loadcore's runtime

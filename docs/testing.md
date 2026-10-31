@@ -16,6 +16,15 @@ Jump-table regressions compile and execute stack spills between a range comparis
 and its branch, and saved table bases with the index shift after the branch delay
 slot. They reject unknown index overwrites, malformed tables and runtime targets
 outside the generated candidate set.
+Native sound fixtures compile public library entries to service stubs while
+rejecting unknown ABI revisions and private implementation roots. Injected audio
+owners exercise failed device creation, invalid registration rollback, cold/warm
+voice initialization, cleanup and unsupported operations. Actual Windows device
+creation is checked separately in opt-in commercial startup; these fixtures do
+not claim audible playback.
+With `-DANYPS2_TEST_AUDIO_DEVICE=ON`, `native-audio-device` opens the actual Windows
+device, creates 48 stopped PCM voices, reinitializes them, closes and reopens the
+device. It submits no sample data and fails if device creation is unavailable.
 
 Native serial integration fixtures execute generated LLVM through the service
 router. They cover configuration, cached aliases, interrupt acknowledgment,

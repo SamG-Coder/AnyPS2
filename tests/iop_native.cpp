@@ -2,6 +2,7 @@
 #include <nt/iop_native_serial.hpp>
 #include <nt/iop_native_hard_timers.hpp>
 #include <nt/iop_native_vblank.hpp>
+#include <nt/iop_native_sound.hpp>
 #include <nt/iop_native_heap.hpp>
 #include <nt/iop_native_heaplib.hpp>
 #include <nt/iop_native_libraries.hpp>
@@ -63,10 +64,62 @@ public:
             request.arguments[0]+request.arguments[1]+request.arguments[2]+request.arguments[3]};
     }
 };
+class FixtureAudio final : public nt::audio::Output {
+public:
+    bool allow_open=false,allow_initialize=true,opened=false;
+    unsigned count=0,initializations=0;
+    bool open() override { return opened=allow_open; }
+    bool initialize(bool) override {
+        if (!allow_initialize || !open()) return false;
+        count=48; ++initializations; return true;
+    }
+    void close() override { opened=false; count=0; }
+    bool ready() const override { return opened; }
+    unsigned voices() const override { return count; }
+    std::uint32_t error() const override { return allow_open ? 0U : 1U; }
+};
 }
 int main() {
     try {
         using namespace nt::iop;
+        {
+            std::vector<std::uint8_t> data(0x20000);
+            NativeLibrarySpec declaration{0x13000,0x104,"libsd",{}};
+            store_native_word(data,0x13000,0x41c00000); store_native_word(data,0x13008,0x104);
+            const std::string name="libsd";
+            std::copy(name.begin(),name.end(),data.begin()+0x1300c);
+            for (unsigned ordinal=0;ordinal<28;++ordinal) {
+                const auto entry=0x13100+(ordinal==3 ? 1U : ordinal)*8;
+                declaration.functions.push_back(entry); store_native_word(data,0x13014+ordinal*4,entry);
+            }
+            NativeLibraryServices libraries({declaration});
+            FixtureAudio output;
+            NativeSoundServices sound(libraries,output);
+            const auto call=[&](unsigned ordinal,unsigned argument=0) {
+                auto cpu=initial(); cpu.pc=declaration.functions.at(ordinal); cpu.registers[4]=argument;
+                const auto stop=run_native(nt_iop_generated_run,cpu,data,32,&sound);
+                return std::pair{stop,cpu};
+            };
+            const auto failed=call(0);
+            check(failed.first.reason==NativeStop::import_request && !failed.second.executed &&
+                  !libraries.resolve("libsd",0x104,4) && !output.ready(),"Sound startup fabricated a working device");
+            output.allow_open=true;
+            store_native_word(data,0x13008,0x105);
+            check(call(0).first.reason==NativeStop::import_request && !output.ready(),"Invalid sound declaration retained a native device");
+            store_native_word(data,0x13008,0x104);
+            check(call(0).first.reason==NativeStop::unmapped_code && output.ready() && !output.voices() &&
+                  libraries.resolve("libsd",0x104,4)==0x13120,"Native sound startup failed to register after opening its device");
+            check(call(4).first.reason==NativeStop::unmapped_code && output.voices()==48 && output.initializations==1,
+                  "Compiled sound initialization did not allocate native voices");
+            check(call(4,1).first.reason==NativeStop::unmapped_code && output.initializations==2,"Warm initialization did not reset native voices");
+            const auto snapshot=data;
+            check(call(5).first.reason==NativeStop::import_request && data==snapshot && output.initializations==2,
+                  "Unimplemented sound operation returned success or changed state");
+            check(call(4,2).first.reason==NativeStop::import_request && output.initializations==2,"Unsupported sound mode changed output");
+            output.allow_initialize=false;
+            check(call(4).first.reason==NativeStop::import_request && output.initializations==2,"Failed voice allocation fabricated completion");
+            check(call(2).first.reason==NativeStop::unmapped_code && !output.ready() && !output.voices(),"Sound quit retained native resources");
+        }
         {
             std::vector<std::uint8_t> data(0x10000);
             NativeModloadServices loader;

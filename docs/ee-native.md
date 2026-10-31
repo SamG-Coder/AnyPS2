@@ -2251,3 +2251,12 @@ are compiled by their owning module. These are compilation candidates, not proof
 that mutable registry values are constant. Actual loads and calls execute as LLVM
 AOT code and reject destinations outside their compiled candidate sets. No runtime
 decoder or additional pointer lookup table is introduced.
+
+Validated LIBSD 1.x export tables lower to LLVM entry stubs calling native sound
+services. Private sound-hardware routines are not compiled into this replacement.
+Module startup opens a Windows XAudio2 mastering voice before registering the
+library; a failed device open or declaration validation cannot report residency.
+Sound initialization creates 48 stopped mono PCM source voices and reinitialization
+resets them. Quit and IOP reset release native resources. The output is stereo
+48 kHz. Playback, transfers, mixing controls and effects are unfinished and stop
+explicitly. Device creation is not evidence of game audio playback.

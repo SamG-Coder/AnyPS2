@@ -65,6 +65,7 @@ public:
     std::uint32_t last_server() const { return last_server_; }
     bool cdvd_initialized() const { return state_->cdvd && state_->cdvd->initialized(); }
     const nt::iop::NativeSerialServices& serial() const { return state_->services->serial(); }
+    const nt::audio::Output& audio() const { return *state_->services->audio_output; }
     const auto& rejected_transfer() const { return state_->services->sif.rejected_transfer(); }
     std::uint32_t cdvd_command() const { return state_->scmd ? state_->scmd->last_method() : 0; }
     std::uint32_t cdvd_media() const { return state_->cdvd ? state_->cdvd->media_mode() : 0; }

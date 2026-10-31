@@ -343,7 +343,10 @@ int main(int argc,char** argv) {
                      <<" load_decision="<<iop_reset->load_decision()
                      <<" load_bytes="<<iop_reset->load_bytes()
                      <<" load_hash="<<iop_reset->load_hash()
-                     <<" load_path="<<iop_reset->load_path()<<'\n';
+                     <<" load_path="<<iop_reset->load_path()
+                     <<" native_audio_ready="<<iop_reset->audio().ready()
+                     <<" native_audio_voices="<<iop_reset->audio().voices()
+                     <<" native_audio_error="<<iop_reset->audio().error()<<'\n';
             if (const auto& transfer=iop_reset->rejected_transfer())
                 std::cout<<"sif_rejected_descriptor="<<transfer->index
                          <<" source="<<nt::hex32(transfer->source)<<" destination="<<nt::hex32(transfer->destination)

@@ -4,6 +4,7 @@
 #include "loaded_pointers.hpp"
 #include "returned_addresses.hpp"
 #include "stack_callbacks.hpp"
+#include "native_library.hpp"
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -236,6 +237,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
     if (module.base%4 || extent%4 || extent>module.memory.size() || extent>module.initialized_size ||
         module.base>=0x200000 || extent>0x200000-module.base)
         throw std::runtime_error("IOP conversion: invalid executable extent");
+    if (auto replacement=native_library(module,entries)) return *replacement;
     Program program; program.entry=module.entry;
     std::map<std::uint32_t,Instruction> native_imports;
     std::ostringstream unresolved;
