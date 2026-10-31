@@ -14,6 +14,10 @@
 #include <nt/iop_native_rpc_data.hpp>
 #include <nt/iop_native_stdio.hpp>
 #include <nt/iop_native_modload.hpp>
+#include <nt/iop_native_dmacman.hpp>
+#include <nt/iop_native_serial.hpp>
+#include <nt/iop_native_cdvdman.hpp>
+#include <nt/iop_native_secrman.hpp>
 #include <nt/iop_native_archive.hpp>
 #include <memory>
 
@@ -42,7 +46,8 @@ public:
           interrupts(layout.interrupt_stack,&callbacks),sif_control(interrupts,&sif),threads(interrupts,&heap),
           rpc_servers(peer_.get(),&threads),rpc_data(peer_.get()),events(&threads),semaphores(&threads),mailboxes(&threads),
           system(events,boot,ram),command_session(events,system,sif_control,peer_.get()),stdio(std::move(output)),
-          disc_service(disc.empty() ? nullptr : std::make_unique<NativeDiscServices>(disc,&descriptors,&events)),router(providers()),arena_(ram),packet_buffer_(layout.packet_buffer) {
+          disc_service(disc.empty() ? nullptr : std::make_unique<NativeDiscServices>(disc,&descriptors,&events)),
+          dmacman_(dmac_priority_),router(providers()),arena_(ram),packet_buffer_(layout.packet_buffer) {
         inbound.connect(commands,command_session,sif_control,&rpc_servers);
         modload.attach_heap(heap);
         if (!disc.empty()) modload.attach_disc(disc);
@@ -81,6 +86,8 @@ public:
     NativeBootServices boot; // Empty until the owner supplies real boot metadata.
     NativeModloadServices modload;
     NativeAlarmServices alarms;
+    NativeCdvdmanServices cdvdman;
+    NativeSecrmanServices secrman;
     NativeSifTransfers sif;
 private:
     std::unique_ptr<NativeSifCommandEndpoint> peer_;
@@ -111,11 +118,14 @@ private:
     std::vector<NativeServices*> providers() {
         std::vector<NativeServices*> result{&boot_callbacks,&heaplib,&prnt,&sysclib,&drivers,&driver_files,&archives,&heap,&libraries,
             &boot,&modload,&interrupts,&events,&semaphores,&mailboxes,&threads,&system,&alarms,&sif,&sif_control,&stdio,
-            &commands,&command_session,&rpc_servers,&rpc_data};
+            &commands,&command_session,&rpc_servers,&rpc_data,&dmacman_,&cdvdman,&secrman,&serial_};
         if (disc_service) result.push_back(disc_service.get());
         return result;
     }
     std::unique_ptr<NativeDiscServices> disc_service;
+    DmacPriorityState dmac_priority_;
+    NativeDmacmanServices dmacman_;
+    NativeSerialServices serial_;
     NativeServiceRouter router;
     std::span<std::uint8_t> arena_;
     std::uint32_t packet_buffer_;

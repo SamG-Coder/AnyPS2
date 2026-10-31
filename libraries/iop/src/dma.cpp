@@ -30,10 +30,6 @@ bool DmaController::signal_completion(unsigned channel) {
     if ((value&(1U<<(16+index))) || channel==9 || channel==10) value|=1U<<(24+index);
     return true;
 }
-std::optional<std::uint32_t> DmaController::channel_register(unsigned channel,unsigned offset) {
-    if (channel>=13 || offset%4 || offset>12 || (offset==12 && channel!=4 && channel!=9)) return {};
-    return (channel<7 ? 0x1f801080+channel*16 : 0x1f801500+(channel-7)*16)+offset;
-}
 std::optional<std::uint32_t> DmaController::read(std::uint32_t address,unsigned bytes) const {
     if ((bytes!=2 && bytes!=4) || address%bytes) return {};
     if (address==0x1f8010f0 && bytes==4) return priority_;

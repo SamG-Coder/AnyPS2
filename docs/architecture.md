@@ -686,7 +686,11 @@ measurements. Other active events and overflow exceptions remain explicit stops.
    returns, software interrupts and precise interrupt timing remain unsupported.
    RAM access and device access are separate. An optional IOP device interface
    receives aligned physical addresses after alias translation; unsupported
-   accesses fault without retiring the instruction. The reboot context owns a
+   accesses fault without retiring the instruction. Compiled word accesses in
+   the public SIO2 block return typed requests to a session-owned native serial
+   service. Unsupported transfers, FIFO and response accesses stop without
+   retirement. Configuration and reset preserve session ownership and instruction
+   delay semantics; generated code has no mutable SIO2 bank. The reboot context owns a
    persistent bootstrap-device instance. It currently retains word accesses to
    ICFG at 0x1f801450 in PS2 mode and DMA control at 0x1f801578. PS1 mode and
    other registers remain unsupported. DMA control stores enable/disable state;
@@ -1403,6 +1407,9 @@ The descriptor, bounded name and first two operation pointers are validated
 before dispatch. Initializer and teardown targets must already be compiled.
 Constant AddDrv descriptors and their operation tables in initialized module
 images seed both private lifecycle roots, including across bundle modules.
+A direct call into a host import keeps the caller's saved registers and forgets
+caller-saved registers and stack-memory constants, so a descriptor held in a
+saved register across that import still seeds the operation table.
 
 AddDrv saves a caller continuation, invokes init(device), and publishes only on
 nonnegative return. Negative initialization returns -1 without a registration.
@@ -1833,6 +1840,10 @@ words are retained; overlapping writes invalidate candidates and unknown-address
 stores clear tracked stack memory. Calls reset continuation knowledge. These are
 compilation candidates only: runtime creation still requires a compiled entry,
 and mutable loads are never promoted into indirect-call proofs.
+When merged caller states lose the stack origin, direct CreateThread calls also
+replay at most 64 preceding straight-line instructions with a fresh symbolic
+stack. This retains locally constructed descriptor entries without assuming
+that arbitrary caller memory or register values are known.
 
 The converter recognizes bounded unsigned switch dispatch through a scaled
 index, constant upper address, word table load and register jump or call. The

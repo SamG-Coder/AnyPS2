@@ -5,7 +5,7 @@
 
 namespace nt::iop {
 // Values are also the generated LLVM function's C ABI return codes.
-enum class NativeStop : std::uint32_t { budget=0, unmapped_code=1, address_fault=2, branch_in_delay=3, code_write=4, guest_break=5, service_request=6, overflow=8, import_request=9, thread_yield=10, thread_wait=11 };
+enum class NativeStop : std::uint32_t { budget=0, unmapped_code=1, address_fault=2, branch_in_delay=3, code_write=4, guest_break=5, service_request=6, overflow=8, import_request=9, thread_yield=10, thread_wait=11, serial_request=12 };
 struct NativeResult { NativeStop reason; std::uint32_t pc, address=0, trap_code=0; };
 using NativeEntry=NativeResult (*)(Cpu&,std::span<std::uint8_t>,std::uint64_t);
 enum class NativeModuleKind { compiled, archive };

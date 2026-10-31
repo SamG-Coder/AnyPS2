@@ -82,6 +82,41 @@ int main() {
         std::string output;
         NativeServiceContext context(iop_ram,{0xc000,0xcc00,0xce00,0xf000},{},{},
             [&](std::string_view text) { output+=text; return true; },{},&destination,0x6000,deliver);
+        {
+            const auto set=context.invoke({33,{12,5},NativeServiceKind::dmacman},iop_ram);
+            const auto enable=context.invoke({34,{12},NativeServiceKind::dmacman},iop_ram);
+            const auto read=context.invoke({17,{},NativeServiceKind::dmacman},iop_ram);
+            const auto slice=context.invoke({28,{12},NativeServiceKind::dmacman},iop_ram);
+            const auto start=context.invoke({32,{12},NativeServiceKind::dmacman},iop_ram);
+            const auto channel=context.invoke({4,{0,1},NativeServiceKind::dmacman},iop_ram);
+            const auto again=context.invoke({17,{},NativeServiceKind::dmacman},iop_ram);
+            require(set.status==NativeServiceStatus::returned && enable.status==NativeServiceStatus::returned &&
+                    read.status==NativeServiceStatus::returned && read.value==((5U|8U)<<20) &&
+                    slice.status==NativeServiceStatus::unavailable && start.status==NativeServiceStatus::unavailable &&
+                    channel.status==NativeServiceStatus::unsupported && again.status==NativeServiceStatus::returned &&
+                    again.value==read.value);
+            for (unsigned byte=0;byte<8;++byte) iop_ram[0xd400+byte]=0xab;
+            const auto clock=context.invoke({24,{0xd400},NativeServiceKind::cdvdman},iop_ram);
+            const auto bcd=[](std::uint8_t value) { return (value>>4)<=9 && (value&15)<=9; };
+            require(clock.status==NativeServiceStatus::returned && clock.value==1 &&
+                    iop_ram[0xd400]==0 && iop_ram[0xd404]==0 && (iop_ram[0xd406]&0x80)==0 &&
+                    bcd(iop_ram[0xd401]) && bcd(iop_ram[0xd402]) && bcd(iop_ram[0xd403]) &&
+                    bcd(iop_ram[0xd405]) && bcd(iop_ram[0xd406]) && bcd(iop_ram[0xd407]));
+            require(context.invoke({24,{0xd401},NativeServiceKind::cdvdman},iop_ram).status==NativeServiceStatus::address_fault);
+            require(context.invoke({25,{0xd400},NativeServiceKind::cdvdman},iop_ram).status==NativeServiceStatus::unsupported);
+            const auto command=context.invoke({4,{0x80001234},NativeServiceKind::secrman},iop_ram);
+            const auto device=context.invoke({5,{0x80005678},NativeServiceKind::secrman},iop_ram);
+            const auto auth=context.invoke({6,{2,0,1},NativeServiceKind::secrman},iop_ram);
+            require(command.status==NativeServiceStatus::returned && command.value==0 &&
+                    device.status==NativeServiceStatus::returned && device.value==0 &&
+                    auth.status==NativeServiceStatus::returned && auth.value==0 &&
+                    context.secrman.command_handler()==0x80001234 && context.secrman.device_handler()==0x80005678);
+            require(context.invoke({4,{0},NativeServiceKind::secrman},iop_ram).value==0 &&
+                    context.secrman.command_handler()==0 &&
+                    context.invoke({5,{0},NativeServiceKind::secrman},iop_ram).value==0 &&
+                    context.secrman.device_handler()==0);
+            require(context.invoke({8,{},NativeServiceKind::secrman},iop_ram).status==NativeServiceStatus::unsupported);
+        }
         auto& endpoint=*context.endpoint();
         auto& commands=context.commands;
         auto& inbound=context.inbound;

@@ -23,7 +23,7 @@ inline NativeResult run_llvm(Cpu& cpu,std::span<std::uint8_t> ram,std::uint64_t 
     cpu.load_register=state[35]; cpu.load_value=state[36];
     cpu.hi=state[38]; cpu.lo=state[39];
     const auto reason=static_cast<NativeStop>(stop);
-    const bool detail=reason==NativeStop::guest_break || reason==NativeStop::import_request;
+    const bool detail=reason==NativeStop::guest_break || reason==NativeStop::import_request || reason==NativeStop::serial_request;
     return {reason,cpu.pc,detail ? 0U : state[37],detail ? state[37] : 0U};
 }
 }

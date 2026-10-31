@@ -264,8 +264,17 @@ establish the module records and entry handoff fields. AnyPS2 constructs these
 data structures independently, using guest allocations and the supplied disc
 archive; it does not copy a firmware initialization routine. The manager module
 itself remains user-supplied data in ignored local storage.
-PS2SDK `common/include/iop_mmio_hwport.h` identifies the SBUS configuration
-register at 0x1f801450. PCSX2 `IopHw.h`, `ps2/Iop/IopHwRead.cpp`,
+PS2SDK `common/include/iop_mmio_hwport.h` identifies the SIO2 block at
+physical 0x1f808200 and the SBUS configuration register at 0x1f801450. Compiled
+word accesses use a session-owned native serial service. SEND configuration,
+control reads, reset writes and interrupt acknowledgment are supported. START,
+FIFO and response-status operations stop before retirement; no completion or
+peripheral response is invented. The public hardware reference
+https://psi-rockin.github.io/ps2tek/#sio2registers (consulted 2026-10-31)
+identifies START/reset bits and FIFO direction. The pinned PCSX2 `SIO/Sio2.cpp`
+and `SIO/SioTypes.h` were consulted for interface bits only; no code was copied.
+Generated LLVM returns typed access metadata rather than retaining global device
+state. PCSX2 `IopHw.h`, `ps2/Iop/IopHwRead.cpp`,
 `ps2/Iop/IopHwWrite.cpp` and `R3000AInterpreter.cpp` identify ICFG, its retained
 register storage and bit-3 PS1-mode use. The independent bootstrap device model
 supports aligned word accesses and rejects switching into PS1 mode.
@@ -307,8 +316,23 @@ IOP hardware register declarations corroborate the two channel banks and tag
 register locations. AnyPS2 independently maps these operations to shared C++
 device state. No SDK implementation is copied; unsupported transfer starts and
 DMA interrupt behavior remain explicit failures. Compiled imports bind the same
-register, priority and enable ordinals. sceSetSliceDMA and sceStartDMA bind as
+register, priority and enable ordinals when a full device set is supplied.
+The production service context supplies only the two priority words, so
+priority and enable ordinals retire and channel, control, and transfer
+ordinals stay unsupported. sceSetSliceDMA and sceStartDMA bind as
 unavailable stops and do not report a completed transfer.
+PS2SDK `thbase.h` declares `USec2SysClock` (ordinal 39) and `SysClock2USec`
+(ordinal 40). The native alarm service converts those values with its
+configured tick frequency and accepts both thread and interrupt context.
+A second count that does not fit in 32 bits stops before either output is
+written. `cdvdman.h` ordinal 24 is `sceCdReadClock`. The native provider
+writes the eight-byte `sceCdCLOCK` from the host clock in Japan standard
+time, BCD, with status and pad clear, and returns 1. A year outside
+2000–2099 stops before the write. Other cdvdman ordinals stay unsupported.
+`secrman.h` ordinals 4 and 5 store the memory-card command and device-id
+handlers, and a zero argument clears the stored pointer. Those handlers are
+not called. Ordinal 6 returns 0 because no card is authenticated. Download
+and card-data ordinals stay unsupported. No PS2SDK implementation is copied.
 The pinned PS2SDK heaplib public interface/export table and its open-source
 service define heap flags, return codes, eight-byte allocation accounting and
 growth/release behavior. AnyPS2 uses an independently written map-based allocator

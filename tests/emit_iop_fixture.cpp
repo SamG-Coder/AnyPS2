@@ -462,6 +462,64 @@ int main(int argc,char** argv) {
             catch (const std::runtime_error& error) { unresolved=std::string(error.what()).find("unresolved indirect")!=std::string::npos; }
             if (!unresolved || !partial.str().empty()) throw std::runtime_error("Call preserved a loaded pointer register");
         }
+        // A shared thread factory sees different caller stack depths. Its local
+        // descriptor must still retain the callback as a compilation candidate.
+        {
+            nt::elf::IopModule image{0xC0000,0xC0000,nt::Bytes(0x100),0x100,{}};
+            const auto put=[&](unsigned offset,std::uint32_t word) { fixture::put32(image.memory,offset,word); };
+            put(0,0x0080e821); // caller supplies an unknown stack origin
+            put(4,0x0c030010); put(8,0);
+            put(12,0x27bdffe0); put(16,0x0c030010); put(20,0); // different stack
+            put(24,0x03e00008); put(28,0);
+            put(0x40,0x27bdffd0); put(0x44,0x27a40010);
+            put(0x48,0x3c02000c); put(0x4c,0x244200e0);
+            put(0x50,0xafa20018); put(0x54,0x0c030025); put(0x58,0);
+            put(0x5c,0x03e00008); put(0x60,0);
+            put(0x80,0x41e00000); put(0x84,0); put(0x88,0x00000101);
+            put(0x8c,0x61626874); put(0x90,0x00006573);
+            put(0x94,0x03e00008); put(0x98,0x24000004);
+            put(0xe0,0x03e00008); put(0xe4,0x24020009);
+            const auto program=nt::iop_codegen::ir::discover(image);
+            if (!program.instructions.contains(0xC00E0))
+                throw std::runtime_error("Merged caller stacks hid a local thread descriptor");
+        }
+        // A host import keeps a descriptor that lives in a saved register.
+        // The following AddDrv receives it from the delay slot.
+        {
+            nt::elf::IopModule saved{0xA0000,0xA0000,nt::Bytes(0x100),0x100,{}};
+            const auto put=[&](unsigned pc,std::uint32_t word) { fixture::put32(saved.memory,pc-saved.base,word); };
+            put(0xA0000,0x3c10000a); put(0xA0004,0x26100080);
+            put(0xA0008,0x0c028015); put(0xA000c,0);
+            put(0xA0010,0x0c028017); put(0xA0014,0x02002021);
+            put(0xA0018,0x03e00008); put(0xA001c,0);
+            put(0xA0040,0x41e00000); put(0xA0044,0); put(0xA0048,0x00000101);
+            put(0xA004c,0x616d6f69); put(0xA0050,0x0000006e);
+            put(0xA0054,0x03e00008); put(0xA0058,0x24000015);
+            put(0xA005c,0x03e00008); put(0xA0060,0x24000014);
+            put(0xA0080,0x000a00a0); put(0xA0084,0x10); put(0xA0090,0x000a00b0);
+            put(0xA00a0,0x0000636d);
+            put(0xA00b0,0x000a00f0); put(0xA00b4,0x000a00f8);
+            put(0xA00f0,0x03e00008); put(0xA00f4,0);
+            put(0xA00f8,0x03e00008); put(0xA00fc,0);
+            const auto program=nt::iop_codegen::ir::discover(saved);
+            if (!program.instructions.contains(0xA00F0) || !program.instructions.contains(0xA00F8))
+                throw std::runtime_error("Host import dropped an AddDrv descriptor held in a saved register");
+        }
+        // A host import discards a pointer held in a caller-saved register.
+        {
+            nt::elf::IopModule temporary{0xB0000,0xB0000,nt::Bytes(0x80),0x80,{}};
+            const auto put=[&](unsigned pc,std::uint32_t word) { fixture::put32(temporary.memory,pc-temporary.base,word); };
+            put(0xB0000,0x3c08000b); put(0xB0004,0x25080060);
+            put(0xB0008,0x0c02c00d); put(0xB000c,0); put(0xB0010,0x01000008); put(0xB0014,0);
+            put(0xB0020,0x41e00000); put(0xB0024,0); put(0xB0028,0x00000101);
+            put(0xB002c,0x616d6f69); put(0xB0030,0x0000006e);
+            put(0xB0034,0x03e00008); put(0xB0038,0x24000015);
+            put(0xB0060,0x03e00008); put(0xB0064,0);
+            std::ostringstream partial; bool unresolved=false;
+            try { nt::iop_codegen::emit_llvm(partial,temporary); }
+            catch (const std::runtime_error& error) { unresolved=std::string(error.what()).find("unresolved indirect")!=std::string::npos; }
+            if (!unresolved || !partial.str().empty()) throw std::runtime_error("Host import preserved a caller-saved pointer");
+        }
         // A partial store overlaps the loaded word and rejects an otherwise valid pointer.
         {
             nt::elf::IopModule partial_store{0x30000,0x30000,nt::Bytes(0x90),0x90,{}};
@@ -958,7 +1016,7 @@ int main(int argc,char** argv) {
         }
         // Constant-address loads. The jump's delay slot writes the pointer register
         // and must not fall through into the jalr.
-        nt::elf::IopModule pointers{0x10000,0x10000,nt::Bytes(0x200),0x200,{}};
+        nt::elf::IopModule pointers{0x10000,0x10000,nt::Bytes(0x220),0x220,{}};
         const auto pointer_word=[&](unsigned pc,std::uint32_t word) { fixture::put32(pointers.memory,pc-pointers.base,word); };
         pointer_word(0x10000,0x03e00008); pointer_word(0x10004,0x24020021);
         pointer_word(0x10008,0x03e00008); pointer_word(0x1000c,0x24020022);
@@ -977,7 +1035,18 @@ int main(int argc,char** argv) {
         pointer_word(0x10100,0x03e00008); pointer_word(0x10104,0x24020033);
         pointer_word(0x10180,0x00010000);
         pointer_word(0x10190,0x00010100);
-        bundle_roots.insert(bundle_roots.end(),{0x4860U,0x48a0U,0x48b0U,0x48c0U,0x48d0U,0x10020U,0x10060U,0x100b0U,0x100d0U,0x10100U});
+        // Word stores in the published SIO2 block, then the same word through its cached alias.
+        constexpr std::uint32_t sio2_words[]{0x3c03bf80,0x34638200,0xac640000,0xac650080,0xac660068,
+            0x3c029f80,0x34428268,0x8c420000,0,0x03e00008,0};
+        for (unsigned index=0;index<std::size(sio2_words);++index) pointer_word(0x101a0+index*4,sio2_words[index]);
+        constexpr std::uint32_t sio2_read[]{0x3c03bf80,0x34638200,0x8c620000,0,0x8c630080,0,0x03e00008,0};
+        for (unsigned index=0;index<std::size(sio2_read);++index) pointer_word(0x101cc+index*4,sio2_read[index]);
+        constexpr std::uint32_t sio2_miss[]{0x3c02bf80,0x34428400,0xac440000,0x03e00008,0};
+        for (unsigned index=0;index<std::size(sio2_miss);++index) pointer_word(0x101ec+index*4,sio2_miss[index]);
+        constexpr std::uint32_t sio2_byte[]{0x3c02bf80,0x34428268,0xa0440000,0x03e00008,0};
+        for (unsigned index=0;index<std::size(sio2_byte);++index) pointer_word(0x10200+index*4,sio2_byte[index]);
+        bundle_roots.insert(bundle_roots.end(),{0x4860U,0x48a0U,0x48b0U,0x48c0U,0x48d0U,0x10020U,0x10060U,0x100b0U,0x100d0U,0x10100U,
+            0x101a0U,0x101ccU,0x101ecU,0x10200U});
         const std::array bundle{module,provider,dispatch,factories,pointers};
         {
             auto broken=bundle; fixture::put32(broken[3].memory,0x300,0);

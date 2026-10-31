@@ -29,7 +29,7 @@ std::optional<Operation> native_operation(const elf::IopImport& import) {
         (import.ordinal==2 || (import.ordinal>=5 && import.ordinal<=8) || (import.ordinal>=21 && import.ordinal<=27) || (import.ordinal>=29 && import.ordinal<=32)))
         return Operation::native_import;
     if (import.library=="thbase" && (import.version>>8)==1 &&
-        ((import.ordinal>=4 && import.ordinal<=10) || import.ordinal==14 || import.ordinal==20 || import.ordinal==21 || import.ordinal==22 || import.ordinal==41 || (import.ordinal>=33 && import.ordinal<=38) || (import.ordinal>=24 && import.ordinal<=28)))
+        ((import.ordinal>=4 && import.ordinal<=10) || import.ordinal==14 || import.ordinal==20 || import.ordinal==21 || import.ordinal==22 || import.ordinal==41 || (import.ordinal>=33 && import.ordinal<=40) || (import.ordinal>=24 && import.ordinal<=28)))
         return Operation::native_import;
     if ((import.library=="thsemap" || import.library=="thmsgbx") && (import.version>>8)==1 && ((import.ordinal>=4 && import.ordinal<=9) || import.ordinal==11 || import.ordinal==12)) return Operation::native_import;
     if (import.library=="thevent" && (import.version>>8)==1 &&
@@ -46,6 +46,10 @@ std::optional<Operation> native_operation(const elf::IopImport& import) {
         ((import.ordinal>=4 && import.ordinal<=11) || (import.ordinal>=14 && import.ordinal<=17) ||
          import.ordinal==26 || import.ordinal==27 || import.ordinal==28 || import.ordinal==32 ||
          (import.ordinal>=33 && import.ordinal<=35)))
+        return Operation::native_import;
+    if (import.library=="cdvdman" && (import.version>>8)==1 && import.ordinal==24)
+        return Operation::native_import;
+    if (import.library=="secrman" && (import.version>>8)==1 && import.ordinal>=4 && import.ordinal<=6)
         return Operation::native_import;
     if (import.library!="sysclib" || (import.version>>8)!=1) return {};
     switch (import.ordinal) {
@@ -254,7 +258,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         }
         Instruction call; call.address=module.base+import.offset;
         call.operation=*operation; call.flow=Flow::native_return;
-        call.immediate=import.ordinal|(!host ? 0x20000U : import.library=="loadcore" ? 0x10000U : import.library=="ioman" ? 0x30000U : import.library=="intrman" ? 0x40000U : import.library=="thevent" ? 0x50000U : import.library=="thbase" ? 0x60000U : import.library=="sifman" ? 0x70000U : import.library=="stdio" ? 0x80000U : import.library=="sifcmd" ? 0x90000U : import.library=="thsemap" ? 0xa0000U : import.library=="thmsgbx" ? 0xb0000U : import.library=="sysclib" ? 0xc0000U : import.library=="heaplib" ? 0xd0000U : import.library=="modload" ? 0xe0000U : import.library=="romdrv" ? 0xf0000U : import.library=="dmacman" ? 0x100000U : 0U);
+        call.immediate=import.ordinal|(!host ? 0x20000U : import.library=="loadcore" ? 0x10000U : import.library=="ioman" ? 0x30000U : import.library=="intrman" ? 0x40000U : import.library=="thevent" ? 0x50000U : import.library=="thbase" ? 0x60000U : import.library=="sifman" ? 0x70000U : import.library=="stdio" ? 0x80000U : import.library=="sifcmd" ? 0x90000U : import.library=="thsemap" ? 0xa0000U : import.library=="thmsgbx" ? 0xb0000U : import.library=="sysclib" ? 0xc0000U : import.library=="heaplib" ? 0xd0000U : import.library=="modload" ? 0xe0000U : import.library=="romdrv" ? 0xf0000U : import.library=="dmacman" ? 0x100000U : import.library=="cdvdman" ? 0x110000U : import.library=="secrman" ? 0x120000U : 0U);
         native_imports.emplace(call.address,call);
         if (!host) {
             auto bound=import; bound.offset+=module.base; bound.table_offset+=module.base;
@@ -532,7 +536,24 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
             // Inspect each direct call before unrelated callers merge at the import.
             if (instruction.flow==Flow::call || instruction.flow==Flow::direct) {
                 const auto target=native_imports.find(instruction.target);
-                if (target!=native_imports.end() && target->second.immediate==0x60004) discover_stack_thread(pc,successor);
+                if (target!=native_imports.end() && target->second.immediate==0x60004) {
+                    discover_stack_thread(pc,successor);
+                    // Different callers can erase the absolute stack relationship
+                    // at a shared helper. Replay its straight-line suffix with a
+                    // fresh symbolic stack to recover locally built descriptors.
+                    // These are compilation candidates, not a pointer proof: the
+                    // native thread service still validates the actual entry.
+                    auto begin=pc;
+                    for (unsigned count=0;count<64 && begin>=4;++count) {
+                        const auto previous=program.instructions.find(begin-4);
+                        if (previous==program.instructions.end() || previous->second.flow!=Flow::sequential) break;
+                        begin-=4;
+                    }
+                    Constants local;
+                    for (auto at=begin;at<pc;at+=4) local=transfer(program.instructions.at(at),std::move(local));
+                    local=transfer(delay,transfer(instruction,std::move(local)));
+                    discover_stack_thread(pc,local);
+                }
                 if (target!=native_imports.end()) discover_loader_callbacks(pc,target->second.immediate,successor);
             }
             if (indirect) {
@@ -542,7 +563,25 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                 for (const auto target : instruction.targets) enqueue(target,loaded_pointer ? Constants{} : successor);
             } else if (instruction.flow!=Flow::return_register) enqueue(instruction.target,successor);
             if (instruction.flow==Flow::conditional) enqueue(pc+8,successor);
-            if (instruction.flow==Flow::call || instruction.flow==Flow::indirect_call) enqueue(pc+8,Constants{});
+            // A host import may enter a guest callback before it returns, so
+            // caller-saved registers and stack memory do not survive. Saved
+            // registers do: a descriptor kept there remains visible to the next
+            // AddDrv. Same-bundle library calls and ordinary guest calls can
+            // overwrite every register.
+            if (instruction.flow==Flow::call) {
+                const auto imported=native_imports.find(instruction.target);
+                if (imported!=native_imports.end() && (imported->second.immediate>>16)!=2) {
+                    auto continuation=successor;
+                    const auto forget=[&](unsigned reg) {
+                        continuation.registers[reg].reset();
+                        continuation.stack_offsets[reg].reset();
+                    };
+                    for (unsigned reg=1;reg<16;++reg) forget(reg);
+                    for (unsigned reg=24;reg<28;++reg) forget(reg);
+                    continuation.stack_words.clear();
+                    enqueue(pc+8,continuation);
+                } else enqueue(pc+8,Constants{});
+            } else if (instruction.flow==Flow::indirect_call) enqueue(pc+8,Constants{});
         }
         // A helper can return a callback which its caller stores in a thread
         // descriptor. The ordinary call-clobber analysis intentionally loses v0;

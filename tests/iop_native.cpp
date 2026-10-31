@@ -1,4 +1,5 @@
 #include <nt/iop_native.hpp>
+#include <nt/iop_native_serial.hpp>
 #include <nt/iop_native_heap.hpp>
 #include <nt/iop_native_heaplib.hpp>
 #include <nt/iop_native_libraries.hpp>
@@ -28,8 +29,11 @@
 #include <nt/iop_native_archive.hpp>
 #include <nt/iop_devices.hpp>
 #include <nt/iop_native_dmacman.hpp>
+#include <nt/iop_native_cdvdman.hpp>
+#include <nt/iop_native_secrman.hpp>
 #include "reboot_fixture.hpp"
 #include "disc_fixture.hpp"
+#include <algorithm>
 #include <chrono>
 #include <string>
 #include <vector>
@@ -1320,6 +1324,73 @@ int main() {
         alarm_ticks=0xfffffffffffffff0ULL;
         check(alarm_call(35,0xc700,0x2100).first.reason==NativeStop::import_request && !alarms.delay(),
               "Alarm deadline overflow wrapped into immediate execution");
+        const auto clock_reply=[&](unsigned ordinal,std::uint32_t a,std::uint32_t b=0,std::uint32_t c=0,bool interrupt=false) {
+            return alarms.invoke({ordinal,{a,b,c,0},NativeServiceKind::thbase,0,interrupt},ram);
+        };
+        auto usec_clock=clock_reply(39,1000000,0xc760);
+        check(usec_clock.status==NativeServiceStatus::returned && usec_clock.value==0 &&
+              load_native_word(ram,0xc760)==36864000 && load_native_word(ram,0xc764)==0,
+              "USec2SysClock did not convert one million microseconds at the default frequency");
+        auto back_clock=clock_reply(40,0xc760,0xc768,0xc76c,true);
+        check(back_clock.status==NativeServiceStatus::returned && back_clock.value==0 &&
+              load_native_word(ram,0xc768)==1 && load_native_word(ram,0xc76c)==0,
+              "SysClock2USec did not round-trip one second in interrupt context");
+        store_native_word(ram,0xc760,36864); store_native_word(ram,0xc764,0);
+        back_clock=clock_reply(40,0xc760,0xc768,0xc76c);
+        check(back_clock.status==NativeServiceStatus::returned && load_native_word(ram,0xc768)==0 &&
+              load_native_word(ram,0xc76c)==1000,
+              "SysClock2USec did not convert 36864 ticks to 1000 microseconds");
+        store_native_word(ram,0xc780,36864); store_native_word(ram,0xc784,0);
+        back_clock=clock_reply(40,0xc780,0xc780,0xc784);
+        check(back_clock.status==NativeServiceStatus::returned && load_native_word(ram,0xc780)==0 &&
+              load_native_word(ram,0xc784)==1000,
+              "SysClock2USec aliased its tick input with the second and microsecond outputs");
+        store_native_word(ram,0xc790,0); store_native_word(ram,0xc794,36864000);
+        store_native_word(ram,0xc798,0x11111111); store_native_word(ram,0xc79c,0x22222222);
+        const auto overflow_clock=clock_reply(40,0xc790,0xc798,0xc79c);
+        check(overflow_clock.status==NativeServiceStatus::unsupported &&
+              load_native_word(ram,0xc798)==0x11111111 && load_native_word(ram,0xc79c)==0x22222222,
+              "SysClock2USec wrapped a second count that does not fit in 32 bits");
+        const auto fault_clock=clock_reply(39,1,0xc761);
+        check(fault_clock.status==NativeServiceStatus::address_fault && fault_clock.address==0xc761,
+              "USec2SysClock accepted an unaligned clock pointer");
+        const auto protected_clock=clock_reply(39,1,0x1000);
+        check(protected_clock.status==NativeServiceStatus::code_write && protected_clock.address==0x1000,
+              "USec2SysClock wrote a clock over compiled code");
+        std::fill(ram.begin()+0xcb00,ram.begin()+0xcb10,static_cast<std::uint8_t>(0xab));
+        const auto sample=std::chrono::sys_days{std::chrono::year{2024}/std::chrono::March/5}+
+            std::chrono::hours{3}+std::chrono::minutes{4}+std::chrono::seconds{5};
+        NativeCdvdmanServices cdvd([sample] { return sample; });
+        const auto read_clock=cdvd.invoke({24,{0xcb00},NativeServiceKind::cdvdman},ram);
+        check(read_clock.status==NativeServiceStatus::returned && read_clock.value==1 &&
+              ram[0xcb00]==0 && ram[0xcb01]==0x05 && ram[0xcb02]==0x04 && ram[0xcb03]==0x12 &&
+              ram[0xcb04]==0 && ram[0xcb05]==0x05 && ram[0xcb06]==0x03 && ram[0xcb07]==0x24 &&
+              ram[0xcb08]==0xab,
+              "sceCdReadClock did not write the JST BCD clock");
+        const auto stale_year=std::chrono::sys_days{std::chrono::year{1999}/std::chrono::January/1};
+        NativeCdvdmanServices stale([stale_year] { return stale_year; });
+        const auto rejected_clock=stale.invoke({24,{0xcb00},NativeServiceKind::cdvdman},ram);
+        check(rejected_clock.status==NativeServiceStatus::unsupported && ram[0xcb00]==0 && ram[0xcb07]==0x24,
+              "sceCdReadClock replaced a clock for a year outside 2000-2099");
+        const auto missed_clock=cdvd.invoke({24,{0xcb01},NativeServiceKind::cdvdman},ram);
+        check(missed_clock.status==NativeServiceStatus::address_fault && missed_clock.address==0xcb01 && ram[0xcb01]==0x05,
+              "sceCdReadClock wrote through an unaligned pointer");
+        check(cdvd.invoke({25,{0xcb00},NativeServiceKind::cdvdman},ram).status==NativeServiceStatus::unsupported,
+              "An unbound cdvdman ordinal was accepted");
+        NativeSecrmanServices secrman;
+        const auto command=secrman.invoke({4,{0x80001234},NativeServiceKind::secrman},ram);
+        const auto device=secrman.invoke({5,{0x80005678},NativeServiceKind::secrman},ram);
+        const auto auth=secrman.invoke({6,{2,0,1},NativeServiceKind::secrman},ram);
+        check(command.status==NativeServiceStatus::returned && command.value==0 &&
+              device.status==NativeServiceStatus::returned && device.value==0 &&
+              auth.status==NativeServiceStatus::returned && auth.value==0 &&
+              secrman.command_handler()==0x80001234 && secrman.device_handler()==0x80005678,
+              "secrman handler registration or AuthCard reported success");
+        const auto cleared=secrman.invoke({4,{0},NativeServiceKind::secrman},ram);
+        const auto cleared_device=secrman.invoke({5,{0},NativeServiceKind::secrman},ram);
+        check(cleared.value==0 && cleared_device.value==0 && secrman.command_handler()==0 && secrman.device_handler()==0 &&
+              secrman.invoke({8,{},NativeServiceKind::secrman},ram).status==NativeServiceStatus::unsupported,
+              "secrman did not clear a handler or accepted a download ordinal");
         std::vector<std::uint8_t> ee_memory(0x1000,0);
         NativeSifDestination ee_destination{ee_memory,[](auto address,auto size) { return address>=0x100 && size<=0x1000-address; }};
         NativeSifTransfers sif(&ee_destination),disconnected_sif;
@@ -2383,6 +2454,62 @@ int main() {
                   dma.invoke({32,{3},NativeServiceKind::dmacman},dma_ram).status==NativeServiceStatus::unavailable &&
                   dma.invoke({33,{13,1},NativeServiceKind::dmacman},dma_ram).status==NativeServiceStatus::unsupported,
                   "DMA availability status did not match the ordinal");
+            {
+                std::vector<std::uint8_t> sio2_ram(0x2000);
+                NativeSerialServices serial;
+                auto write_sio2=initial(); write_sio2.pc=0x101a0;
+                write_sio2.registers[4]=0x11111111; write_sio2.registers[5]=0x22222222; write_sio2.registers[6]=0x3bc;
+                const auto wrote=run_native(nt_iop_generated_run,write_sio2,sio2_ram,32,&serial);
+                check(wrote.reason==NativeStop::unmapped_code && write_sio2.pc==0x5000 && write_sio2.executed==11 &&
+                      write_sio2.registers[2]==0x3bc,"SIO2 word store did not round-trip through its cached alias");
+                auto read_sio2=initial(); read_sio2.pc=0x101cc;
+                const auto read=run_native(nt_iop_generated_run,read_sio2,sio2_ram,32,&serial);
+                check(read.reason==NativeStop::unmapped_code && read_sio2.pc==0x5000 && read_sio2.executed==8 &&
+                      read_sio2.registers[2]==0x11111111 && read_sio2.registers[3]==0,
+                      "SIO2 block edges did not keep the stored words");
+                const auto before=sio2_ram;
+                auto miss=initial(); miss.pc=0x101ec; miss.registers[4]=0x01020304;
+                const auto missed=nt_iop_generated_run(miss,sio2_ram,8);
+                check(missed.reason==NativeStop::address_fault && missed.address==0xbf808400 && miss.pc==0x101f4 &&
+                      miss.executed==2 && sio2_ram==before,"Unmapped SIO2 store retired or wrote RAM");
+                auto byte=initial(); byte.pc=0x10200; byte.registers[4]=0xff;
+                const auto narrow=nt_iop_generated_run(byte,sio2_ram,8);
+                check(narrow.reason==NativeStop::address_fault && narrow.address==0xbf808268 && byte.pc==0x10208 &&
+                      byte.executed==2 && sio2_ram==before,"Byte SIO2 access retired");
+                auto still=initial(); still.pc=0x101cc;
+                const auto kept=run_native(nt_iop_generated_run,still,sio2_ram,32,&serial);
+                check(kept.reason==NativeStop::unmapped_code && still.registers[2]==0x11111111 && still.registers[3]==0,
+                      "Rejected SIO2 access changed a stored word");
+                // Separate sessions and explicit reset cannot retain another transport's settings.
+                NativeSerialServices fresh;
+                auto clean=initial(); clean.pc=0x101cc;
+                run_native(nt_iop_generated_run,clean,sio2_ram,32,&fresh);
+                check(clean.registers[2]==0 && clean.registers[3]==0,"Serial configuration leaked between sessions");
+                auto start=initial(); start.pc=0x101b0; start.registers[3]=0xbf808200; start.registers[6]=0x3bd;
+                const auto rejected=run_native(nt_iop_generated_run,start,sio2_ram,1,&serial);
+                check(rejected.reason==NativeStop::serial_request && start.pc==0x101b0 && start.executed==0,
+                      "Unsupported serial START retired successfully");
+                check(serial.invoke({0,{0x1f808268},NativeServiceKind::serial},sio2_ram).value==0x3bc,
+                      "Rejected serial START changed control state");
+                for (const auto address : {0x1f808260U,0x1f808264U,0x1f80826cU,0x1f808270U,0x1f808274U})
+                    for (unsigned write=0;write<2;++write)
+                        check(serial.invoke({write,{address,1},NativeServiceKind::serial},sio2_ram).status==NativeServiceStatus::unavailable,
+                              "Unsupported serial FIFO/status operation succeeded");
+                auto delayed=initial(); delayed.pc=0x101b0; delayed.registers[3]=0xbf808200;
+                delayed.registers[6]=0x3bc; delayed.load_register=6; delayed.load_value=1;
+                delayed.delay_slot=true; delayed.branch_target=0x5000;
+                run_native(nt_iop_generated_run,delayed,sio2_ram,1,&serial);
+                check(delayed.pc==0x5000 && !delayed.delay_slot && delayed.registers[6]==1 && delayed.executed==1,
+                      "Serial store lost a delayed load or branch target");
+                auto load=initial(); load.pc=0x101bc; load.registers[2]=0x9f808268;
+                run_native(nt_iop_generated_run,load,sio2_ram,1,&serial);
+                check(load.pc==0x101c0 && load.load_register==2 && load.load_value==0x3bc && load.registers[2]==0x9f808268,
+                      "Serial read did not preserve the load delay");
+                serial.reset();
+                check(serial.invoke({0,{0x1f808200},NativeServiceKind::serial},sio2_ram).value==0 &&
+                      serial.invoke({0,{0x1f808268},NativeServiceKind::serial},sio2_ram).value==0,
+                      "Serial reset retained configuration");
+            }
             NativeResult stop{};
             auto pointers=initial(); pointers.pc=0x10020; store_native_word(dma_ram,0x10180,0);
             do { stop=nt_iop_generated_run(pointers,dma_ram,1); } while (stop.reason==NativeStop::budget);

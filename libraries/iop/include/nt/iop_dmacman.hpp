@@ -1,14 +1,9 @@
 #pragma once
 #include <nt/iop_calls.hpp>
-#include <nt/iop_devices.hpp>
+#include <nt/iop_dmacman_invoke.hpp>
 #include <nt/iop_native_library.hpp>
 
 namespace nt::iop {
-enum class DmacmanStatus { unsupported, returned, unavailable };
-struct DmacmanResult { DmacmanStatus status=DmacmanStatus::unsupported; std::uint32_t value=0; };
-// Register reads, priority updates and channel enables. Ordinals 28 and 32 are
-// unavailable and do not mutate devices or report a finished transfer.
-DmacmanResult dmacman_invoke(Devices& devices,std::uint32_t ordinal,const std::array<std::uint32_t,4>& arguments);
 class Dmacman final : public HostCalls {
 public:
     Dmacman(Devices& devices,std::uint32_t base) : devices_(devices), library_("dmacman",0x102,36,base) {}

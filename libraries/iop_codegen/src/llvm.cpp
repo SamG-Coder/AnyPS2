@@ -143,6 +143,22 @@ void instruction(Writer& w,const ir::Instruction& i,bool has_successor,bool open
     if (branch) w.text<<"  br i1 "<<in_delay<<", label %branch_fault, label %branch"<<label<<"\nbranch"<<label<<":\n";
     const auto immediate=std::to_string(i.immediate);
     const auto write=[&](unsigned reg,const std::string& v) { written=reg; result=v; };
+    const auto retire=[&] {
+        const auto pending=w.load(35), pending_value=w.load(36);
+        const auto cancel=w.value("or i1 "+w.binary("icmp eq",pending,std::to_string(written))+", "+w.binary("icmp eq",pending,std::to_string(load_register)));
+        const auto destination=w.select(cancel,"0",pending);
+        const auto pointer=w.pointer(destination);
+        w.text<<"  store i32 "<<pending_value<<", ptr "<<pointer<<", align 4\n";
+        if (written) w.store(written,result);
+        w.store(0,"0"); w.store(32,next_pc); w.store(33,target);
+        w.store(34,branch ? "1" : "0"); w.store(35,std::to_string(load_register)); w.store(36,loaded);
+        const auto executed=w.value("load i64, ptr %executed, align 8");
+        const auto increment=w.value("add i64 "+executed+", 1");
+        w.text<<"  store i64 "<<increment<<", ptr %executed, align 8\n";
+        if (!has_successor) w.text<<"  br label %loop\n";
+        else if (branch) w.text<<"  br label %code"<<i.address+4<<'\n';
+        else w.text<<"  br i1 "<<in_delay<<", label %loop, label %code"<<i.address+4<<'\n';
+    };
     switch (i.operation) {
     case Operation::add_checked: case Operation::subtract_checked: case Operation::add_immediate_checked: {
         const auto rhs=i.operation==Operation::add_immediate_checked ? immediate : b;
@@ -252,8 +268,26 @@ void instruction(Writer& w,const ir::Instruction& i,bool has_successor,bool open
         const auto end=w.binary("add",offset,std::to_string(i.width));
         const auto physical=w.binary("icmp ule",offset,std::to_string(0x200000-i.width));
         const auto within=w.binary("icmp ule",end,"%ram_size");
-        const auto valid=w.value("and i1 "+aligned+", "+w.value("and i1 "+physical+", "+within));
-        w.text<<"  br i1 "<<valid<<", label %memory"<<label<<", label %fault"<<label<<"\nfault"<<label<<":\n";
+        w.text<<"  br i1 "<<aligned<<", label %aligned"<<label<<", label %fault"<<label<<"\naligned"<<label<<":\n";
+        w.text<<"  br i1 "<<physical<<", label %ram"<<label<<", label %mmio"<<label<<"\nram"<<label<<":\n";
+        w.text<<"  br i1 "<<within<<", label %memory"<<label<<", label %fault"<<label<<"\nmmio"<<label<<":\n";
+        // Return typed access metadata to the session-owned native service.
+        // No guest instruction is fetched or decoded by the service dispatcher.
+        const bool sio2_word=!merge && (i.operation==Operation::load_word || i.operation==Operation::store_word);
+        if (!sio2_word) w.text<<"  br label %fault"<<label<<"\n";
+        else {
+            constexpr std::uint32_t sio2_base=0x1f808200;
+            const auto above=w.binary("icmp uge",offset,std::to_string(sio2_base));
+            const auto below=w.binary("icmp ule",offset,std::to_string(sio2_base+32*4));
+            const auto inside=w.value("and i1 "+above+", "+below);
+            w.text<<"  br i1 "<<inside<<", label %mmio_hit"<<label<<", label %fault"<<label<<"\nmmio_hit"<<label<<":\n";
+            const auto relative=w.binary("sub",offset,std::to_string(sio2_base));
+            const auto access=w.binary("or",w.binary("shl",relative,"16"),
+                std::to_string(i.operand|(i.operation==Operation::store_word ? 256U : 0U)));
+            w.store(37,access);
+            w.text<<"  ret i32 12\n";
+        }
+        w.text<<"fault"<<label<<":\n";
         w.store(37,address); w.text<<"  ret i32 2\nmemory"<<label<<":\n";
         const auto ptr=w.value("getelementptr i8, ptr %ram, i32 "+offset);
         const auto type="i"+std::to_string(i.width*8);
@@ -292,22 +326,8 @@ void instruction(Writer& w,const ir::Instruction& i,bool has_successor,bool open
     }
     // Retire only after every possible fault. Old operands were read before a
     // pending load is committed, and a newer write cancels that pending load.
-    const auto pending=w.load(35), pending_value=w.load(36);
-    const auto cancel=w.value("or i1 "+w.binary("icmp eq",pending,std::to_string(written))+", "+w.binary("icmp eq",pending,std::to_string(load_register)));
-    const auto destination=w.select(cancel,"0",pending);
-    const auto pointer=w.pointer(destination);
-    w.text<<"  store i32 "<<pending_value<<", ptr "<<pointer<<", align 4\n";
-    if (written) w.store(written,result);
-    w.store(0,"0"); w.store(32,next_pc); w.store(33,target);
-    w.store(34,branch ? "1" : "0"); w.store(35,std::to_string(load_register)); w.store(36,loaded);
-    const auto executed=w.value("load i64, ptr %executed, align 8");
-    const auto increment=w.value("add i64 "+executed+", 1");
-    w.text<<"  store i64 "<<increment<<", ptr %executed, align 8\n";
-    // The successor is statically known for ordinary fallthrough and entry to
-    // a branch's delay slot. A completed delay slot still routes its saved target.
-    if (!has_successor) w.text<<"  br label %loop\n";
-    else if (branch) w.text<<"  br label %code"<<i.address+4<<'\n';
-    else w.text<<"  br i1 "<<in_delay<<", label %loop, label %code"<<i.address+4<<'\n';
+    // Serial requests return before this point; the native service retires them.
+    retire();
 }
 }
 void emit_llvm(std::ostream& output,const elf::IopModule& module,std::span<const std::uint32_t> entries) {

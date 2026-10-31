@@ -1,5 +1,10 @@
 # Testing AnyPS2
 
+Native serial integration fixtures execute generated LLVM through the service
+router. They cover configuration, cached aliases, interrupt acknowledgment,
+independent sessions, reset, rejected START/FIFO/status operations, and load and
+branch delays. These checks do not establish controller transfers or game boot.
+
 Current policy: LLVM is the only supported conversion backend. Older sections
 below describe historical diagnostic C++/interpreter milestones; those are not
 supported output paths. The EE C++ generator and its execution test have been removed. IOP milestones now run through iop-llvm-execution and iop-llvm-project.
@@ -148,8 +153,10 @@ MMIO/service coherence and address aliases, tag registers, per-channel priority
 and enable preservation, and shared global-enable state. Unsupported transfer
 starts, interrupt-control operations, channels and register widths must stop
 without changing channel state. Compiled dmacman imports use that same register,
-priority and enable behavior. Slice setup and transfer starts stop without a
-completed transfer or a register write. A constant-address loaded pointer calls
+priority and enable behavior when the diagnostic device set is bound. The
+production context binds only the two priority words: priority and enable
+update those words, slice setup and transfer starts stop without a completed
+transfer or a register write, and channel or control ordinals stay unsupported. A constant-address loaded pointer calls
 only its proved targets, and a null pointer does not fall through the jump
 delay slot. An unbounded store through a fixed slot may call any instruction
 compiled into that program, and every other address stops as unmapped code;
@@ -693,9 +700,16 @@ context errors, masked/early/zero-budget delivery, single-operation callback
 suspension, one-shot removal, periodic catch-up relative to the previous deadline,
 cancellation, and waking an idle sleeping thread. GetSystemTime retains both words
 of one clock sample; unknown handlers, protected interval output and deadline
-overflow must not register an alarm. Standalone project builds include the host
-clock and idle-wait integration; deterministic alarm semantics do not claim exact
-wall-clock delivery latency.
+overflow must not register an alarm. USec2SysClock and SysClock2USec use the
+same frequency in either context. One million microseconds is one second at
+the default frequency, and 36864 ticks is 1000 microseconds. An overflowing
+second count and a bad or code pointer leave the outputs unchanged.
+Standalone project builds include the host clock and idle-wait integration;
+deterministic alarm semantics do not claim exact wall-clock delivery latency.
+The production context also serves cdvdman ReadClock and the secrman handler
+registrations. ReadClock returns one and an eight-byte BCD clock with clear
+status and pad. A year outside 2000–2099 leaves the buffer unchanged. AuthCard
+returns 0, and registering or clearing a handler does not call it.
 
 Native SIF integration executes compiled transfer/status/handler imports against
 an explicit synthetic EE data arena. It checks multi-descriptor copies, aliases,
@@ -913,7 +927,10 @@ Run the iop-native and iop-llvm execution/project tests in Release.
 
 The original synthetic module calls AddDrv with a constant initialized descriptor.
 Its private init/deinit functions are discovered through that data, not explicit
-callback roots. Compiled execution checks budgeted init entry, delayed publication,
+callback roots. A second synthetic image keeps that descriptor in a saved register
+across a host DelDrv import and passes it to AddDrv from the delay slot. Discovery
+still reaches both private lifecycle roots. A pointer held in a caller-saved
+register becomes unknown across that import. Compiled execution checks budgeted init entry, delayed publication,
 rollback, teardown with a negative return, duplicate names, the 16-slot limit,
 missing deletion, invalid targets/descriptors, and retained caller GP/load state.
 A foreign continuation return cannot consume the pending registration. The normal

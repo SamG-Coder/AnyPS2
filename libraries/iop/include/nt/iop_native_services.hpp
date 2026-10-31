@@ -2,7 +2,7 @@
 #include <nt/iop_native.hpp>
 
 namespace nt::iop {
-enum class NativeServiceKind { syscall, sysmem, loadcore, library_call, ioman, intrman, thevent, thbase, sifman, stdio, sifcmd, thsemap, thmsgbx, native_return, sysclib, heaplib, modload, romdrv, dmacman };
+enum class NativeServiceKind { syscall, sysmem, loadcore, library_call, ioman, intrman, thevent, thbase, sifman, stdio, sifcmd, thsemap, thmsgbx, native_return, sysclib, heaplib, modload, romdrv, dmacman, cdvdman, secrman, serial };
 struct NativeServiceRequest {
     std::uint32_t selector;
     std::array<std::uint32_t,4> arguments;
@@ -49,6 +49,32 @@ inline NativeResult run_native(NativeEntry entry,Cpu& cpu,std::span<std::uint8_t
         const auto before=cpu.executed;
         auto result=entry(cpu,ram,budget);
         budget-=cpu.executed-before;
+        if (result.reason==NativeStop::serial_request) {
+            // The AOT site supplies access metadata, never an instruction word.
+            if (!services || !budget) return result;
+            const auto operand=result.trap_code&31U;
+            const bool writing=(result.trap_code&256U)!=0;
+            const auto address=0x1f808200U+(result.trap_code>>16);
+            const auto resume=cpu.delay_slot ? cpu.branch_target : cpu.pc+4;
+            const NativeServiceRequest access{writing ? 1U : 0U,{address,cpu.registers[operand],0,0},
+                NativeServiceKind::serial,cpu.pc,cpu.interrupt_depth!=0,cpu.registers[28],cpu.registers[29],&cpu,resume};
+            const auto reply=services->invoke(access,ram);
+            if (reply.status!=NativeServiceStatus::returned) {
+                if (reply.status==NativeServiceStatus::address_fault) return {NativeStop::address_fault,cpu.pc,address};
+                return {NativeStop::serial_request,cpu.pc,address,result.trap_code};
+            }
+            // Operands were sampled before committing the preceding delayed load.
+            if (cpu.load_register && (writing || cpu.load_register!=operand))
+                cpu.registers[cpu.load_register]=cpu.load_value;
+            cpu.load_register=writing ? 0U : operand;
+            cpu.load_value=writing ? 0U : reply.value;
+            cpu.registers[0]=0;
+            cpu.pc=resume;
+            cpu.delay_slot=false;
+            ++cpu.executed;
+            --budget;
+            continue;
+        }
         const bool imported=result.reason==NativeStop::import_request;
         const bool returning=result.reason==NativeStop::unmapped_code && cpu.pc==native_service_return;
         if ((!imported && !returning && result.reason!=NativeStop::service_request) || !services || cpu.delay_slot) return result;
@@ -75,6 +101,8 @@ inline NativeResult run_native(NativeEntry entry,Cpu& cpu,std::span<std::uint8_t
         case 14: kind=NativeServiceKind::modload; break;
         case 15: kind=NativeServiceKind::romdrv; break;
         case 16: kind=NativeServiceKind::dmacman; break;
+        case 17: kind=NativeServiceKind::cdvdman; break;
+        case 18: kind=NativeServiceKind::secrman; break;
         default: return result;
         }
         const auto resume=imported ? reg(31) : cpu.pc+4;

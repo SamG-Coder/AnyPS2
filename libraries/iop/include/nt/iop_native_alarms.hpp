@@ -22,10 +22,11 @@ public:
         };
     }
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
-        if (request.kind!=NativeServiceKind::thbase || request.selector<34 || request.selector>38) return {};
+        if (request.kind!=NativeServiceKind::thbase || request.selector<34 || request.selector>40) return {};
         const auto op=request.selector;
         const auto& a=request.arguments;
         const auto returned=[](std::int32_t value=0) { return NativeServiceReply{NativeServiceStatus::returned,static_cast<std::uint32_t>(value)}; };
+        if (op==39 || op==40) return convert_clock(ram,op,a);
         if (op!=34 && request.interrupt_context!=(op==36 || op==38)) return returned(-100);
         if (op==34) {
             const auto checked=output(ram,a[0],8);
@@ -94,6 +95,32 @@ private:
         for (auto at=*offset;at<*offset+size;at+=4)
             if (nt_iop_native_code_word(at)) return {NativeServiceStatus::code_write,0,pointer};
         return {NativeServiceStatus::returned};
+    }
+    NativeServiceReply convert_clock(std::span<std::uint8_t> ram,std::uint32_t op,const std::array<std::uint32_t,4>& a) {
+        const auto returned=[](std::int32_t value=0) { return NativeServiceReply{NativeServiceStatus::returned,static_cast<std::uint32_t>(value)}; };
+        if (op==39) {
+            const auto checked=output(ram,a[1],8);
+            if (checked.status!=NativeServiceStatus::returned) return checked;
+            const auto ticks=std::uint64_t(a[0])*frequency_/1000000U;
+            const auto offset=*ram_offset(a[1],4,ram.size());
+            store_native_word(ram,offset,static_cast<std::uint32_t>(ticks));
+            store_native_word(ram,offset+4,static_cast<std::uint32_t>(ticks>>32));
+            return returned();
+        }
+        const auto clock=output(ram,a[0],8);
+        if (clock.status!=NativeServiceStatus::returned) return clock;
+        const auto seconds_out=output(ram,a[1],4);
+        if (seconds_out.status!=NativeServiceStatus::returned) return seconds_out;
+        const auto usec_out=output(ram,a[2],4);
+        if (usec_out.status!=NativeServiceStatus::returned) return usec_out;
+        const auto clock_at=*ram_offset(a[0],4,ram.size());
+        const auto ticks=std::uint64_t(load_native_word(ram,clock_at))|(std::uint64_t(load_native_word(ram,clock_at+4))<<32);
+        const auto seconds=ticks/frequency_;
+        if (seconds>0xffffffffULL) return {};
+        const auto usec=(ticks%frequency_)*1000000ULL/frequency_;
+        store_native_word(ram,*ram_offset(a[1],4,ram.size()),static_cast<std::uint32_t>(seconds));
+        store_native_word(ram,*ram_offset(a[2],4,ram.size()),static_cast<std::uint32_t>(usec));
+        return returned();
     }
     std::uint32_t minimum() const { return frequency_/10000; }
     struct Alarm { std::uint64_t deadline; std::uint32_t address,argument; };
