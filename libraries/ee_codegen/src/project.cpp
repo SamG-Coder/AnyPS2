@@ -16,6 +16,7 @@ struct Prepared {
     std::vector<CodePayload> payloads;
     Bytes image;
     std::vector<LayoutDeclaration> layouts;
+    std::vector<ExecutableImage> images;
     std::set<std::uint32_t> registered_calls;
     std::size_t wrapper_candidates=0;
     std::uint32_t syscall_table=0;
@@ -157,15 +158,50 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
     return result;
 }
 }
-void project(const std::filesystem::path& input,const std::filesystem::path& output,std::span<const PayloadMapping> mappings) {
+void project(const std::filesystem::path& input,const std::filesystem::path& output,std::span<const PayloadMapping> mappings,std::span<const std::filesystem::path> images) {
     const auto bytes=read_file(input);
-    const auto prepared=prepare(bytes,mappings);
+    auto prepared=prepare(bytes,mappings);
+    if (images.size()>31) throw std::invalid_argument("Too many secondary executable images");
+    if (!images.empty()) {
+        const auto snapshot=[](ByteView source,const elf::Executable& executable,std::uint32_t id) {
+            ExecutableImage image{executable.entry,id,{}};
+            for (const auto& segment:executable.segments) if (segment.file_size)
+                image.segments.push_back({segment.address,Bytes(source.begin()+segment.offset,source.begin()+segment.offset+segment.file_size)});
+            return image;
+        };
+        for (auto& range:prepared.ranges) range.image=1;
+        prepared.images.push_back(snapshot(bytes,elf::parse(bytes),1));
+        auto occupied=prepared.executable.segments;
+        for (const auto& path:images) {
+            const auto source=read_file(path);
+            auto extra=prepare(source,{});
+            const auto id=static_cast<std::uint32_t>(prepared.images.size()+1);
+            for (const auto& section:extra.executable.segments) {
+                for (const auto& old:occupied)
+                    if (std::uint64_t(section.address)<std::uint64_t(old.address)+old.memory_size &&
+                        std::uint64_t(old.address)<std::uint64_t(section.address)+section.memory_size)
+                        throw std::runtime_error("Executable image overlaps another image or resident payload");
+                if (std::uint64_t(section.address)<std::uint64_t(prepared.syscall_table)+1024 &&
+                    std::uint64_t(prepared.syscall_table)<std::uint64_t(section.address)+section.memory_size)
+                    throw std::runtime_error("Executable image overlaps native service metadata");
+            }
+            occupied.insert(occupied.end(),extra.executable.segments.begin(),extra.executable.segments.end());
+            for (const auto& [pc,instruction]:extra.discovered.instructions)
+                if (!prepared.discovered.instructions.emplace(pc,instruction).second)
+                    throw std::runtime_error("Executable image has an ambiguous compiled target");
+            prepared.discovered.unresolved.insert(extra.discovered.unresolved.begin(),extra.discovered.unresolved.end());
+            for (auto range:extra.ranges) { range.image=id; prepared.ranges.push_back(range); }
+            prepared.layouts.insert(prepared.layouts.end(),extra.layouts.begin(),extra.layouts.end());
+            prepared.images.push_back(snapshot(source,extra.executable,id));
+        }
+        for (const auto& [pc,instruction]:prepared.discovered.instructions) prepared.discovered.unresolved.erase(pc);
+    }
     if (!prepared.discovered.unresolved.empty())
         throw std::runtime_error("EE discovery reached unmapped code at "+hex32(*prepared.discovered.unresolved.begin()));
     std::vector<r5900::Instruction> instructions;
     for (const auto& [pc,instruction]:prepared.discovered.instructions) instructions.push_back(instruction);
     std::ostringstream llvm;
-    emit_llvm(llvm,instructions,prepared.ranges,prepared.payloads,prepared.layouts);
+    emit_llvm(llvm,instructions,prepared.ranges,prepared.payloads,prepared.layouts,prepared.images);
     const auto& executable=prepared.executable;
     const auto& image=prepared.image;
     const auto syscall_table=prepared.syscall_table;
@@ -213,6 +249,16 @@ target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codeg
     for (const auto& record:prepared.layouts)
         native_layout<<hex32(record[0])<<' '<<hex32(record[1])<<' '<<hex32(record[2])<<' '<<hex32(record[3])<<'\n';
     save(output/"native-layout-candidates.txt",native_layout.str());
+    if (!prepared.images.empty()) {
+        std::ostringstream manifest;
+        for (const auto& executable_image:prepared.images) {
+            manifest<<"image "<<executable_image.id<<" entry "<<hex32(executable_image.entry)<<'\n';
+            for (const auto& segment:executable_image.segments)
+                manifest<<"  section "<<hex32(segment.address)<<" bytes "<<segment.bytes.size()<<'\n';
+        }
+        manifest<<"Only image 1 is initialized at launch. Other images must be loaded and validated at ExecPS2.\n";
+        save(output/"executable-images.txt",manifest.str());
+    }
     const auto layout_plan=prepare_native_layout(prepared.layouts);
     std::ostringstream accepted_layout;
     accepted_layout<<"Static native allocations exist from process startup; declarations validate the compiled plan.\n"

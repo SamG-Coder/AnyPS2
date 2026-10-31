@@ -315,7 +315,27 @@ int main(int argc,char** argv) {
     try { std::ostringstream discard; nt::ee_codegen::emit_llvm(discard,code,{},payloads,conflicting); }
     catch (const std::runtime_error&) { failed=true; }
     if (!failed) throw std::runtime_error("Conflicting native access permissions accepted");
-    std::ostringstream generated; nt::ee_codegen::emit_llvm(generated,code,{},payloads,layouts);
+    std::array<nt::ee_codegen::ExecutableImage,2> images;
+    std::array<nt::ee_codegen::CodeRange,2> owned;
+    for (unsigned n=0;n<2;++n) {
+        const auto address=0x430000U+n*0x100;
+        nt::ee_codegen::CodePayload segment{address,{}};
+        for (const auto word:{0x24020055U+n,12U}) {
+            code.push_back(nt::r5900::decode(address+static_cast<unsigned>(segment.bytes.size()),word));
+            for (unsigned b=0;b<4;++b) segment.bytes.push_back(static_cast<std::uint8_t>(word>>(8*b)));
+        }
+        owned[n]={address,8,n+1}; images[n]={address,n+1,{segment}};
+    }
+    auto malformed=images; malformed[1].segments[0].bytes[0]^=1;
+    failed=false;
+    try { std::ostringstream discard; nt::ee_codegen::emit_llvm(discard,code,owned,payloads,layouts,malformed); }
+    catch (const std::invalid_argument&) { failed=true; }
+    if (!failed) throw std::runtime_error("Mismatched native image bytes accepted");
+    malformed=images; malformed[1].id=3; failed=false;
+    try { std::ostringstream discard; nt::ee_codegen::emit_llvm(discard,code,owned,payloads,layouts,malformed); }
+    catch (const std::invalid_argument&) { failed=true; }
+    if (!failed) throw std::runtime_error("Unknown image owner accepted");
+    std::ostringstream generated; nt::ee_codegen::emit_llvm(generated,code,owned,payloads,layouts,images);
     if (generated.str().find("fence seq_cst")==std::string::npos) throw std::runtime_error("Native SYNC ordering was omitted");
     const auto text=generated.str();
     unsigned functions=0;
@@ -344,6 +364,18 @@ int main(int argc,char** argv) {
         word(0x160,0xac850008); word(0x164,0x03e00008); word(0x168,0);
         nt::write_file(argv[2],elf);
         const auto original=elf;
+        // Native loader stores an original synthetic image and hands off via ExecPS2.
+        const std::uint32_t loader[]{0x24040000,0x34058000,0x24061000,0x24072000,0x24081000,
+            0x2403003c,12,0x0040e821,
+            0x3c082402,0x35080056,0xac083000,
+            0x3c082403,0x3508007b,0xac083004,0x2408000c,0xac083008,
+            0x24043000,0x24050000,0x24060000,0x24070000,0x24030007,12,0x03e00008,0};
+        for (unsigned i=0;i<std::size(loader);++i) word(0x100+i*4,loader[i]);
+        nt::write_file(std::string(argv[2])+".loader",elf);
+        elf=original; word(24,0x3000); word(44,1); word(60,0x3000); word(68,12); word(72,12);
+        word(0x100,0x24020056); word(0x104,0x2403007b); word(0x108,12);
+        nt::write_file(std::string(argv[2])+".image",elf);
+        elf=original;
         elf.resize(0x280,0); word(100,0x100); word(104,0x100);
         const std::uint32_t table_call[]{0x24042040,0x24082000,0xac880044,0x8c820044,
             0x24420018,0x8c450000,0x8c430004,0x0060f809,0x00852021,12};

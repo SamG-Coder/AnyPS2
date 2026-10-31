@@ -5,15 +5,24 @@
 #include <sstream>
 #include <stdexcept>
 int main(int argc,char** argv) {
-    if (argc!=3 && argc!=5) {
-        std::cerr<<"Usage: ps2-recompile <boot.elf> <new-output-directory> [--payloads mapping-file]\n"
+    if (argc<3) {
+        std::cerr<<"Usage: ps2-recompile <boot.elf> <new-output-directory> [--payloads mapping-file] [--image secondary.elf ...]\n"
                  <<"LLVM entry-flow conversion follows supported native syscall continuations.\n"; return 2;
     }
     try {
         std::vector<nt::ee_codegen::PayloadMapping> payloads;
-        if (argc==5) {
-            if (std::string_view(argv[3])!="--payloads") throw std::runtime_error("Expected --payloads");
-            std::ifstream input(argv[4]);
+        std::vector<std::filesystem::path> images;
+        bool payload_option=false;
+        for (int index=3;index<argc;++index) {
+            const std::string_view option=argv[index];
+            if (++index==argc) throw std::runtime_error("Missing conversion option value");
+            if (option=="--image") {
+                if (images.size()==31) throw std::runtime_error("Too many secondary images");
+                images.emplace_back(argv[index]); continue;
+            }
+            if (option!="--payloads" || payload_option) throw std::runtime_error("Expected one --payloads or repeated --image options");
+            payload_option=true;
+            std::ifstream input(argv[index]);
             if (!input) throw std::runtime_error("Cannot open payload mapping file");
             std::string line;
             while (std::getline(input,line)) {
@@ -34,7 +43,7 @@ int main(int argc,char** argv) {
                 payloads.push_back(std::move(mapping));
             }
         }
-        nt::ee_codegen::project(argv[1],argv[2],payloads);
+        nt::ee_codegen::project(argv[1],argv[2],payloads,images);
         std::cout<<"Generated EE LLVM project. Compile it with ps2-build. Game boot is not established.\n";
         return 0;
     } catch(const std::exception& error) { std::cerr<<"EE conversion: "<<error.what()<<'\n'; return 1; }

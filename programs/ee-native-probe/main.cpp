@@ -31,9 +31,14 @@
 #include <nt/ee_vu_launch.hpp>
 #endif
 extern "C" nt::ee::Stop nt_ee_generated_run(nt::runtime::State*,nt::ee::Memory*,std::uint64_t);
-extern "C" bool nt_ee_generated_code_overlap(std::uint32_t,std::uint32_t);
+extern "C" bool nt_ee_generated_active_code_overlap(std::uint32_t,std::uint32_t,std::uint32_t);
+extern "C" nt::ee::Stop nt_ee_generated_publish_image(nt::ee::Memory*,std::uint32_t);
 extern "C" bool nt_ee_generated_contains(std::uint32_t);
 namespace {
+nt::ee::Memory* active_program_memory=nullptr;
+bool native_code_overlap(std::uint32_t address,std::uint32_t bytes) {
+    return nt_ee_generated_active_code_overlap(address,bytes,active_program_memory ? active_program_memory->executable_image : 1);
+}
 struct VuCapture {
     unsigned unit=0,destination=0;
     std::vector<std::uint8_t> bytes;
@@ -168,6 +173,7 @@ int main(int argc,char** argv) {
             throw std::runtime_error("Converted program data mismatch");
         ram.resize(0x2000000,0);
         nt::ee::Memory memory{ram.data(),ram.size()};
+        active_program_memory=&memory;
         const auto owner_thread=std::this_thread::get_id();
         nt::ee::NativePerformanceCounters cycles([owner_thread]() -> std::optional<std::uint64_t> {
             if (std::this_thread::get_id()!=owner_thread) return std::nullopt;
@@ -260,11 +266,11 @@ int main(int argc,char** argv) {
         platform.graphics.reset_drawing=[](void* context) {
             static_cast<NativeGpu*>(context)->drawing.reset(); return nt::ee::Stop::budget;
         };
-        nt::ee::NativeSifCommandPeer command_peer(platform.sif_link,memory,nt_ee_generated_code_overlap,0x1000,&platform.sif_receive);
+        nt::ee::NativeSifCommandPeer command_peer(platform.sif_link,memory,native_code_overlap,0x1000,&platform.sif_receive);
 #ifdef ANYPS2_NATIVE_IOP
         std::unique_ptr<probe::IopReset> iop_reset;
         if (!iop_data.empty()) {
-            iop_reset=std::make_unique<probe::IopReset>(iop_data,disc,memory,platform,nt_ee_generated_code_overlap,iop_session);
+            iop_reset=std::make_unique<probe::IopReset>(iop_data,disc,memory,platform,native_code_overlap,iop_session);
             if (!command_peer.reset_owner(iop_reset->owner())) throw std::runtime_error("Cannot bind compiled IOP reset probe");
             active_iop=iop_reset.get();
         }
@@ -279,7 +285,8 @@ int main(int argc,char** argv) {
         }
         if (!command_peer.connect(platform.sif_outbound)) throw std::runtime_error("Cannot connect native command peer");
         auto state=nt::ee::NativePlatform::initial_state(ANYPS2_EE_ENTRY);
-        nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains,ANYPS2_EE_SYSCALL_TABLE);
+        nt::ee::StartupServices services(native_code_overlap,nt_ee_generated_contains,ANYPS2_EE_SYSCALL_TABLE);
+        services.publish_image=[](nt::ee::Memory& m,std::uint32_t entry) { return nt_ee_generated_publish_image(&m,entry); };
 #ifdef ANYPS2_NATIVE_IOP
         if (iop_reset) services.idle_pump=[&] { return iop_reset->pump(); };
 #endif
@@ -365,6 +372,7 @@ int main(int argc,char** argv) {
         if (stop==nt::ee::Stop::memory_fault || stop==nt::ee::Stop::code_write || stop==nt::ee::Stop::unpublished_code || (stop==nt::ee::Stop::unsupported_system && memory.fault_address))
             std::cout<<" address="<<nt::hex32(memory.fault_address);
         if (stop==nt::ee::Stop::unmapped_code) std::cout<<" return_address="<<nt::hex32(static_cast<std::uint32_t>(state.gpr[31].lo));
+        std::cout<<" native_image="<<memory.executable_image;
         if (memory.metrics.rejected) {
             const auto control=memory.metrics.rejected_control;
             std::cout<<" unsupported_performance_control="<<nt::hex32(control)

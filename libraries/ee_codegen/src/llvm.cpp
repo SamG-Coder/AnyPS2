@@ -2,6 +2,7 @@
 #include "llvm_writer.hpp"
 #include "memory.hpp"
 #include "native_layout.hpp"
+#include "images.hpp"
 #include "packed.hpp"
 #include "vector.hpp"
 #include "floating.hpp"
@@ -96,6 +97,15 @@ void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::s
         const auto boundary=w.binary("xor","i1",is_delay,"true");
         const auto deliver=w.binary("and","i1",w.binary("and","i1",enabled,ready),boundary);
         w.out<<"  br i1 "<<deliver<<", label %interrupt_stop, label %body"<<suffix<<"\nbody"<<suffix<<":\n";
+        for (const auto& range:ranges) if (range.image && i.pc>=range.address && std::uint64_t(i.pc)<std::uint64_t(range.address)+range.size) {
+            const auto live=w.load("i32",offsetof(ee::Memory,executable_image),"%memory");
+            const auto active=w.value("icmp eq i32 "+live+", "+std::to_string(range.image));
+            w.out<<"  br i1 "<<active<<", label %image_ready"<<suffix<<", label %image_stop"<<suffix
+                 <<"\nimage_stop"<<suffix<<":\n";
+            w.store("i32",std::to_string(i.pc),offsetof(ee::Memory,fault_address),"%memory");
+            w.out<<"  ret i32 14\nimage_ready"<<suffix<<":\n";
+            break;
+        }
         for (std::size_t payload_index=0;payload_index<payloads.size();++payload_index) {
             const auto& payload=payloads[payload_index];
             if (physical_address(i.pc)<payload.address || std::uint64_t(physical_address(i.pc))>=std::uint64_t(payload.address)+payload.bytes.size()) continue;
@@ -273,7 +283,7 @@ EeRejection reject_unsupported(std::span<const r5900::Instruction> instructions)
     }
     return rejection;
 }
-void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> protected_code,std::span<const CodePayload> payloads,std::span<const LayoutDeclaration> layouts) {
+void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> protected_code,std::span<const CodePayload> payloads,std::span<const LayoutDeclaration> layouts,std::span<const ExecutableImage> images) {
     static_assert(std::is_standard_layout_v<runtime::State> && std::is_standard_layout_v<ee::Memory>);
     static_assert(sizeof(void*)==8 && std::endian::native==std::endian::little,
                   "EE LLVM currently requires a little-endian 64-bit host ABI");
@@ -304,6 +314,7 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
     if (!rejection.families.empty()) throw std::runtime_error(rejection.text());
     if (!rejection.constraints.empty() || rejection.omitted_constraints)
         throw std::invalid_argument(rejection.constraints.empty() ? std::string("EE LLVM encoding constraints") : rejection.constraints.front());
+    validate_images(images,protected_code,instructions);
     std::vector<CodeRange> ranges(protected_code.begin(),protected_code.end());
     for (const auto& range:ranges)
         if (!range.size || std::uint64_t(range.address)+range.size>0x100000000ULL)
@@ -320,7 +331,10 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
             if (word!=i.word) throw std::invalid_argument("Compiled payload instruction differs from expected bytes");
             continue;
         }
-        if (!ranges.empty() && std::uint64_t(ranges.back().address)+ranges.back().size==address)
+        if (std::any_of(ranges.begin(),ranges.end(),[&](const auto& r) {
+            return address>=r.address && std::uint64_t(address)+4<=std::uint64_t(r.address)+r.size;
+        })) continue;
+        if (!ranges.empty() && !ranges.back().image && std::uint64_t(ranges.back().address)+ranges.back().size==address)
             ranges.back().size+=4;
         else ranges.push_back({address,4});
     }
@@ -331,7 +345,9 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
             auto& previous=merged.back();
             const auto previous_end=std::uint64_t(previous.address)+previous.size;
             const auto end=std::max(previous_end,std::uint64_t(range.address)+range.size);
-            if (range.address<=previous_end && end-previous.address<=0xffffffffULL) {
+            if (range.address<previous_end && range.image!=previous.image)
+                throw std::invalid_argument("Native executable lifetimes overlap");
+            if (range.image==previous.image && range.address<=previous_end && end-previous.address<=0xffffffffULL) {
                 previous.size=static_cast<std::uint32_t>(end-previous.address); continue;
             }
         }
@@ -346,7 +362,8 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
     }
     const auto layout=prepare_native_layout(layouts);
     Writer w;
-    if (!payloads.empty()) w.out<<"declare i32 @memcmp(ptr, ptr, i64)\n";
+    if (!payloads.empty() || !images.empty()) w.out<<"declare i32 @memcmp(ptr, ptr, i64)\n";
+    emit_images(w,images);
     for (std::size_t n=0;n<payloads.size();++n) {
         w.out<<"@nt_payload_"<<n<<" = private constant ["<<payloads[n].bytes.size()<<" x i8] [";
         for (std::size_t b=0;b<payloads[n].bytes.size();++b)
@@ -359,11 +376,13 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
     for (const auto& i:instructions) w.out<<"    i32 "<<i.pc<<", label %present\n";
     w.out<<"  ]\npresent:\n  ret i1 true\nmissing:\n  ret i1 false\n}\n";
 
-    w.out<<"define i1 @nt_ee_generated_code_overlap(i32 %address, i32 %bytes) {\nentry:\n";
+    w.out<<"define i1 @nt_ee_generated_code_overlap(i32 %address, i32 %bytes) {\nentry:\n"
+         <<"  %result = call i1 @nt_ee_generated_active_code_overlap(i32 %address, i32 %bytes, i32 1)\n  ret i1 %result\n}\n";
+    w.out<<"define i1 @nt_ee_generated_active_code_overlap(i32 %address, i32 %bytes, i32 %image) {\nentry:\n";
     const auto address=w.value("zext i32 %address to i64");
     const auto bytes=w.value("zext i32 %bytes to i64");
     const auto end=w.binary("add","i64",address,bytes);
-    const auto overlap=code_overlap(w,address,end,ranges);
+    const auto overlap=code_overlap(w,address,end,ranges,"%image");
     w.out<<"  ret i1 "<<overlap<<"\n}\n";
     w.out<<"declare i32 @nt_ee_validate_native_layout(ptr, i32, i32, i32, i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_address_space(ptr, i32, i32, i32)\n";

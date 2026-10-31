@@ -41,14 +41,16 @@ inline std::optional<MemoryOperation> memory_operation(Op op) {
 inline std::uint32_t physical_address(std::uint32_t address) {
     return runtime::default_ram_address(address);
 }
-inline std::string code_overlap(Writer& w,const std::string& offset,const std::string& end,std::span<const CodeRange> code) {
+inline std::string code_overlap(Writer& w,const std::string& offset,const std::string& end,std::span<const CodeRange> code,const std::string& active_image="1") {
     std::string overlap="false";
     for (const auto& range:code) {
         const auto begin=range.address;
         const auto finish=std::uint64_t(begin)+range.size;
         const auto before=w.value("icmp ult i64 "+offset+", "+std::to_string(finish));
         const auto after=w.value("icmp ugt i64 "+end+", "+std::to_string(begin));
-        overlap=w.binary("or","i1",overlap,w.binary("and","i1",before,after));
+        auto hit=w.binary("and","i1",before,after);
+        if (range.image) hit=w.binary("and","i1",hit,w.value("icmp eq i32 "+active_image+", "+std::to_string(range.image)));
+        overlap=w.binary("or","i1",overlap,hit);
     }
     return overlap;
 }
@@ -186,7 +188,7 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
     // boundary; executable writes are still rejected at every memory store.
     if (i.op==Op::cache) { w.out<<"  fence seq_cst\n"; return; }
     if (access.write) {
-        const auto overlap=w.binary("and","i1",main_memory,code_overlap(w,offset,end,code));
+        const auto overlap=w.binary("and","i1",main_memory,code_overlap(w,offset,end,code,w.load("i32",offsetof(ee::Memory,executable_image),"%memory")));
         w.out<<"  br i1 "<<overlap<<", label %code_write"<<suffix<<", label %access"<<suffix<<"\ncode_write"<<suffix<<":\n";
         w.store("i32",address,offsetof(ee::Memory,fault_address),"%memory");
         w.out<<"  ret i32 5\naccess"<<suffix<<":\n";

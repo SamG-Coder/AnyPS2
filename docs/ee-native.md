@@ -2102,10 +2102,10 @@ not automatically accepted by every service merely because generated loads and
 stores support it; service-boundary conversion must preserve the same backing
 before such pointers can be accepted there.
 
-Private GT4 validation completes the populated layout declarations and vacant
-entry cleanup, then reaches ExecPS2. The loaded secondary image has not yet been
-linked into the boot executable's AOT code set. The warning still renders before
-the black handoff screen; a title screen is not established.
+Private GT4 validation completes layout initialization, validates the loaded
+secondary image and executes its LLVM-compiled entry in the same executable.
+Startup reaches an undiscovered constructor callback in that image. The warning
+still renders before a black screen; a title screen is not established.
 
 Count-register reads are lowered to the same native elapsed clock selected for
 profiling, returning the low 32 bits with the required signed register extension.
@@ -2123,3 +2123,33 @@ Uncompiled targets stop with their requested entry; active interrupts, live peer
 threads, invalid pointers and oversized arguments preserve the previous image.
 The Random-index register remains an explicit unsupported address-space service;
 it is not replaced with a fabricated index or assumed to be an entropy source.
+
+### Ahead-of-time image handoff
+
+`ps2-recompile --image secondary.elf` merges discovered code from disjoint input
+images into one LLVM module and one executable. Repeat the option for up to 31
+secondary images. The original boot data remains the sole launch-time RAM input;
+secondary data is not silently preloaded. Overlapping images, resident payloads,
+service metadata, ambiguous code targets and inconsistent instruction bytes are
+conversion errors. Only file-backed executable ranges are supported for owned
+code. The private output manifest records each image entry and section extent.
+
+At `ExecPS2`, argument and thread ownership validation precedes a generated
+publication function. It checks the loaded file-backed bytes against the build
+input, then activates a scalar image lifetime identity. A mismatch leaves the
+old process and image active. Generated constant branches restrict execution and
+code writes to the appropriate lifetime; this identity is not an address map,
+MMU, runtime instruction decoder or executable lookup table. Native service
+writers use the same active-code protection. Copied resident kernel payloads
+retain their existing byte checks and survive a handoff. Old image storage can
+be reused, but retired compiled code cannot execute. File-backed data mutations
+before publication are currently rejected; overlay relocation and overlapping
+image lifetimes are unsupported. BSS initialization remains the compiled
+program's responsibility.
+
+The `ee-native-images` Release test converts and compiles an original synthetic
+loader and image together, verifies that secondary bytes were not preloaded,
+executes the loader's stores and native handoff, and checks the dependency audit.
+Execution tests cover failed publication, active-code writes, retired code,
+unknown targets and preservation of ownership on failure. These are subsystem
+tests, not evidence of commercial-game title-screen rendering.

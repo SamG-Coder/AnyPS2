@@ -26,6 +26,9 @@ public:
     // Owner pumps external native completions. A bounded idle wait preserves
     // resumable state and never consumes the compiled operation budget.
     std::function<Stop()> idle_pump;
+    // Validate and activate an AOT image after arguments/ownership are checked.
+    // Failure must preserve image identity and all application state.
+    std::function<Stop(Memory&,std::uint32_t)> publish_image;
     // Owner-thread UI/cancellation hook, including during native idle waits.
     std::function<bool()> stop_requested;
     std::chrono::milliseconds idle_timeout{1000};
@@ -168,6 +171,10 @@ private:
         LaunchArguments next;
         const auto captured=next.capture(memory,static_cast<std::uint32_t>(state.gpr[6].lo),static_cast<std::uint32_t>(state.gpr[7].lo));
         if (captured!=Stop::budget) return captured;
+        if (publish_image) {
+            const auto published=publish_image(memory,entry);
+            if (published!=Stop::budget) return published;
+        }
         // Commit after validation; a failed handoff preserves all old ownership.
         launch_=std::move(next); threads_.replace_image(); semaphores_={}; main_.reset(); heap_.reset();
         if (memory.interrupts) { memory.interrupts->replace_image(); memory.interrupts->publish(memory); }

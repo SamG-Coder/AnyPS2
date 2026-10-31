@@ -579,10 +579,12 @@ produces a private ELF input for ordinary LLVM conversion:
 
 ```powershell
 .\build\Release\ps2-unpack.exe --disc 'C:\path\to\owned-game.iso' 'path/to/packed-program' work\secondary.elf
-.\build\Release\ps2-recompile.exe work\secondary.elf work\secondary-native
+.\build\Release\ps2-recompile.exe work\boot.elf work\native --image work\secondary.elf
 ```
 
 The importer validates bounded segments and rejects conflicting overlaps; opaque
 container metadata is not authenticated. Only the segment containing the entry
-point is initially marked executable. It neither runs the program nor connects
-it to an existing executable; secondary-image handoff remains in development.
+point is initially marked executable. Repeat `--image` to compile additional,
+disjoint images into the same executable. The compiled loader must populate their
+bytes before `ExecPS2` validates and activates them. This does not establish full
+code discovery or title-screen compatibility; see [native execution](docs/ee-native.md).

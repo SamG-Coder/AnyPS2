@@ -20,6 +20,8 @@ void check(bool ok,std::source_location location=std::source_location::current()
     if (!ok) throw std::runtime_error("EE LLVM execution mismatch at line "+std::to_string(location.line()));
 }
 extern "C" bool nt_ee_generated_contains(std::uint32_t);
+extern "C" nt::ee::Stop nt_ee_generated_publish_image(nt::ee::Memory*,std::uint32_t);
+extern "C" bool nt_ee_generated_active_code_overlap(std::uint32_t,std::uint32_t,std::uint32_t);
 static std::uint64_t timer_now=0;
 static std::uint64_t timer_clock() { return timer_now; }
 static std::uint64_t stepping_timer_clock() { timer_now+=1000; return timer_now; }
@@ -27,6 +29,44 @@ void run_ee_batch_tests();
 void run_ee_file_rpc_tests();
 int main() {
     try {
+        {
+            // Loader writes inactive native code, then publishes verified bytes
+            // atomically through the actual image-handoff service.
+            std::vector<std::uint8_t> ram(0x440000);
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::runtime::State state;
+            state.pc=0x430100;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unpublished_code && !state.executed);
+            check(nt_ee_generated_publish_image(&memory,0x430100)==nt::ee::Stop::unpublished_code && memory.executable_image==1);
+            check(nt_ee_generated_publish_image(&memory,0x430200)==nt::ee::Stop::unmapped_code && memory.executable_image==1);
+            for (unsigned n=0;const auto word:{0x24020056U,12U}) {
+                state={}; state.pc=0x360000; state.set(4,0x430100+n++*4); state.set(8,word);
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+            }
+            memory.size=0x430104;
+            check(nt_ee_generated_publish_image(&memory,0x430100)==nt::ee::Stop::unpublished_code && memory.executable_image==1);
+            memory.size=ram.size();
+            static nt::ee::Memory* live_image=nullptr; live_image=&memory;
+            nt::ee::StartupServices services([](auto a,auto b) {
+                return nt_ee_generated_active_code_overlap(a,b,live_image->executable_image);
+            },nt_ee_generated_contains);
+            services.publish_image=[](auto& m,auto entry) { return nt_ee_generated_publish_image(&m,entry); };
+            state={}; state.pc=0x11ec; state.set(3,0x3c); state.set(5,0x8000);
+            state.set(6,0x1000); state.set(7,0x2000); state.set(8,0x1100);
+            check(services.invoke(state,memory)==nt::ee::Stop::budget);
+            state.set(3,7); state.set(4,0x430100); state.set(5,0); state.set(6,0); state.set(7,0);
+            ram[0x430100]^=1;
+            check(services.invoke(state,memory)==nt::ee::Stop::unpublished_code && services.main_thread() && memory.executable_image==1);
+            ram[0x430100]^=1;
+            check(services.invoke(state,memory)==nt::ee::Stop::budget && memory.executable_image==2 && !services.main_thread());
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.gpr[2].lo==0x56);
+            check(nt_ee_generated_active_code_overlap(0x430100,4,2) && !nt_ee_generated_active_code_overlap(0x430000,4,2));
+            state={}; state.pc=0x430000;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unpublished_code && !state.executed);
+            state={}; state.pc=0x360000; state.set(4,0x430100); state.set(8,0);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::code_write);
+            state.pc=0x360000; state.set(4,0x430000);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+        }
         {
             // Whole native layout transaction, followed by direct compiled
             // accesses to the existing backing. No address-space provider.

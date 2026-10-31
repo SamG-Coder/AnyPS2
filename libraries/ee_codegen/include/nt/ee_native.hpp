@@ -77,6 +77,9 @@ struct Memory {
     void* vector_launch_context=nullptr;
     Stop (*launch_vector)(void*,bool,unsigned)=nullptr;
     NativeVectorMemory vector_data[2];
+    // Converter-assigned lifetime identity, not an address mapping. Generated
+    // code uses constant comparisons; resident services have no image lifetime.
+    std::uint32_t executable_image=1;
 };
 // Syscall boundaries retain PC and do not retire until a native service handles them.
 using Entry = Stop (*)(runtime::State*,Memory*,std::uint64_t);

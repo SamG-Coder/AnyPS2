@@ -15,16 +15,19 @@ inline constexpr std::size_t program_instruction_limit=262144;
 struct PayloadMapping { std::uint32_t source,destination,size; std::vector<std::uint32_t> entry_offsets; };
 struct CodePayload { std::uint32_t address; std::vector<std::uint8_t> bytes; };
 using LayoutDeclaration=std::array<std::uint32_t,4>;
-struct CodeRange { std::uint32_t address,size; };
+struct CodeRange { std::uint32_t address,size,image=0; }; // image 0 is permanently resident.
+struct ExecutableImage { std::uint32_t entry,id; std::vector<CodePayload> segments; };
 // Emits a sorted, bounded set of compiled instructions. Additional ranges protect
 // executable ELF contents that have not yet been reached by discovery.
 void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instructions,
                std::span<const CodeRange> protected_code = {},
                std::span<const CodePayload> payloads = {},
-               std::span<const LayoutDeclaration> layouts = {});
+               std::span<const LayoutDeclaration> layouts = {},
+               std::span<const ExecutableImage> images = {});
 // Discover entry flow and recognized native syscall continuations, then emit a project.
 void project(const std::filesystem::path& input,const std::filesystem::path& output,
-             std::span<const PayloadMapping> payloads = {});
+             std::span<const PayloadMapping> payloads = {},
+             std::span<const std::filesystem::path> images = {});
 // Unsupported operations and encodings in an already decoded instruction list.
 // Empty means this list can be lowered. No text is emitted.
 struct EeRejection {
