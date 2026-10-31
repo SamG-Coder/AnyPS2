@@ -434,8 +434,9 @@ int main(int argc,char** argv) {
             const auto& output=platform.graphics.output();
             const auto frame=nt::graphics::scanout(gpu.drawing.pixels(),output.control,output.buffers,output.displays);
             if (frame) {
-                std::cout<<"native_display="<<frame->width<<'x'<<frame->height<<" execution=stopped\n"<<std::flush;
+                std::cout<<"native_display="<<frame->width<<'x'<<frame->height<<" execution=stopped\n";
             }
+            std::cout<<std::flush;
             window->hold(frame);
         }
         return stop==nt::ee::Stop::budget ? 4 : 3;

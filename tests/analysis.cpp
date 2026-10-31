@@ -13,6 +13,19 @@ void put(nt::Bytes& bytes, std::size_t offset, std::uint32_t word) {
 int main() {
     try {
         {
+            nt::Bytes image(128,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,128,128,5,4}}};
+            put(image,0,0x0c000408); put(image,4,0x24051070); put(image,8,12);
+            const std::uint32_t visitor[]{0x00a0882d,0x0c000418,0,0x0220f809,0,0x03e00008,0};
+            for (unsigned n=0;n<std::size(visitor);++n) put(image,32+n*4,visitor[n]);
+            put(image,96,0x03e00008); put(image,112,0x03e00008);
+            const auto entries=[&] { return nt::analysis::registered_code_pointers(image,fixture,
+                nt::analysis::discover(image,fixture,128,{},true)); };
+            check(entries()==std::set<std::uint32_t>{0x1070},"Invoked argument callback was not recovered across a helper call");
+            put(image,44,0x8c910000); put(image,48,0x0220f809);
+            check(entries().empty(),"Invoked argument survived an unknown pointer overwrite");
+        }
+        {
             nt::Bytes image(176,0);
             nt::elf::Executable fixture{0x1000,0,{{0,0x1000,160,160,5,4},{160,0x2000,16,16,6,4}}};
             put(image,0,0x0c000404); put(image,8,12);

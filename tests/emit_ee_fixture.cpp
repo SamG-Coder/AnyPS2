@@ -401,6 +401,12 @@ int main(int argc,char** argv) {
         for (unsigned n=0;n<std::size(conditional);++n) word(0x100+n*4,conditional[n]);
         word(0x140,0x03e00008); word(0x180,0x03e00008); word(0x184,0x24020049);
         nt::write_file(std::string(argv[2])+".conditional-callback",elf);
+        std::fill(elf.begin()+0x100,elf.end(),0);
+        word(0x100,0x0c000410); word(0x104,0x24051080); word(0x108,0x2403007b); word(0x10c,12);
+        const std::uint32_t visitor[]{0x03e0802d,0x00a0882d,0x0c000418,0,0x0220f809,0,0x02000008,0};
+        for (unsigned n=0;n<std::size(visitor);++n) word(0x140+n*4,visitor[n]);
+        word(0x160,0x03e00008); word(0x180,0x03e00008); word(0x184,0x2402005b);
+        nt::write_file(std::string(argv[2])+".invoked-callback",elf);
         elf=original;
         // Cross the code-module boundary using original synthetic straight-line
         // code. Both the final native function and its preceding module execute.

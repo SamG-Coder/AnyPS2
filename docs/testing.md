@@ -2499,6 +2499,8 @@ LLVM module boundary. The output-stream regression rejects a failed stream,
 and project tests preserve an existing destination.
 The same pipeline executes a callback installed by a conditional delay-slot
 store into initially empty data; analysis rejects a dynamic source overwrite.
+It also executes a callback argument preserved across a helper call and then
+invoked directly, with a regression for an unknown pointer overwrite.
 
 `ee-llvm-execution` covers quotient operations and unsupported numeric rejection,
 clip history, outer products, random-register recurrence and lane masks,

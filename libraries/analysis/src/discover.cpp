@@ -114,7 +114,7 @@ struct ArgumentValue {
     auto operator<=>(const ArgumentValue&) const=default;
 };
 struct ArgumentUses {
-    unsigned stored=0;
+    unsigned stored=0,called=0;
     std::map<unsigned,std::set<std::uint32_t>> callable_fields;
 };
 ArgumentUses argument_uses(const Program& program,std::uint32_t entry) {
@@ -180,6 +180,8 @@ ArgumentUses argument_uses(const Program& program,std::uint32_t entry) {
         }
         if (i.indirect() && origins[i.rs].loaded)
             uses.callable_fields[origins[i.rs].origin].insert(origins[i.rs].offset);
+        else if (i.indirect() && !origins[i.rs].offset)
+            uses.called|=origins[i.rs].origin;
         // ABI-preserved copies may reach registration after a helper call.
         // This only proposes compilation roots; it never folds runtime values.
         if (i.op==Op::jal || i.op==Op::jalr) {
@@ -552,7 +554,7 @@ std::set<std::uint32_t> registered_code_pointers(ByteView bytes,const elf::Execu
             if (!value) continue;
             const auto address=executable_pointer(elf,*value);
             if (!address) continue;
-            if (found->second.stored&(1U<<(reg-4))) result.insert(*address);
+            if ((found->second.stored|found->second.called)&(1U<<(reg-4))) result.insert(*address);
         }
     }
     // Multi-callback descriptor shapes come from actual indirect calls through

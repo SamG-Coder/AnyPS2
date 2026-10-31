@@ -2211,6 +2211,10 @@ delay slot. Dynamic register overwrites and call clobbers still end the slice.
 This rule supplies compilation roots only; memory-layout recovery does not use
 it, and generated code retains the original condition and runtime store.
 
+Direct callee summaries also recover callback arguments invoked through preserved
+registers after helper calls, without requiring a registration store. Unknown
+pointer overwrites and arithmetic offsets invalidate that argument relationship.
+
 Project generation streams checked LLVM output into a uniquely owned temporary
 directory and publishes the directory only after every artifact closes
 successfully. It refuses existing destinations. This avoids retaining the full

@@ -86,3 +86,12 @@ execute_process(COMMAND "${run}/conditional-callback-build/Release/ps2-native${E
 if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00001028.*v0=73")
     message(FATAL_ERROR "Conditionally stored callback did not execute: ${out} ${err}")
 endif()
+
+checked("${CONVERTER}" "${run}/fixture.elf.invoked-callback" "${run}/invoked-callback")
+checked("${CMAKE_COMMAND}" -S "${run}/invoked-callback" -B "${run}/invoked-callback-build" -G "${GENERATOR}" ${platform} "-DANYPS2_ROOT=${ROOT}")
+checked("${CMAKE_COMMAND}" --build "${run}/invoked-callback-build" --config Release --target ps2-native --parallel 2)
+execute_process(COMMAND "${run}/invoked-callback-build/Release/ps2-native${EXE_SUFFIX}" "${run}/invoked-callback/program.data" --headless
+    RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
+if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x0000100c.*v0=91")
+    message(FATAL_ERROR "Callback invoked through a saved argument did not execute: ${out} ${err}")
+endif()
