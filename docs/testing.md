@@ -2536,3 +2536,12 @@ clip history, outer products, random-register recurrence and lane masks,
 Q/I multiplication, accumulator arithmetic and pending VU ownership.
 `vu-llvm-execution` covers shared Q/I/R/clip state across VU0 launch. These tests
 establish behavior of compiled synthetic code, not a commercial title screen.
+
+The network-startup libc/control-flow batch compiles and executes source-first
+overlapping copies, aligned/truncated word copies, pointer aliases, bounded
+string search/span operations, nullable descriptor calls, client-supplied
+callbacks without data relocations, and cursor jump tables. Unknown callback
+targets, code writes, misalignment and out-of-range buffers are rejected.
+A separate regression keeps an unbounded assigned native callback slot from
+being narrowed to an incidental relocation-candidate set. The console iLink
+identity call must stop rather than synthesize an ID or a successful response.

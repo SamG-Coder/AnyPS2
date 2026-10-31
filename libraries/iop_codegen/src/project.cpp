@@ -185,8 +185,12 @@ target_compile_definitions(iop-native PRIVATE ANYPS2_IOP_LLVM=1)
         if (library.name=="usbd") diagnostics<<"Native USBD public ABI: LLVM entry stubs call the Windows USB descriptor owner. "
             "Startup, driver registration/probing, descriptor queries, private data and unregistration are supported; "
             "transfers and topology changes stop explicitly.\n";
+    for (const auto& item:compiled) for (const auto& import:elf::iop_imports(item))
+        if (import.library=="cdvdman" && import.ordinal==22)
+            diagnostics<<"Unavailable native service: cdvdman ordinal 22 (console iLink identity) at "
+                       <<hex32(item.base+import.offset)<<". The compiled call stops if reached; no identity is synthesized.\n";
     for (const auto pc : program.guarded_callback_sites)
-        diagnostics<<"Guarded stack callback at "<<hex32(pc)<<": "<<program.instructions.at(pc).targets.size()
+        diagnostics<<"Guarded native callback at "<<hex32(pc)<<": "<<program.instructions.at(pc).targets.size()
                    <<" compiled address-taken candidates; other runtime targets stop as unmapped code.\n";
     for (const auto pc : program.open_indirect_sites)
         diagnostics<<"Open indirect at "<<hex32(pc)

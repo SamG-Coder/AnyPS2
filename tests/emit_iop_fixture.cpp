@@ -1080,7 +1080,7 @@ int main(int argc,char** argv) {
         for (unsigned i=0;i<std::size(escaped);++i) factory_word(0xb5a0+i*4,escaped[i]);
         factory_word(0xb5e8,0x03e00008); factory_word(0xb5ec,0x24020075);
         bundle_roots.push_back(0xb5a0);
-        nt::elf::IopModule display{0x11000,0x11014,nt::Bytes(0x200),0x200,{}};
+        nt::elf::IopModule display{0x11000,0x11014,nt::Bytes(0x300),0x300,{}};
         const auto display_word=[&](unsigned pc,std::uint32_t word) { fixture::put32(display.memory,pc-display.base,word); };
         display_word(0x11000,0x41e00000); display_word(0x11008,0x101);
         constexpr char display_library[]="vblank";
@@ -1108,13 +1108,30 @@ int main(int argc,char** argv) {
         display.code_addresses={0x111a0};
         bundle_roots.push_back(0x11100);
         bundle_roots.push_back(0x11130);
-        nt::elf::IopModule registry_client{0x12000,0x12060,nt::Bytes(0x80),0x80,{}};
+        constexpr std::uint32_t field_registry[]{0x03e08021,0x8c820038,0,0x8c420008,0,
+            0x0040f809,0,0x0200f821,0x03e00008,0};
+        for (unsigned i=0;i<std::size(field_registry);++i) display_word(0x11200+i*4,field_registry[i]);
+        bundle_roots.push_back(0x11200);
+        {
+            auto clobbered=display; fixture::put32(clobbered.memory,0x210,0x00a01021);
+            const std::array roots{0x11200U};
+            bool rejected=false;
+            try { nt::iop_codegen::ir::discover(clobbered,roots); } catch (const std::runtime_error&) { rejected=true; }
+            if (!rejected) throw std::runtime_error("Unknown overwrite retained a nested descriptor callback");
+        }
+        constexpr std::uint32_t assigned_callback[]{0x03e08021,0x3c030001,0xac6512b0,0x8c6212b0,0,
+            0x0040f809,0,0x0200f821,0x03e00008,0};
+        for (unsigned i=0;i<std::size(assigned_callback);++i) display_word(0x11280+i*4,assigned_callback[i]);
+        bundle_roots.push_back(0x11280);
+        nt::elf::IopModule registry_client{0x12000,0x12060,nt::Bytes(0x100),0x100,{}};
         fixture::put32(registry_client.memory,0,0x41e00000);
         fixture::put32(registry_client.memory,8,0x101);
         std::copy(std::begin(registry_library),std::end(registry_library),registry_client.memory.begin()+12);
         fixture::put32(registry_client.memory,0x14,0x03e00008); fixture::put32(registry_client.memory,0x18,0x24000000);
         fixture::put32(registry_client.memory,0x40,0x03e00008); fixture::put32(registry_client.memory,0x44,0x24020057);
-        fixture::put32(registry_client.memory,0x60,0x03e00008);
+        constexpr std::uint32_t registry_register[]{0x03e08021,0x3c040001,0x34842080,0x0c004805,0,0x0200f821,0x03e00008,0};
+        for (unsigned i=0;i<std::size(registry_register);++i) fixture::put32(registry_client.memory,0x60+i*4,registry_register[i]);
+        fixture::put32(registry_client.memory,0x80,0x03e00008); fixture::put32(registry_client.memory,0x84,0x24020063);
         registry_client.code_addresses={0x12040};
         {
             const std::array roots{0x11100U};
@@ -1199,7 +1216,36 @@ int main(int argc,char** argv) {
             try { nt::iop_codegen::ir::discover(broken); } catch (const std::runtime_error&) { rejected=true; }
             if (!rejected) throw std::runtime_error("Hoisted indexed table accepted a clobbered address register");
         }
-        const std::array bundle{module,provider,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table};
+        nt::elf::IopModule network_services{0x17000,0x17014,nt::Bytes(0x800),0x800,{}};
+        fixture::put32(network_services.memory,0,0x41e00000); fixture::put32(network_services.memory,8,0x104);
+        std::copy(std::begin(library),std::end(library),network_services.memory.begin()+12);
+        constexpr unsigned network_ordinals[]{16,40,24,31,33,34};
+        for (unsigned i=0;i<std::size(network_ordinals);++i) {
+            fixture::put32(network_services.memory,20+i*8,0x03e00008);
+            fixture::put32(network_services.memory,24+i*8,0x24000000|network_ordinals[i]);
+            bundle_roots.push_back(0x17014+i*8);
+        }
+        fixture::put32(network_services.memory,0x100,0x41e00000); fixture::put32(network_services.memory,0x108,0x101);
+        const std::string disc_library="cdvdman";
+        std::copy(disc_library.begin(),disc_library.end(),network_services.memory.begin()+0x10c);
+        fixture::put32(network_services.memory,0x114,0x03e00008); fixture::put32(network_services.memory,0x118,0x24000016);
+        bundle_roots.push_back(0x17114);
+        const auto network_word=[&](unsigned pc,unsigned word) { fixture::put32(network_services.memory,pc-0x17000,word); };
+        constexpr std::uint32_t cursor_code[]{0x3c140001,0x26947600,0x00009021,0x00001821,
+            0x2e420002,0x10400014,0x00008021,0x8e820000,0,0x00400008,0};
+        for (unsigned i=0;i<std::size(cursor_code);++i) network_word(0x17300+i*4,cursor_code[i]);
+        network_word(0x17330,0x2410000a); network_word(0x17334,0x08005cd2);
+        network_word(0x1733c,0x24100014); network_word(0x17340,0x08005cd2);
+        network_word(0x17348,0x00701821); network_word(0x1734c,0x26520001);
+        network_word(0x17350,0x2a420003); network_word(0x17354,0x1440ffee); network_word(0x17358,0x26940004);
+        network_word(0x17368,0x03e00008); network_word(0x1736c,0x00601021);
+        network_word(0x17600,0x17330); network_word(0x17604,0x1733c);
+        bundle_roots.push_back(0x17300);
+        constexpr std::uint32_t nullable_registry[]{0x03e08021,0x8c820038,0,0x8c420008,0,
+            0x14400003,0,0x0800449b,0x24020000,0x0040f809,0,0x0200f821,0x03e00008,0};
+        for (unsigned i=0;i<std::size(nullable_registry);++i) display_word(0x11240+i*4,nullable_registry[i]);
+        bundle_roots.push_back(0x11240);
+        const std::array bundle{module,provider,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services};
         {
             auto overwritten=bundle; fixture::put32(overwritten[3].memory,0x330,0x00a02021);
             bool rejected=false;
@@ -1208,6 +1254,11 @@ int main(int argc,char** argv) {
         }
         {
             const auto discovered=nt::iop_codegen::ir::discover_bundle(bundle,bundle_roots);
+            if (!discovered.open_indirect_sites.contains(0x11294))
+                throw std::runtime_error("Callback candidate recovery narrowed an unbounded native slot");
+            const auto& received=discovered.instructions.at(0x11214).targets;
+            if (std::find(received.begin(),received.end(),0x12080)==received.end())
+                throw std::runtime_error("Registry lost a callback constructed and passed by its compiled client");
             const auto& targets=discovered.instructions.at(0x11118).targets;
             if (!discovered.instructions.contains(0x12040) || std::find(targets.begin(),targets.end(),0x12040)==targets.end())
                 throw std::runtime_error("Registry client callback was not compiled in its owning module");
@@ -1249,7 +1300,7 @@ int main(int argc,char** argv) {
             if (!failed_bundle || !partial.str().empty()) throw std::runtime_error("Invalid bundle emitted partial native code");
         }
         // Earlier owners must be revisited when a later module discovers a callback.
-        const std::array reversed{provider,module,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table};
+        const std::array reversed{provider,module,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services};
         std::ostringstream reverse_code;
         nt::iop_codegen::emit_bundle(reverse_code,reversed,bundle_roots);
         for (const auto target : {0xa061U,0xa080U,0xb800U}) {
@@ -1285,7 +1336,7 @@ int main(int argc,char** argv) {
             put(0x8800,0x00401821);
             put(first+(count-2)*4,0x03e00008); put(first+(count-1)*4,0);
             std::vector<std::uint32_t> roots=bundle_roots; roots.push_back(first);
-            const std::array large_bundle{large,provider,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table};
+            const std::array large_bundle{large,provider,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services};
             std::ostringstream llvm; nt::iop_codegen::emit_bundle(llvm,large_bundle,roots);
             const auto text=llvm.str();
             nt::write_file(argv[3],nt::ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));

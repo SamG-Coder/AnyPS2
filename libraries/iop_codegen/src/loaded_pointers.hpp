@@ -126,10 +126,11 @@ inline LoadedPointerResult recoverable_loaded_pointers(
     for (const auto& [pc,instruction] : program.instructions) {
         if (instruction.operation==Operation::memory_fill || instruction.operation==Operation::memory_copy ||
             instruction.operation==Operation::memory_move) {
-            // memset/memcpy/memmove take the destination in a0 and the byte count in a2.
+            // bcopy reverses the pointer arguments; other memory operations use a0.
             // One constant range poisons only that span. An unknown range can write any slot.
             const auto state=state_at(pc);
-            const auto destination=state ? state->registers[4] : Constant{};
+            const auto destination_register=instruction.memory_convention==MemoryConvention::source_first ? 5U : 4U;
+            const auto destination=state ? state->registers[destination_register] : Constant{};
             const auto length=state ? state->registers[6] : Constant{};
             if (state && destination && destination->size()==1 && length && length->size()==1 && *length->begin() && *length->begin()<=0x200000U)
                 poison_span(physical(*destination->begin()),*length->begin());

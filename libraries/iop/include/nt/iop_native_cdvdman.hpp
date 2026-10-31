@@ -16,7 +16,11 @@ public:
         };
     }
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
-        if (request.kind!=NativeServiceKind::cdvdman || request.selector!=24) return {};
+        if (request.kind!=NativeServiceKind::cdvdman) return {};
+        // Console-specific iLink identity has no native PC provider. Binding
+        // this known ABI lets unrelated compiled paths remain executable.
+        if (request.selector==22) return {NativeServiceStatus::unavailable};
+        if (request.selector!=24) return {};
         const auto pointer=request.arguments[0];
         const auto checked=output(ram,pointer,8);
         if (checked.status!=NativeServiceStatus::returned) return checked;

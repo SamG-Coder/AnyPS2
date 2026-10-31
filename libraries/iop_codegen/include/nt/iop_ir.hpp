@@ -22,12 +22,14 @@ enum class Operation {
     load_word_left, load_word_right, store_word_left, store_word_right
 };
 enum class Flow { sequential, direct, conditional, call, return_register, trap, service, indirect, indirect_call, native_return };
+enum class MemoryConvention { bytes, source_first, words };
 struct Instruction {
     Operation operation{};
     Flow flow=Flow::sequential;
     std::uint32_t address=0, immediate=0, target=0;
     std::vector<std::uint32_t> targets; // AOT destinations, checked against the actual indirect target.
     unsigned source=0, operand=0, destination=0, shift=0, width=0;
+    MemoryConvention memory_convention=MemoryConvention::bytes;
 };
 struct Program {
     std::uint32_t entry=0;

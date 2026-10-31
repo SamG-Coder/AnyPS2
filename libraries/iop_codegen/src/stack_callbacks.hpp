@@ -27,9 +27,9 @@ inline bool stack_callback_call(const Program& program,const Instruction& call) 
 }
 // An indirect call fed by a word load may use a dynamically populated registry.
 // Relocation candidates retain possible callees without proving the loaded value.
-inline bool indexed_load_source(const Program& program,const Instruction& load,unsigned depth=0) {
+inline bool indexed_load_source(const Program& program,const Instruction& load,unsigned depth=0,bool descriptor_fields=false) {
     if (depth>=3 || load.source==29) return false;
-    for (unsigned distance=4;distance<=24 && distance<=load.address;distance+=4) {
+    for (unsigned distance=4;distance<=(descriptor_fields ? 64U : 24U) && distance<=load.address;distance+=4) {
         const auto at=program.instructions.find(load.address-distance);
         if (at==program.instructions.end()) continue;
         const auto& producer=at->second;
@@ -41,21 +41,23 @@ inline bool indexed_load_source(const Program& program,const Instruction& load,u
         bool preserved=true;
         for (auto pc=producer.address+4;pc<load.address;pc+=4) {
             const auto middle=program.instructions.find(pc);
-            if (middle==program.instructions.end() || middle->second.flow!=Flow::sequential) { preserved=false; break; }
+            if (middle==program.instructions.end() || (middle->second.flow!=Flow::sequential && !(descriptor_fields && middle->second.flow==Flow::conditional))) { preserved=false; break; }
             marker=transfer(middle->second,std::move(marker));
         }
         if (preserved && marker.registers[load.source]==constant(0x6d800001) &&
-            (indexed || indexed_load_source(program,producer,depth+1))) return true;
+            (indexed || (descriptor_fields && nested && !(producer.immediate&3U) && !(load.immediate&3U) &&
+                ((producer.source>=4 && producer.source<=7) || (producer.source>=16 && producer.source<=23) || producer.source==28)) ||
+                indexed_load_source(program,producer,depth+1,descriptor_fields))) return true;
     }
     return false;
 }
-inline bool indexed_load_reaches(const Program& program,std::uint32_t address,unsigned reg,unsigned minimum_distance=8) {
+inline bool indexed_load_reaches(const Program& program,std::uint32_t address,unsigned reg,unsigned minimum_distance=8,bool descriptor_fields=false) {
     for (unsigned distance=minimum_distance;distance<=48 && distance<=address;distance+=4) {
         const auto found=program.instructions.find(address-distance);
         if (found==program.instructions.end()) continue;
         const auto& load=found->second;
         if (load.operation!=Operation::load_word || load.source==29) continue;
-        if (!indexed_load_source(program,load)) continue;
+        if (!indexed_load_source(program,load,0,descriptor_fields)) continue;
         Constants marker; marker.registers[load.operand]=constant(0x6d800001);
         bool valid=true;
         for (auto pc=load.address+4;pc<address;pc+=4) {
@@ -69,7 +71,39 @@ inline bool indexed_load_reaches(const Program& program,std::uint32_t address,un
     return false;
 }
 inline bool loaded_callback_call(const Program& program,const Instruction& call) {
-    return call.flow==Flow::indirect_call && indexed_load_reaches(program,call.address,call.source);
+    if (call.flow!=Flow::indirect_call) return false;
+    if (indexed_load_reaches(program,call.address,call.source,8,true)) return true;
+    // A nullable descriptor callback can cross a conditional/direct branch
+    // before invocation. Follow bounded forward paths instead of scanning the
+    // intervening bytes as though the untaken branch also executed.
+    for (unsigned distance=8;distance<=512 && distance<=call.address;distance+=4) {
+        const auto load=program.instructions.find(call.address-distance);
+        if (load==program.instructions.end() || load->second.operation!=Operation::load_word ||
+            load->second.source==29) continue;
+        Constants marker; marker.registers[load->second.operand]=constant(0x6d800001);
+        std::vector<std::pair<std::uint32_t,Constants>> pending{{load->first+4,marker}};
+        unsigned steps=0;
+        while (!pending.empty() && ++steps<=256) {
+            auto [pc,state]=std::move(pending.back()); pending.pop_back();
+            if (pc==call.address) {
+                if (state.registers[call.source]==constant(0x6d800001)) return true;
+                continue;
+            }
+            if (pc<=load->first || pc>call.address) continue;
+            const auto found=program.instructions.find(pc);
+            if (found==program.instructions.end()) continue;
+            const auto& instruction=found->second;
+            auto after=transfer(instruction,std::move(state));
+            if (instruction.flow==Flow::sequential) pending.emplace_back(pc+4,std::move(after));
+            if (instruction.flow!=Flow::conditional && instruction.flow!=Flow::direct) continue;
+            const auto delay=program.instructions.find(pc+4);
+            if (delay==program.instructions.end() || delay->second.flow!=Flow::sequential) continue;
+            after=transfer(delay->second,std::move(after));
+            if (instruction.target>pc) pending.emplace_back(instruction.target,after);
+            if (instruction.flow==Flow::conditional) pending.emplace_back(pc+8,std::move(after));
+        }
+    }
+    return false;
 }
 // A registry helper may return an indexed function-pointer load to its caller.
 // This recognizes a candidate source, not an immutable table or a value proof.

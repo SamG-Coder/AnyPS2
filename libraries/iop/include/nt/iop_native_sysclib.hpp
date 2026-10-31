@@ -3,6 +3,7 @@
 #include <nt/iop_native_code.hpp>
 #include <nt/iop_native_format.hpp>
 #include <algorithm>
+#include <string_view>
 
 namespace nt::iop {
 // Bounded native sysclib operations with fixed guest widths and byte semantics.
@@ -11,6 +12,7 @@ public:
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
         if (request.kind!=NativeServiceKind::sysclib) return {};
         switch (request.selector) {
+        case 24: case 31: case 33: case 34: return string_set(request,ram);
         case 21: case 22: case 25: case 26: case 27: case 29: case 32: return strings(request,ram);
         case 20: case 23: case 30: return copy_string(request,ram);
         case 17: case 41: return fill(request,ram);
@@ -26,6 +28,31 @@ public:
         return {NativeServiceStatus::returned,classify(byte)};
     }
 private:
+    static NativeServiceReply text(std::uint32_t address,std::span<const std::uint8_t> ram,std::string_view& value) {
+        const auto offset=ram_offset(address,1,ram.size());
+        if (!offset) return {NativeServiceStatus::address_fault,0,address};
+        const auto length=std::min<std::size_t>({0x100000,ram.size()-*offset,0x200000-*offset});
+        const auto begin=ram.begin()+*offset, end=begin+length;
+        const auto terminator=std::find(begin,end,0);
+        if (terminator==end) return {length==0x100000 ? NativeServiceStatus::unavailable : NativeServiceStatus::address_fault,0,address};
+        value={reinterpret_cast<const char*>(ram.data()+*offset),static_cast<std::size_t>(terminator-begin)};
+        return {NativeServiceStatus::returned};
+    }
+    static NativeServiceReply string_set(const NativeServiceRequest& request,std::span<const std::uint8_t> ram) {
+        std::string_view source,pattern;
+        auto checked=text(request.arguments[1],ram,pattern);
+        if (checked.status!=NativeServiceStatus::returned) return checked;
+        if (request.selector==34 && pattern.empty()) return {NativeServiceStatus::returned,request.arguments[0]};
+        checked=text(request.arguments[0],ram,source);
+        if (checked.status!=NativeServiceStatus::returned) return checked;
+        if (request.selector==34) {
+            const auto match=source.find(pattern);
+            return {NativeServiceStatus::returned,match==std::string_view::npos ? 0U : request.arguments[0]+static_cast<std::uint32_t>(match)};
+        }
+        const auto match=request.selector==33 ? source.find_first_not_of(pattern) : source.find_first_of(pattern);
+        if (request.selector==31) return {NativeServiceStatus::returned,match==std::string_view::npos ? 0U : request.arguments[0]+static_cast<std::uint32_t>(match)};
+        return {NativeServiceStatus::returned,static_cast<std::uint32_t>(match==std::string_view::npos ? source.size() : match)};
+    }
     static NativeServiceReply writable(std::uint32_t address,std::uint32_t count,unsigned alignment,
                                        std::span<const std::uint8_t> ram,std::uint32_t& offset) {
         const auto at=ram_offset(address,alignment,ram.size());

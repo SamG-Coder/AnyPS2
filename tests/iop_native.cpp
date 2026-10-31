@@ -94,6 +94,68 @@ int main() {
         using namespace nt::iop;
         {
             std::vector<std::uint8_t> data(0x20000);
+            NativeSysclibServices strings; NativeCdvdmanServices disc;
+            NativeServiceRouter router({&strings,&disc});
+            const auto call=[&](unsigned pc,std::array<std::uint32_t,4> args) {
+                auto cpu=initial(); cpu.pc=pc; std::copy(args.begin(),args.end(),cpu.registers.begin()+4);
+                const auto result=run_native(nt_iop_generated_run,cpu,data,64,&router);
+                return std::pair{result,cpu};
+            };
+            for (unsigned i=0;i<16;++i) data[0x18000+i]=static_cast<std::uint8_t>(i+1);
+            check(call(0x17014,{0x80018000,0xa0018002,8}).first.reason==NativeStop::unmapped_code &&
+                  data[0x18002]==1 && data[0x18009]==8,"Compiled bcopy lost argument order, aliases or overlap semantics");
+            data[0x18108]=0xcc;
+            const auto word_copy=call(0x1701c,{0x80018100,0xa0018000,11});
+            check(word_copy.first.reason==NativeStop::unmapped_code && word_copy.second.registers[2]==0x80018100 &&
+                  std::equal(data.begin()+0x18000,data.begin()+0x18008,data.begin()+0x18100) && data[0x18108]==0xcc,
+                  "Word copy failed to truncate its byte count or preserve alias return");
+            for (const auto args:{std::array{0x18101U,0x18000U,8U,0U},std::array{0x18100U,0x18001U,8U,0U},
+                std::array{0x1fffcU,0x18000U,8U,0U}}) {
+                const auto before=data;
+                check(call(0x1701c,args).first.reason==NativeStop::address_fault && data==before,"Rejected word copy partially changed memory");
+            }
+            const auto before=data;
+            check(call(0x17014,{0x18000,0x15080,4}).first.reason==NativeStop::code_write && data==before,
+                  "bcopy wrote into compiled code storage");
+            check(call(0x1701c,{0xffffffff,0xffffffff,3}).first.reason==NativeStop::unmapped_code,
+                  "Empty word copy dereferenced unused pointers");
+            const std::string source="abc.def.abc",pattern=".d";
+            std::copy(source.begin(),source.end(),data.begin()+0x18200);
+            std::copy(pattern.begin(),pattern.end(),data.begin()+0x18300);
+            check(call(0x17024,{0x18200,0x18300}).second.registers[2]==3 &&
+                  call(0x1702c,{0x80018200,0x18300}).second.registers[2]==0x80018203 &&
+                  call(0x17034,{0x18200,0x18300}).second.registers[2]==0 &&
+                  call(0x1703c,{0xa0018200,0x18300}).second.registers[2]==0xa0018203,
+                  "Compiled string search/span family returned the wrong position");
+            data[0x18300]=0;
+            check(call(0x1703c,{0xffffffff,0x18300}).second.registers[2]==0xffffffff &&
+                  call(0x17024,{0x18200,0x18300}).second.registers[2]==source.size(),"Empty pattern semantics changed");
+            data.back()='x';
+            check(call(0x1703c,{0x18200,0x1ffff}).first.reason==NativeStop::address_fault,"Unterminated pattern escaped bounds");
+            check(call(0x17114,{0x18000,0x18100}).first.reason==NativeStop::import_request,
+                  "Console iLink identity was fabricated");
+            store_native_word(data,0x18038,0x18100); store_native_word(data,0x18108,0x12040);
+            check(call(0x11200,{0x18000}).second.registers[2]==87,"Nested descriptor callback did not reach compiled client");
+            store_native_word(data,0x18108,0x12080);
+            check(call(0x11200,{0x18000}).second.registers[2]==99,
+                  "Cross-library callback argument was absent from the compiled registry candidates");
+            store_native_word(data,0x18108,0x12040);
+            check(call(0x11240,{0x18000}).second.registers[2]==87,"Conditional descriptor callback did not reach compiled client");
+            store_native_word(data,0x18108,0);
+            check(call(0x11240,{0x18000}).second.registers[2]==0,"Null descriptor callback invoked code");
+            check(call(0x11280,{0,0x150c0}).second.pc==0x5000,
+                  "An assigned callback was restricted to incidental relocation candidates");
+            check(call(0x11280,{0,0x16700}).first.address==0x16700,
+                  "Assigned callback accepted a destination outside compiled code");
+            store_native_word(data,0x17600,0x17330); store_native_word(data,0x17604,0x1733c);
+            const auto cursor=call(0x17300,{});
+            check(cursor.first.reason==NativeStop::unmapped_code && cursor.second.pc==0x5000 && cursor.second.registers[2]==30,
+                  "Compiled cursor jump table did not follow its checked induction variable");
+            store_native_word(data,0x18108,0x16700);
+            check(call(0x11200,{0x18000}).first.address==0x16700,"Nested descriptor accepted uncompiled target");
+        }
+        {
+            std::vector<std::uint8_t> data(0x20000);
             NativeLibrarySpec declaration{0x14000,0x102,"usbd",{},0x14200};
             store_native_word(data,0x14000,0x41c00000); store_native_word(data,0x14008,0x102);
             const std::string name="usbd"; std::copy(name.begin(),name.end(),data.begin()+0x1400c);

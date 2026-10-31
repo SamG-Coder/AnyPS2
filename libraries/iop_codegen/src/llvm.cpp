@@ -54,18 +54,23 @@ void membership(Writer& w,const std::string& name,const std::set<std::uint32_t>&
         w.text<<"page"<<page<<":\n  %member"<<page<<" = call i1 @"<<name<<"_"<<page<<"(i32 %address)\n  ret i1 %member"<<page<<'\n';
     w.text<<"}\n";
 }
-void memory(Writer& w,const std::string& label,ir::Operation operation) {
+void memory(Writer& w,const std::string& label,const ir::Instruction& instruction) {
+    const auto operation=instruction.operation;
+    const bool reverse=instruction.memory_convention==ir::MemoryConvention::source_first;
+    const bool words=instruction.memory_convention==ir::MemoryConvention::words;
     const auto delay=w.binary("icmp ne",w.load(34),"0");
     w.text<<"  br i1 "<<delay<<", label %branch_fault, label %fill_start"<<label<<"\nfill_start"<<label<<":\n";
     const auto pending=w.load(35), pending_value=w.load(36);
     const auto reg=[&](unsigned index) { return w.select(w.binary("icmp eq",pending,std::to_string(index)),pending_value,w.load(index)); };
-    const auto destination=reg(4), value=reg(5), count=reg(6), target=reg(31);
+    const auto destination=reg(reverse ? 5 : 4), value=reg(reverse ? 4 : 5), raw_count=reg(6), target=reg(31);
+    const auto count=words ? w.binary("and",raw_count,"4294967292") : raw_count;
     const auto empty=w.binary("icmp eq",count,"0");
     w.text<<"  br i1 "<<empty<<", label %fill_commit"<<label<<", label %fill_validate"<<label<<"\nfill_validate"<<label<<":\n";
     const auto offset=w.physical(destination);
     const auto range=w.value("and i1 "+w.binary("icmp ule",offset,"2097152")+", "+w.binary("icmp ule",count,w.binary("sub","2097152",offset)));
     const auto host=w.value("and i1 "+w.binary("icmp ule",offset,"%ram_size")+", "+w.binary("icmp ule",count,w.binary("sub","%ram_size",offset)));
-    const auto valid=w.value("and i1 "+range+", "+host);
+    auto valid=w.value("and i1 "+range+", "+host);
+    if (words) valid=w.value("and i1 "+valid+", "+w.binary("icmp eq",w.binary("and",destination,"3"),"0"));
     w.text<<"  br i1 "<<valid<<", label %fill_source"<<label<<", label %fill_fault"<<label<<"\nfill_fault"<<label<<":\n";
     w.store(37,destination); w.text<<"  ret i32 2\nfill_source"<<label<<":\n";
     std::string source;
@@ -73,7 +78,8 @@ void memory(Writer& w,const std::string& label,ir::Operation operation) {
         source=w.physical(value);
         const auto source_range=w.value("and i1 "+w.binary("icmp ule",source,"2097152")+", "+w.binary("icmp ule",count,w.binary("sub","2097152",source)));
         const auto source_host=w.value("and i1 "+w.binary("icmp ule",source,"%ram_size")+", "+w.binary("icmp ule",count,w.binary("sub","%ram_size",source)));
-        const auto source_valid=w.value("and i1 "+source_range+", "+source_host);
+        auto source_valid=w.value("and i1 "+source_range+", "+source_host);
+        if (words) source_valid=w.value("and i1 "+source_valid+", "+w.binary("icmp eq",w.binary("and",value,"3"),"0"));
         w.text<<"  br i1 "<<source_valid<<", label %copy_overlap"<<label<<", label %source_fault"<<label<<"\nsource_fault"<<label<<":\n";
         w.store(37,value); w.text<<"  ret i32 2\ncopy_overlap"<<label<<":\n";
         if (operation==ir::Operation::memory_copy) {
@@ -117,7 +123,7 @@ void instruction(Writer& w,const ir::Instruction& i,bool has_successor,bool open
     const auto remaining=w.value("sub i64 "+left+", 1");
     w.text<<"  store i64 "<<remaining<<", ptr %remaining, align 8\n";
     const auto pc=w.load(32);
-    if (i.operation==Operation::memory_fill || i.operation==Operation::memory_copy || i.operation==Operation::memory_move) { memory(w,label,i.operation); return; }
+    if (i.operation==Operation::memory_fill || i.operation==Operation::memory_copy || i.operation==Operation::memory_move) { memory(w,label,i); return; }
     if (i.operation==Operation::native_import) {
         const auto delay=w.binary("icmp ne",w.load(34),"0");
         w.text<<"  br i1 "<<delay<<", label %branch_fault, label %import"<<label<<"\nimport"<<label<<":\n";

@@ -2275,3 +2275,16 @@ AOT discovery recovers public USB driver descriptor callbacks and bounded jump
 tables whose indexed address was formed before the range check. The latter
 requires a preserved address/index along the intervening straight-line path.
 Generated indirect calls still validate their actual compiled target.
+
+The native IOP libc boundary also lowers source-first bcopy and aligned word-copy
+imports to LLVM memory intrinsics. Word-copy lengths count bytes and truncate to
+whole words; aliases and code-write protection are preserved. Native string
+search/span operations validate complete bounded strings. Console iLink identity
+queries are identified at conversion but remain explicit unsupported calls.
+
+Callback discovery propagates code addresses passed across compiled library
+interfaces, including addresses constructed by instructions rather than stored
+in relocation records. It follows bounded forward paths through nullable
+callbacks and checks actual targets against compiled code. Library declarations
+remain data. Range-checked jump tables support several scheduled stack spills,
+hoisted temporary bases and matched index/table-cursor increments.

@@ -43,13 +43,46 @@ std::optional<std::set<std::uint32_t>> initial_jump_table(const elf::IopModule& 
             if (pc-module.base<32) return {};
             guard=decode(pc-32,le32(module.memory,pc-module.base-32));
             branch=code[0];
-            if (code[1].flow!=Flow::sequential) return {};
             // A stack spill between the comparison and its branch preserves
             // both the tested index and predicate registers.
-            if (guard.operation==Operation::store_word && guard.source==29 && pc-module.base>=36)
-                guard=decode(pc-36,le32(module.memory,pc-module.base-36));
+            for (unsigned distance=36;guard.operation==Operation::store_word && guard.source==29 &&
+                    distance<=48 && pc-module.base>=distance;distance+=4)
+                guard=decode(pc-distance,le32(module.memory,pc-module.base-distance));
         }
     } catch (const std::runtime_error&) { return {}; }
+    // A loop may advance a table cursor in parallel with its checked index.
+    // Recover the initial base only when the latch increments that index by one
+    // and the pointer by one word. The emitted transfer still guards the value.
+    if (code[2].operation==Operation::less_immediate_unsigned && code[2].immediate && code[2].immediate<=256 &&
+        code[3].operation==Operation::equal && code[3].source==code[2].operand && code[3].operand==0 &&
+        (code[3].target<pc-8 || code[3].target>pc+4) && code[4].flow==Flow::sequential &&
+        code[5].operation==Operation::load_word && code[5].source>=16 && code[5].source<=23 &&
+        code[7].flow==Flow::indirect && code[7].source==code[5].operand && le32(module.memory,pc-module.base-4)==0) {
+        const auto cursor=code[5].source,index=code[2].source;
+        Constants marker; marker.registers[cursor]=constant(0x6d800001); marker.registers[index]=constant(0x6d800002);
+        marker=transfer(code[4],std::move(marker));
+        if (cursor!=index && marker.registers[cursor]==constant(0x6d800001) && marker.registers[index]==constant(0x6d800002)) {
+            const auto first=pc-module.base>128 ? pc-128 : module.base;
+            for (auto at=first;at+8<=pc-20;at+=4) {
+                Instruction upper,lower;
+                try { upper=decode(at,le32(module.memory,at-module.base)); lower=decode(at+4,le32(module.memory,at+4-module.base)); }
+                catch (const std::runtime_error&) { continue; }
+                if (upper.operation!=Operation::upper_immediate || upper.operand!=cursor ||
+                    lower.operation!=Operation::add_immediate || lower.source!=cursor || lower.operand!=cursor) continue;
+                for (auto latch=pc+8;latch<=pc+512 && latch-module.base+16<=module.initialized_size;latch+=4) {
+                    std::array<Instruction,4> loop;
+                    try { for (unsigned i=0;i<4;++i) loop[i]=decode(latch+i*4,le32(module.memory,latch+i*4-module.base)); }
+                    catch (const std::runtime_error&) { continue; }
+                    if (loop[0].operation!=Operation::add_immediate || loop[0].source!=index || loop[0].operand!=index || loop[0].immediate!=1 ||
+                        (loop[1].operation!=Operation::less_immediate_signed && loop[1].operation!=Operation::less_immediate_unsigned) || loop[1].source!=index ||
+                        loop[2].operation!=Operation::not_equal || loop[2].source!=loop[1].operand || loop[2].operand!=0 ||
+                        loop[2].target<at+8 || loop[2].target>pc-20 ||
+                        loop[3].operation!=Operation::add_immediate || loop[3].source!=cursor || loop[3].operand!=cursor || loop[3].immediate!=4) continue;
+                    if (const auto targets=table_targets(data,(upper.immediate<<16)+lower.immediate+code[5].immediate,code[2].immediate)) return targets;
+                }
+            }
+        }
+    }
     // Some compilers form table[index] in a saved register before the range
     // check. Require the complete address expression and a straight-line,
     // non-clobbering path to the guard; initial entries remain only candidates.
@@ -108,7 +141,7 @@ std::optional<std::set<std::uint32_t>> initial_jump_table(const elf::IopModule& 
         const auto& add=code[4];
         const auto index=code[3].destination;
         const auto base_register=add.source==index ? add.operand : add.operand==index ? add.source : 0;
-        if (base_register>=16 && base_register<=23 && hoisted_guard.immediate && hoisted_guard.immediate<=256) {
+        if (base_register && base_register!=29 && hoisted_guard.immediate && hoisted_guard.immediate<=256) {
             std::set<std::uint32_t> candidates;
             const auto first=pc-module.base>512 ? pc-512 : module.base;
             for (auto at=first;at+4<pc-24;at+=4) {

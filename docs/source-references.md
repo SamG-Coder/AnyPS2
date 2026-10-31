@@ -1647,3 +1647,10 @@ registration return codes and synchronous probe/connect ordering. Independent
 C++ ownership replaces controller initialization and guest linked lists. No
 reference implementation or commercial code is copied. Unsupported transfers
 and topology changes stop; discovery never fabricates an empty host bus.
+
+The pinned PS2SDK sysclib public interfaces define bcopy source/destination order,
+word-copy byte-count truncation and string search/span signatures. Native LLVM
+copy intrinsics retain bounds, code-write protection and pointer aliases. The
+cdvdman ordinal 22 interface identifies console iLink identity; it is deliberately
+an unavailable native service, reported during conversion and stopped if called.
+No console identity or successful response is invented.
