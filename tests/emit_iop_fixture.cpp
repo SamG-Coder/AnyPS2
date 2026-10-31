@@ -1148,7 +1148,58 @@ int main(int argc,char** argv) {
             try { nt::iop_codegen::ir::discover(sound,private_entry); } catch (const std::runtime_error&) { rejected=true; }
             if (!rejected) throw std::runtime_error("Native sound replacement exposed private console implementation code");
         }
-        const std::array bundle{module,provider,dispatch,factories,pointers,display,registry_client,sound};
+        nt::elf::IopModule usb{0x14000,0x14200,nt::Bytes(0x300),0x300,{}};
+        fixture::put32(usb.memory,0,0x41c00000); fixture::put32(usb.memory,8,0x102);
+        constexpr char usb_name[]="usbd";
+        std::copy(std::begin(usb_name),std::end(usb_name),usb.memory.begin()+12);
+        for (unsigned ordinal=0;ordinal<19;++ordinal) {
+            const auto offset=0x100+(ordinal==0 || ordinal==3 ? 1U : ordinal)*8;
+            fixture::put32(usb.memory,20+ordinal*4,usb.base+offset);
+            fixture::put32(usb.memory,offset,0xfc000000);
+        }
+        fixture::put32(usb.memory,0x200,0xfc000000);
+        nt::elf::IopModule usb_client{0x15000,0x15000,nt::Bytes(0x600),0x600,nt::elf::IopModuleInfo{"usb-client",0x100,0,0x300,0x300,0}};
+        const auto usb_put=[&](unsigned offset,unsigned value) { fixture::put32(usb_client.memory,offset,value); };
+        constexpr std::uint32_t usb_start[]{0x27bdfff0,0xafbf000c,0x3c040001,0x34845440,
+            0x0c0054bd,0,0x8fbf000c,0x27bd0010,0x03e00008,0};
+        for (unsigned i=0;i<std::size(usb_start);++i) usb_put(i*4,usb_start[i]);
+        // Probe records its module GP, counts calls and claims each test device.
+        constexpr std::uint32_t usb_probe[]{0x3c080001,0x35085400,0x8d090000,0xad1c0008,
+            0x25290001,0xad090000,0x03e00008,0x24020001};
+        constexpr std::uint32_t usb_connect[]{0x3c080001,0x35085404,0x8d090000,0,
+            0x25290001,0xad090000,0x03e00008,0x24020000};
+        for (unsigned i=0;i<std::size(usb_probe);++i) usb_put(0x80+i*4,usb_probe[i]);
+        for (unsigned i=0;i<std::size(usb_connect);++i) usb_put(0xa0+i*4,usb_connect[i]);
+        usb_put(0xc0,0x03e00008); usb_put(0xc4,0x24020000);
+        usb_put(0x448,0x15480); usb_put(0x44c,0x15080); usb_put(0x450,0x150a0); usb_put(0x454,0x150c0);
+        usb_client.memory[0x480]='t';
+        usb_put(0x2e0,0x41e00000); usb_put(0x2e8,0x102);
+        std::copy(std::begin(usb_name),std::end(usb_name),usb_client.memory.begin()+0x2ec);
+        usb_put(0x2f4,0x03e00008); usb_put(0x2f8,0x24000004);
+        {
+            const std::array modules{usb,usb_client};
+            const auto discovered=nt::iop_codegen::ir::discover_bundle(modules);
+            if (discovered.instructions.at(0x14200).immediate!=0x160100 ||
+                !discovered.instructions.contains(0x15080) || !discovered.instructions.contains(0x150a0) ||
+                !discovered.instructions.contains(0x150c0))
+                throw std::runtime_error("USB public ABI and driver callbacks were not compiled");
+        }
+        nt::elf::IopModule hoisted_table{0x16000,0x16000,nt::Bytes(0x400),0x400,
+            nt::elf::IopModuleInfo{"hoisted-table",0x100,0,0x200,0x200,0}};
+        const auto table_put=[&](unsigned offset,unsigned value) { fixture::put32(hoisted_table.memory,offset,value); };
+        constexpr std::uint32_t table_code[]{0x3c030001,0x24636300,0x00041080,0x00438021,
+            0x00004021,0,0x2c820002,0x1040001c,0,0x8e020000,0,0x00400008,0};
+        for (unsigned i=0;i<std::size(table_code);++i) table_put(i*4,table_code[i]);
+        table_put(0x80,0x03e00008); table_put(0x84,0x2402000a);
+        table_put(0x90,0x03e00008); table_put(0x94,0x2402000b);
+        table_put(0x300,0x16080); table_put(0x304,0x16090);
+        {
+            auto broken=hoisted_table; fixture::put32(broken.memory,0x10,0x00a08021);
+            bool rejected=false;
+            try { nt::iop_codegen::ir::discover(broken); } catch (const std::runtime_error&) { rejected=true; }
+            if (!rejected) throw std::runtime_error("Hoisted indexed table accepted a clobbered address register");
+        }
+        const std::array bundle{module,provider,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table};
         {
             auto overwritten=bundle; fixture::put32(overwritten[3].memory,0x330,0x00a02021);
             bool rejected=false;
@@ -1198,7 +1249,7 @@ int main(int argc,char** argv) {
             if (!failed_bundle || !partial.str().empty()) throw std::runtime_error("Invalid bundle emitted partial native code");
         }
         // Earlier owners must be revisited when a later module discovers a callback.
-        const std::array reversed{provider,module,dispatch,factories,pointers,display,registry_client,sound};
+        const std::array reversed{provider,module,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table};
         std::ostringstream reverse_code;
         nt::iop_codegen::emit_bundle(reverse_code,reversed,bundle_roots);
         for (const auto target : {0xa061U,0xa080U,0xb800U}) {
@@ -1234,7 +1285,7 @@ int main(int argc,char** argv) {
             put(0x8800,0x00401821);
             put(first+(count-2)*4,0x03e00008); put(first+(count-1)*4,0);
             std::vector<std::uint32_t> roots=bundle_roots; roots.push_back(first);
-            const std::array large_bundle{large,provider,dispatch,factories,pointers,display,registry_client,sound};
+            const std::array large_bundle{large,provider,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table};
             std::ostringstream llvm; nt::iop_codegen::emit_bundle(llvm,large_bundle,roots);
             const auto text=llvm.str();
             nt::write_file(argv[3],nt::ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));

@@ -13,6 +13,7 @@ struct NativeLibrarySpec {
     std::uint16_t version;
     std::string name;
     std::vector<std::uint32_t> functions;
+    std::uint32_t module_entry=0;
 };
 struct NativeImportSpec {
     std::uint32_t address, table;
@@ -37,7 +38,7 @@ public:
         }
         for (std::size_t index=0;index<libraries_.size();++index) {
             const auto& library=libraries_[index];
-            if (library.address%4 || library.address>=0x200000 || library.name.empty() || library.name.size()>8 ||
+            if (library.module_entry%4 || library.module_entry>=0x200000 || library.address%4 || library.address>=0x200000 || library.name.empty() || library.name.size()>8 ||
                 library.functions.size()>65536 || 24+library.functions.size()*4>0x200000-library.address)
                 throw std::invalid_argument("Invalid compiled export descriptor");
             for (const auto target : library.functions)
@@ -55,7 +56,7 @@ public:
         const auto address=ram_offset(entry,4,0x200000);
         if (!address) return {};
         for (const auto& library:libraries_)
-            if (library.name==name && (library.version>>8)==major && !library.functions.empty() && library.functions.front()==*address)
+            if (library.name==name && (library.version>>8)==major && !library.functions.empty() && (library.module_entry ? library.module_entry : library.functions.front())==*address)
                 return library.address;
         return {};
     }

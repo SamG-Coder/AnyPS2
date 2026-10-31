@@ -317,6 +317,18 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         for (unsigned index=0;index<count;++index) if (input.registers[4+index])
             for (const auto target : *input.registers[4+index]) if (target) discover_callback(target,source,false);
     };
+    const auto initial_word=[&](std::uint32_t address)->std::optional<std::uint32_t> {
+        const auto physical=physical_address(address);
+        if (physical%4) return {};
+        for (const auto& owner : data_modules) {
+            if (physical<owner.base) continue;
+            const auto offset=physical-owner.base;
+            if (offset>owner.initialized_size || owner.initialized_size-offset<4 ||
+                offset>owner.memory.size() || owner.memory.size()-offset<4) continue;
+            return le32(owner.memory,offset);
+        }
+        return {};
+    };
     const auto trapped=[&](std::uint32_t pc) {
         Instruction stop; stop.address=pc; stop.flow=Flow::trap; stop.operation=Operation::breakpoint; return stop;
     };
@@ -463,19 +475,20 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                     for (const auto address : *input.registers[6]) if (address) discover_callback(address,pc,false);
                 if (instruction.operation==Operation::native_import && (instruction.immediate==0xc0012 || instruction.immediate==0x4000e || instruction.immediate==0x10014) && input.registers[4])
                     for (const auto address : *input.registers[4]) if (address) discover_callback(address,pc,false);
-                if (instruction.operation==Operation::native_import && instruction.immediate==0x30014 && input.registers[4]) {
-                    const auto initial_word=[&](std::uint32_t address)->std::optional<std::uint32_t> {
-                        const auto physical=physical_address(address);
-                        if (physical%4) return {};
-                        for (const auto& owner : data_modules) {
-                            if (physical<owner.base) continue;
-                            const auto offset=physical-owner.base;
-                            if (offset>owner.initialized_size || owner.initialized_size-offset<4 ||
-                                offset>owner.memory.size() || owner.memory.size()-offset<4) continue;
-                            return le32(owner.memory,offset);
+                if (instruction.operation==Operation::native_import && input.registers[4] &&
+                    std::any_of(program.library_imports.begin(),program.library_imports.end(),[&](const auto& import) {
+                        return import.offset==pc && import.library=="usbd" && (import.version>>8)==1 &&
+                               (import.ordinal==4 || import.ordinal==14);
+                    })) {
+                    for (const auto descriptor:*input.registers[4]) {
+                        if (descriptor>0xffffffffU-20) continue;
+                        for (const auto offset:{12U,16U,20U}) {
+                            const auto callback=initial_word(descriptor+offset);
+                            if (callback && *callback) discover_callback(*callback,pc,false);
                         }
-                        return {};
-                    };
+                    }
+                }
+                if (instruction.operation==Operation::native_import && instruction.immediate==0x30014 && input.registers[4]) {
                     for (const auto descriptor : *input.registers[4]) {
                         if (descriptor>0xffffffffU-16) continue;
                         const auto operations=initial_word(descriptor+16);

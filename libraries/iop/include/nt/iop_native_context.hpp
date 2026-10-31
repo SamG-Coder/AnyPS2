@@ -22,6 +22,7 @@
 #include <nt/iop_native_hard_timers.hpp>
 #include <nt/iop_native_vblank.hpp>
 #include <nt/iop_native_sound.hpp>
+#include <nt/iop_native_usb.hpp>
 #include <memory>
 
 namespace nt::iop {
@@ -45,6 +46,7 @@ public:
         : heap(checked_size(ram,layout,destination || !delivery),layout.heap_begin,layout.heap_end),heaplib(heap),boot_callbacks(heap),
           libraries(std::move(exports),std::move(imports)),archives(descriptors),driver_files(drivers,descriptors,heap),
           audio_output(audio::make_output()),sound(libraries,*audio_output),
+          usb_host(usb::make_host()),usb(libraries,heap,*usb_host),
           sif(destination),peer_(destination ? std::make_unique<NativeSifCommandEndpoint>(*destination,command_buffer,sif,std::move(delivery)) : nullptr),
           commands(peer_.get()),inbound(ram,layout.packet_buffer),callbacks({&alarms,&sif,&inbound,&hard_timers,&vblank}),
           interrupts(layout.interrupt_stack,&callbacks),sif_control(interrupts,&sif),threads(interrupts,&heap),
@@ -100,6 +102,8 @@ public:
     NativeSecrmanServices secrman;
     std::unique_ptr<audio::Output> audio_output;
     NativeSoundServices sound;
+    std::unique_ptr<usb::Host> usb_host;
+    NativeUsbServices usb;
     NativeSifTransfers sif;
 private:
     std::unique_ptr<NativeSifCommandEndpoint> peer_;
@@ -130,7 +134,7 @@ private:
     std::vector<NativeServices*> providers() {
         std::vector<NativeServices*> result{&boot_callbacks,&heaplib,&prnt,&sysclib,&drivers,&driver_files,&archives,&heap,&libraries,
             &boot,&modload,&interrupts,&events,&semaphores,&mailboxes,&threads,&system,&alarms,&sif,&sif_control,&stdio,
-            &commands,&command_session,&rpc_servers,&rpc_data,&serial_,&dmacman_,&cdvdman,&secrman,&hard_timers,&vblank,&sound};
+            &commands,&command_session,&rpc_servers,&rpc_data,&serial_,&dmacman_,&cdvdman,&secrman,&hard_timers,&vblank,&sound,&usb};
         if (disc_service) result.push_back(disc_service.get());
         return result;
     }

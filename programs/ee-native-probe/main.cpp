@@ -346,6 +346,9 @@ int main(int argc,char** argv) {
                      <<" load_path="<<iop_reset->load_path()
                      <<" native_audio_ready="<<iop_reset->audio().ready()
                      <<" native_audio_voices="<<iop_reset->audio().voices()
+                     <<" native_usb_devices="<<iop_reset->usb().device_count()
+                     <<" native_usb_drivers="<<iop_reset->usb().driver_count()
+                     <<" native_usb_error="<<iop_reset->usb().error()
                      <<" native_audio_error="<<iop_reset->audio().error()<<'\n';
             if (const auto& transfer=iop_reset->rejected_transfer())
                 std::cout<<"sif_rejected_descriptor="<<transfer->index

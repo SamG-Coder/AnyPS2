@@ -1635,3 +1635,15 @@ updates, outer-product operand ordering and the 23-bit random-register recurrenc
 (taps 4 and 22). Independent LLVM lowering reuses AnyPS2 numeric helpers and
 shared vector ownership; no upstream execution loop or instruction interpreter
 is copied into generated output.
+
+Native USB enumeration uses Windows SDK SetupAPI, `GUID_DEVINTERFACE_USB_HUB`,
+`IOCTL_USB_GET_NODE_INFORMATION`, `IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX`
+and `IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION` public interfaces:
+https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/usbioctl/ni-usbioctl-ioctl_usb_get_node_connection_information_ex
+https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/usbioctl/ni-usbioctl-ioctl_usb_get_descriptor_from_node_connection
+The pinned PS2SDK `iop/usb/usbd/include/usbd.h`, `src/exports.tab`,
+`src/usbd_api.c` and `src/device_driver.c` describe the public LDD descriptor,
+registration return codes and synchronous probe/connect ordering. Independent
+C++ ownership replaces controller initialization and guest linked lists. No
+reference implementation or commercial code is copied. Unsupported transfers
+and topology changes stop; discovery never fabricates an empty host bus.

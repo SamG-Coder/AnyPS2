@@ -26,6 +26,15 @@ With `-DANYPS2_TEST_AUDIO_DEVICE=ON`, `native-audio-device` opens the actual Win
 device, creates 48 stopped PCM voices, reinitializes them, closes and reopens the
 device. It submits no sample data and fails if device creation is unavailable.
 
+USB fixtures compile public entry replacements and LDD callbacks, checking
+failed host discovery, descriptor iteration, malformed pointers, synchronous
+probe/connect ordering, module GP, rejected probes, private data, unregistration,
+unknown targets and unsupported transfers/topology changes. Jump-table coverage
+also includes an indexed address hoisted before its range guard.
+`usb-descriptors` validates synthetic descriptor chains. The optional
+`-DANYPS2_TEST_USB_DEVICES=ON` test queries actual Windows hubs and fails on host
+query errors; it does not open transfer pipes or send device output.
+
 Native serial integration fixtures execute generated LLVM through the service
 router. They cover configuration, cached aliases, interrupt acknowledgment,
 independent sessions, reset, rejected START/FIFO/status operations, and load and

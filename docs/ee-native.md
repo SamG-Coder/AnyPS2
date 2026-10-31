@@ -2260,3 +2260,18 @@ Sound initialization creates 48 stopped mono PCM source voices and reinitializat
 resets them. Quit and IOP reset release native resources. The output is stereo
 48 kHz. Playback, transfers, mixing controls and effects are unfinished and stop
 explicitly. Device creation is not evidence of game audio playback.
+
+Validated USBD 1.x export tables lower to LLVM service entry stubs. Startup
+queries actual Windows USB hubs and copies validated device/configuration
+descriptors into owned native data storage before registering the library.
+Driver registration invokes compiled probe/connect callbacks synchronously with
+the caller's module GP; descriptor iteration, per-device private data and
+unregistration share this ownership. Failed discovery cannot claim residency.
+Transfers, pipe management and hotplug callbacks remain unsupported. Registration
+rechecks the host snapshot and stops if topology changed. USB controller
+instructions are excluded; this does not reproduce OHCI registers or scheduling.
+
+AOT discovery recovers public USB driver descriptor callbacks and bounded jump
+tables whose indexed address was formed before the range check. The latter
+requires a preserved address/index along the intervening straight-line path.
+Generated indirect calls still validate their actual compiled target.

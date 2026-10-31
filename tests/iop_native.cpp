@@ -3,6 +3,7 @@
 #include <nt/iop_native_hard_timers.hpp>
 #include <nt/iop_native_vblank.hpp>
 #include <nt/iop_native_sound.hpp>
+#include <nt/iop_native_usb.hpp>
 #include <nt/iop_native_heap.hpp>
 #include <nt/iop_native_heaplib.hpp>
 #include <nt/iop_native_libraries.hpp>
@@ -78,10 +79,82 @@ public:
     unsigned voices() const override { return count; }
     std::uint32_t error() const override { return allow_open ? 0U : 1U; }
 };
+class FixtureUsb final : public nt::usb::Host {
+public:
+    bool available=false;
+    std::vector<nt::usb::Device> devices{{L"synthetic-port",{18,1,0,2,0,0,0,64,0x34,0x12,0x78,0x56,0,1,0,0,0,1,
+        9,2,9,0,0,1,0,0x80,50}}};
+    bool scan(std::vector<nt::usb::Device>& result) override { if (!available) return false; result=devices; return true; }
+    std::uint32_t error() const override { return available ? 0U : 5U; }
+};
+
 }
 int main() {
     try {
         using namespace nt::iop;
+        {
+            std::vector<std::uint8_t> data(0x20000);
+            NativeLibrarySpec declaration{0x14000,0x102,"usbd",{},0x14200};
+            store_native_word(data,0x14000,0x41c00000); store_native_word(data,0x14008,0x102);
+            const std::string name="usbd"; std::copy(name.begin(),name.end(),data.begin()+0x1400c);
+            for (unsigned ordinal=0;ordinal<19;++ordinal) {
+                const auto entry=0x14100+(ordinal==0 || ordinal==3 ? 1U : ordinal)*8;
+                declaration.functions.push_back(entry); store_native_word(data,0x14014+ordinal*4,entry);
+            }
+            NativeLibraryServices libraries({declaration},{{0x152f4,0x152e0,"usbd",0x102,4}});
+            NativeHeapServices heap(0x20000,0x18000,0x1f000);
+            FixtureUsb host; NativeUsbServices usb(libraries,heap,host);
+            NativeServiceRouter router({&libraries,&usb});
+            const auto call=[&](unsigned pc,std::array<std::uint32_t,4> arguments={}) {
+                auto cpu=initial(); cpu.pc=pc; cpu.registers[28]=0x16230; cpu.registers[29]=0x1fff0;
+                std::copy(arguments.begin(),arguments.end(),cpu.registers.begin()+4);
+                const auto result=run_native(nt_iop_generated_run,cpu,data,256,&router);
+                return std::pair{result,cpu};
+            };
+            check(call(0x14200).first.reason==NativeStop::import_request && !libraries.resolve("usbd",0x102,4),
+                  "USB startup fabricated a host snapshot");
+            host.available=true;
+            check(call(0x14200).first.reason==NativeStop::unmapped_code && usb.device_count()==1 &&
+                  libraries.resolve("usbd",0x102,4)==0x14120,"USB module startup did not publish real descriptor ownership");
+            const auto device=call(0x14130,{1,0,1});
+            check(device.second.registers[2]==0x18000 && data[0x18000]==18,"USB device descriptor missing");
+            check(call(0x14130,{1,0x18000,2}).second.registers[2]==0x18012 &&
+                  call(0x14130,{1,0x18001,0}).second.registers[2]==0,"USB descriptor iterator accepted a non-boundary pointer");
+            store_native_word(data,0x15448,0x15480); data[0x15480]='t';
+            store_native_word(data,0x1544c,0x15080); store_native_word(data,0x15450,0x150a0); store_native_word(data,0x15454,0x150c0);
+            const auto registration=call(0x15000);
+            check(registration.first.reason==NativeStop::unmapped_code && registration.second.pc==0x5000 &&
+                  registration.second.registers[2]==0 && usb.driver_count()==1 &&
+                  load_native_word(data,0x15400)==1 && load_native_word(data,0x15404)==1 &&
+                  load_native_word(data,0x15408)==0x16230,"Compiled USB probe/connect sequence or GP restoration failed");
+            check(call(0x14120,{0x15440}).second.registers[2]==0x121,"Duplicate USB driver registration succeeded");
+            check(call(0x14138,{1,0x1234}).second.registers[2]==0 && call(0x14140,{1}).second.registers[2]==0x1234,
+                  "USB private data did not retain device ownership");
+            check(call(0x14128,{0x80015440}).second.registers[2]==0 && !usb.driver_count() &&
+                  call(0x14140,{1}).second.registers[2]==0,"USB unregistration failed to release device ownership");
+            store_native_word(data,0x1544c,0x150c0); // Compiled rejection callback.
+            check(call(0x14120,{0x15440}).second.registers[2]==0 && usb.driver_count()==1 &&
+                  load_native_word(data,0x15404)==1,"Rejected USB probe still ran connect");
+            check(call(0x14128,{0x15440}).second.registers[2]==0,"Rejected-probe registration could not be removed");
+            store_native_word(data,0x1544c,0);
+            check(call(0x14120,{0x15440}).first.reason==NativeStop::unmapped_code && usb.driver_count()==1,
+                  "USB registration without callbacks did not complete synchronously");
+            check(call(0x14128,{0x15440}).second.registers[2]==0,"Empty registration could not be removed");
+            store_native_word(data,0x1544c,0x15080);
+            store_native_word(data,0x16300,0x16080); store_native_word(data,0x16304,0x16090);
+            for (unsigned index=0;index<3;++index)
+                check(call(0x16000,{index}).second.registers[2]==(index ? 11U : 10U),"Compiled hoisted indexed jump table selected the wrong target");
+            const auto snapshot=data;
+            check(call(0x14158,{1}).first.reason==NativeStop::import_request && data==snapshot,
+                  "Unimplemented USB transfer changed state or fabricated success");
+            host.devices.clear();
+            check(call(0x14120,{0x15440}).first.reason==NativeStop::import_request && !usb.driver_count(),
+                  "USB registration concealed a host topology change");
+            host.devices={{L"synthetic-port",{18,1,0,2,0,0,0,64,0x34,0x12,0x78,0x56,0,1,0,0,0,1,9,2,9,0,0,1,0,0x80,50}}};
+            store_native_word(data,0x1544c,0x16700);
+            check(call(0x14120,{0x15440}).first.reason==NativeStop::unmapped_code && !usb.driver_count(),
+                  "Uncompiled USB probe was accepted");
+        }
         {
             std::vector<std::uint8_t> data(0x20000);
             NativeLibrarySpec declaration{0x13000,0x104,"libsd",{}};

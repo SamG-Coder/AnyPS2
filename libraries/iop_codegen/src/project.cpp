@@ -115,7 +115,7 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
     for (const auto& item : compiled) for (const auto& library : elf::iop_exports(item)) {
         code<<"{"<<library.address<<"U,"<<library.version<<"U,"<<std::quoted(library.name)<<",{";
         for (const auto target : library.functions) code<<target<<"U,";
-        code<<"}},\n";
+        code<<"},"<<item.entry<<"U},\n";
     }
     code<<"}; }\n";
     code<<"std::vector<NativeModule> nt_iop_generated_entries() { return {\n";
@@ -145,7 +145,9 @@ add_executable(iop-native module_metadata.cpp "${ANYPS2_ROOT}/programs/iop-nativ
 target_compile_features(iop-native PRIVATE cxx_std_20)
 include("${ANYPS2_ROOT}/libraries/audio/native.cmake")
 anyps2_add_audio(nt_audio)
-target_link_libraries(iop-native PRIVATE nt_audio)
+include("${ANYPS2_ROOT}/libraries/usb/native.cmake")
+anyps2_add_usb(nt_usb)
+target_link_libraries(iop-native PRIVATE nt_audio nt_usb)
 target_include_directories(iop-native PRIVATE "${ANYPS2_ROOT}/libraries/iop/include"
   "${ANYPS2_ROOT}/libraries/disc/include" "${ANYPS2_ROOT}/libraries/binary/include")
 target_sources(iop-native PRIVATE "${ANYPS2_ROOT}/libraries/disc/src/disc_files.cpp"
@@ -179,6 +181,10 @@ target_compile_definitions(iop-native PRIVATE ANYPS2_IOP_LLVM=1)
     for (const auto& item:compiled) for (const auto& library:elf::iop_exports(item))
         if (library.name=="libsd") diagnostics<<"Native LIBSD public ABI: LLVM entry stubs call the Windows audio owner. "
             "Module startup, voice initialization and quit are supported; other sound requests stop explicitly.\n";
+    for (const auto& item:compiled) for (const auto& library:elf::iop_exports(item))
+        if (library.name=="usbd") diagnostics<<"Native USBD public ABI: LLVM entry stubs call the Windows USB descriptor owner. "
+            "Startup, driver registration/probing, descriptor queries, private data and unregistration are supported; "
+            "transfers and topology changes stop explicitly.\n";
     for (const auto pc : program.guarded_callback_sites)
         diagnostics<<"Guarded stack callback at "<<hex32(pc)<<": "<<program.instructions.at(pc).targets.size()
                    <<" compiled address-taken candidates; other runtime targets stop as unmapped code.\n";

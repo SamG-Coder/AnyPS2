@@ -50,6 +50,42 @@ std::optional<std::set<std::uint32_t>> initial_jump_table(const elf::IopModule& 
                 guard=decode(pc-36,le32(module.memory,pc-module.base-36));
         }
     } catch (const std::runtime_error&) { return {}; }
+    // Some compilers form table[index] in a saved register before the range
+    // check. Require the complete address expression and a straight-line,
+    // non-clobbering path to the guard; initial entries remain only candidates.
+    if (code[2].operation==Operation::less_immediate_unsigned && code[2].immediate && code[2].immediate<=256 &&
+        code[3].operation==Operation::equal && code[3].source==code[2].operand && code[3].operand==0 &&
+        (code[3].target<pc-8 || code[3].target>pc+4) && le32(module.memory,pc-module.base-12)==0 &&
+        code[5].operation==Operation::load_word && (code[7].flow==Flow::indirect || code[7].flow==Flow::indirect_call) &&
+        code[7].source==code[5].operand && le32(module.memory,pc-module.base-4)==0) {
+        const auto first=pc-module.base>128 ? pc-128 : module.base;
+        for (auto at=first;at+16<=pc-20;at+=4) {
+            std::array<Instruction,4> address;
+            try { for (unsigned i=0;i<4;++i) address[i]=decode(at+i*4,le32(module.memory,at+i*4-module.base)); }
+            catch (const std::runtime_error&) { continue; }
+            const auto& upper=address[0]; const auto& lower=address[1]; const auto& shift=address[2]; const auto& add=address[3];
+            if (upper.operation!=Operation::upper_immediate || lower.operation!=Operation::add_immediate ||
+                lower.source!=upper.operand || lower.operand!=upper.operand ||
+                shift.operation!=Operation::shift_left || shift.shift!=2 || shift.operand!=code[2].source ||
+                add.operation!=Operation::add || add.destination!=code[5].source ||
+                !((add.source==shift.destination && add.operand==lower.operand) ||
+                  (add.operand==shift.destination && add.source==lower.operand))) continue;
+            Constants marker; marker.registers[add.destination]=constant(0x6d800001);
+            marker.registers[code[2].source]=constant(0x6d800002);
+            bool preserved=add.destination!=code[2].source;
+            for (auto step=at+16;preserved && step<pc-20;step+=4) {
+                try {
+                    const auto instruction=decode(step,le32(module.memory,step-module.base));
+                    if (instruction.flow!=Flow::sequential) { preserved=false; break; }
+                    marker=transfer(instruction,std::move(marker));
+                } catch (const std::runtime_error&) { preserved=false; }
+            }
+            if (preserved && marker.registers[add.destination]==constant(0x6d800001) &&
+                marker.registers[code[2].source]==constant(0x6d800002))
+                if (const auto targets=table_targets(data,(upper.immediate<<16)+lower.immediate+code[5].immediate,code[2].immediate))
+                    return targets;
+        }
+    }
     // Hoisted saved-register bases are address candidates, not proof that the
     // register or initial table stays immutable. Runtime target guards remain.
     const auto guard_index=code[0].operation==Operation::less_immediate_unsigned ? 0U : 1U;
