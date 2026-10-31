@@ -2545,3 +2545,9 @@ targets, code writes, misalignment and out-of-range buffers are rejected.
 A separate regression keeps an unbounded assigned native callback slot from
 being narrowed to an incidental relocation-candidate set. The console iLink
 identity call must stop rather than synthesize an ID or a successful response.
+
+The compiled module-query milestone exercises bounded enumeration, truncated
+lists with total counts, status metadata, name/address lookup, aliased output
+pointers, startup-to-resident transitions and released IDs. Invalid output
+ranges and code writes leave buffers unchanged. The native SIF startup test
+also checks that completed compiled entries appear in the same loader registry.

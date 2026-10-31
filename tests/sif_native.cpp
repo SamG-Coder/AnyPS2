@@ -244,6 +244,9 @@ int main() {
                 load_native_word(fresh_ram,0xc800)==1234 && load_native_word(fresh_ram,0xc700)==0xc80c);
         const auto initialized=startup.executed(); startup.advance(100);
         require(startup.executed()==initialized && !fresh.sif_control.ready());
+        const auto modules=fresh.modload.invoke({16,{0xc900,2,0xc910},NativeServiceKind::modload},fresh_ram);
+        require(modules.status==NativeServiceStatus::returned && modules.value==2 &&
+            load_native_word(fresh_ram,0xc910)==2 && load_native_word(fresh_ram,0xc900)!=load_native_word(fresh_ram,0xc904));
         for (const auto layout : {NativeContextLayout{0xc000,0xcc00,0xc000,0xf000},NativeContextLayout{0xc000,0xcc00,0xfff0,0xf000}}) {
             bool rejected=false;
             try { NativeServiceContext invalid(fresh_ram,layout,{},{},[](std::string_view) { return true; }); }

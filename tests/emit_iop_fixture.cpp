@@ -997,7 +997,7 @@ int main(int argc,char** argv) {
         factory_word(0xb400,0x41e00000); factory_word(0xb408,0x107);
         constexpr char modload_name[]="modload";
         std::copy(std::begin(modload_name),std::end(modload_name),factories.memory.begin()+0x40c);
-        constexpr unsigned loader_ordinals[]{12,13,14,7};
+        constexpr unsigned loader_ordinals[]{12,13,14,7,16,17,18,22,23};
         for (unsigned i=0;i<std::size(loader_ordinals);++i) {
             factory_word(0xb414+i*8,0x03e00008); factory_word(0xb418+i*8,0x24000000|loader_ordinals[i]);
             bundle_roots.push_back(0xb414+i*8);

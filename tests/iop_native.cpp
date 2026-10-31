@@ -93,6 +93,47 @@ int main() {
     try {
         using namespace nt::iop;
         {
+            NativeModloadServices loader;
+            std::vector<std::uint8_t> data(0x20000,0);
+            const NativeModule module{0xb000,0xb280,0x400,0x600,0xb300,NativeModuleKind::compiled,
+                {"synthetic-module",0x102,0x300,0x100,0x200}};
+            const auto call=[&](unsigned pc,std::array<std::uint32_t,4> args) {
+                auto cpu=initial(); cpu.pc=pc; std::copy(args.begin(),args.end(),cpu.registers.begin()+4);
+                const auto result=run_native(nt_iop_generated_run,cpu,data,64,&loader);
+                return std::pair{result,cpu.registers[2]};
+            };
+            const auto count=[&] { return load_native_word(data,0x18100); };
+            const auto empty=call(0xb434,{0xffffffff,0,0x18100});
+            check(empty.second==0 && count()==0,"Catalog-free native module enumeration was not empty");
+            const auto first=loader.begin_startup(module),second=loader.begin_startup(module);
+            const auto limited=call(0xb434,{0xa0018000,1,0x80018100});
+            check(limited.first.reason==NativeStop::unmapped_code && limited.second==1 && count()==2 &&
+                load_native_word(data,0x18000)==first && load_native_word(data,0x18004)==0,
+                "Module list ignored capacity, count or pointer aliases");
+            std::fill_n(data.begin()+0x18200,96,std::uint8_t{0xcd});
+            check(call(0xb43c,{first,0x18200}).second==0 && load_native_word(data,0x18238)==0x00020102 &&
+                load_native_word(data,0x1823c)==first && load_native_word(data,0x18240)==0xb280 &&
+                load_native_word(data,0x18250)==0x100 && load_native_word(data,0x18254)==0x200 &&
+                data[0x18258]==0xcd,"Starting module status lost metadata or overwrote reserved fields");
+            std::copy(module.details.name.begin(),module.details.name.end(),data.begin()+0x18300);
+            check(call(0xb44c,{0x18300}).second==second && call(0xb454,{0xa000b5ff}).second==second &&
+                call(0xb454,{0xb600}).second==static_cast<unsigned>(-202),"Module search failed name, alias or extent semantics");
+            loader.finish_startup(first,0); loader.finish_startup(second,1);
+            check(call(0xb444,{0x18300,0x18000,2,0x18100}).second==1 && count()==1 &&
+                call(0xb43c,{first,0x18200}).second==0 && load_native_word(data,0x18238)==0x00030102,
+                "Module completion did not publish residency or remove a released entry");
+            const auto before=data;
+            check(call(0xb434,{0x18000,1,0xb434}).first.reason==NativeStop::code_write && data==before,
+                "Invalid module count output partially wrote the ID list");
+            check(call(0xb43c,{first,0x1fffc}).first.reason==NativeStop::address_fault && data==before,
+                "Truncated module status partially changed memory");
+            check(call(0xb43c,{second,0xffffffff}).second==static_cast<unsigned>(-202) && data==before,
+                "Released module status touched output or reported success");
+            data[0x18300]='x';
+            check(call(0xb444,{0x18300,0xffffffff,1,0x18100}).second==0 && count()==0,
+                "Missing name produced fabricated module residency");
+        }
+        {
             std::vector<std::uint8_t> data(0x20000);
             NativeSysclibServices strings; NativeCdvdmanServices disc;
             NativeServiceRouter router({&strings,&disc});

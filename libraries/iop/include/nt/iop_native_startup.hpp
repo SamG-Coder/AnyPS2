@@ -38,6 +38,8 @@ public:
             if (returned_.size()<entries_.size()) {
                 if (entries_[returned_.size()].kind==NativeModuleKind::archive) {
                     if (!services_.archives.initialize()) return {NativeStop::import_request,entries_[returned_.size()].entry};
+                    const auto id=services_.modload.begin_startup(entries_[returned_.size()]);
+                    services_.modload.finish_startup(id,0);
                     returned_.push_back({0,0});
                     continue;
                 }
@@ -46,10 +48,12 @@ public:
                     Cpu cpu; cpu.pc=entry.entry; cpu.registers[28]=entry.global_pointer;
                     cpu.registers[29]=stack_top_; cpu.registers[31]=return_address;
                     active_=services_.threads.admit(cpu);
+                    module_id_=services_.modload.begin_startup(entry);
                 }
                 result=services_.threads.run(execute_,ram_,budget,services_);
                 const auto& state=services_.threads.state(*active_);
                 if (result.reason==NativeStop::unmapped_code && state.pc==return_address && !state.delay_slot) {
+                    services_.modload.finish_startup(module_id_,state.registers[2]);
                     returned_.push_back({state.registers[2],state.executed}); active_.reset();
                 } else if (result.reason!=NativeStop::unmapped_code || result.pc!=return_address) return result;
             } else {
@@ -71,6 +75,7 @@ private:
     std::uint32_t stack_top_;
     std::uint64_t initial_executed_;
     std::optional<std::uint32_t> active_;
+    std::uint32_t module_id_=0;
     std::vector<Returned> returned_;
     Cpu callback_state_;
 };

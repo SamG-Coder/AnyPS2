@@ -1654,3 +1654,10 @@ copy intrinsics retain bounds, code-write protection and pointer aliases. The
 cdvdman ordinal 22 interface identifies console iLink identity; it is deliberately
 an unavailable native service, reported during conversion and stopped if called.
 No console identity or successful response is invented.
+
+The pinned PS2SDK `xmodload.h` defines module list/status/search ordinals and the
+`ModuleStatus` data layout. Module entry results and starting/resident flags use
+its public lifecycle contract. Independent C++ records track entries actually
+started by AnyPS2; compiled-but-unstarted catalog entries are excluded. The
+Play! module-list stub is not used. List outputs start at element zero and report
+both written IDs and total matches, with output validation before any write.

@@ -1,7 +1,6 @@
 #include <nt/iop_codegen.hpp>
 #include "program.hpp"
 #include <sstream>
-#include <iomanip>
 #include <algorithm>
 #include <array>
 #include <stdexcept>
@@ -10,6 +9,20 @@ namespace nt::iop_codegen {
 namespace {
 void save(const std::filesystem::path& file,const std::string& text) {
     write_file(file,ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));
+}
+std::string metadata_string(std::string_view text) {
+    std::string result="\"";
+    for (const unsigned char byte:text) {
+        if (byte=='"' || byte=='\\') { result+='\\'; result+=static_cast<char>(byte); }
+        else if (byte>=32 && byte<127) result+=static_cast<char>(byte);
+        else {
+            result+='\\';
+            result+=static_cast<char>('0'+((byte>>6)&7));
+            result+=static_cast<char>('0'+((byte>>3)&7));
+            result+=static_cast<char>('0'+(byte&7));
+        }
+    }
+    return result+'"';
 }
 }
 void emit_bundle(std::ostream& output,std::span<const elf::IopModule> modules,std::span<const std::uint32_t> entries) {
@@ -96,6 +109,12 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
     for (std::size_t index=0;index<source_hashes.size();++index) if (!inputs[index].sealed) code<<source_hashes[index]<<"ULL,";
     code<<"}; }\n";
     Bytes sealed_image;
+    const auto details=[&](const elf::IopModule& item) {
+        code<<"{";
+        if (item.info) code<<metadata_string(item.info->name)<<","<<item.info->version<<"U,"<<item.info->text_size<<"U,"
+            <<item.info->data_size<<"U,"<<item.info->bss_size<<"U";
+        code<<"}";
+    };
     code<<"std::vector<nt::iop::SealedModule> nt_iop_generated_sealed() { return {";
     if (any_sealed) {
         code<<'\n';
@@ -103,7 +122,8 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
             const auto& item=modules[index];
             const auto image=ByteView(item.memory).first(item.initialized_size);
             code<<"{"<<source_hashes[index]<<"ULL,"<<fingerprint(image)<<"ULL,"<<item.base<<"U,"<<item.entry<<"U,"
-                <<item.initialized_size<<"U,"<<item.memory.size()<<"U,"<<(item.info ? item.info->global_pointer : 0)<<"U},\n";
+                <<item.initialized_size<<"U,"<<item.memory.size()<<"U,"<<(item.info ? item.info->global_pointer : 0)<<"U,";
+            details(item); code<<"},\n";
             sealed_image.insert(sealed_image.end(),image.begin(),image.end());
         }
     }
@@ -113,7 +133,7 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
         <<(module.info ? module.info->global_pointer : 0)<<"U}; }\n";
     code<<"#include <nt/iop_native_libraries.hpp>\nstd::vector<NativeLibrarySpec> nt_iop_generated_libraries() { return {\n";
     for (const auto& item : compiled) for (const auto& library : elf::iop_exports(item)) {
-        code<<"{"<<library.address<<"U,"<<library.version<<"U,"<<std::quoted(library.name)<<",{";
+        code<<"{"<<library.address<<"U,"<<library.version<<"U,"<<metadata_string(library.name)<<",{";
         for (const auto target : library.functions) code<<target<<"U,";
         code<<"},"<<item.entry<<"U},\n";
     }
@@ -123,12 +143,13 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
         const auto& item=modules[index];
         code<<"{"<<item.base<<"U,"<<item.entry<<"U,"<<item.initialized_size<<"U,"<<item.memory.size()<<"U,"
             <<(item.info ? item.info->global_pointer : 0)<<"U,NativeModuleKind::"
-            <<(inputs[index].native_romdrv ? "archive" : "compiled")<<"},\n";
+            <<(inputs[index].native_romdrv ? "archive" : "compiled")<<",";
+        details(item); code<<"},\n";
     }
     code<<"}; }\n";
     code<<"std::vector<NativeImportSpec> nt_iop_generated_imports() { return {\n";
     for (const auto& import : program.library_imports)
-        code<<"{"<<import.offset<<"U,"<<import.table_offset<<"U,"<<std::quoted(import.library)<<","<<import.version<<"U,"<<import.ordinal<<"U},\n";
+        code<<"{"<<import.offset<<"U,"<<import.table_offset<<"U,"<<metadata_string(import.library)<<","<<import.version<<"U,"<<import.ordinal<<"U},\n";
     code<<"}; }\n";
     // Finish validation before creating output. Never overwrite a prior conversion.
     if (!std::filesystem::create_directories(output)) throw std::runtime_error("IOP conversion: output directory already exists");

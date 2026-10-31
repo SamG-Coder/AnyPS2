@@ -2,6 +2,7 @@
 #include <nt/iop_state.hpp>
 #include <nt/iop_memory.hpp>
 #include <span>
+#include <string>
 
 namespace nt::iop {
 // Values are also the generated LLVM function's C ABI return codes.
@@ -9,7 +10,16 @@ enum class NativeStop : std::uint32_t { budget=0, unmapped_code=1, address_fault
 struct NativeResult { NativeStop reason; std::uint32_t pc, address=0, trap_code=0; };
 using NativeEntry=NativeResult (*)(Cpu&,std::span<std::uint8_t>,std::uint64_t);
 enum class NativeModuleKind { compiled, archive };
-struct NativeModule { std::uint32_t base, entry, initialized_size, memory_size, global_pointer; NativeModuleKind kind=NativeModuleKind::compiled; };
+struct NativeModuleDetails {
+    std::string name;
+    std::uint16_t version=0;
+    std::uint32_t text_size=0,data_size=0,bss_size=0;
+};
+struct NativeModule {
+    std::uint32_t base, entry, initialized_size, memory_size, global_pointer;
+    NativeModuleKind kind=NativeModuleKind::compiled;
+    NativeModuleDetails details;
+};
 // These are data-memory helpers only. Generated programs have no code fetch,
 // instruction decoder, device interpreter or fallback execution entry point.
 inline std::uint32_t load_native_word(std::span<const std::uint8_t> ram,std::uint32_t offset) {

@@ -2288,3 +2288,12 @@ in relocation records. It follows bounded forward paths through nullable
 callbacks and checks actual targets against compiled code. Library declarations
 remain data. Range-checked jump tables support several scheduled stack spills,
 hoisted temporary bases and matched index/table-cursor increments.
+
+Native module enumeration, status and name/address search share the loader's
+actual startup and residency records. Conversion retains module names, versions
+and text/data/BSS extents as metadata. Starting entries are visible during their
+initialization; released entries disappear and resident flags change only when
+the compiled entry returns. Sealed code that has not started is not listed.
+Outputs preserve pointer aliases, validate capacity and code protection before
+writing, and leave reserved status words untouched. Unsupported stop/unload
+operations remain diagnostic boundaries.
