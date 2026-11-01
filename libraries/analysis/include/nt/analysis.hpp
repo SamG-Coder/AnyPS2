@@ -41,10 +41,21 @@ std::set<std::uint32_t> syscall_callbacks(ByteView bytes,const elf::Executable& 
 std::set<std::uint32_t> materialized_code_pointers(ByteView bytes,const elf::Executable& executable,
                                                 const Program& program);
 std::set<std::uint32_t> thread_entries(ByteView bytes,const elf::Executable& executable,const Program& program);
-// Compilation candidates stored into runtime callback tables; not immutable values.
-std::set<std::uint32_t> stored_code_pointers(ByteView bytes,const elf::Executable& executable,const Program& program);
-// Resolve constant arguments that a bounded direct callee stores through copies.
-std::set<std::uint32_t> registered_code_pointers(ByteView bytes,const elf::Executable& executable,const Program& program);
+struct PointerReference {
+    std::uint32_t site,target;
+    bool argument=false;
+    bool callable=false;
+    bool data_read=false;
+    std::uint32_t callee=0;
+    unsigned argument_index=0;
+};
+// Stores become roots only when a matching indirect-call consumer is found.
+// Other address references remain available as unresolved classification evidence.
+std::set<std::uint32_t> stored_code_pointers(ByteView bytes,const elf::Executable& executable,const Program& program,
+    std::vector<PointerReference>* references=nullptr);
+// Resolve arguments used as calls, or stored into slots with observed call uses.
+std::set<std::uint32_t> registered_code_pointers(ByteView bytes,const elf::Executable& executable,const Program& program,
+    std::vector<PointerReference>* references=nullptr);
 // Candidate functions loaded from constant-offset tables installed in objects.
 // Runtime table reads and indirect dispatch remain dynamic.
 std::set<std::uint32_t> object_table_entries(ByteView bytes,const elf::Executable& executable,const Program& program);

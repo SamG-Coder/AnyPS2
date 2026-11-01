@@ -310,6 +310,11 @@ void record_ee(Accumulator& accumulator,const std::string& id,ByteView bytes,con
     if (assessment.unresolved_count)
         accumulator.gap("ee-unmapped","discovery target is not file-backed executable memory",assessment.unresolved_count,
             assessment.unresolved_sample.empty()?0:assessment.unresolved_sample.front(),id,hex_list(assessment.unresolved_sample));
+    if (assessment.unclassified_pointer_count)
+        accumulator.gap("ee-pointer-reference","stored/passed address has no recovered call consumer",
+            assessment.unclassified_pointer_count,assessment.unclassified_pointer_sample.front(),id,
+            "Not established as EE code; payload/data uses and unrecovered callbacks remain distinct from compiled coverage. Candidates: "+
+            hex_list(assessment.unclassified_pointer_sample));
     if (assessment.indirect_sites)
         accumulator.gap("ee-indirect","register-indirect transfer",assessment.indirect_sites,assessment.first_indirect,id,
             "Compiled indirect sites stop at runtime when the destination was not discovered.");

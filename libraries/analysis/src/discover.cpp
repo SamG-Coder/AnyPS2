@@ -4,6 +4,7 @@
 #include <deque>
 #include <optional>
 #include <stdexcept>
+#include <tuple>
 
 namespace nt::analysis {
 std::set<std::uint32_t> syscall_wrappers(ByteView bytes,const elf::Executable& executable) {
@@ -115,6 +116,14 @@ struct ArgumentValue {
 };
 struct ArgumentUses {
     unsigned stored=0,called=0;
+    unsigned returned=0,data_read=0;
+    struct Store {
+        unsigned source,base;
+        std::uint32_t offset,pc;
+        unsigned base_register;
+        auto operator<=>(const Store&) const=default;
+    };
+    std::set<Store> stores;
     std::map<unsigned,std::set<std::uint32_t>> callable_fields;
 };
 bool conditional_call(const r5900::Instruction& i) {
@@ -140,26 +149,91 @@ bool scalar_float_preserves_gpr(r5900::Op op) {
     default: return false;
     }
 }
+// Limited effect model shared by the pointer slices. Unknown effects end a
+// slice; they must not be assumed to preserve a potential pointer register.
+std::optional<unsigned> pointer_write(const r5900::Instruction& i) {
+    using r5900::Op;
+    if (scalar_float_preserves_gpr(i.op)) return 0;
+    switch (i.op) {
+    case Op::sw: case Op::sd: case Op::sq: case Op::sb: case Op::sh: case Op::sync: return 0;
+    case Op::slti: case Op::sltiu: case Op::andi: case Op::xori:
+    case Op::lui: case Op::addiu: case Op::daddiu: case Op::ori: case Op::lw: case Op::lwu:
+    case Op::lb: case Op::lbu: case Op::lh: case Op::lhu: case Op::ld: case Op::lq: case Op::mfc1: case Op::cfc1:
+        return i.rt;
+    case Op::slt: case Op::sltu: case Op::sll: case Op::srl: case Op::sra:
+    case Op::sllv: case Op::srlv: case Op::srav: case Op::addu: case Op::daddu: case Op::bit_or:
+    case Op::bit_and: case Op::bit_xor: case Op::bit_nor: case Op::subu: case Op::dsubu:
+    case Op::mult: case Op::multu: case Op::mflo: case Op::mfhi: case Op::movn: case Op::movz:
+        return i.rd;
+    default: return {};
+    }
+}
+std::optional<unsigned> copied_register(const r5900::Instruction& i) {
+    using r5900::Op;
+    if (i.op==Op::addu || i.op==Op::daddu || i.op==Op::bit_or) {
+        if (!i.rt) return i.rs;
+        if (!i.rs) return i.rt;
+    }
+    if (i.op==Op::sll && !i.sa) return i.rt;
+    if ((i.op==Op::addiu || i.op==Op::daddiu || i.op==Op::ori) && !i.immediate) return i.rs;
+    return {};
+}
+unsigned pointer_store_width(r5900::Op op) {
+    using r5900::Op;
+    switch (op) {
+    case Op::sb: return 1;
+    case Op::sh: return 2;
+    case Op::sw: case Op::swc1: return 4;
+    case Op::sd: return 8;
+    case Op::sq: return 16;
+    default: return 0;
+    }
+}
+bool overwrites_word(std::uint32_t store,unsigned width,std::uint32_t word) {
+    // Unsigned differences also handle a store spanning the address wrap.
+    return word-store<width || store-word<4;
+}
 ArgumentUses argument_uses(const Program& program,std::uint32_t entry) {
     using r5900::Op;
     using Origins=std::array<ArgumentValue,32>;
+    using Stack=std::map<std::int32_t,ArgumentValue>;
+    constexpr unsigned stack_origin=1U<<31;
     Origins initial{};
     // The EE ABI passes eight integer arguments in registers a0 through t3.
     for (unsigned reg=4;reg<12;++reg) initial[reg].origin=1U<<(reg-4);
-    struct Cursor { std::uint32_t pc; Origins origins; unsigned call_depth; };
-    std::deque<Cursor> pending{{entry,initial,0}};
-    std::set<std::pair<std::uint32_t,Origins>> visited;
+    initial[29].origin=stack_origin;
+    Stack incoming;
+    for (unsigned n=0;n<16;++n) incoming[static_cast<std::int32_t>(n*4)]={1U<<(8+n)};
+    struct Cursor { std::uint32_t pc; Origins origins; Stack stack; unsigned call_depth; };
+    std::deque<Cursor> pending{{entry,initial,incoming,0}};
+    std::set<std::tuple<std::uint32_t,Origins,Stack>> visited;
     ArgumentUses uses;
     unsigned budget=1024;
-    const auto transfer=[&](const r5900::Instruction& i,Origins& origins) {
-        if (scalar_float_preserves_gpr(i.op)) return true;
+    const auto transfer=[&](const r5900::Instruction& i,Origins& origins,Stack& stack) {
+        if (scalar_float_preserves_gpr(i.op) && i.op!=Op::swc1) return true;
         unsigned destination=0;
         ArgumentValue value;
+        const auto& base=origins[i.rs];
+        const bool stack_access=base.origin==stack_origin && !base.loaded;
+        const auto offset=base.offset+static_cast<std::uint32_t>(i.immediate);
         switch (i.op) {
-        case Op::sw:
-            if (!origins[i.rt].loaded && !origins[i.rt].offset) uses.stored|=origins[i.rt].origin;
+        case Op::sw: case Op::sb: case Op::sh: case Op::sd: case Op::sq: case Op::swc1: {
+            const auto source=i.op==Op::swc1 ? ArgumentValue{} : origins[i.rt];
+            if (i.op==Op::sw && !source.loaded && !source.offset && source.origin!=stack_origin) {
+                uses.stored|=source.origin;
+                if (!base.loaded && source.origin)
+                    uses.stores.insert({source.origin,base.origin,offset,i.pc,i.rs});
+            }
+            if (stack_access) {
+                const auto at=static_cast<std::int32_t>(offset);
+                const auto width=pointer_store_width(i.op);
+                std::erase_if(stack,[&](const auto& slot) {
+                    return std::int64_t(slot.first)<std::int64_t(at)+width && std::int64_t(at)<std::int64_t(slot.first)+4;
+                });
+                if (width>=4 && source.origin) stack[at]=source;
+            }
             return true;
-        case Op::sb: case Op::sh: case Op::sd: case Op::sq: return true;
+        }
         case Op::addu: case Op::daddu: case Op::bit_or:
             destination=i.rd;
             if (!i.rt) value=origins[i.rs];
@@ -173,14 +247,20 @@ ArgumentUses argument_uses(const Program& program,std::uint32_t entry) {
             break;
         case Op::ori: destination=i.rt; if (!i.immediate) value=origins[i.rs]; break;
         case Op::sll: destination=i.rd; if (!i.sa) value=origins[i.rt]; break;
-        case Op::lw: case Op::lwu:
+        case Op::lw: case Op::lwu: case Op::ld: case Op::lq:
             destination=i.rt;
-            if (origins[i.rs].origin && !origins[i.rs].loaded) {
-                value=origins[i.rs]; value.offset+=static_cast<std::uint32_t>(i.immediate); value.loaded=true;
+            if (stack_access) {
+                const auto at=static_cast<std::int32_t>(offset);
+                if (const auto found=stack.find(at);found!=stack.end()) value=found->second;
+            } else if (base.origin && !base.loaded) {
+                uses.data_read|=base.origin;
+                if (i.op==Op::lw || i.op==Op::lwu) { value=base; value.offset=offset; value.loaded=true; }
             }
             break;
-        case Op::lui: case Op::ld: case Op::lq: case Op::mfc1: case Op::cfc1:
         case Op::lb: case Op::lbu: case Op::lh: case Op::lhu:
+            if (base.origin && !base.loaded && !stack_access) uses.data_read|=base.origin;
+            destination=i.rt; break;
+        case Op::lui: case Op::mfc1: case Op::cfc1:
         case Op::andi: case Op::xori: case Op::slti: case Op::sltiu:
             destination=i.rt; break;
         case Op::bit_and: case Op::bit_xor: case Op::bit_nor: case Op::subu:
@@ -194,13 +274,13 @@ ArgumentUses argument_uses(const Program& program,std::uint32_t entry) {
         return true;
     };
     while (!pending.empty() && budget--) {
-        auto [pc,origins,call_depth]=pending.front(); pending.pop_front();
-        if (!visited.emplace(pc,origins).second || pc>0xfffffff7U) continue;
+        auto [pc,origins,stack,call_depth]=std::move(pending.front()); pending.pop_front();
+        if (!visited.emplace(pc,origins,stack).second || pc>0xfffffff7U) continue;
         const auto found=program.instructions.find(pc);
         if (found==program.instructions.end()) continue;
         const auto& i=found->second;
         if (!i.branch()) {
-            if (transfer(i,origins)) pending.push_back({pc+4,origins,call_depth});
+            if (transfer(i,origins,stack)) pending.push_back({pc+4,origins,stack,call_depth});
             continue;
         }
         if (i.indirect() && origins[i.rs].loaded)
@@ -212,25 +292,31 @@ ArgumentUses argument_uses(const Program& program,std::uint32_t entry) {
         if (const auto link=link_register(i)) {
             origins[link]={};
             const auto before_slot=origins;
+            const auto stack_before_slot=stack;
             const auto slot=program.instructions.find(pc+4);
-            if (slot==program.instructions.end() || !transfer(slot->second,origins)) continue;
+            if (slot==program.instructions.end() || !transfer(slot->second,origins,stack)) continue;
             // Registration wrappers often forward a callback to another helper.
             // Follow bounded direct calls with the current argument origins;
             // their effects are discovery evidence, never folded runtime values.
             if (!i.indirect() && call_depth<4)
-                pending.push_back({i.target(),origins,call_depth+1});
+                pending.push_back({i.target(),origins,stack,call_depth+1});
             if (conditional_call(i))
-                pending.push_back({pc+8,i.likely() ? before_slot : origins,call_depth});
+                pending.push_back({pc+8,i.likely() ? before_slot : origins,i.likely()?stack_before_slot:stack,call_depth});
             for (unsigned reg=1;reg<32;++reg)
                 if (!(reg>=16 && reg<=23) && reg!=28 && reg!=29 && reg!=30) origins[reg]={};
-            pending.push_back({pc+8,origins,call_depth});
+            // Retain stack values as possible compilation candidates across a
+            // call, not immutable memory. Runtime loads still read the slot.
+            pending.push_back({pc+8,origins,stack,call_depth});
             continue;
         }
         const auto before_slot=origins;
+        const auto stack_before_slot=stack;
         const auto slot=program.instructions.find(pc+4);
-        if (slot==program.instructions.end() || !transfer(slot->second,origins)) continue;
-        if (!i.indirect()) pending.push_back({i.target(),origins,call_depth});
-        if (i.op!=Op::j && i.op!=Op::jr) pending.push_back({pc+8,i.likely() ? before_slot : origins,call_depth});
+        if (slot==program.instructions.end() || !transfer(slot->second,origins,stack)) continue;
+        if (i.indirect() && i.rs==31 && !origins[2].loaded && !origins[2].offset) uses.returned|=origins[2].origin;
+        if (!i.indirect()) pending.push_back({i.target(),origins,stack,call_depth});
+        if (i.op!=Op::j && i.op!=Op::jr)
+            pending.push_back({pc+8,i.likely() ? before_slot : origins,i.likely()?stack_before_slot:stack,call_depth});
     }
     return uses;
 }
@@ -343,6 +429,109 @@ std::optional<std::uint32_t> known_callee(ByteView bytes,const elf::Executable& 
     // The target is consumed before the delay slot or link-register write.
     const auto value=candidate(bytes,elf,program,call.pc,call.rs,fuel,0xffffffffU,false,0,true);
     return value ? executable_pointer(elf,*value) : std::nullopt;
+}
+struct PointerLoad { std::uint32_t pc; unsigned base; std::uint32_t offset; };
+std::optional<PointerLoad> called_load(const Program& program,const r5900::Instruction& call) {
+    using r5900::Op;
+    unsigned reg=call.rs;
+    auto before=call.pc;
+    for (unsigned step=0;step<128 && before>=4;++step) {
+        before-=4;
+        const auto found=program.instructions.find(before);
+        if (found==program.instructions.end()) return {};
+        const auto& i=found->second;
+        if (i.branch() || i.terminal() || i.op==Op::syscall) return {};
+        const auto write=pointer_write(i);
+        if (!write) return {};
+        if (*write!=reg) continue;
+        if (i.op==Op::lw || i.op==Op::lwu) return PointerLoad{i.pc,i.rs,static_cast<std::uint32_t>(i.immediate)};
+        const auto copy=copied_register(i);
+        if (!copy || !*copy) return {};
+        reg=*copy;
+    }
+    return {};
+}
+bool same_local_slot(const Program& program,const PointerLoad& load,std::uint32_t after,unsigned base,std::uint32_t offset) {
+    using r5900::Op;
+    auto before=load.pc;
+    auto reg=load.base;
+    auto displacement=load.offset;
+    for (unsigned step=0;before>after && step<128;++step) {
+        before-=4;
+        const auto found=program.instructions.find(before);
+        if (found==program.instructions.end()) return false;
+        const auto& i=found->second;
+        if (i.branch() || i.terminal() || i.op==Op::syscall) return false;
+        // A definite overwrite severs the earlier store-to-call relation.
+        if (const auto width=pointer_store_width(i.op);width && i.rs==reg &&
+            overwrites_word(static_cast<std::uint32_t>(i.immediate),width,displacement)) return false;
+        const auto write=pointer_write(i);
+        if (!write) return false;
+        if (*write!=reg) continue;
+        if (const auto copy=copied_register(i)) reg=*copy;
+        else if (i.op==Op::addiu || i.op==Op::daddiu) {
+            reg=i.rs; displacement+=static_cast<std::uint32_t>(i.immediate);
+        } else return false;
+    }
+    return before==after && reg==base && displacement==offset;
+}
+struct CallConsumers {
+    std::set<std::pair<bool,std::uint32_t>> slots; // absolute address, or ABI GP-relative offset
+    std::vector<PointerLoad> loads;
+    CallConsumers(ByteView bytes,const elf::Executable& elf,const Program& program) {
+        for (const auto& [pc,i]:program.instructions) {
+            if (!i.indirect() || !call_transfer(i)) continue;
+            const auto load=called_load(program,i);
+            if (!load) continue;
+            loads.push_back(*load);
+            unsigned fuel=128;
+            const auto base=candidate(bytes,elf,program,load->pc,load->base,fuel,0xffffffffU);
+            if (base) slots.insert({false,physical(*base+load->offset)});
+            else if (load->base==28) slots.insert({true,load->offset});
+        }
+        std::sort(loads.begin(),loads.end(),[](const auto& a,const auto& b) { return a.pc<b.pc; });
+    }
+    static std::uint32_t physical(std::uint32_t address) {
+        return address>=0x80000000U && address<0xc0000000U ? address&0x1fffffffU : address;
+    }
+    bool contains(ByteView bytes,const elf::Executable& elf,const Program& program,
+                  std::uint32_t after,unsigned base,std::uint32_t offset,std::uint32_t call_site=0xffffffffU) const {
+        unsigned fuel=128;
+        const auto address=candidate(bytes,elf,program,after,base,fuel,call_site);
+        if (address && slots.contains({false,physical(*address+offset)})) return true;
+        if (!address && base==28 && slots.contains({true,offset})) return true;
+        auto load=std::lower_bound(loads.begin(),loads.end(),after,[](const auto& item,auto pc) { return item.pc<pc; });
+        for (;load!=loads.end() && std::uint64_t(load->pc)<=std::uint64_t(after)+512;++load)
+            if (same_local_slot(program,*load,after,base,offset)) return true;
+        return false;
+    }
+};
+std::optional<std::uint32_t> stack_argument(ByteView bytes,const elf::Executable& elf,const Program& program,
+    std::uint32_t call,unsigned index) {
+    using r5900::Op;
+    auto before=call+8;
+    std::uint32_t offset=index*4;
+    for (unsigned step=0;before>=4 && step<128;++step) {
+        before-=4;
+        const auto found=program.instructions.find(before);
+        if (found==program.instructions.end()) return {};
+        const auto& i=found->second;
+        if (before==call) continue;
+        if (i.branch() || i.terminal() || i.op==Op::syscall) return {};
+        if (const auto width=pointer_store_width(i.op);width && i.rs==29 &&
+            overwrites_word(static_cast<std::uint32_t>(i.immediate),width,offset)) {
+            if (i.op!=Op::sw || static_cast<std::uint32_t>(i.immediate)!=offset) return {};
+            unsigned fuel=128;
+            return candidate(bytes,elf,program,before,i.rt,fuel,call);
+        }
+        const auto write=pointer_write(i);
+        if (!write) return {};
+        if (*write==29) {
+            if ((i.op!=Op::addiu && i.op!=Op::daddiu) || i.rs!=29) return {};
+            offset+=static_cast<std::uint32_t>(i.immediate);
+        }
+    }
+    return {};
 }
 }
 std::string_view name(CallKind kind) {
@@ -472,8 +661,10 @@ std::set<std::uint32_t> materialized_code_pointers(ByteView bytes,const elf::Exe
 // Stores of recoverable executable addresses provide candidates for callback
 // tables built during startup. Do not fold the stored value or constrain later
 // indirect dispatch: writable tables may change after initialization.
-std::set<std::uint32_t> stored_code_pointers(ByteView bytes,const elf::Executable& elf,const Program& program) {
+std::set<std::uint32_t> stored_code_pointers(ByteView bytes,const elf::Executable& elf,const Program& program,
+                                           std::vector<PointerReference>* references) {
     std::set<std::uint32_t> result;
+    const CallConsumers consumers(bytes,elf,program);
     for (const auto& [pc,i]:program.instructions) {
         if (i.op!=r5900::Op::sw || !i.rt) continue;
         unsigned fuel=128;
@@ -482,7 +673,11 @@ std::set<std::uint32_t> stored_code_pointers(ByteView bytes,const elf::Executabl
         const auto call_site=prior!=program.instructions.end() && call_transfer(prior->second) ? pc-4 : 0xffffffffU;
         const auto value=candidate(bytes,elf,program,pc,i.rt,fuel,call_site,false,pc);
         if (!value || !*value) continue;
-        if (const auto address=executable_pointer(elf,*value)) result.insert(*address);
+        if (const auto address=executable_pointer(elf,*value)) {
+            const bool callable=consumers.contains(bytes,elf,program,pc+4,i.rs,static_cast<std::uint32_t>(i.immediate),call_site);
+            if (callable) result.insert(*address);
+            if (references) references->push_back({pc,*address,false,callable,false});
+        }
     }
     return result;
 }
@@ -647,9 +842,11 @@ std::set<std::uint32_t> object_table_entries(ByteView bytes,const elf::Executabl
     }
     return result;
 }
-std::set<std::uint32_t> registered_code_pointers(ByteView bytes,const elf::Executable& elf,const Program& program) {
+std::set<std::uint32_t> registered_code_pointers(ByteView bytes,const elf::Executable& elf,const Program& program,
+                                               std::vector<PointerReference>* references) {
     std::set<std::uint32_t> result;
     std::map<std::uint32_t,ArgumentUses> summaries;
+    const CallConsumers consumers(bytes,elf,program);
     for (const auto& [pc,call]:program.instructions) {
         // A tail jump passes the same argument registers as a linking call.
         // Recover both before lowering: an indirect callback may be saved by
@@ -658,14 +855,37 @@ std::set<std::uint32_t> registered_code_pointers(ByteView bytes,const elf::Execu
         if (!callee || pc>0xfffffff7U) continue;
         auto found=summaries.find(*callee);
         if (found==summaries.end()) found=summaries.emplace(*callee,argument_uses(program,*callee)).first;
-        for (unsigned reg=4;reg<12;++reg) {
+        const auto& uses=found->second;
+        const auto argument=[&](unsigned index,bool called=false) {
             unsigned fuel=128;
-            const bool called=(found->second.called&(1U<<(reg-4)))!=0;
-            const auto value=candidate(bytes,elf,program,pc+8,reg,fuel,pc,false,0,called);
+            return index<8 ? candidate(bytes,elf,program,pc+8,index+4,fuel,pc,false,0,called) :
+                stack_argument(bytes,elf,program,pc,index-8);
+        };
+        for (unsigned index=0;index<24;++index) {
+            const auto bit=1U<<index;
+            if (!((uses.stored|uses.called|uses.data_read)&bit)) continue;
+            bool callable=(uses.called&bit)!=0;
+            const auto value=argument(index,callable);
             if (!value) continue;
             const auto address=executable_pointer(elf,*value);
             if (!address) continue;
-            if ((found->second.stored|found->second.called)&(1U<<(reg-4))) result.insert(*address);
+            for (const auto& store:uses.stores) {
+                if (!(store.source&bit)) continue;
+                const auto instruction=program.instructions.find(store.pc);
+                if (instruction!=program.instructions.end() && consumers.contains(bytes,elf,program,store.pc+4,
+                    store.base_register,static_cast<std::uint32_t>(instruction->second.immediate))) callable=true;
+                if (const auto fields=uses.callable_fields.find(store.base);
+                    fields!=uses.callable_fields.end() && fields->second.contains(store.offset)) callable=true;
+                for (unsigned base_index=0;base_index<24 && !callable;++base_index) {
+                    if (store.base!=(1U<<base_index)) continue;
+                    const auto base=argument(base_index);
+                    if (base && consumers.slots.contains({false,CallConsumers::physical(*base+store.offset)})) callable=true;
+                    if (base_index<8 && consumers.contains(bytes,elf,program,pc+8,base_index+4,store.offset,pc)) callable=true;
+                    if ((uses.returned&store.base) && consumers.contains(bytes,elf,program,pc+8,2,store.offset,pc)) callable=true;
+                }
+            }
+            if (callable) result.insert(*address);
+            if (references) references->push_back({pc,*address,true,callable,(uses.data_read&bit)!=0,*callee,index});
         }
     }
     // Multi-callback descriptor shapes come from actual indirect calls through

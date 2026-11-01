@@ -49,6 +49,7 @@ struct Prepared {
     std::vector<LayoutDeclaration> layouts;
     std::vector<ExecutableImage> images;
     std::vector<analysis::CallSite> calls;
+    std::vector<analysis::PointerReference> pointers;
     std::set<std::uint32_t> registered_calls;
     std::size_t wrapper_candidates=0;
     std::uint32_t syscall_table=0;
@@ -56,9 +57,32 @@ struct Prepared {
 void save(const std::filesystem::path& path,const std::string& text) {
     write_file(path,ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));
 }
+std::vector<CodeRange> declared_code_ranges(const elf::Executable& executable) {
+    std::vector<CodeRange> result;
+    if (executable.inferred_permissions) return result;
+    auto data=executable.non_executable_sections;
+    std::sort(data.begin(),data.end(),[](const auto& a,const auto& b) { return a.address<b.address; });
+    for (const auto& segment:executable.segments) {
+        if (!(segment.flags&1)) continue;
+        // BSS and allocated data sections are writable application storage,
+        // even when the enclosing LOAD segment also contains executable code.
+        auto cursor=std::uint64_t(segment.address);
+        const auto end=cursor+segment.file_size;
+        for (const auto& section:data) {
+            if (section.address>=end) break;
+            const auto finish=std::uint64_t(section.address)+section.size;
+            if (finish<=cursor) continue;
+            if (section.address>cursor)
+                result.push_back({static_cast<std::uint32_t>(cursor),static_cast<std::uint32_t>(section.address-cursor)});
+            cursor=std::min(end,finish);
+        }
+        if (cursor<end) result.push_back({static_cast<std::uint32_t>(cursor),static_cast<std::uint32_t>(end-cursor)});
+    }
+    return result;
+}
 Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
     auto executable=elf::parse(bytes);
-    std::vector<CodeRange> ranges;
+    auto ranges=declared_code_ranges(executable);
     std::vector<std::pair<std::uint32_t,std::uint32_t>> extents;
     std::uint32_t end=0;
     for (const auto& segment:executable.segments) {
@@ -71,7 +95,6 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
         for (const auto& [first,last]:extents)
             if (segment.address<last && first<finish) throw std::runtime_error("EE project has overlapping ELF segments");
         extents.emplace_back(segment.address,finish); end=std::max(end,finish);
-        if ((segment.flags&1) && !executable.inferred_permissions) ranges.push_back({segment.address,segment.memory_size});
     }
     const auto initial_executable=executable;
     std::vector<CodePayload> payloads;
@@ -111,8 +134,10 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
     const auto wrappers=analysis::syscall_wrappers(bytes,executable);
     continuations.insert(continuations.end(),wrappers.begin(),wrappers.end());
     analysis::Program discovered;
+    std::vector<analysis::PointerReference> pointers;
     std::set<std::uint32_t> registered_calls;
     while (true) {
+        pointers.clear();
         discovered=analysis::discover(bytes,executable,program_instruction_limit,continuations,true);
         bool added=false;
         for (const auto& [pc,instruction]:discovered.instructions) {
@@ -144,7 +169,7 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
                 std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;
             continuations.push_back(address); added=true;
         }
-        for (const auto address:analysis::stored_code_pointers(bytes,executable,discovered)) {
+        for (const auto address:analysis::stored_code_pointers(bytes,executable,discovered,&pointers)) {
             if (discovered.instructions.contains(address) ||
                 std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;
             continuations.push_back(address); added=true;
@@ -169,7 +194,7 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
                 std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;
             continuations.push_back(address); added=true;
         }
-        for (const auto address:analysis::registered_code_pointers(bytes,executable,discovered)) {
+        for (const auto address:analysis::registered_code_pointers(bytes,executable,discovered,&pointers)) {
             if (discovered.instructions.contains(address) ||
                 std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;
             continuations.push_back(address); added=true;
@@ -192,6 +217,7 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
     Prepared result;
     result.executable=std::move(executable);
     result.calls=analysis::call_sites(bytes,result.executable,discovered);
+    result.pointers=std::move(pointers);
     for (const auto& record:analysis::layout_candidates(bytes,result.executable,discovered)) result.layouts.push_back(record.fields);
     result.discovered=std::move(discovered);
     result.ranges=std::move(ranges);
@@ -238,6 +264,7 @@ void project(const std::filesystem::path& input,const std::filesystem::path& des
                     throw std::runtime_error("Executable image has an ambiguous compiled target");
             prepared.discovered.unresolved.insert(extra.discovered.unresolved.begin(),extra.discovered.unresolved.end());
             prepared.calls.insert(prepared.calls.end(),extra.calls.begin(),extra.calls.end());
+            prepared.pointers.insert(prepared.pointers.end(),extra.pointers.begin(),extra.pointers.end());
             for (auto range:extra.ranges) { range.image=id; prepared.ranges.push_back(range); }
             prepared.layouts.insert(prepared.layouts.end(),extra.layouts.begin(),extra.layouts.end());
             prepared.images.push_back(snapshot(source,extra.executable,id));
@@ -279,6 +306,18 @@ void project(const std::filesystem::path& input,const std::filesystem::path& des
         calls<<'\n';
     }
     save(output/"call-sites.tsv",calls.str());
+    std::ostringstream pointers;
+    pointers<<"site\ttarget\tsource\tuse\tcoverage\tcallee\targument_index\n";
+    for (const auto& reference:prepared.pointers) {
+        pointers<<hex32(reference.site)<<'\t'<<hex32(reference.target)<<'\t'
+                <<(reference.argument ? "argument" : "store")<<'\t'
+                <<(reference.callable ? "indirect-call-consumer" : reference.data_read ? "data-read-observed" : "unclassified")<<'\t'
+                <<(prepared.discovered.instructions.contains(reference.target) ? "discovered-EE-code" : "not-established-as-EE-code")<<'\t';
+        if (reference.argument) pointers<<hex32(reference.callee)<<'\t'<<reference.argument_index;
+        else pointers<<"-\t-";
+        pointers<<'\n';
+    }
+    save(output/"pointer-references.tsv",pointers.str());
     const auto& executable=prepared.executable;
     const auto& image=prepared.image;
     const auto syscall_table=prepared.syscall_table;
@@ -370,6 +409,14 @@ EeAssessment assess(ByteView bytes,std::span<const PayloadMapping> mappings) {
         (void)prepare_native_layout(prepared.layouts);
         result.instructions=prepared.discovered.instructions.size();
         result.wrapper_candidates=prepared.wrapper_candidates;
+        std::set<std::uint32_t> unclassified;
+        for (const auto& reference:prepared.pointers)
+            if (!reference.callable && !prepared.discovered.instructions.contains(reference.target)) unclassified.insert(reference.target);
+        result.unclassified_pointer_count=unclassified.size();
+        for (const auto target:unclassified) {
+            if (result.unclassified_pointer_sample.size()==16) break;
+            result.unclassified_pointer_sample.push_back(target);
+        }
         result.registered_calls.assign(prepared.registered_calls.begin(),prepared.registered_calls.end());
         for (const auto& segment:prepared.executable.segments)
             if (segment.flags&1) result.declared_executable_words+=segment.memory_size/4;

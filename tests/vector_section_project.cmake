@@ -27,3 +27,15 @@ file(READ "${executable}.audit.txt" audit)
 if(NOT audit MATCHES "dependency audit passed")
     message(FATAL_ERROR "Native vector-container output failed dependency audit")
 endif()
+
+# The same executable LOAD holds initialized payload storage, zero-filled BSS
+# and EE instructions. Data writes must work; code writes must still stop.
+checked("${CONVERTER}" "${run}/fixture.elf.mixed-memory" "${run}/mixed-memory")
+checked("${CMAKE_COMMAND}" -S "${run}/mixed-memory" -B "${run}/mixed-memory-build" -G "${GENERATOR}"
+    ${platform} "-DANYPS2_ROOT=${ROOT}")
+checked("${CMAKE_COMMAND}" --build "${run}/mixed-memory-build" --config Release --target ps2-native --parallel 2)
+execute_process(COMMAND "${run}/mixed-memory-build/Release/ps2-native${EXE_SUFFIX}" "${run}/mixed-memory/program.data" --headless
+    RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
+if(NOT result EQUAL 3 OR NOT out MATCHES "stop=5 pc=0x0000101c executed=7 v0=12.*address=0x00001000")
+    message(FATAL_ERROR "Mixed LOAD protection confused code, initialized data and BSS: ${out}\n${err}")
+endif()

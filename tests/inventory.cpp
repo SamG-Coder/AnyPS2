@@ -184,6 +184,24 @@ int main(int argc,char** argv) {
             }),"Separate VU conversion requirement was not reported");
         }
         {
+            auto payload=make_elf(); payload.resize(0x180,0);
+            put32(payload,68,0x80); put32(payload,72,0x80);
+            put32(payload,0x100,0x3c080010); put32(payload,0x104,0x35080070);
+            put32(payload,0x108,0xafa80000); put32(payload,0x10c,0x2403007b); put32(payload,0x110,12);
+            put32(payload,0x170,0x4c0000ff);
+            const auto payload_disc=root/"payload.iso";
+            nt::write_file(payload_disc,iso_with({{"SYSTEM.CNF;1",nt::Bytes(cnf.begin(),cnf.end())},
+                {"BOOT.ELF;1",payload}}));
+            auto payload_options=options; payload_options.output=root/"payload";
+            const auto report=nt::inventory::convert_disc(payload_disc,payload_options);
+            const auto* ee=find_exact(report,"BOOT.ELF;1");
+            check(ee && ee->stage==nt::inventory::Stage::llvm_generated,
+                "An unconsumed payload pointer prevented EE generation");
+            check(std::any_of(report.gaps.begin(),report.gaps.end(),[](const auto& gap) {
+                return gap.subsystem=="ee-pointer-reference" && gap.count==1 && gap.first_address==0x100070;
+            }),"Unclassified pointer coverage disappeared from the inventory");
+        }
+        {
             auto audit_options=options;
             audit_options.output=root/"audit"; audit_options.generate=false;
             const auto audit=nt::inventory::convert_disc(disc,audit_options);

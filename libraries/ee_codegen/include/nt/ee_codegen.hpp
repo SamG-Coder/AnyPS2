@@ -54,6 +54,8 @@ struct EeAssessment {
     std::size_t declared_executable_words=0;
     std::size_t unresolved_count=0;
     std::vector<std::uint32_t> unresolved_sample;
+    std::size_t unclassified_pointer_count=0;
+    std::vector<std::uint32_t> unclassified_pointer_sample;
     std::size_t indirect_sites=0;
     std::uint32_t first_indirect=0;
     std::map<std::uint32_t,std::size_t> known_syscalls;

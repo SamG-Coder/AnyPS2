@@ -154,6 +154,9 @@ Each EE conversion writes `call-sites.tsv`, separating encoded destinations,
 initial-data candidates, unresolved indirect calls, returns and native service
 boundaries. The report covers discovered code; it does not assert complete coverage
 of dynamically constructed pointers or code that has not yet been found.
+`pointer-references.tsv` records stored and passed executable-segment addresses,
+distinguishing observed indirect-call consumers, data reads and unclassified uses.
+Unproven references remain inventory gaps instead of being assumed to be callbacks.
 Visible boot and gameplay are not established.
 CFC2/CTC2 compile to native vector-service calls; the production vector owner is
 not connected, so executing these calls currently stops explicitly.

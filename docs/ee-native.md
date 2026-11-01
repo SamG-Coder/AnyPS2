@@ -2215,6 +2215,31 @@ Direct callee summaries also recover callback arguments invoked through preserve
 registers after helper calls, without requiring a registration store. Unknown
 pointer overwrites and arithmetic offsets invalidate that argument relationship.
 
+An address stored from an executable segment is not sufficient callback evidence:
+mixed segments can contain vector uploads and other payloads. Stored addresses
+become compilation candidates when bounded analysis finds a matching slot load
+used by an indirect call. Argument summaries follow register copies, stack
+arguments, direct helper calls and returned object fields. Definite overlapping
+stores invalidate a local slot relationship. Global-slot matching and values
+retained across calls are conservative candidates, not immutable-value proofs;
+the generated program still loads the actual value.
+
+Each EE project writes `pointer-references.tsv` with the source site, target,
+observed use, discovery status and, for arguments, the callee and zero-based
+argument index. `indirect-call-consumer` supplies code evidence;
+`data-read-observed` identifies a data use without proving that no other use
+exists. `unclassified` is an unresolved reference, not a declaration that the
+bytes cannot be code. Undiscovered targets remain visible in the conversion
+inventory as `ee-pointer-reference` gaps. Unsupported instructions reached through
+actual control flow still reject conversion. All file-backed payload bytes remain
+in the program data image; this analysis does not rewrite them or decode them at
+runtime.
+
+Code-write protection follows the same ELF classification: only file-backed
+executable bytes are reserved as code, excluding allocated data and VU sections.
+Zero-filled BSS remains writable even in an executable LOAD segment. Discovered
+instructions are still protected, and a write into compiled code stops explicitly.
+
 Project generation streams checked LLVM output into a uniquely owned temporary
 directory and publishes the directory only after every artifact closes
 successfully. It refuses existing destinations. This avoids retaining the full

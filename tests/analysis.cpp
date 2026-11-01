@@ -13,6 +13,58 @@ void put(nt::Bytes& bytes, std::size_t offset, std::uint32_t word) {
 int main() {
     try {
         {
+            // A pointer store alone does not establish a callback. A partial
+            // overwrite must sever the local store-to-call relation.
+            nt::Bytes image(128,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,128,128,5,4}}};
+            put(image,0,0x24081070); put(image,4,0xac88000c); put(image,12,12);
+            put(image,112,0x03e00008);
+            std::vector<nt::analysis::PointerReference> references;
+            const auto roots=[&] {
+                references.clear();
+                return nt::analysis::stored_code_pointers(image,fixture,
+                    nt::analysis::discover(image,fixture,128,{},true),&references);
+            };
+            check(roots().empty() && references.size()==1 && !references[0].callable,
+                "An unconsumed object payload became code or disappeared from the report");
+            put(image,12,0x8c99000c); put(image,16,0x0320f809); put(image,24,12);
+            check(roots()==std::set<std::uint32_t>{0x1070} && references[0].callable,
+                "Store/load/indirect-call evidence was not recovered");
+            for (const auto overwrite:{0xa080000dU,0xa480000eU,0xac80000cU,0xfc800008U,0x7c800000U,0xe480000cU}) {
+                put(image,8,overwrite);
+                check(roots().empty(),"An overwritten object slot retained a stale callback");
+            }
+            put(image,8,0); put(image,12,0x9099000c);
+            check(roots().empty(),"A byte payload read was classified as a function pointer");
+        }
+        {
+            // The ninth argument is loaded from the incoming stack, including
+            // a callee frame adjustment and a caller delay-slot store.
+            nt::Bytes image(128,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,128,128,5,4}}};
+            put(image,0,0x24081070); put(image,4,0xafa80000);
+            put(image,12,0x0c000410); put(image,20,12);
+            put(image,64,0x27bdfff0); put(image,68,0x8fb90010);
+            put(image,72,0x03200008); put(image,76,0x27bd0010); put(image,112,0x03e00008);
+            const auto roots=[&] { return nt::analysis::registered_code_pointers(image,fixture,
+                nt::analysis::discover(image,fixture,128,{},true)); };
+            check(roots()==std::set<std::uint32_t>{0x1070},"Stack argument callback was not recovered");
+            for (const auto overwrite:{0xa3a00001U,0xa7a00002U,0xafa00000U,0xffa00000U,0x7fa00000U,0xe7a00000U}) {
+                put(image,8,overwrite);
+                check(roots().empty(),"Overwritten outgoing stack argument retained a callback");
+            }
+            put(image,8,0); put(image,4,0); put(image,16,0xafa80000);
+            check(roots()==std::set<std::uint32_t>{0x1070},"Delay-slot stack argument was lost");
+            put(image,64,0xafa00000); put(image,68,0x8fb90000); put(image,76,0);
+            check(roots().empty(),"Overwritten incoming argument was resurrected");
+            put(image,64,0); put(image,68,0x8fa80000); put(image,72,0x91020000); put(image,76,0x03e00008);
+            std::vector<nt::analysis::PointerReference> references;
+            const auto data=nt::analysis::registered_code_pointers(image,fixture,
+                nt::analysis::discover(image,fixture,128,{},true),&references);
+            check(data.empty() && references.size()==1 && references[0].data_read && !references[0].callable,
+                "A stack payload read was not distinguished from a callback");
+        }
+        {
             nt::Bytes image(48,0);
             nt::elf::Executable fixture{0x1000,0,{{0,0x1000,16,16,5,4},{16,0x2000,32,32,6,4}}};
             put(image,0,0x0c000800); put(image,8,12);
@@ -32,7 +84,7 @@ int main() {
             nt::elf::Executable fixture{0x1000,0,{{0,0x1000,160,160,5,4}}};
             put(image,0,0x0c000408); put(image,4,0x24051090); put(image,8,12);
             put(image,32,0x0c000410); put(image,36,0x00a0302d); put(image,40,0x03e00008);
-            put(image,64,0xac860000); put(image,68,0x03e00008);
+            put(image,64,0xac860000); put(image,68,0x8c990000); put(image,72,0x03200008);
             put(image,144,0x03e00008);
             const auto entries=[&] { return nt::analysis::registered_code_pointers(image,fixture,
                 nt::analysis::discover(image,fixture,160,{},true)); };
@@ -48,7 +100,8 @@ int main() {
             put(image,0,0x24051080); put(image,4,0xdfbf0000);
             put(image,8,0x08000410); put(image,12,0x24061090);
             put(image,64,0xe7b40020); put(image,68,0xafa50000);
-            put(image,72,0xafa60004); put(image,76,0x03e00008);
+            put(image,72,0xafa60004); put(image,76,0x8fb90000); put(image,80,0x0320f809);
+            put(image,88,0x8fb90004); put(image,92,0x03200008);
             put(image,128,0x03e00008); put(image,144,0x03e00008);
             const auto entries=[&] { return nt::analysis::registered_code_pointers(image,fixture,
                 nt::analysis::discover(image,fixture,160,{},true)); };
@@ -98,7 +151,8 @@ int main() {
         {
             nt::Bytes image(64,0);
             nt::elf::Executable fixture{0x1000,0,{{0,0x1000,64,64,5,4}}};
-            put(image,0,0x24031030); put(image,4,0xdfb00000); put(image,8,0xac830000); put(image,12,12);
+            put(image,0,0x24031030); put(image,4,0xdfb00000); put(image,8,0xac830000);
+            put(image,12,0x8c990000); put(image,16,0x0320f809); put(image,24,12);
             put(image,48,0x03e00008);
             const auto entries=[&] { return nt::analysis::stored_code_pointers(image,fixture,
                 nt::analysis::discover(image,fixture,64,{},true)); };
@@ -622,7 +676,8 @@ int main() {
             nt::elf::Executable fixture{0x1000,0,{{0,0x1000,0x80,0x80,5,4},{0x80,0x2000,0x80,0x80,6,4}}};
             // Original callback-table initialization, including a call delay slot.
             put(image,0,0x24081060); put(image,4,0xac88000c);
-            put(image,8,0x0c000410); put(image,12,0xac880010); put(image,16,12);
+            put(image,8,0x0c000410); put(image,12,0xac880010);
+            put(image,16,0x8c990010); put(image,20,0x0320f809); put(image,28,12);
             put(image,0x40,0x03e00008); put(image,0x60,0x03e00008);
             const auto roots=[&] {
                 return nt::analysis::stored_code_pointers(image,fixture,nt::analysis::discover(image,fixture,128,{},true));
@@ -636,7 +691,8 @@ int main() {
             }
             put(image,0,0x8ca80000);
             check(roots().empty(),"Dynamic stored callback guessed");
-            put(image,0,0x24081060); put(image,12,0); put(image,16,0xac880010); put(image,20,12);
+            put(image,0,0x24081060); put(image,12,0); put(image,16,0xac880010);
+            put(image,20,0x8c990010); put(image,24,0x0320f809); put(image,28,0); put(image,32,12);
             check(roots().empty(),"Volatile pointer propagated across call");
             put(image,4,0x10850003); put(image,8,0); put(image,12,0x0c000410); put(image,16,0xac880010);
             check(roots()==std::set<std::uint32_t>{0x1060},"Conditional delay-slot callback store lost");
@@ -646,7 +702,8 @@ int main() {
         {
             nt::Bytes image(0x100,0);
             nt::elf::Executable fixture{0x1000,0,{{0,0x1000,0x80,0x80,5,4},{0x80,0x2000,0x80,0x80,6,4}}};
-            put(image,0,0x0c000410); put(image,4,0x24051070); put(image,8,12);
+            put(image,0,0x0c000410); put(image,4,0x24051070);
+            put(image,8,0x8c990000); put(image,12,0x0320f809); put(image,20,12);
             // Copy the argument in a branch delay slot, then store on one path.
             put(image,0x40,0x10800003); put(image,0x44,0x00a0402d);
             put(image,0x48,0xac880000); put(image,0x4c,0);
@@ -679,10 +736,10 @@ int main() {
             check(roots().empty(),"Loop summary escaped its reachable graph");
             // Eighth argument saved across a helper call before registration.
             put(image,4,0x240b1070); put(image,0x40,0x0160b82d);
-            put(image,0x44,0x0c000418); put(image,0x48,0);
-            put(image,0x4c,0xac970000); put(image,0x60,0x03e00008);
+            put(image,0x44,0x0c000418); put(image,0x48,0x0080802d);
+            put(image,0x4c,0xae170000); put(image,0x60,0x03e00008);
             check(roots()==std::set<std::uint32_t>{0x1070},"Preserved argument copy lost across helper call");
-            put(image,0x40,0x0160402d); put(image,0x4c,0xac880000);
+            put(image,0x40,0x0160402d); put(image,0x4c,0xae080000);
             check(roots().empty(),"Volatile argument copy survived helper call");
         }
         {

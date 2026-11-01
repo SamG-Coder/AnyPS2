@@ -425,6 +425,11 @@ int main(int argc,char** argv) {
     std::ofstream output(argv[1]); output<<text;
     if (argc==3) {
         nt::write_file(std::string(argv[2])+".vector",fixture::vector_container_elf());
+        auto mixed_memory=fixture::vector_container_elf();
+        const std::uint32_t initialize[]{0x24080005,0xac081060,0x24080007,0xac081080,
+            0x8c021060,0x8c081080,0x00481021,0xac001000,0x2403007b,12};
+        for (unsigned n=0;n<std::size(initialize);++n) fixture::put32(mixed_memory,0x100+n*4,initialize[n]);
+        nt::write_file(std::string(argv[2])+".mixed-memory",mixed_memory);
         nt::Bytes elf(0x184,0);
         const std::uint8_t identity[]{0x7f,'E','L','F',1,1,1};
         std::copy(std::begin(identity),std::end(identity),elf.begin());
@@ -492,6 +497,26 @@ int main(int argc,char** argv) {
             word(at,0x03e00008); word(at+4,0x24020000|value);
         }
         nt::write_file(std::string(argv[2])+".call-forms",elf);
+        // The constructor stores both a payload and a callback. Only the
+        // callback is executable; the payload deliberately starts with an
+        // unsupported word. A second callback arrives as a stack argument.
+        elf=original;
+        elf.resize(0x284,0); std::fill(elf.begin()+0x100,elf.end(),0);
+        word(68,0x170); word(72,0x170); word(88,0x280); word(100,4); word(104,64);
+        const std::uint32_t mixed_main[]{0x241d2000,0x24042020,0x24051140,0x24061150,0x0c000428,0,
+            0x8c48000c,0x91100000,0x8c590010,0x0320f809,0,0x00408821,
+            0x24081160,0xafa80000,0x0c000430,0,0x02221021,0x02021021,0x2403007b,12};
+        for (unsigned n=0;n<std::size(mixed_main);++n) word(0x100+n*4,mixed_main[n]);
+        word(0x1a0,0xac85000c); word(0x1a4,0xac860010); word(0x1a8,0x03e00008); word(0x1ac,0x00801021);
+        const std::uint32_t stack_callback[]{0x03e09021,0x8fb90000,0x0320f809,0,0x02400008,0};
+        for (unsigned n=0;n<std::size(stack_callback);++n) word(0x1c0+n*4,stack_callback[n]);
+        word(0x240,0x4c0000ff); word(0x250,0x03e00008); word(0x254,0x24020025);
+        word(0x260,0x03e00008); word(0x264,0x24020005);
+        nt::write_file(std::string(argv[2])+".pointer-uses",elf);
+        // Moving the same unsupported word to an actual callback must reject
+        // conversion; classification must never be based on opcode support.
+        word(0x250,0x4c0000ff);
+        nt::write_file(std::string(argv[2])+".unsupported-callback",elf);
         elf=original;
         // Cross the code-module boundary using original synthetic straight-line
         // code. Both the final native function and its preceding module execute.
