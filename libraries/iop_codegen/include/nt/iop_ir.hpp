@@ -23,6 +23,9 @@ enum class Operation {
 };
 enum class Flow { sequential, direct, conditional, call, return_register, trap, service, indirect, indirect_call, native_return };
 enum class MemoryConvention { bytes, source_first, words };
+// Shared by conversion and offline call inventories. Identifying an ABI does
+// not guarantee that its native provider supports every argument or mode.
+std::optional<Operation> native_import_operation(const elf::IopImport& import);
 struct Instruction {
     Operation operation{};
     Flow flow=Flow::sequential;

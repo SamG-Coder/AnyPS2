@@ -1,6 +1,7 @@
 #include <nt/iop_ir.hpp>
 #include "constants.hpp"
 #include "jump_tables.hpp"
+#include "inline_tails.hpp"
 #include "loaded_pointers.hpp"
 #include "returned_addresses.hpp"
 #include "stack_callbacks.hpp"
@@ -10,8 +11,7 @@
 #include <stdexcept>
 
 namespace nt::iop_codegen::ir {
-namespace {
-std::optional<Operation> native_operation(const elf::IopImport& import) {
+std::optional<Operation> native_import_operation(const elf::IopImport& import) {
     if (import.library=="romdrv" && (import.version>>8)==2 && (import.ordinal==4 || import.ordinal==5))
         return Operation::native_import;
     // Binding identifies the host ABI, not successful implementation. Module
@@ -31,7 +31,7 @@ std::optional<Operation> native_operation(const elf::IopImport& import) {
         (import.ordinal==2 || (import.ordinal>=5 && import.ordinal<=8) || (import.ordinal>=21 && import.ordinal<=27) || (import.ordinal>=29 && import.ordinal<=32)))
         return Operation::native_import;
     if (import.library=="thbase" && (import.version>>8)==1 &&
-        ((import.ordinal>=4 && import.ordinal<=10) || import.ordinal==14 || (import.ordinal>=20 && import.ordinal<=23) || import.ordinal==41 || (import.ordinal>=33 && import.ordinal<=40) || (import.ordinal>=24 && import.ordinal<=28)))
+        ((import.ordinal>=4 && import.ordinal<=10) || (import.ordinal>=14 && import.ordinal<=17) || (import.ordinal>=20 && import.ordinal<=23) || import.ordinal==41 || (import.ordinal>=33 && import.ordinal<=40) || (import.ordinal>=24 && import.ordinal<=28)))
         return Operation::native_import;
     if (import.library=="timrman" && (import.version>>8)==1 &&
         (import.ordinal==4 || (import.ordinal>=6 && import.ordinal<=12) || import.ordinal==16)) return Operation::native_import;
@@ -52,12 +52,15 @@ std::optional<Operation> native_operation(const elf::IopImport& import) {
          import.ordinal==26 || import.ordinal==27 || import.ordinal==28 || import.ordinal==32 ||
          (import.ordinal>=33 && import.ordinal<=35)))
         return Operation::native_import;
-    if (import.library=="cdvdman" && (import.version>>8)==1 && (import.ordinal==22 || import.ordinal==24))
+    if (import.library=="cdvdman" && (import.version>>8)==1 &&
+        (import.ordinal==6 || import.ordinal==8 || (import.ordinal>=11 && import.ordinal<=14) ||
+         import.ordinal==22 || import.ordinal==24 || import.ordinal==28 || import.ordinal==37 || import.ordinal==39 || import.ordinal==83))
         return Operation::native_import;
     if (import.library=="secrman" && (import.version>>8)==1 && import.ordinal>=4 && import.ordinal<=6)
         return Operation::native_import;
     if (import.library!="sysclib" || (import.version>>8)!=1) return {};
     switch (import.ordinal) {
+    case 4: case 5: case 10: case 11: case 15: return Operation::native_import;
     case 24: case 31: case 33: case 34: case 8: case 17: case 18: case 19: case 20: case 21: case 22: case 23: case 25: case 26: case 27: case 29: case 30: case 32: case 36: case 41: return Operation::native_import;
     case 12: case 40: return Operation::memory_copy;
     case 13: case 16: return Operation::memory_move;
@@ -65,6 +68,7 @@ std::optional<Operation> native_operation(const elf::IopImport& import) {
     default: return {};
     }
 }
+namespace {
 Instruction decode(std::uint32_t pc,std::uint32_t word) {
     Instruction i;
     i.address=pc; i.source=(word>>21)&31; i.operand=(word>>16)&31;
@@ -273,7 +277,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
     std::map<std::uint32_t,Instruction> native_imports;
     std::ostringstream unresolved;
     for (const auto& import : elf::iop_imports(module)) {
-        auto operation=native_operation(import);
+        auto operation=native_import_operation(import);
         if (import.library=="romdrv" && std::any_of(libraries.begin(),libraries.end(),[&](const auto& library) {
                 return library.name==import.library && (library.version>>8)==(import.version>>8);
             })) operation.reset(); // An unreplaced module retains its compiled export ownership.
@@ -345,8 +349,8 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         if (stored!=input.stack_words.end() && stored->second)
             for (const auto entry : *stored->second) if (entry) discover_callback(entry,source,false);
     };
-    const auto discover_loader_callbacks=[&](std::uint32_t source,std::uint32_t service,const Constants& input) {
-        if (service!=0xe000c && service!=0xe000d) return;
+    const auto discover_service_callbacks=[&](std::uint32_t source,std::uint32_t service,const Constants& input) {
+        if (service!=0xe000c && service!=0xe000d && service!=0x110025) return;
         const auto count=service==0xe000c ? 3U : 1U;
         for (unsigned index=0;index<count;++index) if (input.registers[4+index])
             for (const auto target : *input.registers[4+index]) if (target) discover_callback(target,source,false);
@@ -502,7 +506,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
             if (instruction.flow==Flow::native_return) {
                 if (instruction.operation==Operation::native_import && instruction.immediate==0x140008 && input.registers[6])
                     for (const auto address : *input.registers[6]) if (address) discover_callback(address,pc,false);
-                if (instruction.operation==Operation::native_import) discover_loader_callbacks(pc,instruction.immediate,input);
+                if (instruction.operation==Operation::native_import) discover_service_callbacks(pc,instruction.immediate,input);
                 if (instruction.operation==Operation::native_import && instruction.immediate==0x90011 && input.registers[6])
                     for (const auto address : *input.registers[6]) if (address) discover_callback(address,pc,false);
                 if (instruction.operation==Operation::native_import && instruction.immediate==0x9000a && input.registers[5])
@@ -581,6 +585,9 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                 else if (const auto table=initial_jump_table(module,data_modules,pc,decode)) {
                     physical=*table; table_transfers.insert(pc);
                 }
+                else if (const auto tail=inline_tail_targets(module,program,states,instruction,decode)) {
+                    physical=*tail; stack_transfers[pc]=*tail;
+                }
                 else if (const auto callbacks=stack_transfers.find(pc);callbacks!=stack_transfers.end()) physical=callbacks->second;
                 else if (const auto loaded=pointer_transfers.find(pc);loaded!=pointer_transfers.end()) physical=loaded->second;
                 instruction.targets.assign(physical.begin(),physical.end());
@@ -617,7 +624,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                     local=transfer(delay,transfer(instruction,std::move(local)));
                     discover_stack_thread(pc,local);
                 }
-                if (target!=native_imports.end()) discover_loader_callbacks(pc,target->second.immediate,successor);
+                if (target!=native_imports.end()) discover_service_callbacks(pc,target->second.immediate,successor);
                 if (target!=native_imports.end() && (target->second.immediate>>16)==2) {
                     // Code pointers escaping to a compiled library can be
                     // retained as callbacks in that library's private state.

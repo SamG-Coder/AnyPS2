@@ -29,6 +29,34 @@ void run_ee_batch_tests();
 void run_ee_file_rpc_tests();
 int main() {
     try {
+        {
+            const std::uint64_t expected[]{0xffffffff8000ffffULL,0x7fff8000,0xffffffffffff0001ULL,
+                0x7fffffff,0x7ffe8000,0xffffffffffff0001ULL,
+                0xffffffff7fffffffULL,0x7ffe8000,0xffffffffffff0001ULL};
+            for (unsigned n=0;n<9;++n) {
+                nt::runtime::State fused,stepped;
+                fused.pc=0x470000+n*16; fused.gpr[8]={123,456}; stepped=fused;
+                check(run(&fused,2)==nt::ee::Stop::budget);
+                check(run(&stepped,1)==nt::ee::Stop::budget && stepped.pc==0x470004+n*16);
+                check(run(&stepped,1)==nt::ee::Stop::budget);
+                check(fused.gpr[8].lo==expected[n] && fused.gpr[8].lo==stepped.gpr[8].lo &&
+                    fused.gpr[8].hi==456 && stepped.gpr[8].hi==456 && fused.pc==stepped.pc &&
+                    fused.executed==2 && stepped.executed==2 && !fused.delay_slot && !stepped.delay_slot);
+            }
+            nt::runtime::State state;
+            state.pc=0x470004; state.gpr[8]={0x12340000,789};
+            check(run(&state,1)==nt::ee::Stop::budget && state.gpr[8].lo==0x1234ffff && state.gpr[8].hi==789);
+            state={}; state.pc=0x471000;
+            check(run(&state,8)==nt::ee::Stop::syscall && state.pc==0x471010 &&
+                state.executed==2 && state.gpr[8].lo==0xffffffff80000000ULL && !state.delay_slot);
+            state={}; state.pc=0x470000; state.cop0_status=0x10401;
+            nt::ee::Memory memory; memory.pending_interrupts=0x400;
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::interrupt_pending && !state.executed);
+            memory.pending_interrupts=0; memory.executable_image=2; state={}; state.pc=0x472000;
+            const auto blocked=nt_ee_generated_run(&state,&memory,8);
+            check(blocked==nt::ee::Stop::unpublished_code &&
+                state.executed==1 && state.pc==0x472004 && state.gpr[8].lo==0xffffffff80000000ULL);
+        }
         for (const auto address:{0x430000U,0x430004U,0x430100U,0x430104U,0xfffffffcU})
             check(nt_ee_generated_contains(address));
         for (const auto address:{0U,0x42fffcU,0x430001U,0x430008U,0x4300fcU,0x430108U,0xfffffff8U,0xffffffffU})

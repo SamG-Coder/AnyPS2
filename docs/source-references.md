@@ -1,5 +1,66 @@
 # Source references and provenance
 
+The Vulkan sprite batch implementation follows Khronos' public
+[synchronization rules](https://docs.vulkan.org/spec/latest/chapters/synchronization.html),
+[`vkCmdCopyBuffer`](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdCopyBuffer.html)
+and [`vkCmdUpdateBuffer`](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdUpdateBuffer.html)
+contracts (accessed 2026-11-01). Ordered compute/transfer barriers retain
+per-draw texture snapshots and palettes; one host upload/readback surrounds
+each consecutive draw batch. No Khronos sample implementation is copied.
+
+## Offline library-call mapping
+
+DEV9 initialization uses the public export ABI and nonresident failure contract
+in PS2SDK `iop/dev9/dev9/include/dev9.h` and `src/ps2dev9.c` at the same pinned
+revision below. The independently written native owner reports
+`MODULE_NO_RESIDENT_END` because AnyPS2 has no expansion network/storage provider;
+it neither registers a working adapter nor invents register values. No driver
+implementation was copied. Existing module lifecycle code handles the failure.
+The absent-device path error follows `iop/system/iomanx/src/iomanX.c` at that
+revision: path-based calls return `-ENODEV` before inspecting operation buffers
+when no driver owns the device. Native mounts remain explicit namespace owners.
+
+The inventory ABI catalogue records public library names, versions, ordinal
+numbers and function names from the PS2SDK headers at
+`2a18d15da1332665451a9bcf9a0d4df9029c9490`, including
+`ee/kernel/include/syscallnr.h` and the IOP public import declarations. Each
+catalogue entry retains its header path. These are interface facts, not copied
+implementations, and never provide a runtime replacement by themselves.
+PS2SDK's applicable file notices and Academic Free License 2.0 remain at the
+[pinned source](https://github.com/ps2dev/ps2sdk/tree/2a18d15da1332665451a9bcf9a0d4df9029c9490).
+No PS2SDK implementation is linked. Unknown ordinals and private interfaces
+remain unnamed; a matching public name does not prove behavioral equivalence.
+
+The native byte-search/comparison batch uses the public sysclib `memchr`,
+`memcmp` and `bcmp` signatures and ordinal declarations. The pinned public
+implementations establish that comparison returns the difference of the first
+unequal unsigned bytes and that `bcmp` shares that result. AnyPS2 independently
+implements bounded spans using `std::memchr` and `std::mismatch`; no loop or
+library source is copied. The bounded `strlen` fast path uses the same host
+byte search while retaining its existing fault and scan-limit behavior.
+
+Open-source native-provider candidates researched on 2026-11-01:
+
+| Candidate | Pinned reference | License | Candidate use |
+| --- | --- | --- | --- |
+| SDL | `bd9f6ca9ff0e9509f49980fc1b70837f54b6f244` | zlib | Controller input and haptics behind an ABI adapter |
+| Asio | `bdf337ddb1a667c274372a602de5857ad3cb3ed0` | Boost Software License 1.0 | Socket operations and asynchronous completions |
+| libusb | `987c1170d0018ba82557823a98ae443e8335e11b` | LGPL 2.1 or later | Explicit physical USB transfers, subject to host-driver access |
+| miniaudio | `877ea4a7c2601c7b0f2a44e83dfac42e6470fea6` | MIT-0 or public domain | PCM output, mixing and resampling; not an SPU2 implementation |
+| Vulkan Memory Allocator | `0f1a757da579831283413295cc7f3b47eb521c77` | MIT | Vulkan buffer/image allocation; not GS command semantics |
+
+API research: [SDL gamepads](https://wiki.libsdl.org/SDL3/CategoryGamepad),
+[SDL license](https://wiki.libsdl.org/SDL3/FAQLicensing),
+[Asio networking](https://think-async.com/Asio/asio-1.36.0/doc/asio/overview/networking.html),
+[Asio license](https://think-async.com/Asio/License),
+[libusb asynchronous transfers](https://libusb.sourceforge.io/api-1.0/group__libusb__asyncio.html),
+[libusb](https://libusb.info/), [miniaudio](https://miniaud.io/), and
+[VMA](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator).
+These are researched candidates only; this mapping does not download, copy,
+link or enable them. Existing native services remain in use. Any integration
+must retain the selected project's notices and prove the adapter's ABI,
+ownership, ordering, error and completion semantics first.
+
 AnyPS2 uses public instruction/ABI interfaces and local open-source
 references. No BIOS code or BIOS disassembly is incorporated into this implementation.
 A user-supplied BIOS may be used locally with a reference emulator for differential
@@ -360,8 +421,16 @@ Windows output uses the Windows SDK XAudio2 API, following Microsoft's
 [initialization contract](https://learn.microsoft.com/en-us/windows/win32/xaudio2/how-to--initialize-xaudio2)
 and [mastering-voice contract](https://learn.microsoft.com/en-us/windows/win32/api/xaudio2/nf-xaudio2-ixaudio2-createmasteringvoice).
 The backend creates a stereo 48 kHz output and stopped mono PCM voices. It does not
-yet implement sample upload, ADPCM playback, pitch/volume controls or effects;
-those LIBSD requests remain explicit unsupported boundaries.
+interpret sound instructions. The pinned public LIBSD parameter, routing,
+effect-workspace and callback interfaces also inform the native sound services.
+PCSX2's pinned SPU2 volume and mixing definitions were consulted for signed
+15-bit fixed volume, signed 16-bit input gain, mixer gate bit meanings and
+core-zero-to-core-one routing. No emulator mixer or effect algorithm is copied.
+Native gains use XAudio2's documented
+[channel matrices](https://learn.microsoft.com/en-us/windows/win32/api/xaudio2/nf-xaudio2-ixaudio2voice-setoutputmatrix)
+and [volume and pitch units](https://learn.microsoft.com/en-us/windows/win32/xaudio2/xaudio2-volume-and-pitch-control).
+Volume sweeps, active effects and unimplemented playback requests remain explicit
+unsupported boundaries; configuring an inactive voice is not evidence of playback.
 Startup planning uses the public import/export version fields and loadcore's
 major/minor version organization. Its minimum-minor and ordinal checks are a
 conservative static policy, not a complete implementation of loadcore's runtime
@@ -1665,3 +1734,21 @@ its public lifecycle contract. Independent C++ records track entries actually
 started by AnyPS2; compiled-but-unstarted catalog entries are excluded. The
 Play! module-list stub is not used. List outputs start at element zero and report
 both written IDs and total matches, with output validation before any write.
+
+Native continuation buffers follow the twelve-word public IOP `jmp_buf` size
+and the register order described by Play!'s `Iop_Sysclib` at its pinned revision
+above. No emulator implementation is copied. `longjmp` normalizes zero to one
+as required by the C interface and accepts only compiled targets; abandoning
+an owned native callback remains unsupported. The scheduler's priority and
+ready-queue operations follow the pinned PS2SDK `threadman/src/thbase.c`
+interfaces, including deferring interrupt-requested scheduling until return.
+
+The pinned PS2SDK CD/DVD public headers and `cdvdman.c` describe sector-read
+arguments, error codes, media/status queries, callback reasons and callback
+delivery from interrupt context. Native IOP disc services share the already
+initialized ISO session with the EE RPC service. Host file reads finish before
+publication; completion callbacks are deferred through the existing compiled
+callback scheduler. Optical seek/spin timing is not reproduced. The pinned
+PCSX2 `CDVDisoReader.cpp` documents the PS2 ISO convention in which the first
+volume's block count points at the next volume descriptor. AnyPS2 independently
+validates that metadata; an unrecognized layout is not reported as single-layer.

@@ -316,7 +316,7 @@ int main(int argc,char** argv) {
     catch (const std::runtime_error&) { failed=true; }
     if (!failed) throw std::runtime_error("Conflicting native access permissions accepted");
     std::array<nt::ee_codegen::ExecutableImage,2> images;
-    std::array<nt::ee_codegen::CodeRange,2> owned;
+    std::array<nt::ee_codegen::CodeRange,3> owned;
     for (unsigned n=0;n<2;++n) {
         const auto address=0x430000U+n*0x100;
         nt::ee_codegen::CodePayload segment{address,{}};
@@ -350,6 +350,23 @@ int main(int argc,char** argv) {
         code.push_back(nt::r5900::decode(0x460000+n*8,(18U<<26)|vector_special[n]));
         code.push_back(nt::r5900::decode(0x460004+n*8,12));
     }
+    // Original constant materialization fixtures, including signed wraparound.
+    for (unsigned group=0;group<3;++group) for (unsigned value=0;value<3;++value) {
+        const auto pc=0x470000U+(group*3+value)*16;
+        const unsigned high[]{0x8000,0x7fff,0xffff};
+        const unsigned low[]{0xffff,0x8000,1};
+        const unsigned operation[]{13,9,25}; // ORI, ADDIU, DADDIU.
+        code.push_back(nt::r5900::decode(pc,0x3c080000|high[value]));
+        code.push_back(nt::r5900::decode(pc+4,(operation[group]<<26)|(8U<<21)|(8U<<16)|low[value]));
+        code.push_back(nt::r5900::decode(pc+8,12));
+    }
+    for (unsigned n=0;const auto word:{0x10000003U,0x3c088000U,0x3508ffffU,12U,12U})
+        code.push_back(nt::r5900::decode(0x471000+n++*4,word));
+    code.push_back(nt::r5900::decode(0x472000,0x3c088000));
+    nt::ee_codegen::CodePayload guarded{0x472004,{0xff,0xff,0x08,0x35,12,0,0,0}};
+    code.push_back(nt::r5900::decode(0x472004,0x3508ffff));
+    code.push_back(nt::r5900::decode(0x472008,12));
+    owned[2]={0x472004,8,1}; images[0].segments.push_back(guarded);
     code.push_back(nt::r5900::decode(0xfffffffcU,12));
     auto malformed=images; malformed[1].segments[0].bytes[0]^=1;
     failed=false;
@@ -368,6 +385,10 @@ int main(int argc,char** argv) {
     std::ostringstream generated; nt::ee_codegen::emit_llvm(generated,code,owned,payloads,layouts,images);
     if (generated.str().find("fence seq_cst")==std::string::npos) throw std::runtime_error("Native SYNC ordering was omitted");
     const auto text=generated.str();
+    if (text.find("constant_pair4653056:")==std::string::npos)
+        throw std::runtime_error("Constant materialization was not grouped");
+    if (text.find("constant_pair4661248:")!=std::string::npos)
+        throw std::runtime_error("Constant grouping crossed an image ownership boundary");
     unsigned functions=0;
     for (std::size_t start=0;(start=text.find("define internal i32 @nt_ee_part_",start))!=std::string::npos;) {
         const auto end=text.find("\n}",start);

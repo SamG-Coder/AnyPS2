@@ -11,6 +11,7 @@
 #include "dispatch.hpp"
 #include "branches.hpp"
 #include "traps.hpp"
+#include "patterns.hpp"
 #include "system.hpp"
 #include <nt/ee_native.hpp>
 #include <cstddef>
@@ -165,6 +166,32 @@ void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::s
             const auto left=w.binary("sub","i64",remaining,"7");
             w.out<<"  store i64 "<<left<<", ptr %remaining\n  br label %dispatch\n";
             continue;
+        }
+        if (n+1<instructions.size()) if (const auto pattern=constant_pattern(i,instructions[n+1])) {
+            const auto next_pc=instructions[n+1].pc;
+            const auto contains=[](std::uint32_t pc,std::uint32_t address,std::uint64_t size) {
+                return pc>=address && std::uint64_t(pc)<std::uint64_t(address)+size;
+            };
+            bool same_guard=true;
+            for (const auto& range:ranges)
+                same_guard&=contains(i.pc,range.address,range.size)==contains(next_pc,range.address,range.size);
+            for (const auto& payload:payloads)
+                same_guard&=contains(physical_address(i.pc),payload.address,payload.bytes.size())==
+                    contains(physical_address(next_pc),payload.address,payload.bytes.size());
+            if (same_guard) {
+                const auto enough=w.value("icmp uge i64 "+remaining+", 2");
+                const auto fast=w.binary("and","i1",enough,w.binary("xor","i1",is_delay,"true"));
+                w.out<<"  br i1 "<<fast<<", label %constant_pair"<<suffix<<", label %constant_single"<<suffix
+                     <<"\nconstant_pair"<<suffix<<":\n";
+                if (pattern->destination) w.store("i64",std::to_string(pattern->value),
+                    offsetof(runtime::State,gpr)+pattern->destination*sizeof(runtime::Register));
+                w.store("i32",std::to_string(i.pc+8),offsetof(runtime::State,pc));
+                w.store("i64",w.binary("add","i64",w.load("i64",offsetof(runtime::State,executed)),"2"),offsetof(runtime::State,executed));
+                const auto left=w.binary("sub","i64",remaining,"2");
+                w.out<<"  store i64 "<<left<<", ptr %remaining\n";
+                w.out<<"  br label "<<(n+2<instructions.size() && instructions[n+2].pc==i.pc+8 ?
+                    "%block"+std::to_string(i.pc+8) : "%unmapped")<<"\nconstant_single"<<suffix<<":\n";
+            }
         }
         if (i.op==Op::breakpoint) { w.out<<"  ret i32 11\n"; continue; }
         if (i.op==Op::syscall) { w.out<<"  ret i32 1\n"; continue; }

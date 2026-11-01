@@ -26,6 +26,7 @@ inline nt::Bytes single_file_iso(const std::string& name,nt::ByteView payload) {
     iso[pvd]=1; const std::string signature="CD001";
     std::copy(signature.begin(),signature.end(),iso.begin()+pvd+1);
     iso[pvd+6]=1; iso[pvd+129]=8; iso[pvd+130]=8;
+    both32(iso,pvd+80,static_cast<std::uint32_t>(iso.size()/2048));
     record(iso,pvd+156,std::string(1,'\0'),20,2048,true);
     record(iso,20*2048,name,21,static_cast<std::uint32_t>(payload.size()),false);
     std::copy(payload.begin(),payload.end(),iso.begin()+21*2048);

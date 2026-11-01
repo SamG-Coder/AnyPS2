@@ -59,7 +59,7 @@ public:
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
         if (request.kind!=NativeServiceKind::thbase) return {};
         const auto op=request.selector;
-        if (!((op>=4 && op<=10) || op==14 || op==20 || op==21 || op==22 || op==23 || op==33 || (op>=24 && op<=28))) return {};
+        if (!((op>=4 && op<=10) || (op>=14 && op<=17) || op==20 || op==21 || op==22 || op==23 || op==33 || (op>=24 && op<=28))) return {};
         const auto returned=[](std::int32_t value=0) { return NativeServiceReply{NativeServiceStatus::returned,static_cast<std::uint32_t>(value)}; };
         if (op==21) {
             if (request.interrupt_context) return returned();
@@ -73,7 +73,7 @@ public:
                 return {NativeServiceStatus::address_fault,0,request.stack_pointer};
             return returned(static_cast<std::int32_t>(*pointer-thread.stack));
         }
-        const bool interrupt_call=op==23 || op==26 || op==28;
+        const bool interrupt_call=op==15 || op==17 || op==23 || op==26 || op==28;
         if (interrupt_call!=request.interrupt_context) return returned(-100);
         if (op==4) return create(request,ram);
         if (op==10) {
@@ -91,7 +91,8 @@ public:
             thread.exit_requested=false; thread.delete_on_exit=false;
             return returned();
         }
-        if (op==14) return change_priority(request);
+        if (op==14 || op==15) return change_priority(request);
+        if (op==16 || op==17) return rotate_ready(request);
         if (op==22 || op==23) return refer_status(request,ram);
         if (op==33) {
             if (!current_) return {};
@@ -266,6 +267,7 @@ private:
     NativeServiceReply change_priority(const NativeServiceRequest& request) {
         auto id=request.arguments[0];
         if (!id) {
+            if (request.interrupt_context) return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-406)};
             if (!current_) return {};
             id=*current_;
         }
@@ -292,6 +294,21 @@ private:
             });
             if (reschedule) return {NativeServiceStatus::yielded};
         }
+        return {NativeServiceStatus::returned};
+    }
+    NativeServiceReply rotate_ready(const NativeServiceRequest& request) {
+        auto priority=request.arguments[0];
+        if (priority>=(request.interrupt_context ? 126U : 127U))
+            return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-403)};
+        if (!priority) {
+            if (!current_) return {NativeServiceStatus::unavailable};
+            priority=threads_.at(*current_).priority;
+            if (request.interrupt_context) for (const auto id:ready_) priority=std::min(priority,threads_.at(id).priority);
+        }
+        const auto first=std::find_if(ready_.begin(),ready_.end(),[&](auto id) { return threads_.at(id).priority==priority; });
+        if (first==ready_.end()) return {NativeServiceStatus::returned};
+        if (current_ && threads_.at(*current_).priority==priority) return {NativeServiceStatus::yielded};
+        std::rotate(first,first+1,ready_.end());
         return {NativeServiceStatus::returned};
     }
     static NativeServiceReply writable(std::span<std::uint8_t> ram,std::uint32_t address,std::uint32_t size) {

@@ -14,6 +14,7 @@ public:
     explicit NativeCdvdInitRpc(std::filesystem::path image,std::uint32_t server=0x4000,std::uint32_t buffer=0x5000)
         : NativeRpcService(0x80000592U,server,buffer),image_(std::move(image)) {}
     bool initialized() const { return bool(disc_); }
+    disc::Iso9660* volume() const { return disc_.get(); }
     // Public media modes are CD (1) and DVD (2). Zero means the session has not selected one.
     std::uint32_t media_mode() const { return media_mode_; }
     bool select_media(std::uint32_t mode) {

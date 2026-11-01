@@ -124,8 +124,10 @@ public:
                 if (source_active_) callbacks_->finish(cpu.registers[2]);
                 else lines_[active_].enabled=cpu.registers[2]!=0;
                 cpu=*saved_; cpu.executed=executed; saved_.reset(); enabled_=prior_enabled_;
+                if (reschedule_) { reschedule_=false; return {NativeStop::thread_yield,cpu.pc}; }
                 continue;
             }
+            if (saved_ && stop.reason==NativeStop::thread_yield) { reschedule_=true; continue; }
             if (stop.reason!=NativeStop::budget) return stop;
         }
         return {NativeStop::budget,cpu.pc};
@@ -148,6 +150,7 @@ private:
     std::uint32_t stack_top_;
     NativeCallbackSource* callbacks_;
     bool source_active_=false;
+    bool reschedule_=false;
     static constexpr std::uint32_t return_address=0xfffffff8;
 };
 }

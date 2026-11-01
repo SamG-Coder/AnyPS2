@@ -255,6 +255,9 @@ void project(const std::filesystem::path& input,const std::filesystem::path& des
     });
     llvm.close();
     for (auto& stream:streams) stream->close();
+    std::string module_manifest;
+    for (const auto& name:modules) module_manifest+=name+'\n';
+    save(output/"llvm-modules.txt",module_manifest);
     const auto& executable=prepared.executable;
     const auto& image=prepared.image;
     const auto syscall_table=prepared.syscall_table;
@@ -267,29 +270,16 @@ endif()
 if(NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|amd64|x86_64")
   message(FATAL_ERROR "Initial EE LLVM output supports Windows x86-64 with MSVC")
 endif()
-find_program(ANYPS2_CLANG NAMES clang REQUIRED)
-)cmake";
-    cmake<<"set(ANYPS2_EE_MODULES";
-    for (const auto& name:modules) cmake<<" \""<<name<<"\"";
-    cmake<<")\n";
-    cmake<<R"cmake(
-foreach(module IN LISTS ANYPS2_EE_MODULES)
-  get_filename_component(stem "${module}" NAME_WE)
-  set(object "${CMAKE_CURRENT_BINARY_DIR}/${stem}.obj")
-  add_custom_command(OUTPUT "${object}"
-    COMMAND "${ANYPS2_CLANG}" -target x86_64-pc-windows-msvc -Werror -Wno-override-module -O2 -c
-      "${CMAKE_CURRENT_SOURCE_DIR}/${module}" -o "${object}"
-    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${module}" VERBATIM)
-  add_custom_target(ee_module_${stem} DEPENDS "${object}")
-  list(APPEND ANYPS2_EE_OBJECTS "${object}")
-  list(APPEND ANYPS2_EE_TARGETS ee_module_${stem})
-endforeach()
+include("${ANYPS2_ROOT}/cmake/llvm_objects.cmake")
+anyps2_add_llvm_library(ee_code "${CMAKE_CURRENT_SOURCE_DIR}")
 add_executable(ps2-native "${ANYPS2_ROOT}/programs/ee-native-probe/main.cpp"
   "${ANYPS2_ROOT}/libraries/binary/src/reader.cpp" "${ANYPS2_ROOT}/libraries/ee_native/src/numeric.cpp"
   "${ANYPS2_ROOT}/libraries/fileio/src/fileio.cpp"
   "${ANYPS2_ROOT}/libraries/disc/src/disc_files.cpp" "${ANYPS2_ROOT}/libraries/disc/src/iso9660.cpp"
-  "${ANYPS2_ROOT}/libraries/ee_native/src/io.cpp" "${ANYPS2_ROOT}/libraries/ee_native/src/vector.cpp" ${ANYPS2_EE_OBJECTS})
-add_dependencies(ps2-native ${ANYPS2_EE_TARGETS})
+  "${ANYPS2_ROOT}/libraries/ee_native/src/io.cpp" "${ANYPS2_ROOT}/libraries/ee_native/src/vector.cpp")
+target_link_libraries(ps2-native PRIVATE ee_code)
+add_custom_command(TARGET ps2-native POST_BUILD
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/program.data" "$<TARGET_FILE_DIR:ps2-native>/program.data")
 include("${ANYPS2_ROOT}/libraries/graphics/vulkan.cmake")
 anyps2_add_vulkan(nt_vulkan)
 include("${ANYPS2_ROOT}/libraries/host_metrics/native.cmake")

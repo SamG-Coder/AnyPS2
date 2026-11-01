@@ -3,6 +3,7 @@
 #include <nt/iop_native_code.hpp>
 #include <nt/iop_native_format.hpp>
 #include <algorithm>
+#include <cstring>
 #include <string_view>
 
 namespace nt::iop {
@@ -12,6 +13,7 @@ public:
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
         if (request.kind!=NativeServiceKind::sysclib) return {};
         switch (request.selector) {
+        case 10: case 11: case 15: return bytes(request,ram);
         case 24: case 31: case 33: case 34: return string_set(request,ram);
         case 21: case 22: case 25: case 26: case 27: case 29: case 32: return strings(request,ram);
         case 20: case 23: case 30: return copy_string(request,ram);
@@ -28,6 +30,34 @@ public:
         return {NativeServiceStatus::returned,classify(byte)};
     }
 private:
+    static NativeServiceReply bytes(const NativeServiceRequest& request,std::span<const std::uint8_t> ram) {
+        const auto count=request.arguments[2];
+        if (!count) return {NativeServiceStatus::returned,0};
+        const auto first=ram_offset(request.arguments[0],1,ram.size());
+        if (!first || count>ram.size()-*first || count>0x200000-*first)
+            return {NativeServiceStatus::address_fault,0,request.arguments[0]};
+        const auto* begin=ram.data()+*first;
+        if (request.selector==10) {
+            const auto* match=static_cast<const std::uint8_t*>(std::memchr(begin,request.arguments[1]&255U,count));
+            return {NativeServiceStatus::returned,match ? request.arguments[0]+static_cast<std::uint32_t>(match-begin) : 0U};
+        }
+        const auto second=ram_offset(request.arguments[1],1,ram.size());
+        if (!second || count>ram.size()-*second || count>0x200000-*second)
+            return {NativeServiceStatus::address_fault,0,request.arguments[1]};
+        const auto unequal=std::mismatch(begin,begin+count,ram.data()+*second);
+        return {NativeServiceStatus::returned,unequal.first==begin+count ? 0U :
+            static_cast<std::uint32_t>(int(*unequal.first)-int(*unequal.second))};
+    }
+    static NativeServiceReply string_length(std::uint32_t address,std::span<const std::uint8_t> ram) {
+        const auto offset=ram_offset(address,1,ram.size());
+        if (!offset) return {NativeServiceStatus::address_fault,0,address};
+        const auto limit=std::min<std::size_t>({0x100000,ram.size()-*offset,0x200000-*offset});
+        const auto* begin=ram.data()+*offset;
+        const auto* end=static_cast<const std::uint8_t*>(std::memchr(begin,0,limit));
+        if (end) return {NativeServiceStatus::returned,static_cast<std::uint32_t>(end-begin)};
+        if (limit==0x100000) return {NativeServiceStatus::unavailable};
+        return {NativeServiceStatus::address_fault,0,address+static_cast<std::uint32_t>(limit)};
+    }
     static NativeServiceReply text(std::uint32_t address,std::span<const std::uint8_t> ram,std::string_view& value) {
         const auto offset=ram_offset(address,1,ram.size());
         if (!offset) return {NativeServiceStatus::address_fault,0,address};
@@ -189,7 +219,8 @@ private:
         return {NativeServiceStatus::returned,original};
     }
     static NativeServiceReply strings(const NativeServiceRequest& request,std::span<const std::uint8_t> ram) {
-        const bool length=request.selector==27,bounded=request.selector==29;
+        if (request.selector==27) return string_length(request.arguments[0],ram);
+        const bool bounded=request.selector==29;
         const bool last=request.selector==26 || request.selector==32;
         const bool search=last || request.selector==21 || request.selector==25;
         std::uint32_t match=0;
@@ -214,8 +245,6 @@ private:
                     if (!last) return {NativeServiceStatus::returned,match};
                 }
                 if (!left) return {NativeServiceStatus::returned,match};
-            } else if (length) {
-                if (!left) return {NativeServiceStatus::returned,index};
             } else {
                 if (!read(request.arguments[1],index,right)) return failure;
                 if (left!=right) return {NativeServiceStatus::returned,static_cast<std::uint32_t>(int(left)-int(right))};

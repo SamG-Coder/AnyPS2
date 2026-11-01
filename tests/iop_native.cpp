@@ -4,6 +4,8 @@
 #include <nt/iop_native_vblank.hpp>
 #include <nt/iop_native_sound.hpp>
 #include <nt/iop_native_usb.hpp>
+#include <nt/iop_native_dev9.hpp>
+#include <nt/iop_native_jump.hpp>
 #include <nt/iop_native_heap.hpp>
 #include <nt/iop_native_heaplib.hpp>
 #include <nt/iop_native_libraries.hpp>
@@ -67,14 +69,24 @@ public:
 };
 class FixtureAudio final : public nt::audio::Output {
 public:
-    bool allow_open=false,allow_initialize=true,opened=false;
+    bool allow_open=false,allow_initialize=true,allow_configure=true,opened=false;
     unsigned count=0,initializations=0;
+    std::array<nt::audio::VoiceMix,48> voice_mix{};
+    std::array<nt::audio::CoreMix,2> core_mix{};
     bool open() override { return opened=allow_open; }
     bool initialize(bool) override {
         if (!allow_initialize || !open()) return false;
         count=48; ++initializations; return true;
     }
     void close() override { opened=false; count=0; }
+    bool configure_voice(unsigned index,const nt::audio::VoiceMix& mix) override {
+        if (!count || !allow_configure || index>=voice_mix.size()) return false;
+        voice_mix[index]=mix; return true;
+    }
+    bool configure_core(unsigned core,const nt::audio::CoreMix& mix) override {
+        if (!count || !allow_configure || core>=core_mix.size()) return false;
+        core_mix[core]=mix; return true;
+    }
     bool ready() const override { return opened; }
     unsigned voices() const override { return count; }
     std::uint32_t error() const override { return allow_open ? 0U : 1U; }
@@ -92,6 +104,93 @@ public:
 int main() {
     try {
         using namespace nt::iop;
+        {
+            NativeJumpServices jumps;
+            std::vector<std::uint8_t> data(0x20000);
+            auto cpu=initial(); cpu.pc=0x17400; cpu.registers[28]=0x12345678; cpu.registers[29]=0x1fff0;
+            NativeResult result;
+            do { result=run_native(nt_iop_generated_run,cpu,data,1,&jumps); } while (result.reason==NativeStop::budget && cpu.executed<100);
+            check(result.reason==NativeStop::unmapped_code && cpu.pc==0x5000 && cpu.registers[2]==1 &&
+                  cpu.registers[3]==42 && cpu.registers[16]==42 && cpu.registers[28]==0x12345678 &&
+                  load_native_word(data,0x18000)==0x17418 && load_native_word(data,0x1802c)==0x12345678,
+                  "Compiled setjmp/longjmp failed register restoration, zero normalization or sliced execution");
+            const auto before=data;
+            for (const auto address:{0x1fff0U,0x17000U}) {
+                cpu=initial(); cpu.pc=0x1705c; cpu.registers[4]=address;
+                result=run_native(nt_iop_generated_run,cpu,data,64,&jumps);
+                check(result.reason==(address==0x17000 ? NativeStop::code_write : NativeStop::address_fault) && data==before,
+                      "Invalid jump buffer changed memory");
+            }
+            cpu=initial(); cpu.pc=0x17064; cpu.registers[4]=0x80018000; cpu.registers[5]=7;
+            check(run_native(nt_iop_generated_run,cpu,data,64,&jumps).reason==NativeStop::unmapped_code &&
+                  cpu.pc==0x5000 && cpu.registers[2]==7,"Longjmp lost nonzero return value or pointer alias");
+            cpu=initial(); cpu.pc=0x17064; cpu.registers[4]=0x18000; cpu.native_call_owner=&jumps;
+            check(run_native(nt_iop_generated_run,cpu,data,64,&jumps).reason==NativeStop::import_request && data==before,
+                  "Longjmp abandoned an owned native callback");
+            store_native_word(data,0x18000,0x18040);
+            cpu=initial(); cpu.pc=0x17064; cpu.registers[4]=0x18000;
+            result=run_native(nt_iop_generated_run,cpu,data,64,&jumps);
+            check(result.reason==NativeStop::unmapped_code && result.address==0x18040,
+                  "Longjmp accepted an uncompiled continuation");
+        }
+        for (const bool interrupt_rotation:{false,true}) {
+            std::vector<std::uint8_t> data(0x20000);
+            NativeInterruptServices interrupts(0x1f000);
+            NativeThreadServices threads(interrupts);
+            NativeServiceRouter services({&threads,&interrupts});
+            auto first=initial(); first.pc=interrupt_rotation ? 0x12080 : 0x17500; first.registers[31]=0xfffffffc;
+            auto second=initial(); second.pc=0x12040; second.registers[31]=0xfffffffc;
+            const auto first_id=threads.admit(first),second_id=threads.admit(second);
+            check(threads.invoke({15,{second_id,3},NativeServiceKind::thbase},data).value==static_cast<unsigned>(-100) &&
+                  threads.invoke({15,{0,3},NativeServiceKind::thbase,0,true},data).value==static_cast<unsigned>(-406),
+                  "Interrupt priority change accepted invalid context or thread id");
+            check(threads.invoke({15,{second_id,9},NativeServiceKind::thbase,0,true},data).value==0 &&
+                  threads.wait_priority(second_id)==9 &&
+                  threads.invoke({15,{second_id,8},NativeServiceKind::thbase,0,true},data).value==0,
+                  "Interrupt priority change did not update the native scheduler");
+            if (interrupt_rotation) {
+                check(interrupts.invoke({4,{4,0,0x17580,0},NativeServiceKind::intrman},data).value==0 &&
+                      interrupts.invoke({6,{4},NativeServiceKind::intrman},data).value==0 &&
+                      interrupts.invoke({9,{},NativeServiceKind::intrman},data).value==0,"Rotation interrupt setup failed");
+                interrupts.post(4);
+            }
+            const auto result=threads.run(nt_iop_generated_run,data,64,services);
+            check(result.reason==NativeStop::unmapped_code && threads.state(second_id).registers[2]==87 &&
+                  threads.state(first_id).pc==(interrupt_rotation ? 0x12080U : 0x17510U) &&
+                  !threads.state(first_id).interrupt_depth,"Ready-queue rotation lost FIFO order or switched inside a handler");
+            check(threads.run(nt_iop_generated_run,data,64,services).reason==NativeStop::unmapped_code &&
+                  threads.state(first_id).registers[2]==(interrupt_rotation ? 99U : 42U),
+                  "Rotated thread did not resume its compiled continuation");
+        }
+        {
+            std::vector<std::uint8_t> data(0x25000);
+            NativeLibrarySpec declaration{0x24000,0x109,"dev9",{},0x24100};
+            for (unsigned ordinal=0;ordinal<14;++ordinal)
+                declaration.functions.push_back(0x24100+(ordinal==3 ? 1U : ordinal)*8);
+            NativeLibraryServices libraries({declaration});
+            NativeDev9Services dev9(libraries);
+            NativeModloadServices loader;
+            NativeServiceRouter services({&dev9,&libraries,&loader});
+            const auto snapshot=data;
+            auto cpu=initial(); cpu.pc=0x24100;
+            const NativeModule module{0x24000,0x24100,0x200,0x200,0};
+            const auto id=loader.begin_startup(module);
+            const auto result=run_native(nt_iop_generated_run,cpu,data,64,&services);
+            check(result.reason==NativeStop::unmapped_code && cpu.pc==0x5000 && cpu.registers[2]==1 &&
+                  dev9.unavailable_initializations()==1 && data==snapshot && !libraries.resolve("dev9",0x109,4),
+                  "Unavailable DEV9 adapter fabricated initialization, memory writes or registered exports");
+            loader.finish_startup(id,cpu.registers[2]);
+            check(loader.invoke({17,{id,0},NativeServiceKind::modload},data).value==static_cast<unsigned>(-202),
+                  "Unavailable DEV9 adapter remained resident");
+            for (const auto ordinal:{4U,5U,7U,8U,9U,12U,13U}) {
+                cpu=initial(); cpu.pc=0x24100+ordinal*8;
+                check(run_native(nt_iop_generated_run,cpu,data,64,&services).reason==NativeStop::import_request && data==snapshot,
+                      "Unimplemented DEV9 export fabricated a successful operation");
+            }
+            check(dev9.invoke({0x100,{},NativeServiceKind::dev9,0x24108},data).status==NativeServiceStatus::unavailable &&
+                  dev9.invoke({0x100,{},NativeServiceKind::dev9,0x24100,true},data).status==NativeServiceStatus::unavailable &&
+                  dev9.unavailable_initializations()==1,"DEV9 accepted an invalid initialization context");
+        }
         {
             NativeModloadServices loader;
             std::vector<std::uint8_t> data(0x20000,0);
@@ -197,6 +296,32 @@ int main() {
         }
         {
             std::vector<std::uint8_t> data(0x20000);
+            for (const auto budget : {1U,128U}) for (unsigned index=0;index<=7;++index) {
+                auto cpu=initial(); cpu.pc=0x17700; cpu.registers[4]=index;
+                NativeResult result;
+                do { result=nt_iop_generated_run(cpu,data,budget); } while (result.reason==NativeStop::budget);
+                unsigned expected=259;
+                for (unsigned suffix=0;suffix<index;++suffix) expected+=128U>>suffix;
+                if (index<=6)
+                    check(result.reason==NativeStop::unmapped_code && cpu.pc==0x5000 &&
+                          cpu.registers[2]==expected && cpu.executed==9+index,
+                          "Compiled inline tail lost a selected operation or delay slot");
+                else
+                    check(result.reason==NativeStop::unmapped_code && cpu.pc==0x17714 &&
+                          result.address==0x17718 && cpu.registers[2]==1 && cpu.executed==5 && !cpu.delay_slot,
+                          "Inline tail admitted an out-of-range but compiled destination");
+            }
+            store_native_word(data,0x17b00,0x17a54); store_native_word(data,0x17b04,0x17a60);
+            for (unsigned index=0;index<3;++index) {
+                auto cpu=initial(); cpu.pc=0x17a00; cpu.registers[4]=index; cpu.registers[29]=0x1fff0;
+                const auto result=nt_iop_generated_run(cpu,data,128);
+                check(result.reason==NativeStop::unmapped_code && cpu.pc==0x5000 && cpu.registers[29]==0x1fff0 &&
+                      cpu.registers[2]==(index==0 ? 7U : index==1 ? 9U : 0xffffffffU),
+                      "Stack-spill prologue hid a bounded jump table");
+            }
+        }
+        {
+            std::vector<std::uint8_t> data(0x20000);
             NativeLibrarySpec declaration{0x14000,0x102,"usbd",{},0x14200};
             store_native_word(data,0x14000,0x41c00000); store_native_word(data,0x14008,0x102);
             const std::string name="usbd"; std::copy(name.begin(),name.end(),data.begin()+0x1400c);
@@ -271,8 +396,9 @@ int main() {
             NativeLibraryServices libraries({declaration});
             FixtureAudio output;
             NativeSoundServices sound(libraries,output);
-            const auto call=[&](unsigned ordinal,unsigned argument=0) {
+            const auto call=[&](unsigned ordinal,unsigned argument=0,unsigned value=0,unsigned third=0) {
                 auto cpu=initial(); cpu.pc=declaration.functions.at(ordinal); cpu.registers[4]=argument;
+                cpu.registers[5]=value; cpu.registers[6]=third;
                 const auto stop=run_native(nt_iop_generated_run,cpu,data,32,&sound);
                 return std::pair{stop,cpu};
             };
@@ -288,13 +414,51 @@ int main() {
             check(call(4).first.reason==NativeStop::unmapped_code && output.voices()==48 && output.initializations==1,
                   "Compiled sound initialization did not allocate native voices");
             check(call(4,1).first.reason==NativeStop::unmapped_code && output.initializations==2,"Warm initialization did not reset native voices");
+            for (unsigned core=0;core<2;++core) {
+                check(call(5,0x980|core,0x2000).first.reason==NativeStop::unmapped_code &&
+                      call(5,0xa80|core,0x4000).first.reason==NativeStop::unmapped_code &&
+                      output.core_mix[core].output.left==0.5f && output.core_mix[core].output.right==-1.0f,
+                      "Master controls did not reach independent native stereo buses");
+                check(call(6,0x980|core).second.registers[2]==0x2000,"Master readback lost the library value");
+                const auto voice=core*24+3;
+                check(call(5,6|core,0x2000).first.reason==NativeStop::unmapped_code &&
+                      call(5,0x106|core,0x3fff).first.reason==NativeStop::unmapped_code &&
+                      call(5,0x206|core,0x800).first.reason==NativeStop::unmapped_code &&
+                      output.voice_mix[voice].direct.left==0.5f && output.voice_mix[voice].rate==0.5f,
+                      "Voice panning and pitch did not reach the native voice");
+                check(call(7,0x1800|core,0xfffff7).first.reason==NativeStop::unmapped_code &&
+                      output.voice_mix[voice].direct.left==0 && output.voice_mix[voice].direct.right>0.99f &&
+                      call(8,0x1800|core).second.registers[2]==0xfffff7,"Native per-channel voice routing was not applied");
+                check(call(5,0x800|core,0).first.reason==NativeStop::unmapped_code &&
+                      output.voice_mix[voice].direct.right==0,"Core mixer gate did not silence its native route");
+                check(call(9,0x1d00|core,0x17ffff).first.reason==NativeStop::unmapped_code &&
+                      call(10,0x1d00|core).second.registers[2]==0x17ffff &&
+                      call(25,core,0,4).first.reason==NativeStop::unmapped_code,"Effect workspace initialization failed");
+            }
+            store_native_word(data,0x18000,0); store_native_word(data,0x18004,0);
+            check(call(23,1,0x18000).first.reason==NativeStop::unmapped_code &&
+                  call(24,1,0x18020).first.reason==NativeStop::unmapped_code && load_native_word(data,0x18020)==1,
+                  "Disabled effect configuration did not retain the selected core");
+            store_native_word(data,0x18004,5);
+            check(call(23,1,0x18000).first.reason==NativeStop::import_request,"Active reverb was silently discarded");
+            check(call(26,0,0x13108,0x18000).first.reason==NativeStop::unmapped_code &&
+                  call(26,0,0).second.registers[2]==0x13108 &&
+                  call(27,0x1ff00).first.address==0x1ff00,
+                  "Sound callback replacement or AOT validation failed");
+            output.allow_configure=false;
+            check(call(5,0x980,0).first.reason==NativeStop::import_request &&
+                  call(6,0x980).second.registers[2]==0x2000,"Failed native volume update reported success");
+            output.allow_configure=true;
             const auto snapshot=data;
-            check(call(5).first.reason==NativeStop::import_request && data==snapshot && output.initializations==2,
+            check(call(5,0x980,0x8000).first.reason==NativeStop::import_request && data==snapshot && output.initializations==2,
                   "Unimplemented sound operation returned success or changed state");
             check(call(4,2).first.reason==NativeStop::import_request && output.initializations==2,"Unsupported sound mode changed output");
             output.allow_initialize=false;
             check(call(4).first.reason==NativeStop::import_request && output.initializations==2,"Failed voice allocation fabricated completion");
             check(call(2).first.reason==NativeStop::unmapped_code && !output.ready() && !output.voices(),"Sound quit retained native resources");
+            output.allow_initialize=true;
+            check(call(4,1).first.reason==NativeStop::unmapped_code && call(6,0x980).second.registers[2]==0 &&
+                  call(10,0x1d01).second.registers[2]==0x1fffff,"Warm open after quit retained stale sound state");
         }
         {
             std::vector<std::uint8_t> data(0x10000);
@@ -3289,6 +3453,31 @@ int main() {
                       state.pc==0x5000 && !state.load_register && ram==before,"Native string import lost caller state or wrote memory");
                 return state.registers[2];
             };
+            // One compiled import family covers binary search/comparison, alias
+            // preservation, zero lengths and malformed spans without writes.
+            const std::array<std::uint8_t,7> binary{0,0xff,0x80,'A',0,'B',0xfe};
+            std::copy(binary.begin(),binary.end(),ram.begin()+0xc800);
+            std::copy(binary.begin(),binary.end(),ram.begin()+0xc900);
+            check(string_call(0x17044,0x8000c800,0x180,7)==0x8000c802 &&
+                  string_call(0x17044,0xa000c800,0,7)==0xa000c800 &&
+                  string_call(0x17044,0xc800,'B',5)==0 &&
+                  string_call(0x17044,0xffffffff,'B',0)==0,"Binary search lost bounds, byte or alias semantics");
+            for (const auto pc:{0x1704cU,0x17054U}) {
+                check(string_call(pc,0xc800,0xa000c900,7)==0 && string_call(pc,0xffffffff,0xffffffff,0)==0,
+                    "Binary comparison failed equality or zero length");
+                ram[0xc902]=1;
+                check(string_call(pc,0xc800,0xc900,7)==127 && string_call(pc,0xc900,0xc800,7)==0xffffff81U,
+                    "Binary comparison changed the first unsigned-byte difference");
+                check(string_call(pc,0xc800,0xc900,2)==0,"Binary comparison exceeded its length");
+                ram[0xc902]=0x80;
+            }
+            for (const auto pc:{0x17044U,0x1704cU,0x17054U}) {
+                auto bad=initial(); bad.pc=pc; bad.registers[4]=0xffff; bad.registers[5]=0xc800; bad.registers[6]=2;
+                const auto before=ram;
+                const auto failed=run_native(nt_iop_generated_run,bad,ram,1,&sysclib);
+                check(failed.reason==NativeStop::address_fault && !bad.executed && ram==before,
+                    "Binary import accepted an out-of-range span or mutated on failure");
+            }
             const std::array<std::uint8_t,5> text{'a',0x80,'z',0,0xff};
             std::copy(text.begin(),text.end(),ram.begin()+0xc800);
             std::copy(text.begin(),text.end(),ram.begin()+0xc900);
@@ -3597,7 +3786,78 @@ int main() {
             const auto empty_sector=static_cast<std::uint32_t>(disc_image.size()/2048);
             disc_image.resize(disc_image.size()+2048);
             fixture::record(disc_image,directory_offset,"EMPTY",empty_sector,2048,true);
+            fixture::both32(disc_image,16*2048+80,static_cast<std::uint32_t>(disc_image.size()/2048));
             nt::write_file(image.path,disc_image);
+            {
+                std::vector<std::uint8_t> data(0x20000);
+                auto volume=std::make_unique<nt::disc::Iso9660>(image.path);
+                NativeCdvdmanServices cdvd;
+                cdvd.attach([&] { return volume.get(); },[] { return 2U; });
+                const auto call=[&](unsigned ordinal,std::array<std::uint32_t,4> arguments={}) {
+                    constexpr unsigned ordinals[]{6,8,11,12,13,14,28,37,39,83};
+                    const auto index=std::find(std::begin(ordinals),std::end(ordinals),ordinal)-std::begin(ordinals);
+                    auto cpu=initial(); cpu.pc=0x17814+static_cast<unsigned>(index)*8;
+                    std::copy(arguments.begin(),arguments.end(),cpu.registers.begin()+4);
+                    const auto result=run_native(nt_iop_generated_run,cpu,data,64,&cdvd);
+                    return std::pair{result,cpu};
+                };
+                check(call(12).second.registers[2]==0x14 && call(13,{1}).second.registers[2]==2 &&
+                      call(28).second.registers[2]==0x0a,"Native disc queries did not reflect the open volume");
+                check(call(14,{2,0x18204}).second.registers[2]==1 && load_native_word(data,0x18204)==0 &&
+                      call(14,{0,0x18204}).first.reason==NativeStop::import_request,
+                      "Native mounted ISO fabricated eject support");
+                auto registration=initial(); registration.pc=0x17920;
+                check(run_native(nt_iop_generated_run,registration,data,64,&cdvd).reason==NativeStop::unmapped_code &&
+                      registration.pc==0x5000 && !registration.registers[2],"Compiled disc callback was not discovered");
+                data[0x18101]=1;
+                const auto read=call(6,{21,1,0xa0019000,0x18100});
+                check(read.second.registers[2]==1 && std::equal(payload.begin(),payload.begin()+2048,data.begin()+0x19000) &&
+                      !load_native_word(data,0x18200) && call(11,{1}).second.registers[2]==0 && !call(8).second.registers[2],
+                      "Native sector read did not publish real bytes before deferred completion");
+                check(!call(6,{21,1,0x19000,0x18100}).second.registers[2],"Pending completion was overwritten");
+                NativeCallbackMux callbacks({&cdvd}); NativeInterruptServices interrupts(0x1f000,&callbacks);
+                NativeServiceRouter router({&interrupts,&cdvd});
+                interrupts.invoke({9,{},NativeServiceKind::intrman},data);
+                auto foreground=initial(); foreground.pc=0x5000;
+                NativeResult completed;
+                do { completed=interrupts.run(nt_iop_generated_run,foreground,data,1,router); } while (completed.reason==NativeStop::budget);
+                check(completed.reason==NativeStop::unmapped_code && foreground.pc==0x5000 &&
+                      load_native_word(data,0x18200)==1 && !cdvd.take(),"Compiled disc completion did not run exactly once");
+                check(call(37).second.registers[2]==0x17900,"Disc callback removal lost the old pointer");
+                check(call(37,{0x17b80}).first.reason==NativeStop::unmapped_code,
+                      "Disc completion accepted an uncompiled callback");
+                check(call(39).second.registers[2]==1 && call(8).second.registers[2]==1 && !cdvd.take(),
+                      "Native read cancellation lost its error or invented an unregistered callback");
+                const auto before=data;
+                check(call(6,{21,1,0x17700,0x18100}).first.reason==NativeStop::code_write && data==before &&
+                      call(6,{21,1,0x19002,0x18100}).first.reason==NativeStop::address_fault && data==before,
+                      "Rejected sector destination changed native data");
+                data[0x18102]=1;
+                check(call(6,{21,1,0x19000,0x18100}).first.reason==NativeStop::import_request,"Missing raw sectors were fabricated");
+                data[0x18102]=0;
+                check(!call(6,{0xffffffff,1,0x19000,0x18100}).second.registers[2] && call(8).second.registers[2]==0x20,
+                      "Out-of-volume read lost its error state");
+                check(call(83,{0x18204,0x18208}).second.registers[2]==1 &&
+                      !load_native_word(data,0x18204) && !load_native_word(data,0x18208),"Single-volume geometry was not validated");
+                volume.reset();
+                check(call(13,{1}).second.registers[2]==6 && !call(12).second.registers[2] &&
+                      !call(6,{21,1,0x19000,0x18100}).second.registers[2] && call(8).second.registers[2]==0x12,
+                      "Closed disc session reported ready or completed a read");
+                auto layered=disc_image;
+                const auto boundary=static_cast<std::uint32_t>(layered.size()/2048);
+                layered.resize(layered.size()+32*2048);
+                std::copy_n(disc_image.begin()+16*2048,2048,layered.begin()+boundary*2048);
+                fixture::both32(layered,boundary*2048+80,32);
+                nt::write_file(image.path,layered); volume=std::make_unique<nt::disc::Iso9660>(image.path);
+                check(call(83,{0x18204,0x18208}).second.registers[2]==1 && load_native_word(data,0x18204)==1 &&
+                      load_native_word(data,0x18208)==boundary,"Appended volume geometry did not come from the ISO");
+                volume.reset(); layered[boundary*2048+1]=0; nt::write_file(image.path,layered);
+                volume=std::make_unique<nt::disc::Iso9660>(image.path);
+                const auto saved=data;
+                check(call(83,{0x18204,0x18208}).first.reason==NativeStop::import_request && data==saved,
+                      "Unknown layer geometry was fabricated or partially published");
+                volume.reset(); nt::write_file(image.path,disc_image);
+            }
             NativeFileDescriptors descriptors;
             NativeEventServices disc_events;
             NativeDiscServices files(image.path,&descriptors,&disc_events);
@@ -3705,8 +3965,20 @@ int main() {
             {
                 NativeHeapServices heap(static_cast<std::uint32_t>(ram.size()),0xd000,0xe000);
                 NativeDriverServices drivers;
-                NativeDriverFiles driver_files(drivers,descriptors,heap);
+                NativeDriverFiles driver_files(drivers,descriptors,heap,[](std::string_view name) { return name=="cdrom"; });
                 NativeServiceRouter router({&drivers,&driver_files,&files,&heap});
+                {
+                    const std::string absent="absent7:";
+                    std::copy(absent.begin(),absent.end(),ram.begin()+0xc080); ram[0xc080+absent.size()]=0;
+                    const auto before=ram;
+                    for (const auto ordinal:{4U,10U,11U,12U,13U,16U,17U,18U,25U,26U,27U,28U,29U,31U,32U,33U})
+                        check(router.invoke({ordinal,{0xc080,0xffffffff,0xffffffff,0xffffffff},NativeServiceKind::ioman},ram).value==static_cast<unsigned>(-19) && ram==before,
+                              "Absent device accepted a path operation or touched its unused buffers");
+                    check(driver_files.invoke({31,{0x2000,0xffffffff},NativeServiceKind::ioman},ram).status==NativeServiceStatus::unsupported,
+                          "Native mount was incorrectly classified as an absent compiled driver");
+                    check(router.invoke({31,{0xffffffff},NativeServiceKind::ioman},ram).status==NativeServiceStatus::address_fault,
+                          "Absent-device resolution bypassed path validation");
+                }
                 store_native_word(ram,0xc000,0xc040); store_native_word(ram,0xc004,0x10);
                 store_native_word(ram,0xc008,1); store_native_word(ram,0xc010,0xc300);
                 for (const auto [offset,target] : {std::pair{0U,0x2860U},{4U,0x2880U},{12U,0x2940U},{16U,0x2960U},{20U,0x2980U},{24U,0x2a00U},{28U,0x2a40U},{48U,0x2b00U},{52U,0x2b80U},{56U,0x2b20U}})
@@ -4354,6 +4626,14 @@ int main() {
             check(finished.reason==NativeStop::unmapped_code && finished.pc==0x5000 && cpu.registers[2]==1 &&
                   loader.load_decision()==8 && load_native_word(guest,0x7000)==0x61,
                   "Held sealed entry did not run and finish through decision 8");
+            // A nonresident return releases ownership, not its immutable AOT
+            // address range. Ordinary argument/stack allocations must skip it.
+            const auto free_after=heap.invoke({8,{},NativeServiceKind::sysmem},guest).value;
+            const auto scratch=heap.invoke({4,{0,0x100,0},NativeServiceKind::sysmem},guest);
+            check(free_after==0x4a00 && scratch.value==0xb600 &&
+                  heap.invoke({4,{2,0x600,0xb000},NativeServiceKind::sysmem},guest).value==0xb000 &&
+                  heap.invoke({5,{0xb000},NativeServiceKind::sysmem},guest).value==0,
+                  "Unloaded AOT image became writable heap storage or could not be claimed again");
             for (const auto entry:{0xb280U,0xb288U}) {
                 NativeHeapServices scheduled_heap(0x10000,0xb000,0x10000);
                 NativeInterruptServices interrupts(0xa000);

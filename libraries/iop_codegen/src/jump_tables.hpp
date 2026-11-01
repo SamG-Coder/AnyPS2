@@ -46,7 +46,7 @@ std::optional<std::set<std::uint32_t>> initial_jump_table(const elf::IopModule& 
             // A stack spill between the comparison and its branch preserves
             // both the tested index and predicate registers.
             for (unsigned distance=36;guard.operation==Operation::store_word && guard.source==29 &&
-                    distance<=48 && pc-module.base>=distance;distance+=4)
+                    distance<=128 && pc-module.base>=distance;distance+=4)
                 guard=decode(pc-distance,le32(module.memory,pc-module.base-distance));
         }
     } catch (const std::runtime_error&) { return {}; }

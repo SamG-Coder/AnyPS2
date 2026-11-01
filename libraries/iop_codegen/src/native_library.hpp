@@ -9,12 +9,16 @@ namespace nt::iop_codegen::ir {
 // Entries are still emitted as LLVM functions, which call native services.
 inline std::optional<Program> native_library(const elf::IopModule& module,std::span<const std::uint32_t> entries) {
     const auto exports=elf::iop_exports(module);
-    const auto found=std::find_if(exports.begin(),exports.end(),[](const auto& library) { return library.name=="libsd" || library.name=="usbd"; });
+    const auto found=std::find_if(exports.begin(),exports.end(),[](const auto& library) {
+        return library.name=="libsd" || library.name=="usbd" || library.name=="dev9";
+    });
     if (found==exports.end()) return {};
     const bool sound=found->name=="libsd";
-    const unsigned minimum=sound ? 28U : 14U, maximum=sound ? 34U : 19U;
+    const bool expansion=found->name=="dev9";
+    const unsigned minimum=sound ? 28U : expansion ? 10U : 14U;
+    const unsigned maximum=sound ? 34U : expansion ? 16U : 19U;
     if (exports.size()!=1 || (found->version>>8)!=1 || found->functions.size()<minimum || found->functions.size()>maximum ||
-        (sound && found->functions.front()!=module.entry))
+        ((sound || expansion) && found->functions.front()!=module.entry))
         throw std::runtime_error("Native library replacement requires a supported 1.x public export ABI");
     Program program; program.entry=module.entry;
     const auto append=[&](std::uint32_t address,std::uint32_t selector) {
@@ -22,7 +26,7 @@ inline std::optional<Program> native_library(const elf::IopModule& module,std::s
         if (address%4 || address<module.base || address-module.base>extent || extent-(address-module.base)<8)
             throw std::runtime_error("Native library entry is outside the declared executable extent");
         Instruction entry; entry.address=address; entry.operation=Operation::native_import;
-        entry.flow=Flow::native_return; entry.immediate=(sound ? 0x150000U : 0x160000U)|selector;
+        entry.flow=Flow::native_return; entry.immediate=(sound ? 0x150000U : expansion ? 0x170000U : 0x160000U)|selector;
         const auto [previous,inserted]=program.instructions.emplace(address,entry);
         if (!inserted && previous->second.immediate!=entry.immediate)
             throw std::runtime_error("Native library export aliases have conflicting ABI operations");

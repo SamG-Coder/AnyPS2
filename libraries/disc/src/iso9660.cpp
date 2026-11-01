@@ -31,6 +31,7 @@ Iso9660::Iso9660(const std::filesystem::path& path)
         while (!volume_.empty() && volume_.back() == ' ') volume_.pop_back();
         root_ = record(ByteView(descriptor).subspan(156, descriptor[156]));
         if (!root_.directory) throw std::runtime_error("ISO root is not a directory");
+        if (le32(descriptor,80)==be32(descriptor,84)) volume_sectors_=le32(descriptor,80);
         return;
     }
     throw std::runtime_error("Missing ISO primary volume descriptor");
@@ -62,6 +63,21 @@ Bytes Iso9660::read_range(const Entry& entry, std::uint32_t offset, std::uint32_
     if (offset > entry.size || count > entry.size - offset)
         throw std::runtime_error("Disc read exceeds file bounds");
     return read_at(std::uint64_t(entry.sector) * sector_size + offset,count);
+}
+Bytes Iso9660::read_sectors(std::uint32_t first,std::uint32_t count) {
+    if (count>65536) throw std::runtime_error("Disc sector read exceeds 128 MiB limit");
+    return read_at(std::uint64_t(first)*sector_size,std::uint64_t(count)*sector_size);
+}
+std::uint32_t Iso9660::appended_volume_start() {
+    if (size_%sector_size || !volume_sectors_ || volume_sectors_>sector_count())
+        throw std::runtime_error("Invalid ISO volume size for layer discovery");
+    if (volume_sectors_==sector_count()) return 0;
+    const auto descriptor=read_sectors(volume_sectors_,1);
+    if (descriptor[0]!=1 || std::string(descriptor.begin()+1,descriptor.begin()+6)!="CD001" || descriptor[6]!=1 ||
+        le16(descriptor,128)!=sector_size || descriptor[130]!=8 || descriptor[131]!=0 ||
+        !le32(descriptor,80) || le32(descriptor,80)!=be32(descriptor,84))
+        throw std::runtime_error("Unrecognized appended ISO volume descriptor");
+    return volume_sectors_;
 }
 std::vector<Entry> Iso9660::entries(const Entry& directory) {
     if (!directory.directory) throw std::runtime_error("Expected a directory");

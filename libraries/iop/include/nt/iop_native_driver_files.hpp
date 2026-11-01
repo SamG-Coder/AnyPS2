@@ -4,14 +4,18 @@
 #include <nt/iop_native_heap.hpp>
 #include <nt/iop_native_file_metadata.hpp>
 #include <map>
+#include <functional>
+#include <string_view>
 
 namespace nt::iop {
 // Compiled device operations share the mount descriptor namespace. Only public
 // iop_file fields live in guest RAM; ownership and continuations stay native.
 class NativeDriverFiles final : public NativeServices {
 public:
-    NativeDriverFiles(NativeDriverServices& drivers,NativeFileDescriptors& descriptors,NativeHeapServices& heap)
-        : drivers_(drivers),descriptors_(descriptors),heap_(heap) {}
+    using NativeDeviceQuery=std::function<bool(std::string_view)>;
+    NativeDriverFiles(NativeDriverServices& drivers,NativeFileDescriptors& descriptors,NativeHeapServices& heap,
+                      NativeDeviceQuery native_device={})
+        : drivers_(drivers),descriptors_(descriptors),heap_(heap),native_device_(std::move(native_device)) {}
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
         auto reply=dispatch(request,ram);
         if (request.kind==NativeServiceKind::ioman && request.selector==30 &&
@@ -33,6 +37,7 @@ private:
                 Path path; const auto parsed=parse(request.arguments[0],ram,path);
                 if (parsed.status!=NativeServiceStatus::returned || parsed.value) return parsed;
                 if (drivers_.find(path.device)) return {NativeServiceStatus::unavailable};
+                return missing_driver(path.device);
             }
             return {};
         }
@@ -117,6 +122,11 @@ private:
                      file.driver,request.arguments[0],request.selector==5 || request.selector==14 ? Action::close : Action::value);
     }
 private:
+    NativeServiceReply missing_driver(std::string_view name) const {
+        // Only a complete namespace may conclude that a device is absent.
+        // Standalone compositions without a native-mount query still decline.
+        return native_device_ && !native_device_(name) ? returned(-19) : NativeServiceReply{};
+    }
     enum class Action { open, value, value64, close, directory };
     struct File { std::uint32_t record,mode,unit; std::size_t driver; bool directory; };
     struct Path { std::string device; std::uint32_t unit=0,relative=0,bytes=0; };
@@ -207,7 +217,7 @@ private:
         Path path; const auto parsed=parse(request.arguments[0],ram,path);
         if (parsed.status!=NativeServiceStatus::returned || parsed.value) return parsed;
         const auto driver=drivers_.find(path.device);
-        if (!driver) return {};
+        if (!driver) return missing_driver(path.device);
         if (pending_ || request.interrupt_context || !request.context) return {NativeServiceStatus::unavailable};
         std::uint32_t target=0;
         const bool directory=request.selector==13;
@@ -367,6 +377,7 @@ private:
     NativeDriverServices& drivers_;
     NativeFileDescriptors& descriptors_;
     NativeHeapServices& heap_;
+    NativeDeviceQuery native_device_;
     std::map<std::uint32_t,File> files_;
     std::optional<Pending> pending_;
 };

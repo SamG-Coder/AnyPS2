@@ -248,7 +248,7 @@ int main(int argc,char** argv) {
             const auto at=ir.find("code262188:");
             const auto next=at==std::string::npos ? std::string::npos : ir.find("\ncode",at+1);
             const auto block=at==std::string::npos ? std::string{} : ir.substr(at,next==std::string::npos ? std::string::npos : next-at);
-            if (ir.empty() || block.find("call i1 @is_instruction")==std::string::npos || block.find("262400")!=std::string::npos)
+            if (ir.empty() || block.find("call i1 @nt_iop_contains_instruction")==std::string::npos || block.find("262400")!=std::string::npos)
                 throw std::runtime_error("Open indirect was not guarded by compiled instructions");
         }
         // A branch that skips the load must not keep the other path's delayed slot.
@@ -304,7 +304,7 @@ int main(int argc,char** argv) {
             const auto opened_next=opened_at==std::string::npos ? std::string::npos : opened_text.find("\ncode",opened_at+1);
             const auto opened_block=opened_at==std::string::npos ? std::string{} :
                 opened_text.substr(opened_at,opened_next==std::string::npos ? std::string::npos : opened_next-opened_at);
-            if (opened_block.find("call i1 @is_instruction")==std::string::npos || opened_block.find(std::to_string(0x60020))!=std::string::npos)
+            if (opened_block.find("call i1 @nt_iop_contains_instruction")==std::string::npos || opened_block.find(std::to_string(0x60020))!=std::string::npos)
                 throw std::runtime_error("Cross-module open indirect kept a proved target");
             nt::elf::IopModule wide_writer{0x61000,0x61000,nt::Bytes(0x40),0x40,{}};
             fixture::put32(wide_writer.memory,0,0x3c010006); fixture::put32(wide_writer.memory,4,0x3c040006);
@@ -343,7 +343,7 @@ int main(int argc,char** argv) {
             const auto retracted_next=retracted_at==std::string::npos ? std::string::npos : retracted_text.find("\ncode",retracted_at+1);
             const auto retracted_block=retracted_at==std::string::npos ? std::string{} :
                 retracted_text.substr(retracted_at,retracted_next==std::string::npos ? std::string::npos : retracted_next-retracted_at);
-            if (retracted_block.find("call i1 @is_instruction")==std::string::npos || retracted_text.find("code"+std::to_string(0x61020)+":")!=std::string::npos)
+            if (retracted_block.find("call i1 @nt_iop_contains_instruction")==std::string::npos || retracted_text.find("code"+std::to_string(0x61020)+":")!=std::string::npos)
                 throw std::runtime_error("Retracted writer leaf remained a compiled indirect target");
             // The writer's destination is an argument, so it can be the caller's slot.
             // The containing module is not a proof that the slot stays unchanged.
@@ -361,7 +361,7 @@ int main(int argc,char** argv) {
             const auto alias_next=alias_at==std::string::npos ? std::string::npos : alias_text.find("\ncode",alias_at+1);
             const auto alias_block=alias_at==std::string::npos ? std::string{} :
                 alias_text.substr(alias_at,alias_next==std::string::npos ? std::string::npos : alias_next-alias_at);
-            if (alias_block.find("call i1 @is_instruction")==std::string::npos || alias_text.find("code"+std::to_string(0x60020)+":")!=std::string::npos)
+            if (alias_block.find("call i1 @nt_iop_contains_instruction")==std::string::npos || alias_text.find("code"+std::to_string(0x60020)+":")!=std::string::npos)
                 throw std::runtime_error("Cross-module unknown store kept a proved loaded pointer");
             // A stack spill has an address range that cannot name the absolute slot.
             nt::elf::IopModule stack_writer{0x61000,0x61000,nt::Bytes(0x20),0x20,{}};
@@ -411,7 +411,7 @@ int main(int argc,char** argv) {
             const auto at=ir.find("code"+std::to_string(0x8000c)+":");
             const auto next=at==std::string::npos ? std::string::npos : ir.find("\ncode",at+1);
             const auto block=at==std::string::npos ? std::string{} : ir.substr(at,next==std::string::npos ? std::string::npos : next-at);
-            if (block.find("call i1 @is_instruction")==std::string::npos || ir.find("code"+std::to_string(0x80040)+":")!=std::string::npos)
+            if (block.find("call i1 @nt_iop_contains_instruction")==std::string::npos || ir.find("code"+std::to_string(0x80040)+":")!=std::string::npos)
                 throw std::runtime_error("Retracted same-module leaf remained a compiled indirect target");
         }
         // A constant returned from a reached helper is not an instruction edge.
@@ -1216,10 +1216,10 @@ int main(int argc,char** argv) {
             try { nt::iop_codegen::ir::discover(broken); } catch (const std::runtime_error&) { rejected=true; }
             if (!rejected) throw std::runtime_error("Hoisted indexed table accepted a clobbered address register");
         }
-        nt::elf::IopModule network_services{0x17000,0x17014,nt::Bytes(0x800),0x800,{}};
+        nt::elf::IopModule network_services{0x17000,0x17014,nt::Bytes(0xc00),0xc00,{}};
         fixture::put32(network_services.memory,0,0x41e00000); fixture::put32(network_services.memory,8,0x104);
         std::copy(std::begin(library),std::end(library),network_services.memory.begin()+12);
-        constexpr unsigned network_ordinals[]{16,40,24,31,33,34};
+        constexpr unsigned network_ordinals[]{16,40,24,31,33,34,10,11,15,4,5};
         for (unsigned i=0;i<std::size(network_ordinals);++i) {
             fixture::put32(network_services.memory,20+i*8,0x03e00008);
             fixture::put32(network_services.memory,24+i*8,0x24000000|network_ordinals[i]);
@@ -1231,6 +1231,24 @@ int main(int argc,char** argv) {
         fixture::put32(network_services.memory,0x114,0x03e00008); fixture::put32(network_services.memory,0x118,0x24000016);
         bundle_roots.push_back(0x17114);
         const auto network_word=[&](unsigned pc,unsigned word) { fixture::put32(network_services.memory,pc-0x17000,word); };
+        network_word(0x17200,0x41e00000); network_word(0x17208,0x102);
+        const std::string scheduling_library="thbase";
+        std::copy(scheduling_library.begin(),scheduling_library.end(),network_services.memory.begin()+0x20c);
+        for (unsigned ordinal=15;ordinal<=17;++ordinal) {
+            const auto pc=0x17214+(ordinal-15)*8;
+            network_word(pc,0x03e00008); network_word(pc+4,0x24000000|ordinal); bundle_roots.push_back(pc);
+        }
+        constexpr std::uint32_t jumping[]{0x03e0b821,0x2410002a,0x3c040001,0x34848000,
+            0x0c005c17,0,0x14400007,0,0x24100063,0x24050000,0x3c040001,0x34848000,
+            0x0c005c19,0,0x02001821,0x02e0f821,0x03e00008,0};
+        for (unsigned i=0;i<std::size(jumping);++i) network_word(0x17400+i*4,jumping[i]);
+        bundle_roots.push_back(0x17400);
+        constexpr std::uint32_t rotating[]{0x03e08021,0x24040000,0x0c005c87,0,0x0200f821,0x03e00008,0x2402002a};
+        for (unsigned i=0;i<std::size(rotating);++i) {
+            network_word(0x17500+i*4,rotating[i]);
+            network_word(0x17580+i*4,i==2 ? 0x0c005c89 : i==6 ? 0x24020001 : rotating[i]);
+        }
+        bundle_roots.push_back(0x17500); bundle_roots.push_back(0x17580);
         constexpr std::uint32_t cursor_code[]{0x3c140001,0x26947600,0x00009021,0x00001821,
             0x2e420002,0x10400014,0x00008021,0x8e820000,0,0x00400008,0};
         for (unsigned i=0;i<std::size(cursor_code);++i) network_word(0x17300+i*4,cursor_code[i]);
@@ -1241,11 +1259,77 @@ int main(int argc,char** argv) {
         network_word(0x17368,0x03e00008); network_word(0x1736c,0x00601021);
         network_word(0x17600,0x17330); network_word(0x17604,0x1733c);
         bundle_roots.push_back(0x17300);
+        network_word(0x17800,0x41e00000); network_word(0x17808,0x101);
+        std::copy(disc_library.begin(),disc_library.end(),network_services.memory.begin()+0x80c);
+        constexpr unsigned cdvd_ordinals[]{6,8,11,12,13,14,28,37,39,83};
+        for (unsigned i=0;i<std::size(cdvd_ordinals);++i) {
+            network_word(0x17814+i*8,0x03e00008); network_word(0x17818+i*8,0x24000000|cdvd_ordinals[i]);
+            bundle_roots.push_back(0x17814+i*8);
+        }
+        constexpr std::uint32_t cdvd_callback[]{0x3c080001,0x35088200,0xad040000,0x03e00008,0};
+        constexpr std::uint32_t cdvd_register[]{0x03e08021,0x3c040001,0x34847900,0x0c005e13,0,0x0200f821,0x03e00008,0};
+        for (unsigned i=0;i<std::size(cdvd_callback);++i) network_word(0x17900+i*4,cdvd_callback[i]);
+        for (unsigned i=0;i<std::size(cdvd_register);++i) network_word(0x17920+i*4,cdvd_register[i]);
+        bundle_roots.push_back(0x17920); // Callback must be discovered through registration.
+        network_word(0x17a00,0x27bdffc0); network_word(0x17a04,0x2c820002);
+        for (unsigned i=0;i<10;++i) network_word(0x17a08+i*4,0xafbf0000+i*4);
+        constexpr std::uint32_t spilled_switch[]{0x10400010,0xafb00028,0x00041080,0x3c010001,
+            0x00220821,0x8c227b00,0,0x00400008,0,0x24020007,0x03e00008,0x27bd0040,
+            0x24020009,0x03e00008,0x27bd0040,0,0,0x2402ffff,0x03e00008,0x27bd0040};
+        for (unsigned i=0;i<std::size(spilled_switch);++i) network_word(0x17a30+i*4,spilled_switch[i]);
+        network_word(0x17b00,0x17a54); network_word(0x17b04,0x17a60);
+        bundle_roots.push_back(0x17a00);
+        // Original unrolled arithmetic tail, selected as end - index * 4.
+        // An out-of-range index must not enter even another compiled word.
+        constexpr std::uint32_t inline_tail[]{0x3c080001,0x35087734,0x00044880,0x01094022,
+            0x24020001,0x01000008,0x24420002,0x24420004,0x24420008,0x24420010,
+            0x24420020,0x24420040,0x24420080,0x03e00008,0x24420100};
+        for (unsigned i=0;i<std::size(inline_tail);++i) network_word(0x17700+i*4,inline_tail[i]);
+        bundle_roots.push_back(0x17700);
+        {
+            const std::array roots{0x17700U};
+            const auto discovered=nt::iop_codegen::ir::discover(network_services,roots);
+            const auto& targets=discovered.instructions.at(0x17714).targets;
+            if (targets.size()!=7 || targets.front()!=0x1771c || targets.back()!=0x17734 ||
+                !discovered.guarded_callback_sites.contains(0x17714))
+                throw std::runtime_error("Inline tail entries were not discovered and guarded");
+            for (const auto [offset,word] : {std::pair{0x708U,0x00044840U}, // wrong stride
+                    std::pair{0x710U,0x00c74021U}, // clobbered target
+                    std::pair{0x724U,0x10000000U}}) { // non-linear tail
+                auto invalid=network_services; fixture::put32(invalid.memory,offset,word);
+                bool rejected=false;
+                try { nt::iop_codegen::ir::discover(invalid,roots); }
+                catch (const std::runtime_error&) { rejected=true; }
+                if (!rejected) throw std::runtime_error("Unproved inline tail shape was accepted");
+            }
+        }
         constexpr std::uint32_t nullable_registry[]{0x03e08021,0x8c820038,0,0x8c420008,0,
             0x14400003,0,0x0800449b,0x24020000,0x0040f809,0,0x0200f821,0x03e00008,0};
         for (unsigned i=0;i<std::size(nullable_registry);++i) display_word(0x11240+i*4,nullable_registry[i]);
         bundle_roots.push_back(0x11240);
-        const std::array bundle{module,provider,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services};
+        nt::elf::IopModule dev9{0x24000,0x24100,nt::Bytes(0x200),0x200,{}};
+        fixture::put32(dev9.memory,0,0x41c00000); fixture::put32(dev9.memory,8,0x109);
+        constexpr char dev9_name[]="dev9";
+        std::copy(std::begin(dev9_name),std::end(dev9_name),dev9.memory.begin()+12);
+        for (unsigned ordinal=0;ordinal<14;++ordinal) {
+            const auto offset=0x100+(ordinal==3 ? 1U : ordinal)*8;
+            fixture::put32(dev9.memory,20+ordinal*4,dev9.base+offset);
+            fixture::put32(dev9.memory,offset,0xfc000000);
+        }
+        {
+            const auto replaced=nt::iop_codegen::ir::discover(dev9);
+            if (replaced.instructions.at(dev9.entry).immediate!=0x170100 || replaced.instructions.size()!=13)
+                throw std::runtime_error("DEV9 public module entry was not lowered to native capability detection");
+            auto invalid=dev9; fixture::put32(invalid.memory,8,0x209);
+            bool rejected=false;
+            try { nt::iop_codegen::ir::discover(invalid); } catch (const std::runtime_error&) { rejected=true; }
+            if (!rejected) throw std::runtime_error("Unknown DEV9 ABI accepted a native replacement");
+            rejected=false;
+            const std::array private_entry{0x241f0U};
+            try { nt::iop_codegen::ir::discover(dev9,private_entry); } catch (const std::runtime_error&) { rejected=true; }
+            if (!rejected) throw std::runtime_error("DEV9 replacement exposed private driver code");
+        }
+        const std::array bundle{module,provider,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services,dev9};
         {
             auto overwritten=bundle; fixture::put32(overwritten[3].memory,0x330,0x00a02021);
             bool rejected=false;
@@ -1300,7 +1384,7 @@ int main(int argc,char** argv) {
             if (!failed_bundle || !partial.str().empty()) throw std::runtime_error("Invalid bundle emitted partial native code");
         }
         // Earlier owners must be revisited when a later module discovers a callback.
-        const std::array reversed{provider,module,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services};
+        const std::array reversed{provider,module,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services,dev9};
         std::ostringstream reverse_code;
         nt::iop_codegen::emit_bundle(reverse_code,reversed,bundle_roots);
         for (const auto target : {0xa061U,0xa080U,0xb800U}) {
@@ -1336,7 +1420,7 @@ int main(int argc,char** argv) {
             put(0x8800,0x00401821);
             put(first+(count-2)*4,0x03e00008); put(first+(count-1)*4,0);
             std::vector<std::uint32_t> roots=bundle_roots; roots.push_back(first);
-            const std::array large_bundle{large,provider,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services};
+            const std::array large_bundle{large,provider,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services,dev9};
             std::ostringstream llvm; nt::iop_codegen::emit_bundle(llvm,large_bundle,roots);
             const auto text=llvm.str();
             nt::write_file(argv[3],nt::ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));
@@ -1397,7 +1481,7 @@ int main(int argc,char** argv) {
             const auto disc_put=[&](unsigned at,std::uint32_t value) { fixture::put32(disc_client,at,value); };
             disc_put(68,512); disc_put(72,512);
             constexpr std::uint32_t disc_entry[]{0x03e08021,0x24045100,0x24050001,0x0c00142d,0,
-                0x00408821,0x00402021,0x24055140,0x24060001,0x0c001431,0,0x90b20000,0,
+                0x0440000d,0,0x00408821,0x00402021,0x24055140,0x24060001,0x0c001431,0,0x90b20000,0,
                 0x02202021,0x0c00142f,0,0x02401021,0x0200f821,0x03e00008,0};
             for (unsigned index=0;index<std::size(disc_entry);++index) disc_put(128+index*4,disc_entry[index]);
             disc_put(288,0x41e00000); disc_put(296,0x104);

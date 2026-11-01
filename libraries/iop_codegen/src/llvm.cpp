@@ -3,6 +3,7 @@
 #include <nt/iop_ir.hpp>
 #include <sstream>
 #include <stdexcept>
+#include <optional>
 
 namespace nt::iop_codegen {
 namespace {
@@ -38,7 +39,7 @@ public:
 private:
     unsigned next_=0;
 };
-void membership(Writer& w,const std::string& name,const std::set<std::uint32_t>& words) {
+void membership(Writer& w,const std::string& name,const std::set<std::uint32_t>& words,bool external=false) {
     std::map<std::uint32_t,std::set<std::uint32_t>> pages;
     for (const auto word : words) pages[word>>10].insert(word);
     for (const auto& [page,instructions] : pages) {
@@ -46,7 +47,7 @@ void membership(Writer& w,const std::string& name,const std::set<std::uint32_t>&
         for (const auto pc : instructions) w.text<<"    i32 "<<pc<<", label %yes\n";
         w.text<<"  ]\nyes:\n  ret i1 true\nno:\n  ret i1 false\n}\n";
     }
-    w.text<<"define internal i1 @"<<name<<"(i32 %address) {\nentry:\n  %page = lshr i32 %address, 10\n"
+    w.text<<"define "<<(external ? "" : "internal ")<<"i1 @"<<name<<"(i32 %address) {\nentry:\n  %page = lshr i32 %address, 10\n"
         "  switch i32 %page, label %no [\n";
     for (const auto& [page,instructions] : pages) w.text<<"    i32 "<<page<<", label %page"<<page<<'\n';
     w.text<<"  ]\nno:\n  ret i1 false\n";
@@ -91,7 +92,7 @@ void memory(Writer& w,const std::string& label,const ir::Instruction& instructio
     const auto first=w.binary("and",offset,"4294967292"), end=w.binary("add",offset,count);
     w.text<<"  br label %fill_check"<<label<<"\nfill_check"<<label<<":\n"
         "  %cursor"<<label<<" = phi i32 [ "<<first<<", %fill_prepare"<<label<<" ], [ %next"<<label<<", %fill_step"<<label<<" ]\n";
-    const auto code=w.value("call i1 @is_code(i32 %cursor"+label+")");
+    const auto code=w.value("call i1 @nt_iop_contains_code(i32 %cursor"+label+")");
     w.text<<"  br i1 "<<code<<", label %fill_code_fault"<<label<<", label %fill_step"<<label<<"\nfill_code_fault"<<label<<":\n";
     w.store(37,destination); w.text<<"  ret i32 4\nfill_step"<<label<<":\n  %next"<<label<<" = add i32 %cursor"<<label<<", 4\n";
     const auto more=w.binary("icmp ult","%next"+label,end);
@@ -238,7 +239,7 @@ void instruction(Writer& w,const ir::Instruction& i,bool has_successor,bool open
         std::string valid="false";
         // An open slot may reach any instruction already compiled into this
         // program. It is not a proof that the stored register is one of them.
-        if (open_indirect) valid=w.value("call i1 @is_instruction(i32 "+physical+")");
+        if (open_indirect) valid=w.value("call i1 @nt_iop_contains_instruction(i32 "+physical+")");
         else for (const auto destination : i.targets) {
             const auto matches=w.binary("icmp eq",physical,std::to_string(destination));
             valid=valid=="false" ? matches : w.value("or i1 "+valid+", "+matches);
@@ -323,7 +324,7 @@ void instruction(Writer& w,const ir::Instruction& i,bool has_successor,bool open
             }
             load_register=i.operand;
         } else {
-            const auto code=w.value("call i1 @is_code(i32 "+w.binary("and",offset,"4294967292")+")");
+            const auto code=w.value("call i1 @nt_iop_contains_code(i32 "+w.binary("and",offset,"4294967292")+")");
             w.text<<"  br i1 "<<code<<", label %write_fault"<<label<<", label %store"<<label<<"\nwrite_fault"<<label<<":\n";
             w.store(37,address); w.text<<"  ret i32 4\nstore"<<label<<":\n";
             const auto narrowed=merge_store ? merge_word(w.value("load i32, ptr "+ptr+", align 1"),b) :
@@ -346,27 +347,32 @@ void emit_program(std::ostream& output,const ir::Program& program) {
     if (program.instructions.empty()) throw std::runtime_error("IOP conversion: empty program");
     detail::llvm(output,program);
 }
-void detail::llvm(std::ostream& output,const ir::Program& program) {
+void emit_program(std::ostream& output,const ir::Program& program,const CodeStream& code_stream) {
+    if (program.instructions.empty()) throw std::runtime_error("IOP conversion: empty program");
+    detail::llvm(output,program,code_stream);
+}
+void detail::llvm(std::ostream& output,const ir::Program& program,const CodeStream& code_stream) {
     // Fixed address pages bound execution functions to at most 256 instructions.
     std::map<std::uint32_t,std::map<std::uint32_t,ir::Instruction>> pages;
     for (const auto& [pc,i] : program.instructions) pages[pc>>10].emplace(pc,i);
     Writer w;
-    w.text<<"declare { i32, i1 } @llvm.sadd.with.overflow.i32(i32, i32)\n"
+    const auto preamble=[](Writer& w) { w.text<<"declare { i32, i1 } @llvm.sadd.with.overflow.i32(i32, i32)\n"
             "declare { i32, i1 } @llvm.ssub.with.overflow.i32(i32, i32)\n"
             "declare void @llvm.memset.p0.i32(ptr, i8, i32, i1)\n"
             "declare void @llvm.memcpy.p0.p0.i32(ptr, ptr, i32, i1)\n"
-            "declare void @llvm.memmove.p0.p0.i32(ptr, ptr, i32, i1)\n";
+            "declare void @llvm.memmove.p0.p0.i32(ptr, ptr, i32, i1)\n"; };
+    preamble(w);
     w.text<<"; AnyPS2 ahead-of-time IOP output. Keep commercial conversions out of source control.\n";
     std::set<std::uint32_t> entries_set;
     for (const auto& [pc,i] : program.instructions) entries_set.insert(pc);
-    membership(w,"is_instruction",entries_set);
-    membership(w,"is_code",program.protected_words);
+    membership(w,"nt_iop_contains_instruction",entries_set,bool(code_stream));
+    membership(w,"nt_iop_contains_code",program.protected_words,bool(code_stream));
     w.text<<"define i32 @nt_iop_native_instruction(i32 %address) {\nentry:\n"
-        "  %member = call i1 @is_instruction(i32 %address)\n  %result = zext i1 %member to i32\n  ret i32 %result\n}\n";
+        "  %member = call i1 @nt_iop_contains_instruction(i32 %address)\n  %result = zext i1 %member to i32\n  ret i32 %result\n}\n";
     w.text<<"define i32 @nt_iop_native_code_word(i32 %address) {\nentry:\n"
-        "  %member = call i1 @is_code(i32 %address)\n  %result = zext i1 %member to i32\n  ret i32 %result\n}\n";
-    for (const auto& [page,instructions] : pages) {
-        w.text<<"define internal i32 @run_page_"<<page<<"(ptr %state, ptr %ram, i32 %ram_size, ptr %executed, ptr %remaining) noinline {\n"
+        "  %member = call i1 @nt_iop_contains_code(i32 %address)\n  %result = zext i1 %member to i32\n  ret i32 %result\n}\n";
+    const auto emit_page=[&](Writer& w,std::uint32_t page,const auto& instructions) {
+        w.text<<"define "<<(code_stream ? "" : "internal ")<<"i32 @nt_iop_run_page_"<<page<<"(ptr %state, ptr %ram, i32 %ram_size, ptr %executed, ptr %remaining) noinline {\n"
             "entry:\n  br label %loop\n"
             "loop:\n  %left = load i64, ptr %remaining, align 8\n  %done = icmp eq i64 %left, 0\n"
             "  br i1 %done, label %budget_stop, label %dispatch\ndispatch:\n"
@@ -378,14 +384,31 @@ void detail::llvm(std::ostream& output,const ir::Program& program) {
         for (const auto& [address,i] : instructions)
             instruction(w,i,instructions.contains(address+4),program.open_indirect_sites.contains(address));
         w.text<<"}\n";
+    };
+    Writer group;
+    std::optional<std::uint32_t> group_id;
+    const auto flush=[&] {
+        if (group_id && !(code_stream(*group_id)<<group.text.str()))
+            throw std::runtime_error("Cannot write IOP LLVM code group");
+    };
+    for (const auto& [page,instructions]:pages) {
+        if (!code_stream) { emit_page(w,page,instructions); continue; }
+        const auto id=page/16U;
+        if (group_id!=id) {
+            flush(); group=Writer{}; group_id=id; preamble(group);
+            group.text<<"declare i1 @nt_iop_contains_code(i32)\ndeclare i1 @nt_iop_contains_instruction(i32)\n";
+        }
+        emit_page(group,page,instructions);
+        w.text<<"declare i32 @nt_iop_run_page_"<<page<<"(ptr, ptr, i32, ptr, ptr)\n";
     }
+    if (code_stream) flush();
     w.text<<"define i32 @nt_iop_llvm_run_v2(ptr %state, ptr %ram, i32 %ram_size, ptr %executed, i64 %budget) {\n"
         "entry:\n  %remaining = alloca i64, align 8\n  store i64 %budget, ptr %remaining, align 8\n  br label %loop\n"
         "loop:\n  %left = load i64, ptr %remaining, align 8\n  %done = icmp eq i64 %left, 0\n"
         "  br i1 %done, label %budget_stop, label %dispatch\ndispatch:\n"
         "  %pc_ptr = getelementptr i32, ptr %state, i32 32\n  %pc = load i32, ptr %pc_ptr, align 4\n";
     const auto pc=w.physical("%pc");
-    const auto member=w.value("call i1 @is_instruction(i32 "+pc+")");
+    const auto member=w.value("call i1 @nt_iop_contains_instruction(i32 "+pc+")");
     w.text<<"  br i1 "<<member<<", label %route, label %unmapped\nroute:\n";
     const auto page=w.binary("lshr",pc,"10");
     w.text<<"  switch i32 "<<page<<", label %unmapped [\n";
@@ -393,11 +416,11 @@ void detail::llvm(std::ostream& output,const ir::Program& program) {
     w.text<<"  ]\nbudget_stop:\n  ret i32 0\nunmapped:\n  ret i32 1\n";
     for (const auto& [number,instructions] : pages) {
         w.text<<"page"<<number<<":\n";
-        const auto result=w.value("call i32 @run_page_"+std::to_string(number)+"(ptr %state, ptr %ram, i32 %ram_size, ptr %executed, ptr %remaining)");
+        const auto result=w.value("call i32 @nt_iop_run_page_"+std::to_string(number)+"(ptr %state, ptr %ram, i32 %ram_size, ptr %executed, ptr %remaining)");
         const auto again=w.binary("icmp eq",result,"7");
         w.text<<"  br i1 "<<again<<", label %loop, label %stop"<<number<<"\nstop"<<number<<":\n  ret i32 "<<result<<'\n';
     }
     w.text<<"}\n";
-    output<<w.text.str();
+    if (!(output<<w.text.str())) throw std::runtime_error("Cannot write IOP LLVM dispatch");
 }
 }

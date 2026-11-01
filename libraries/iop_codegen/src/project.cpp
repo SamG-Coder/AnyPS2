@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <array>
 #include <stdexcept>
+#include <fstream>
+#include <memory>
 
 namespace nt::iop_codegen {
 namespace {
@@ -98,8 +100,7 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
         const auto& item=modules[index];
         std::copy_n(item.memory.begin(),item.initialized_size,module.memory.begin()+item.base-first);
     }
-    std::ostringstream code, llvm;
-    detail::llvm(llvm,program);
+    std::ostringstream code;
     for (std::size_t index=0;index<modules.size();++index)
         if (inputs[index].sealed && !program.instructions.contains(modules[index].entry))
             throw std::runtime_error("IOP conversion: sealed entry is not a compiled instruction at "+hex32(modules[index].entry));
@@ -154,7 +155,20 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
     // Finish validation before creating output. Never overwrite a prior conversion.
     if (!std::filesystem::create_directories(output)) throw std::runtime_error("IOP conversion: output directory already exists");
     save(output/"module_metadata.cpp",code.str());
-    save(output/"generated.ll",llvm.str());
+    std::ofstream llvm(output/"generated.ll",std::ios::binary);
+    llvm.exceptions(std::ios::badbit|std::ios::failbit);
+    std::vector<std::unique_ptr<std::ofstream>> streams;
+    std::string manifest="generated.ll\n";
+    detail::llvm(llvm,program,[&](std::size_t group)->std::ostream& {
+        const auto name="iop-code-"+std::to_string(group)+".ll";
+        auto stream=std::make_unique<std::ofstream>(output/name,std::ios::binary);
+        stream->exceptions(std::ios::badbit|std::ios::failbit);
+        manifest+=name+'\n'; streams.push_back(std::move(stream));
+        return *streams.back();
+    });
+    llvm.close();
+    for (auto& stream:streams) stream->close();
+    save(output/"llvm-modules.txt",manifest);
     write_file(output/"module.data",ByteView(module.memory).first(module.initialized_size));
     if (any_sealed) write_file(output/"sealed.data",sealed_image);
     std::string cmake=R"cmake(cmake_minimum_required(VERSION 3.24)
@@ -181,12 +195,9 @@ add_custom_command(TARGET iop-native POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy
 if(NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|amd64|x86_64")
   message(FATAL_ERROR "Initial LLVM output currently supports Windows x86-64 with MSVC")
 endif()
-find_program(ANYPS2_CLANG NAMES clang REQUIRED)
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated.obj"
-  COMMAND "${ANYPS2_CLANG}" -target x86_64-pc-windows-msvc -Werror -Wno-override-module -O2 -c
-    "${CMAKE_CURRENT_SOURCE_DIR}/generated.ll" -o "${CMAKE_CURRENT_BINARY_DIR}/generated.obj"
-  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/generated.ll" VERBATIM)
-target_sources(iop-native PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated.obj")
+include("${ANYPS2_ROOT}/cmake/llvm_objects.cmake")
+anyps2_add_llvm_library(iop_code "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(iop-native PRIVATE iop_code)
 target_compile_definitions(iop-native PRIVATE ANYPS2_IOP_LLVM=1)
 )cmake";
     save(output/"CMakeLists.txt",cmake);
@@ -206,6 +217,10 @@ target_compile_definitions(iop-native PRIVATE ANYPS2_IOP_LLVM=1)
         if (library.name=="usbd") diagnostics<<"Native USBD public ABI: LLVM entry stubs call the Windows USB descriptor owner. "
             "Startup, driver registration/probing, descriptor queries, private data and unregistration are supported; "
             "transfers and topology changes stop explicitly.\n";
+    for (const auto& item:compiled) for (const auto& library:elf::iop_exports(item))
+        if (library.name=="dev9") diagnostics<<"Native DEV9 public ABI: no expansion network/storage provider is installed. "
+            "Initialization returns MODULE_NO_RESIDENT_END without registering exports. "
+            "Direct export calls stop explicitly; no hardware identity or successful I/O is fabricated.\n";
     for (const auto& item:compiled) for (const auto& import:elf::iop_imports(item))
         if (import.library=="cdvdman" && import.ordinal==22)
             diagnostics<<"Unavailable native service: cdvdman ordinal 22 (console iLink identity) at "

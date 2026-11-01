@@ -4,6 +4,7 @@
 #include <nt/iop_codegen.hpp>
 #include <nt/iop_module.hpp>
 #include <nt/iso9660.hpp>
+#include <nt/packed_image.hpp>
 #include <nt/process.hpp>
 #include <nt/reboot_image.hpp>
 #include <algorithm>
@@ -11,6 +12,9 @@
 #include <map>
 #include <sstream>
 #include <string_view>
+#include <fstream>
+#include <memory>
+#include <chrono>
 
 namespace nt::inventory {
 namespace {
@@ -44,7 +48,7 @@ struct Accumulator {
         auto& state=groups[{std::move(subsystem),std::move(key)}];
         if (!state.count) { state.first=address; state.detail=std::move(detail); }
         state.count+=count;
-        if (!owner.empty() && state.owners.size()<8 &&
+        if (!owner.empty() &&
             std::find(state.owners.begin(),state.owners.end(),owner)==state.owners.end())
             state.owners.push_back(std::move(owner));
     }
@@ -132,14 +136,6 @@ bool looks_reboot(ByteView header) {
 void write_text(const std::filesystem::path& path,const std::string& text) {
     write_file(path,ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));
 }
-bool compile_object(const std::filesystem::path& ir,const std::filesystem::path& object,std::string& error) {
-    try {
-        const auto status=run_process({"clang","-target","x86_64-pc-windows-msvc","-Werror","-Wno-override-module","-O2","-c",
-            ir.string(),"-o",object.string()});
-        if (status) { error="clang exited with status "+std::to_string(status); return false; }
-        return true;
-    } catch (const std::exception& failure) { error=failure.what(); return false; }
-}
 std::string hex_list(const std::vector<std::uint32_t>& values) {
     std::ostringstream text;
     for (std::size_t index=0;index<values.size();++index) {
@@ -175,13 +171,23 @@ void record_iop_gaps(Accumulator& accumulator,const std::string& id,const elf::I
     if (!diagnosis.unexpected.empty())
         accumulator.gap("iop-analysis",diagnosis.unexpected.substr(0,180),1,module.base,id);
 }
-void emit_iop(Accumulator& accumulator,Unit& unit,const iop_codegen::ir::Program& program,const std::filesystem::path& directory,bool compile) {
+void emit_iop(Unit& unit,const iop_codegen::ir::Program& program,const std::filesystem::path& directory) {
     if (std::filesystem::exists(directory)) throw std::runtime_error("IOP artifact directory already exists");
     std::filesystem::create_directories(directory);
-    std::ostringstream llvm;
-    iop_codegen::emit_program(llvm,program);
     const auto ir=directory/"generated.ll";
-    write_text(ir,llvm.str());
+    std::ofstream llvm(ir,std::ios::binary); llvm.exceptions(std::ios::badbit|std::ios::failbit);
+    std::vector<std::unique_ptr<std::ofstream>> streams;
+    unit.modules.push_back(ir);
+    iop_codegen::emit_program(llvm,program,[&](std::size_t group)->std::ostream& {
+        const auto file=directory/("iop-code-"+std::to_string(group)+".ll");
+        auto stream=std::make_unique<std::ofstream>(file,std::ios::binary);
+        stream->exceptions(std::ios::badbit|std::ios::failbit);
+        unit.modules.push_back(file); streams.push_back(std::move(stream)); return *streams.back();
+    });
+    llvm.close(); for (auto& stream:streams) stream->close();
+    std::string manifest;
+    for (const auto& file:unit.modules) manifest+=file.filename().string()+'\n';
+    write_text(directory/"llvm-modules.txt",manifest);
     write_text(directory/"source.txt",unit.id);
     write_text(directory/"conversion.txt",
         "AnyPS2 IOP module LLVM inventory\n"
@@ -190,13 +196,9 @@ void emit_iop(Accumulator& accumulator,Unit& unit,const iop_codegen::ir::Program
         "Analysis base "+hex32(unit.analysis_base)+" is an inventory placement, not a disc address.\n");
     unit.artifact=ir;
     unit.stage=Stage::llvm_generated;
-    if (!compile) return;
-    std::string error;
-    const auto object=directory/"generated.obj";
-    if (compile_object(ir,object,error)) unit.stage=Stage::machine_compiled;
-    else unit.detail+=unit.detail.empty() ? error : "; "+error;
+
 }
-void convert_iop_group(Accumulator& accumulator,const std::string& owner,std::vector<std::pair<std::string,elf::IopModule>> modules,const std::filesystem::path& output,bool compile) {
+void convert_iop_group(Accumulator& accumulator,const std::string& owner,std::vector<std::pair<std::string,elf::IopModule>> modules,const std::filesystem::path& output,bool generate) {
     std::vector<elf::IopModule> loaded;
     std::vector<std::string> names;
     loaded.reserve(modules.size());
@@ -208,6 +210,9 @@ void convert_iop_group(Accumulator& accumulator,const std::string& owner,std::ve
     std::string bundle_error;
     try { diagnosed=iop_codegen::ir::diagnose_bundle(loaded); }
     catch (const std::exception& error) { bundle_error=error.what(); }
+    std::vector<std::string> sources;
+    for (const auto& name:names) sources.push_back(owner+"/"+name);
+    record_iop_calls(accumulator.inventory,loaded,sources,diagnosed);
     if (!bundle_error.empty()) {
         accumulator.gap("iop-analysis",bundle_error.substr(0,180),1,0,owner);
         for (std::size_t index=0;index<loaded.size();++index) {
@@ -252,9 +257,9 @@ void convert_iop_group(Accumulator& accumulator,const std::string& owner,std::ve
             if (!unit.detail.empty()) unit.detail+="; ";
             unit.detail+="ROMDRV 2.x six-entry ABI matches the native archive replacement";
         }
-        if (diagnosis.convertible()) {
+        if (generate && diagnosis.convertible()) {
             try {
-                emit_iop(accumulator,unit,diagnosis.program,output/"iop"/identity_directory(owner)/identity_directory(names[index]),compile);
+                emit_iop(unit,diagnosis.program,output/"iop"/identity_directory(owner)/identity_directory(names[index]));
             } catch (const std::exception& error) {
                 if (!unit.detail.empty()) unit.detail+="; ";
                 unit.detail+=error.what();
@@ -263,10 +268,10 @@ void convert_iop_group(Accumulator& accumulator,const std::string& owner,std::ve
         accumulator.inventory.units.push_back(std::move(unit));
     }
 }
-void record_ee(Accumulator& accumulator,const std::string& id,ByteView bytes,const std::filesystem::path& output,const std::vector<ee_codegen::PayloadMapping>& payloads,bool compile,bool boot) {
+void record_ee(Accumulator& accumulator,const std::string& id,ByteView bytes,const std::filesystem::path& output,const std::vector<ee_codegen::PayloadMapping>& payloads,bool boot,bool packed=false,bool generate=true) {
     Unit unit;
     unit.id=id;
-    unit.kind=boot?"ee-boot":"ee-elf";
+    unit.kind=boot?"ee-boot":packed?"ee-packed":"ee-elf";
     try {
         const auto executable=elf::parse(bytes);
         (void)executable;
@@ -299,6 +304,12 @@ void record_ee(Accumulator& accumulator,const std::string& id,ByteView bytes,con
             "Compiled indirect sites stop at runtime when the destination was not discovered.");
     if (assessment.unknown_syscall_sites)
         accumulator.gap("ee-syscall","number encoding was not a recognized immediate",assessment.unknown_syscall_sites,0,id);
+    if (assessment.unknown_syscall_sites) {
+        LibraryCall call;
+        call.domain="ee"; call.library="kernel"; call.source=id;
+        call.sites=assessment.unknown_syscall_sites;
+        accumulator.inventory.calls.push_back(std::move(call));
+    }
     if (assessment.address_space_requests)
         accumulator.gap("ee-native-memory","conversion-time native memory lowering required",
             assessment.address_space_requests,assessment.first_address_space_request,id,
@@ -307,6 +318,11 @@ void record_ee(Accumulator& accumulator,const std::string& id,ByteView bytes,con
     for (const auto& [number,count]:assessment.known_syscalls) {
         std::ostringstream key;
         const auto registered=std::find(assessment.registered_calls.begin(),assessment.registered_calls.end(),number)!=assessment.registered_calls.end();
+        LibraryCall call;
+        call.domain="ee"; call.library="kernel"; call.source=id; call.selector=number; call.sites=count;
+        call.binding=registered ? CallBinding::registered_handler :
+            ee::startup_syscall(number) ? CallBinding::native_dispatch : CallBinding::unresolved;
+        accumulator.inventory.calls.push_back(std::move(call));
         key<<hex32(number)<<(registered ? " registered-handler-candidate" :
             ee::startup_syscall(number) ? " native-dispatch" : " no-native-dispatch");
         accumulator.gap("ee-syscall",key.str(),count,number,id,
@@ -321,7 +337,7 @@ void record_ee(Accumulator& accumulator,const std::string& id,ByteView bytes,con
     if (assessment.rejection.omitted_constraints)
         accumulator.gap("ee-encoding","additional encoding constraints omitted",assessment.rejection.omitted_constraints,0,id);
     if (!assessment.convertible) unit.detail="reached code is not fully convertible";
-    if (assessment.convertible) {
+    if (generate && assessment.convertible) {
         try {
             const auto directory=output/"ee"/identity_directory(id);
             std::filesystem::create_directories(directory);
@@ -331,11 +347,10 @@ void record_ee(Accumulator& accumulator,const std::string& id,ByteView bytes,con
             write_text(project/"source.txt",unit.id);
             unit.artifact=project/"generated.ll";
             unit.stage=Stage::llvm_generated;
-            if (compile) {
-                std::string error;
-                if (compile_object(unit.artifact,project/"generated.obj",error)) unit.stage=Stage::machine_compiled;
-                else unit.detail=error;
-            }
+            std::ifstream manifest(project/"llvm-modules.txt");
+            std::string module;
+            while (std::getline(manifest,module)) if (!module.empty()) unit.modules.push_back(project/module);
+            if (unit.modules.empty()) throw std::runtime_error("Generated EE project has no LLVM modules");
         } catch (const std::exception& error) { unit.detail=error.what(); }
     }
     accumulator.inventory.units.push_back(std::move(unit));
@@ -378,7 +393,7 @@ void consider_file(Accumulator& accumulator,disc::Iso9660& disc,const disc::Entr
                 const auto leaf=slash==std::string::npos ? path : path.substr(slash+1);
                 std::vector<std::pair<std::string,elf::IopModule>> modules;
                 modules.emplace_back(stem(leaf),std::move(module));
-                convert_iop_group(accumulator,path,std::move(modules),output,options.compile);
+                convert_iop_group(accumulator,path,std::move(modules),output,options.generate);
             } catch (const std::exception& error) {
                 Unit unit; unit.id=path; unit.kind="iop-module"; unit.detail=error.what();
                 accumulator.gap("iop-parse",std::string(error.what()).substr(0,180),1,0,path);
@@ -387,7 +402,7 @@ void consider_file(Accumulator& accumulator,disc::Iso9660& disc,const disc::Entr
             return;
         }
         if (type==2) {
-            record_ee(accumulator,path,bytes,output,options.payloads,options.compile,boot_file);
+            record_ee(accumulator,path,bytes,output,options.payloads,boot_file,false,options.generate);
             return;
         }
         Unit unit; unit.id=path; unit.kind="elf-other"; unit.detail="ELF type "+std::to_string(type)+" is not an executable or IRX";
@@ -450,8 +465,20 @@ void consider_file(Accumulator& accumulator,disc::Iso9660& disc,const disc::Entr
                 accumulator.inventory.units.push_back(std::move(unit));
             }
         }
-        if (!modules.empty()) convert_iop_group(accumulator,path,std::move(modules),output,options.compile);
+        if (!modules.empty()) convert_iop_group(accumulator,path,std::move(modules),output,options.generate);
         return;
+    }
+    // Full container validation must precede code discovery. The opaque prefix
+    // and filename do not select behavior, and failed probes stay unrecognized.
+    if (entry.size<=executable_read_limit && header.size()>=6 &&
+        le32(header,2)>=24 && le32(header,2)<=executable_read_limit) {
+        Bytes unpacked;
+        try { unpacked=package::elf_image(package::unpack(disc.read(entry,executable_read_limit))); }
+        catch (const std::exception&) { /* Not a recognized executable container. */ }
+        if (!unpacked.empty()) {
+            record_ee(accumulator,path,unpacked,output,{},boot_file,true,options.generate);
+            return;
+        }
     }
     if (accumulator.unrecognized>=unrecognized_unit_limit) {
         ++accumulator.unrecognized;
@@ -503,6 +530,8 @@ std::string stage_name(Stage stage) {
 }
 }
 Inventory convert_disc(const std::filesystem::path& image,const Options& options) {
+    const auto started=std::chrono::steady_clock::now();
+    if (options.jobs>64) throw std::invalid_argument("Compile jobs must not exceed 64");
     if (options.output.empty()) throw std::runtime_error("Inventory output directory is required");
     if (std::filesystem::exists(options.output)) throw std::runtime_error("Inventory output directory already exists");
     std::filesystem::create_directories(options.output);
@@ -510,7 +539,7 @@ Inventory convert_disc(const std::filesystem::path& image,const Options& options
     Accumulator accumulator;
     accumulator.inventory.volume=disc.volume();
     accumulator.limit("Static discovery does not recover dynamically loaded, encrypted, transformed or indirectly addressed code.");
-    accumulator.limit("Unrecognized files and non-ELF archive members are not decoded as instructions.");
+    accumulator.limit("Unrecognized files and non-ELF archive members are not decoded as instructions. Bounded packed-image candidates require full container validation.");
     accumulator.limit("VU microprograms are recovered only from a framed upload packet. This disc walk does not scan data for VU instructions.");
     accumulator.limit("Linked and executed coverage are not produced. A machine-code object was not linked or run.");
     accumulator.limit("An export that matches a native service library is still converted when the module itself converts. The object is not linked.");
@@ -527,6 +556,10 @@ Inventory convert_disc(const std::filesystem::path& image,const Options& options
         accumulator.limit(std::to_string(accumulator.unrecognized-unrecognized_unit_limit)+
             " additional unrecognized files were counted only in the undiscovered group.");
     accumulator.finish();
+    accumulator.inventory.generation_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
+    compile_inventory(accumulator.inventory,options);
+    write_build_plan(accumulator.inventory,options.output);
+    write_call_reports(accumulator.inventory,options.output);
     return std::move(accumulator.inventory);
 }
 std::string format_report(const Inventory& inventory) {
@@ -540,6 +573,7 @@ std::string format_report(const Inventory& inventory) {
           <<"discovered="<<counts[0]<<" parsed="<<counts[1]<<" analyzed="<<counts[2]
           <<" llvm_generated="<<counts[3]<<" machine_compiled="<<counts[4]
           <<" linked=0 executed=0\n"
+          <<"generation_seconds="<<inventory.generation_seconds<<" compilation_seconds="<<inventory.compilation_seconds<<" jobs="<<inventory.jobs<<'\n'
           <<"Stage counts are cumulative. A compiled unit is also counted in every earlier stage.\n\nLimits:\n";
     for (const auto& limit:inventory.limits) report<<"- "<<limit<<'\n';
     report<<"\nUnits:\n";
@@ -550,7 +584,7 @@ std::string format_report(const Inventory& inventory) {
         if (unit.overlaps_native_service) report<<" native_service_overlap=1";
         if (unit.native_replacement) report<<" native_replacement=1";
         if (!unit.detail.empty()) report<<" detail="<<unit.detail;
-        if (!unit.artifact.empty()) report<<" artifact="<<unit.artifact.generic_string();
+        if (!unit.artifact.empty()) report<<" objects="<<unit.compiled_objects<<'/'<<unit.modules.size()<<" artifact="<<unit.artifact.generic_string();
         report<<'\n';
     }
     report<<"\nMissing behavior by subsystem:\n";

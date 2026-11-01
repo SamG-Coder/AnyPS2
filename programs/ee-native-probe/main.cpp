@@ -66,10 +66,16 @@ struct NativeGpu {
     std::unique_ptr<nt::graphics::VulkanRenderer> renderer;
     nt::graphics::NativeDrawing drawing;
     std::string error;
+    std::chrono::steady_clock::duration render_time{};
     static bool submit(void* raw,std::span<const nt::graphics::NativeDrawing::Packet> packets) {
         auto& self=*static_cast<NativeGpu*>(raw);
-        if (synchronize(raw)!=nt::ee::Stop::budget) return false;
-        try { self.drawing.submit(*self.renderer,packets); return true; }
+        const auto began=std::chrono::steady_clock::now();
+        try {
+            if (!self.renderer) self.renderer=std::make_unique<nt::graphics::VulkanRenderer>();
+            self.drawing.submit(*self.renderer,packets);
+            self.render_time+=std::chrono::steady_clock::now()-began;
+            return true;
+        }
         catch (const std::exception& error) { self.error=error.what(); return false; }
     }
     static nt::ee::Stop synchronize(void* context) {
@@ -309,6 +315,15 @@ int main(int argc,char** argv) {
             return false;
         };
         const auto stop=nt::ee::run(execute,state,memory,budget,services);
+        const auto execution_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
+        std::cout<<"execution_seconds="<<execution_seconds
+                 <<" render_seconds="<<std::chrono::duration<double>(gpu.render_time).count();
+        if (gpu.renderer) {
+            const auto& statistics=gpu.renderer->statistics();
+            std::cout<<" gpu_submissions="<<statistics.submissions<<" gpu_sprites="<<statistics.sprites
+                     <<" gpu_upload_bytes="<<statistics.upload_bytes<<" gpu_readback_bytes="<<statistics.readback_bytes;
+        }
+        std::cout<<'\n';
         if (timed_out || window_closed)
             std::cout<<"host_stop="<<(timed_out ? "diagnostic-deadline" : "window-closed")<<'\n';
         if (const auto thread=services.current_thread())
@@ -349,6 +364,7 @@ int main(int argc,char** argv) {
                      <<" native_usb_devices="<<iop_reset->usb().device_count()
                      <<" native_usb_drivers="<<iop_reset->usb().driver_count()
                      <<" native_usb_error="<<iop_reset->usb().error()
+                     <<" native_dev9_unavailable="<<iop_reset->dev9().unavailable_initializations()
                      <<" native_audio_error="<<iop_reset->audio().error()<<'\n';
             if (const auto& transfer=iop_reset->rejected_transfer())
                 std::cout<<"sif_rejected_descriptor="<<transfer->index

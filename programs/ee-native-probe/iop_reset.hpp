@@ -68,6 +68,7 @@ public:
     bool cdvd_initialized() const { return state_->cdvd && state_->cdvd->initialized(); }
     const nt::iop::NativeSerialServices& serial() const { return state_->services->serial(); }
     const nt::iop::NativeUsbServices& usb() const { return state_->services->usb; }
+    const nt::iop::NativeDev9Services& dev9() const { return state_->services->dev9; }
     const nt::audio::Output& audio() const { return *state_->services->audio_output; }
     const auto& rejected_transfer() const { return state_->services->sif.rejected_transfer(); }
     std::uint32_t cdvd_command() const { return state_->scmd ? state_->scmd->last_method() : 0; }
@@ -137,6 +138,8 @@ private:
         next->incoming=std::make_unique<nt::ee::NativeIopCommands>(next->services->sif_control,next->services->inbound);
         if (!disc.empty()) {
             next->cdvd=std::make_unique<nt::ee::NativeCdvdInitRpc>(disc,0x1ee000,0x1ee010);
+            auto* session=next->cdvd.get();
+            next->services->cdvdman.attach([session] { return session->volume(); },[session] { return session->media_mode(); });
             next->scmd=std::make_unique<nt::ee::NativeCdvdScmdRpc>(*next->cdvd,0x1ed000,0x1ed010);
             next->ready=std::make_unique<nt::ee::NativeCdvdReadyRpc>(*next->cdvd,0x8000059AU,0x1ef000,0x1ef010);
             next->ready_alternate=std::make_unique<nt::ee::NativeCdvdReadyRpc>(*next->cdvd,0x8000059CU,0x1ef800,0x1ef810);

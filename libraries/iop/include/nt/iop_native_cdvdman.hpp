@@ -1,15 +1,23 @@
 #pragma once
 #include <nt/iop_native_services.hpp>
 #include <nt/iop_native_code.hpp>
+#include <nt/iop_native_callbacks.hpp>
+#include <nt/iso9660.hpp>
+#include <algorithm>
 #include <chrono>
 #include <functional>
 
 namespace nt::iop {
-// Ordinal 24 writes the eight-byte sceCdCLOCK from the host clock in Japan
-// standard time. Every other cdvdman ordinal stays unsupported.
-class NativeCdvdmanServices final : public NativeServices {
+// Native ISO reads share the initialized EE disc session. File I/O completes
+// before buffers are published; its compiled callback runs on the existing
+// interrupt owner. No optical timing or DMA register model is required.
+class NativeCdvdmanServices final : public NativeServices,public NativeCallbackSource {
 public:
     using Clock=std::function<std::chrono::sys_seconds()>;
+    using Volume=std::function<disc::Iso9660*()>;
+    void attach(Volume volume,std::function<std::uint32_t()> media) {
+        volume_=std::move(volume); media_=std::move(media);
+    }
     explicit NativeCdvdmanServices(Clock clock={}) : clock_(std::move(clock)) {
         if (!clock_) clock_=[] {
             return std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
@@ -20,7 +28,7 @@ public:
         // Console-specific iLink identity has no native PC provider. Binding
         // this known ABI lets unrelated compiled paths remain executable.
         if (request.selector==22) return {NativeServiceStatus::unavailable};
-        if (request.selector!=24) return {};
+        if (request.selector!=24) return disc_call(request,ram);
         const auto pointer=request.arguments[0];
         const auto checked=output(ram,pointer,8);
         if (checked.status!=NativeServiceStatus::returned) return checked;
@@ -45,7 +53,98 @@ public:
         for (unsigned index=0;index<8;++index) ram[offset+index]=bytes[index];
         return {NativeServiceStatus::returned,1};
     }
+    std::optional<NativeCallback> take() override {
+        if (active_ || !pending_) return {};
+        auto result=pending_; pending_.reset(); active_=true; return result;
+    }
+    void finish(std::uint32_t) override { active_=false; }
 private:
+    NativeServiceReply disc_call(const NativeServiceRequest& request,std::span<std::uint8_t> ram) {
+        if (!volume_ || !media_) return {};
+        const auto returned=[](std::uint32_t value) { return NativeServiceReply{NativeServiceStatus::returned,value}; };
+        auto* volume=volume_();
+        const auto& args=request.arguments;
+        switch (request.selector) {
+        case 6: return read(request,ram,volume);
+        case 8: return returned(error_);
+        case 11:
+            // All accepted native reads have already completed. The callback
+            // may remain queued, independently of storage completion.
+            if (args[0]>4 || args[0]==2) return {};
+            return returned(0);
+        case 12:
+            if (!volume) return returned(0);
+            if (media_()==1) return returned(0x12);
+            if (media_()==2) return returned(0x14);
+            return {};
+        case 13:
+            if (args[0]==8) return returned(volume ? 0x40U : 1U);
+            if (args[0]>1) return {};
+            return returned(volume ? 2U : 6U);
+        case 14: {
+            // The mounted ISO has no ejectable tray and cannot be swapped by
+            // this API. Querying it reports zero media changes, not a fake eject.
+            if (args[0]!=2) return {};
+            const auto checked=output(ram,args[1],4);
+            if (checked.status!=NativeServiceStatus::returned) return checked;
+            store_native_word(ram,*ram_offset(args[1],4,ram.size()),0);
+            return returned(1);
+        }
+        case 28: return returned(volume ? 0x0aU : 0U);
+        case 37: {
+            if (pending_) return returned(0);
+            if (args[0]) {
+                const auto target=ram_offset(args[0],4,ram.size());
+                if (!target || !nt_iop_native_instruction(*target)) return {NativeServiceStatus::unmapped_code,0,args[0]};
+            }
+            const auto previous=callback_; callback_=args[0]; return returned(previous);
+        }
+        case 39:
+            error_=1;
+            pending_.reset();
+            if (callback_) pending_=NativeCallback{callback_,8,{}};
+            return returned(1);
+        case 83: {
+            for (unsigned i=0;i<2;++i) {
+                const auto checked=output(ram,args[i],4);
+                if (checked.status!=NativeServiceStatus::returned) return checked;
+            }
+            if (!volume) return returned(0);
+            std::uint32_t layer=0;
+            try { layer=volume->appended_volume_start(); }
+            catch (const std::runtime_error&) { return {}; }
+            store_native_word(ram,*ram_offset(args[0],4,ram.size()),layer!=0);
+            store_native_word(ram,*ram_offset(args[1],4,ram.size()),layer);
+            return returned(1);
+        }
+        default: return {};
+        }
+    }
+    NativeServiceReply read(const NativeServiceRequest& request,std::span<std::uint8_t> ram,disc::Iso9660* volume) {
+        const auto& args=request.arguments;
+        if (pending_) return {NativeServiceStatus::returned,0};
+        const auto mode=ram_offset(args[3],1,ram.size());
+        if (!mode || 4>ram.size()-*mode || 4>0x200000-*mode)
+            return {NativeServiceStatus::address_fault,0,args[3]};
+        // Sector images contain only 2048-byte user sectors. Other patterns
+        // require data that is not present and remain explicit boundaries.
+        if (ram[*mode+2]!=0 || ram[*mode+1]>6) return {};
+        if (!volume) { error_=0x12; return {NativeServiceStatus::returned,0}; }
+        if (!args[1] || args[1]>0x200000/2048) { error_=0x21; return {NativeServiceStatus::returned,0}; }
+        const auto bytes=args[1]*2048;
+        const auto checked=output(ram,args[2],bytes);
+        if (checked.status!=NativeServiceStatus::returned) return checked;
+        if (args[0]>volume->sector_count() || args[1]>volume->sector_count()-args[0]) {
+            error_=0x20; return {NativeServiceStatus::returned,0};
+        }
+        try {
+            const auto data=volume->read_sectors(args[0],args[1]);
+            std::copy(data.begin(),data.end(),ram.begin()+*ram_offset(args[2],4,ram.size()));
+            error_=0;
+        } catch (const std::runtime_error&) { error_=0x30; }
+        if (callback_) pending_=NativeCallback{callback_,1,{}};
+        return {NativeServiceStatus::returned,1};
+    }
     static NativeServiceReply output(std::span<std::uint8_t> ram,std::uint32_t pointer,std::uint32_t size) {
         const auto offset=ram_offset(pointer,4,ram.size());
         if (!offset || size>ram.size()-*offset || size>0x200000-*offset) return {NativeServiceStatus::address_fault,0,pointer};
@@ -54,5 +153,10 @@ private:
         return {NativeServiceStatus::returned};
     }
     Clock clock_;
+    Volume volume_;
+    std::function<std::uint32_t()> media_;
+    std::uint32_t callback_=0,error_=0;
+    std::optional<NativeCallback> pending_;
+    bool active_=false;
 };
 }

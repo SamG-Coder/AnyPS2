@@ -46,7 +46,8 @@ public:
     // Split a span out of one free block so mode 0 and mode 1 skip it. Mode 2
     // at this exact address and rounded size marks it allocated. Overlap with
     // an allocated, reserved, or held block returns false and leaves the map
-    // unchanged. Ordinary free-block allocation is unchanged.
+    // unchanged. A claimed image returns to held storage on release: its AOT
+    // addresses still identify immutable compiled code after module unload.
     bool hold(std::uint32_t address,std::uint32_t size) {
         if (!size || size>memory_size_ || (address&(alignment_-1)) || address>=memory_size_) return false;
         size=(size+alignment_-1)&~(alignment_-1);
@@ -67,7 +68,7 @@ public:
         return true;
     }
 private:
-    enum class State { free, allocated, reserved, held };
+    enum class State { free, allocated, reserved, held, claimed_image };
     struct Block { std::uint32_t size; State state; };
     std::uint32_t memory_size_,alignment_;
     std::map<std::uint32_t,Block> blocks_;
@@ -79,7 +80,7 @@ private:
             const auto held=blocks_.find(requested);
             if (held!=blocks_.end() && held->second.state==State::held) {
                 if (held->second.size!=size) return 0;
-                held->second.state=State::allocated;
+                held->second.state=State::claimed_image;
                 return requested;
             }
         }
@@ -109,6 +110,10 @@ private:
     }
     std::uint32_t release(std::uint32_t address) {
         auto it=blocks_.find(address);
+        if (it!=blocks_.end() && it->second.state==State::claimed_image) {
+            it->second.state=State::held;
+            return 0;
+        }
         if (it==blocks_.end() || it->second.state!=State::allocated) return 0xffffffff;
         it->second.state=State::free;
         const auto next=std::next(it);

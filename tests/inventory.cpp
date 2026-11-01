@@ -84,6 +84,11 @@ std::string read_text(const std::filesystem::path& path) {
     check(static_cast<bool>(input),"artifact file missing");
     return std::string(std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>());
 }
+std::string read_ir(const nt::inventory::Unit& unit) {
+    std::string text;
+    for (const auto& module:unit.modules) text+=read_text(module);
+    return text;
+}
 nt::Bytes module_with(std::uint32_t instruction) {
     const auto image=fixture::memory_bootstrap_image();
     nt::Bytes module(image.begin()+80,image.end());
@@ -91,8 +96,25 @@ nt::Bytes module_with(std::uint32_t instruction) {
     return module;
 }
 }
-int main() {
+int main(int argc,char** argv) {
     try {
+        if ((argc==3 || argc==4) && std::string_view(argv[1])=="--emit-fixture") {
+            auto boot=make_elf(); boot.resize(268);
+            put32(boot,68,12); put32(boot,72,12);
+            put32(boot,256,0x2402002b); put32(boot,260,0x2403007b); put32(boot,264,12);
+            const std::string cnf="BOOT2 = cdrom0:\\BOOT.ELF;1\n";
+            std::vector<std::pair<std::string,nt::Bytes>> files{
+                {"SYSTEM.CNF;1",nt::Bytes(cnf.begin(),cnf.end())},{"BOOT.ELF;1",boot},
+                {"MODULE.IMG;1",archive_of({{"FIRST",module_with(0x24020007)},{"SECOND",module_with(0x24020009)}})}
+            };
+            if (argc==4) {
+                auto packed=nt::read_file(argv[3],65536);
+                files.emplace_back("SECONDARY.BIN;1",packed);
+                packed.pop_back(); files.emplace_back("TRUNCATED.BIN;1",std::move(packed));
+            }
+            nt::write_file(argv[2],iso_with(files));
+            return 0;
+        }
         {
             auto bytes=make_elf(); bytes.resize(320);
             put32(bytes,68,64); put32(bytes,72,64);
@@ -138,6 +160,59 @@ int main() {
         options.output=root/"out";
         options.compile=false;
         const auto inventory=nt::inventory::convert_disc(disc,options);
+        check(std::filesystem::exists(options.output/"library-calls.json"),"Call inventory was not emitted");
+        {
+            auto audit_options=options;
+            audit_options.output=root/"audit"; audit_options.generate=false;
+            const auto audit=nt::inventory::convert_disc(disc,audit_options);
+            check(audit.calls.size()==inventory.calls.size(),"Analysis-only mode lost library calls");
+            check(std::all_of(audit.units.begin(),audit.units.end(),[](const auto& unit) {
+                return unit.modules.empty() && unit.stage<=nt::inventory::Stage::analyzed;
+            }),"Analysis-only mode generated code");
+        }
+        {
+            using namespace nt::inventory;
+            const auto client=[](std::string_view library,std::uint16_t version,std::initializer_list<std::uint16_t> ordinals) {
+                nt::elf::IopModule module{0x1000,0x1180,nt::Bytes(512),512,{}};
+                put32(module.memory,0,0x41e00000); put32(module.memory,8,version);
+                std::copy(library.begin(),library.end(),module.memory.begin()+12);
+                unsigned at=20;
+                for (const auto ordinal:ordinals) {
+                    put32(module.memory,at,0x03e00008); put32(module.memory,at+4,0x24000000|ordinal); at+=8;
+                }
+                put32(module.memory,0x180,0x03e00008);
+                return module;
+            };
+            auto native=client("sysclib",0x104,{12,11,65535});
+            auto imported=client("sample",0x101,{0});
+            auto provider=client("unused",0x101,{});
+            put32(provider.memory,0x80,0x41c00000); put32(provider.memory,0x88,0x102);
+            const std::string sample="sample";
+            std::copy(sample.begin(),sample.end(),provider.memory.begin()+0x8c);
+            put32(provider.memory,0x94,0x1180);
+            auto incompatible=provider; put32(incompatible.memory,0x88,0x201);
+            const std::vector modules{native,imported,provider,incompatible};
+            const std::vector<std::string> sources{"client|quoted\".irx","caller.irx","provider.irx","incompatible.irx"};
+            Inventory calls;
+            record_iop_calls(calls,modules,sources,{});
+            check(calls.calls.size()==4,"Call inventory lost declared or unresolved imports");
+            check(calls.calls[0].binding==CallBinding::intrinsic && !calls.calls[0].reached,
+                "Unreached intrinsic import was missing or falsely marked executed");
+            check(calls.calls[2].binding==CallBinding::unresolved,"Unknown ordinal was assigned a native provider");
+            check(calls.calls[3].binding==CallBinding::compiled_export && calls.calls[3].providers.size()==1 &&
+                calls.calls[3].providers[0].source=="provider.irx" && !calls.calls[3].providers[0].convertible,
+                "Export discovery accepted an incompatible version or claimed compilation");
+            auto unknown=calls.calls[0]; unknown.domain="ee"; unknown.library="kernel";
+            unknown.version=0; unknown.binding=CallBinding::unknown; unknown.address.reset(); calls.calls.push_back(unknown);
+            write_call_reports(calls,root);
+            const auto json=read_text(root/"library-calls.json");
+            const auto markdown=read_text(root/"library-calls.md");
+            check(json.find("\"name\":\"memcpy\"")!=json.npos && json.find("\"selector\":65535")!=json.npos &&
+                json.find("\"selector\":null")!=json.npos && json.find("\"runtime_verified\":false")!=json.npos &&
+                json.find("client|quoted\\\".irx")!=json.npos,"Call report lost names, unknowns or source escaping");
+            check(markdown.find("llvm.memcpy")!=markdown.npos && markdown.find("No provider is automatically installed")!=markdown.npos,
+                "Native mapping report lost its compatibility boundary");
+        }
         const auto text=nt::inventory::format_report(inventory);
         check(text.find("linked=0")!=std::string::npos && text.find("executed=0")!=std::string::npos,
             "Inventory claimed link or execution coverage");
@@ -168,7 +243,7 @@ int main() {
             if (!unit || unit->stage!=nt::inventory::Stage::llvm_generated)
                 throw std::runtime_error(std::string("Colliding source was not converted on its own: ")+std::string(id)+
                     (unit ? " stage="+std::to_string(static_cast<int>(unit->stage))+" "+unit->detail : " missing"));
-            const auto ir_text=read_text(unit->artifact);
+            const auto ir_text=read_ir(*unit);
             const auto marker=std::string("add i32 0, ")+immediate+"\n";
             check(ir_text.find(marker)!=std::string::npos,"Converted module lost its own instruction");
             check(read_text(unit->artifact.parent_path()/"source.txt")==unit->id,"Artifact provenance does not match the source");
@@ -202,12 +277,29 @@ int main() {
             "Case-only member names shared an artifact directory");
         check(identity_is_lower(lower_case->artifact) && identity_is_lower(upper_case->artifact),
             "Case-distinct artifact identity is not lowercase");
-        check(read_text(lower_case->artifact).find("add i32 0, 23\n")==std::string::npos,
+        check(read_ir(*lower_case).find("add i32 0, 23\n")==std::string::npos,
             "Lowercase member artifact contains the uppercase module");
-        check(read_text(upper_case->artifact).find("add i32 0, 21\n")==std::string::npos,
+        check(read_ir(*upper_case).find("add i32 0, 21\n")==std::string::npos,
             "Uppercase member artifact contains the lowercase module");
-        check(read_text(dotted->artifact).find("add i32 0, 9\n")==std::string::npos,"Sanitized member artifact contains the other module");
-        check(read_text(first_long->artifact).find("add i32 0, 19\n")==std::string::npos,"Long-prefix artifact contains the other module");
+        check(read_ir(*dotted).find("add i32 0, 9\n")==std::string::npos,"Sanitized member artifact contains the other module");
+        check(read_ir(*first_long).find("add i32 0, 19\n")==std::string::npos,"Long-prefix artifact contains the other module");
+#ifdef ANYPS2_TEST_CLANG
+        // One failed object must not hide a supported sibling, and a partially
+        // compiled unit must never receive machine-compiled status.
+        nt::inventory::Inventory batch;
+        batch.units={*good_module,*dotted};
+        const auto malformed=root/"malformed.ll";
+        { std::ofstream file(malformed); file<<"invalid LLVM input\n"; }
+        batch.units[0].modules.push_back(malformed);
+        options.compile=true; options.compiler=ANYPS2_TEST_CLANG; options.jobs=2;
+        nt::inventory::compile_inventory(batch,options);
+        check(batch.units[0].stage==nt::inventory::Stage::llvm_generated &&
+            batch.units[0].compiled_objects+1==batch.units[0].modules.size(),"Partial object compilation was reported as complete");
+        check(batch.units[1].stage==nt::inventory::Stage::machine_compiled &&
+            batch.units[1].compiled_objects==batch.units[1].modules.size(),"A compiler failure prevented a supported sibling from compiling");
+        check(std::any_of(batch.gaps.begin(),batch.gaps.end(),[](const auto& gap) { return gap.subsystem=="llvm-compile"; }),
+            "Failed LLVM object was absent from the missing-work report");
+#endif
         bool refused=false;
         try { nt::inventory::convert_disc(disc,options); } catch (const std::exception&) { refused=true; }
         check(refused,"Existing inventory output was overwritten");

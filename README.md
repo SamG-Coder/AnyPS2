@@ -24,7 +24,7 @@ build artifacts for reproducibility; keep converted commercial content ignored.
 The standalone IOP converter is implemented for a bounded subset. EE/VU LLVM
 conversion and integration into game startup remain unfinished.
 **GT4 renders its opening warning through Vulkan, but has not reached the title screen or playable gameplay.**
-No performance improvement is claimed.
+Runtime performance is still experimental; compiler measurements and tuning are described in [batch conversion](docs/batch-conversion.md).
 
 ## Pipeline
 
@@ -74,6 +74,25 @@ Windows window; the renderer itself is a separate C++ library.
 Read the [usage and ownership disclaimer](DISCLAIMER.md) first. Use your own
 lawfully obtained game files and keep all output under ignored `work/`.
 Import and generation require new output directories.
+
+For an automatic batch conversion and build:
+
+```powershell
+.\build\Release\AnyPS2.exe convert 'C:\path\to\owned-game.iso' --jobs 4
+```
+
+This creates `work/owned-game-native/` by default. `SYSTEM.CNF` identifies the
+boot executable; recognized secondary EE/IOP modules become library targets.
+The generated build writes the executable to `bin/ps2-native.exe`, libraries to
+`libraries/`, and `build-plan.json` maps targets and missing operations/imports
+back to their sources. Only convertible targets are built. The plan does not
+invent implementations for missing services or establish complete game linkage.
+`library-calls.json` and `library-calls.md` list discovered imports and syscall
+candidates, current binding routes, and researched native-library mappings.
+Use `AnyPS2 inventory <disc.iso> <new-directory> --audit-only` to produce the
+call map without generating or compiling game code.
+See [batch conversion and LLVM tuning](docs/batch-conversion.md) for explicit
+output paths, incremental rebuilds, compiler upgrades, and measurement limits.
 
 ```powershell
 .\build\Release\AnyPS2.exe import 'C:\path\to\owned-game.iso' work\game
@@ -517,6 +536,21 @@ completes the warning thread, uses statically compiled native memory aliases,
 hands off to the secondary executable image and completes a repeated native IOP
 reset. Further startup, service and control-flow gaps remain. The title screen
 and gameplay are not established.
+
+Consecutive sprite draws now share a Vulkan submission and graphics-store
+transfer. GPU work uses device-local storage with cached CPU staging; palette
+changes, image uploads and framebuffer-texture dependencies retain their order.
+The native probe reports execution/render time, submissions, sprites and transfer
+bytes separately. Presentation FPS is not a measurement of unique game frames.
+Native startup also handles absent expansion hardware, preserves compiled module
+reservations across failed starts, and shares ISO-backed CD/DVD reads and deferred
+compiled callbacks between EE and IOP services. Optical drive timing is not modeled.
+Native sound initialization now applies stereo master/voice gains, pitch and mixer
+routing to an XAudio2 graph, clears bounded effect workspaces and validates callback
+registrations against compiled targets. GT4 passes this initialization and next
+requests a module absent from the current AOT bundle. Sample playback, volume
+sweeps, active reverb and sound-completion dispatch are not established by this
+milestone; unsupported operations stop explicitly.
 
 Scalar, V2, masked V3 and V4 uploads in 32-, 16- and 8-bit formats,
 plus packed V4-5 data, can populate

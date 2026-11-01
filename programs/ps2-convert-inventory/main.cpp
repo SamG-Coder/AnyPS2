@@ -1,4 +1,5 @@
 #include <nt/inventory.hpp>
+#include <nt/process.hpp>
 #include <charconv>
 #include <fstream>
 #include <iostream>
@@ -34,23 +35,41 @@ std::vector<nt::ee_codegen::PayloadMapping> load_payloads(const std::filesystem:
 }
 }
 int main(int argc,char** argv) {
-    if (argc<3) {
-        std::cerr<<"Usage: ps2-convert-inventory <disc.iso> <new-output-directory> [--payloads mapping-file] [--no-compile]\n"
+    if (argc<2 || std::string_view(argv[1])=="--help") {
+        std::cerr<<"Usage: ps2-convert-inventory <disc.iso> [new-output-directory] [--payloads mapping-file] [--no-compile] [--audit-only] [--jobs N] [--compiler path] [--build] [--source-root path]\n"
                    "Inventories recognizable EE, IOP and archive members, converts each independently,\n"
-                   "and writes report.txt. Unrecognized bytes are not decoded. Nothing is linked or executed.\n";
-        return 2;
+                   "and writes report.txt, library-calls.json/.md, build-plan.json and a CMake library/executable plan.\n"
+                   "--audit-only collects calls and coverage without generating or compiling game code.\n"
+                   "--build also links convertible targets. Unrecognized bytes are not decoded; no game is executed.\n";
+        return argc<2 ? 2 : 0;
     }
     try {
         nt::inventory::Options options;
-        options.output=argv[2];
-        for (int index=3;index<argc;++index) {
+        options.output=std::filesystem::path("work")/(std::filesystem::path(argv[1]).stem().string()+"-native");
+        int first=2;
+        if (argc>2 && !std::string_view(argv[2]).starts_with("--")) options.output=argv[first++];
+        bool build=false;
+        std::filesystem::path source_root=ANYPS2_SOURCE_ROOT;
+        for (int index=first;index<argc;++index) {
             const std::string_view argument=argv[index];
             if (argument=="--no-compile") options.compile=false;
+            else if (argument=="--audit-only") { options.generate=false; options.compile=false; }
+            else if (argument=="--build") build=true;
+            else if (argument=="--jobs" || argument=="--compiler" || argument=="--source-root") {
+                if (index+1==argc) throw std::runtime_error("Expected option value");
+                const std::string value=argv[++index];
+                if (argument=="--jobs") { options.jobs=number(value); if (!options.jobs || options.jobs>64) throw std::runtime_error("Jobs must be between 1 and 64"); }
+                else if (argument=="--compiler") options.compiler=value;
+                else source_root=value;
+            }
             else if (argument=="--payloads") {
                 if (index+1==argc) throw std::runtime_error("Expected a payload mapping file");
                 options.payloads=load_payloads(argv[++index]);
             } else throw std::runtime_error("Unknown inventory option");
         }
+        // The generated build compiles its own objects; avoid compiling twice.
+        if (build && !options.generate) throw std::runtime_error("--audit-only cannot be combined with --build");
+        if (build) options.compile=false;
         const auto inventory=nt::inventory::convert_disc(argv[1],options);
         const auto text=nt::inventory::format_report(inventory);
         const auto report=options.output/"report.txt";
@@ -66,6 +85,24 @@ int main(int argc,char** argv) {
                  <<"\nunits="<<inventory.units.size()<<" llvm_generated="<<generated
                  <<" machine_compiled="<<compiled<<" grouped_gaps="<<inventory.gaps.size()
                  <<"\nLinked and executed coverage were not produced. This is not a game boot.\n";
+        if (build) {
+            const auto build_dir=options.output/"build";
+            std::vector<std::string> configure{"cmake","-S",options.output.string(),"-B",build_dir.string(),
+                "-DANYPS2_ROOT="+std::filesystem::absolute(source_root).generic_string()};
+            if (options.compiler!="clang") configure.push_back("-DANYPS2_CLANG="+options.compiler.generic_string());
+            auto status=nt::run_process(configure);
+            if (status) return status;
+            status=nt::run_process({"cmake","--build",build_dir.string(),"--config","Release","--parallel",std::to_string(inventory.jobs)});
+            if (status) return status;
+            std::ofstream receipt(options.output/"build-result.txt");
+            const bool executable=std::filesystem::exists(options.output/"bin"/"ps2-native.exe");
+            receipt<<"build_succeeded=true\nboot_executable="<<(executable ? "bin/ps2-native.exe" : "absent-conversion-blocked")
+                   <<"\nexecuted=false\nLibraries are independent units; complete runtime dependency binding is not implied.\n";
+            if (!receipt) throw std::runtime_error("Cannot record batch build result");
+            std::cout<<"Batch build completed. Outputs: "<<(options.output/"libraries").string()
+                     <<"; boot executable "<<(executable ? "built" : "blocked by conversion gaps")<<". Not executed.\n";
+            if (!executable) return 3;
+        }
         return 0;
     } catch (const std::exception& error) {
         std::cerr<<"ps2-convert-inventory: "<<error.what()<<'\n';

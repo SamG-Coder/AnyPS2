@@ -17,6 +17,7 @@ public:
     NativeArchiveServices(const NativeArchiveServices&)=delete;
     NativeArchiveServices& operator=(const NativeArchiveServices&)=delete;
     bool initialize() { if (active_) return false; active_=true; return true; }
+    bool initialized() const { return active_; }
     bool mount(unsigned unit,Bytes image) {
         if (!active_ || unit>=images_.size() || images_[unit]) return false;
         auto files=disc::parse_reboot_image(image);
