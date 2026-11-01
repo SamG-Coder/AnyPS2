@@ -36,6 +36,37 @@ public:
         Thread thread{state}; thread.entry=state.pc; thread.gp=state.registers[28];
         threads_.emplace(id,thread); ready_.push_back(id); return id;
     }
+    // Serialized foreground work uses a real scheduler continuation and stack,
+    // so a compiled callback may wait or call ordinary thread services safely.
+    NativeServiceReply post_callback(const void* owner,std::uint32_t address,
+                                     std::array<std::uint32_t,4> arguments,std::uint32_t gp,
+                                     std::span<std::uint8_t> ram) {
+        const auto entry=ram_offset(address,4,ram.size());
+        if (!entry || !nt_iop_native_instruction(*entry)) return {NativeServiceStatus::unmapped_code,0,address};
+        if (!owner || !heap_) return {NativeServiceStatus::unavailable};
+        const CallbackJob job{address,gp,arguments};
+        for (auto& [id,thread]:threads_) if (thread.callback_owner==owner) {
+            if (thread.jobs.size()>=1024) return {NativeServiceStatus::unavailable};
+            if (thread.status==Status::finished) {
+                ready_.push_back(id); begin_callback(thread,job);
+            } else thread.jobs.push_back(job);
+            return {NativeServiceStatus::returned};
+        }
+        if (threads_.size()>=4096 || next_id_>0x7fffffffU) return {NativeServiceStatus::unavailable};
+        constexpr std::uint32_t stack_size=0x1000;
+        const auto allocation=heap_->invoke({4,{1,stack_size},NativeServiceKind::sysmem},ram);
+        if (allocation.status!=NativeServiceStatus::returned || !allocation.value) return {NativeServiceStatus::unavailable};
+        const auto checked=writable(ram,allocation.value,stack_size);
+        if (checked.status!=NativeServiceStatus::returned) {
+            heap_->invoke({5,{allocation.value},NativeServiceKind::sysmem},ram); return checked;
+        }
+        Thread thread; thread.stack=allocation.value; thread.stack_size=stack_size; thread.callback_owner=owner;
+        begin_callback(thread,job);
+        try { threads_.emplace(next_id_,std::move(thread)); ready_.push_back(next_id_); }
+        catch (...) { threads_.erase(next_id_); heap_->invoke({5,{allocation.value},NativeServiceKind::sysmem},ram); throw; }
+        ++next_id_;
+        return {NativeServiceStatus::returned};
+    }
     bool contains(std::uint32_t id) const { return threads_.contains(id); }
     const Cpu& state(std::uint32_t id) const { return threads_.at(id).cpu; }
     const Cpu* active_state() const { return current_ ? &threads_.at(*current_).cpu : nullptr; }
@@ -226,7 +257,14 @@ public:
                 current_.reset(); continue;
             }
             if (stop.reason==NativeStop::unmapped_code && cpu.pc==thread_return && !cpu.delay_slot && !cpu.interrupt_depth) {
+                const auto id=*current_;
                 thread.status=Status::finished; current_.reset();
+                if (thread.callback_owner) {
+                    if (!thread.jobs.empty()) {
+                        ready_.push_back(id); begin_callback(thread,thread.jobs.front()); thread.jobs.pop_front();
+                    }
+                    continue;
+                }
                 // Report explicit completion to the caller before running another entry.
                 if (completion==CompletionPolicy::report) return stop;
                 continue;
@@ -362,6 +400,7 @@ private:
         return returned(static_cast<std::int32_t>(next_id_++));
     }
     enum class Status { ready, sleeping, waiting, delayed, finished };
+    struct CallbackJob { std::uint32_t address,gp; std::array<std::uint32_t,4> arguments; };
     struct Thread {
         Cpu cpu;
         std::chrono::steady_clock::time_point deadline{};
@@ -371,7 +410,17 @@ private:
         NativeWaitKind wait_kind=NativeWaitKind::event;
         std::uint32_t option=0,initial_priority=8,wait_id=0;
         bool exit_requested=false,delete_on_exit=false;
+        const void* callback_owner=nullptr;
+        std::deque<CallbackJob> jobs;
     };
+    static void begin_callback(Thread& thread,const CallbackJob& job) {
+        const auto executed=thread.cpu.executed;
+        thread.cpu=Cpu{}; thread.cpu.executed=executed; thread.cpu.pc=job.address;
+        std::copy(job.arguments.begin(),job.arguments.end(),thread.cpu.registers.begin()+4);
+        thread.cpu.registers[28]=job.gp; thread.cpu.registers[29]=thread.stack+thread.stack_size-16;
+        thread.cpu.registers[31]=thread_return; thread.entry=job.address; thread.gp=job.gp;
+        thread.status=Status::ready; thread.wakeups=0; thread.wait_id=0; thread.wait_owner=nullptr;
+    }
     NativeInterruptServices& interrupts_;
     NativeHeapServices* heap_;
     Clock clock_;

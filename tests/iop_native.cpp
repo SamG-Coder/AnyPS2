@@ -19,6 +19,7 @@
 #include <nt/iop_native_interrupts.hpp>
 #include <nt/iop_native_events.hpp>
 #include <nt/iop_native_semaphores.hpp>
+#include <nt/iop_native_fixed_pool.hpp>
 #include <nt/iop_native_mailboxes.hpp>
 #include <nt/iop_native_threads.hpp>
 #include <nt/iop_native_system.hpp>
@@ -94,16 +95,188 @@ public:
 class FixtureUsb final : public nt::usb::Host {
 public:
     bool available=false;
+    bool allow_read=true;
+    unsigned opened=0,closed=0,reads=0;
     std::vector<nt::usb::Device> devices{{L"synthetic-port",{18,1,0,2,0,0,0,64,0x34,0x12,0x78,0x56,0,1,0,0,0,1,
         9,2,9,0,0,1,0,0x80,50}}};
     bool scan(std::vector<nt::usb::Device>& result) override { if (!available) return false; result=devices; return true; }
     std::uint32_t error() const override { return available ? 0U : 5U; }
+    struct Control final : nt::usb::ControlPipe {
+        FixtureUsb& host;
+        explicit Control(FixtureUsb& value) : host(value) { ++host.opened; }
+        ~Control() override { ++host.closed; }
+        bool read_descriptor(std::uint16_t value,std::uint16_t index,std::uint16_t length,std::vector<std::uint8_t>& bytes) override {
+            ++host.reads;
+            if (!host.allow_read || value!=0x100 || index) return false;
+            const auto& source=host.devices.front().descriptors;
+            bytes.assign(source.begin(),source.begin()+std::min<unsigned>(length,18)); return true;
+        }
+        std::uint32_t error() const override { return host.allow_read ? 0 : 5; }
+        bool use_configuration(std::uint8_t configuration) override { return host.allow_read && configuration==1; }
+        bool use_interface(std::uint8_t number,std::uint8_t alternate) override { return host.allow_read && number==0 && alternate==0; }
+    };
+    std::unique_ptr<nt::usb::ControlPipe> open_control(const nt::usb::Device& device) override {
+        if (!available || devices.empty() || device!=devices.front()) return {};
+        return std::make_unique<Control>(*this);
+    }
 };
 
 }
 int main() {
     try {
         using namespace nt::iop;
+        {
+            std::vector<std::uint8_t> data(0x30000);
+            for (unsigned i=0;i<3;++i) store_native_word(data,0x26100+i*4,0x26060+i*8);
+            for (const auto index:{0U,1U,2U,3U,0xffffffffU}) {
+                auto cpu=initial(); cpu.pc=0x26000; cpu.registers[4]=index;
+                const auto result=run_native(nt_iop_generated_run,cpu,data,64);
+                check(result.reason==NativeStop::unmapped_code && cpu.pc==0x5000 &&
+                      cpu.registers[2]==(index<3 ? 17+2*index : 91),
+                      "Predecessor delay-slot table guard lost a case or accepted an out-of-range index");
+            }
+            store_native_word(data,0x26100,0x26110);
+            auto cpu=initial(); cpu.pc=0x26000; cpu.registers[4]=0;
+            const auto mutated=run_native(nt_iop_generated_run,cpu,data,64);
+            if (mutated.reason!=NativeStop::unmapped_code || cpu.pc!=0x26038)
+                throw std::runtime_error("Mutated edge-guarded table: stop="+std::to_string(static_cast<unsigned>(mutated.reason))+
+                    " pc="+std::to_string(cpu.pc)+" address="+std::to_string(mutated.address));
+        }
+        {
+            std::vector<std::uint8_t> data(0x30000);
+            NativeHeapServices heap(data.size(),0x20000,0x24000);
+            NativeInterruptServices interrupts(0x1f000);
+            NativeThreadServices threads(interrupts);
+            NativeFixedPoolServices pools(heap,&threads);
+            NativeServiceRouter services({&pools,&threads});
+            const auto call=[&](unsigned op,std::uint32_t a,std::uint32_t b=0,bool irq=false) {
+                auto cpu=initial(); cpu.pc=0x25014+(op<=9 ? op-4 : op-5)*8;
+                cpu.registers[4]=a; cpu.registers[5]=b; cpu.interrupt_depth=irq;
+                const auto result=run_native(nt_iop_generated_run,cpu,data,32,&services);
+                return std::pair{result,cpu.registers[2]};
+            };
+            store_native_word(data,0x18008,7); store_native_word(data,0x1800c,2);
+            const auto pool=call(4,0x18000).second;
+            const auto first=call(7,pool).second,second=call(8,pool,0,true).second;
+            check(pool>0 && first==0x20000 && second==first+8 && call(7,pool).second==std::uint32_t(-400),
+                  "Compiled fixed-pool allocation did not preserve stride or report exhaustion");
+            data[first]=0xa5;
+            check(call(9,pool,first+4).second==std::uint32_t(-426) && call(9,pool,first).second==0 &&
+                  call(9,pool,first).second==std::uint32_t(-426) && call(7,pool).second==first && data[first]==0xa5,
+                  "Fixed-pool ownership, reuse or payload preservation failed");
+            auto waiting=initial(); waiting.pc=0x25024; waiting.registers[4]=pool; waiting.registers[31]=0xfffffffc;
+            const auto one=threads.admit(waiting),two=threads.admit(waiting);
+            check(threads.run(nt_iop_generated_run,data,64,services).reason==NativeStop::thread_wait,
+                  "Exhausted fixed pool did not suspend native continuations");
+            store_native_word(data,0x18058,0x12345678);
+            check(call(11,pool,0x18040).second==0 && load_native_word(data,0x18050)==0 &&
+                  load_native_word(data,0x18054)==2 && load_native_word(data,0x18058)==0x12345678,
+                  "Fixed-pool status lost waiters or changed reserved fields");
+            const auto before=data;
+            check(call(11,pool,0x25014).first.reason==NativeStop::code_write && data==before &&
+                  call(8,pool).second==std::uint32_t(-100),"Fixed-pool status or interrupt validation failed");
+            check(call(9,pool,first).second==0 && threads.run(nt_iop_generated_run,data,64,services).reason==NativeStop::unmapped_code &&
+                  threads.state(one).registers[2]==first,"FreeFpl did not hand the real block to its waiting continuation");
+            check(call(5,pool).second==0 && threads.run(nt_iop_generated_run,data,64,services).reason==NativeStop::unmapped_code &&
+                  threads.state(two).registers[2]==std::uint32_t(-425) &&
+                  heap.invoke({8,{},NativeServiceKind::sysmem},data).value==0x4000,
+                  "Pool deletion did not release storage and complete waiters with deletion errors");
+            store_native_word(data,0x18000,0x200);
+            const auto high=call(4,0x18000).second;
+            check(call(7,high).second==0x23f00 && call(5,high).second==0,"High-memory fixed-pool placement failed");
+            store_native_word(data,0x18008,0xffffffff);
+            check(call(4,0x18000).second==std::uint32_t(-427),"Overflowing pool size was accepted");
+        }
+        {
+            std::vector<std::uint8_t> data(0x30000),peer_data(0x2000);
+            NativeSifDestination destination{peer_data,[](std::uint32_t,std::uint32_t) { return true; }};
+            NativeSifTransfers transfers(&destination);
+            NativeSifCommandEndpoint peer(destination,0x600,transfers);
+            NativeSifInbound inbound(data,0x19000);
+            NativeCallbackMux callbacks({});
+            NativeInterruptServices interrupts(0x1f000,&callbacks);
+            NativeThreadServices threads(interrupts);
+            NativeHeapServices heap(data.size(),0x20000,0x24000);
+            bool ready=false;
+            NativeRpcClients clients(heap,threads,&peer,[&] { return ready; },data);
+            callbacks=NativeCallbackMux({&inbound,&clients});
+            NativeSifControl link(interrupts,&transfers);
+            NativeEventServices events;
+            NativeBootServices boot;
+            NativeSystemServices system(events,boot,data);
+            NativeSifCommandSession session(events,system,link,&peer);
+            NativeSifCommands commands(&peer);
+            inbound.connect(commands,session,link,nullptr,&clients);
+            link.publish_main(0x600,0x10000); link.invoke({5,{},NativeServiceKind::sifman},data);
+            NativeServiceRouter services({&clients,&threads,&interrupts});
+            const auto call=[&](unsigned ordinal,std::uint32_t client,std::uint32_t mode) {
+                auto cpu=initial(); cpu.pc=ordinal==15 ? 0x27014 : ordinal==16 ? 0x2701c : 0x27024;
+                cpu.registers[4]=client; cpu.registers[5]=0x12345678; cpu.registers[6]=mode;
+                cpu.registers[7]=0x18400; cpu.registers[29]=0x18300;
+                const auto result=run_native(nt_iop_generated_run,cpu,data,32,&services);
+                return std::pair{result,cpu.registers[2]};
+            };
+            const auto untouched=data;
+            check(call(15,0x18000,1).first.reason==NativeStop::import_request && data==untouched && !peer.take(),
+                  "RPC client bound before the real link was ready");
+            ready=true;
+            check(call(15,0x18000,0).first.reason==NativeStop::import_request && data==untouched,
+                  "Synchronous RPC without a native continuation changed memory");
+            auto waiting=initial(); waiting.pc=0x27014; waiting.registers[4]=0x18000;
+            waiting.registers[5]=0x12345678; waiting.registers[31]=0xfffffffc;
+            const auto bind_thread=threads.admit(waiting);
+            check(threads.run(nt_iop_generated_run,data,64,services).reason==NativeStop::thread_wait &&
+                  call(18,0x18000,0).second==1 && load_native_word(data,0x18024)==0,
+                  "RPC bind reported completion without a peer response");
+            const auto pending=data;
+            check(call(15,0x18080,1).first.reason==NativeStop::thread_wait && data==pending &&
+                  heap.invoke({8,{},NativeServiceKind::sysmem},data).value==0x3f00,
+                  "RPC backpressure changed client state or leaked packet storage");
+            const auto packet=peer.take();
+            check(packet && load_native_word(*packet,32)==0x12345678,"RPC bind lost its requested server");
+            auto reply=nt::sif::bind_reply(load_native_word(*packet,20),0x18000,0x900,0x1000);
+            auto invalid=reply; store_native_word(invalid,20,0x20200);
+            check(clients.receive(invalid,{}).status==NativeServiceStatus::unavailable && data==pending,
+                  "Mismatched RPC reply completed a different transaction");
+            check(inbound.submit(reply).value==1 && !inbound.take() && !inbound.failure() &&
+                  call(18,0x18000,0).second==0 && load_native_word(data,0x18024)==0x900 &&
+                  load_native_word(data,0x18014)==0x1000,
+                  "Inbound bind reply did not publish the actual server and buffer");
+            threads.run(nt_iop_generated_run,data,64,services);
+            check(threads.state(bind_thread).registers[2]==0 &&
+                  heap.invoke({8,{},NativeServiceKind::sysmem},data).value==0x4000,
+                  "RPC bind did not resume its owner or release its packet");
+            store_native_word(data,0x18310,4); store_native_word(data,0x18314,0x18100);
+            store_native_word(data,0x18318,4); store_native_word(data,0x1831c,0x27100);
+            store_native_word(data,0x18320,0x18200); store_native_word(data,0x18400,0x11223344);
+            waiting.pc=0x2701c; waiting.registers[5]=7; waiting.registers[7]=0x18400;
+            waiting.registers[28]=0x13579bdf; waiting.registers[29]=0x18300;
+            const auto call_thread=threads.admit(waiting);
+            check(threads.run(nt_iop_generated_run,data,64,services).reason==NativeStop::thread_wait,
+                  "RPC call failed to wait for its result");
+            const auto request=peer.take();
+            check(request && load_native_word(*request,32)==7 && load_native_word(*request,52)==0x900 &&
+                  load_native_word(peer_data,0x1000)==0x11223344 && load_native_word(data,0x18100)==0,
+                  "RPC call lost its input payload or fabricated output");
+            reply=nt::sif::bind_reply(load_native_word(*request,20),0x18000,0,0);
+            store_native_word(reply,32,0x8000000a); store_native_word(reply,0,64|(4<<8));
+            store_native_word(reply,4,0x18100);
+            const std::array<std::uint8_t,4> output{1,2,3,4};
+            check(inbound.submit(reply,output).value==1 && !inbound.take() && !inbound.failure() &&
+                  load_native_word(data,0x18100)==0x04030201 && call(18,0x18000,0).second==1 &&
+                  load_native_word(data,0x18204)==0,"RPC completed before its compiled callback");
+            interrupts.invoke({9,{},NativeServiceKind::intrman},data);
+            threads.run(nt_iop_generated_run,data,128,services);
+            check(load_native_word(data,0x18200)==0x13579bdf && load_native_word(data,0x18204)==77 &&
+                  threads.state(call_thread).registers[2]==0 && threads.state(call_thread).registers[28]==0x13579bdf &&
+                  call(18,0x18000,0).second==0,"RPC callback lost GP, output, completion ordering or its owner");
+            check(call(15,0x18080,1).second==0 && call(18,0x18080,0).second==1,
+                  "Asynchronous bind did not remain pending");
+            const auto asynchronous=peer.take();
+            reply=nt::sif::bind_reply(load_native_word(*asynchronous,20),0x18080,0,0);
+            check(clients.receive(reply,{}).status==NativeServiceStatus::returned && call(18,0x18080,0).second==0 &&
+                  load_native_word(data,0x180a4)==0,"Missing server reply fabricated a binding");
+        }
         {
             NativeJumpServices jumps;
             std::vector<std::uint8_t> data(0x20000);
@@ -329,12 +502,15 @@ int main() {
                 const auto entry=0x14100+(ordinal==0 || ordinal==3 ? 1U : ordinal)*8;
                 declaration.functions.push_back(entry); store_native_word(data,0x14014+ordinal*4,entry);
             }
-            NativeLibraryServices libraries({declaration},{{0x152f4,0x152e0,"usbd",0x102,4}});
+            NativeLibraryServices libraries({declaration},{{0x152f4,0x152e0,"usbd",0x102,4},{0x152fc,0x152e0,"usbd",0x102,11}});
             NativeHeapServices heap(0x20000,0x18000,0x1f000);
             FixtureUsb host; NativeUsbServices usb(libraries,heap,host);
-            NativeServiceRouter router({&libraries,&usb});
+            NativeInterruptServices usb_interrupts(0x17f00);
+            NativeThreadServices usb_threads(usb_interrupts,&heap);
+            usb.connect(usb_threads);
+            NativeServiceRouter router({&libraries,&usb,&usb_threads});
             const auto call=[&](unsigned pc,std::array<std::uint32_t,4> arguments={}) {
-                auto cpu=initial(); cpu.pc=pc; cpu.registers[28]=0x16230; cpu.registers[29]=0x1fff0;
+                auto cpu=initial(); cpu.pc=pc; cpu.registers[28]=0x16230; cpu.registers[29]=0x15600;
                 std::copy(arguments.begin(),arguments.end(),cpu.registers.begin()+4);
                 const auto result=run_native(nt_iop_generated_run,cpu,data,256,&router);
                 return std::pair{result,cpu};
@@ -372,9 +548,45 @@ int main() {
             store_native_word(data,0x16300,0x16080); store_native_word(data,0x16304,0x16090);
             for (unsigned index=0;index<3;++index)
                 check(call(0x16000,{index}).second.registers[2]==(index ? 11U : 10U),"Compiled hoisted indexed jump table selected the wrong target");
+            check(call(0x14158,{1}).second.registers[2]==0x102,"Unknown USB pipe was accepted");
+            const auto pipe=call(0x14160,{1}).second.registers[2];
+            check(pipe==1 && host.opened==1 && call(0x14148,{99}).second.registers[2]==0xffffffff,
+                  "USB control pipe did not acquire actual host ownership");
+            store_native_word(data,0x15610,0x15100); store_native_word(data,0x15614,0x15700);
+            store_native_word(data,0x15800,0x01000680); store_native_word(data,0x15804,18<<16);
             const auto snapshot=data;
-            check(call(0x14158,{1}).first.reason==NativeStop::import_request && data==snapshot,
-                  "Unimplemented USB transfer changed state or fabricated success");
+            host.allow_read=false;
+            check(call(0x14158,{pipe,0x15900,18,0x15800}).first.reason==NativeStop::import_request && data==snapshot && usb.error()==5,
+                  "Failed USB host read changed memory or completed successfully");
+            host.allow_read=true;
+            check(call(0x14158,{pipe,0x15901,18,0x15800}).second.registers[2]==0x106 && host.reads==1,
+                  "Aligned USB pipe issued a misaligned transfer");
+            check(call(0x14158,{pipe,0x15100,18,0x15800}).first.reason==NativeStop::code_write && host.reads==1,
+                  "USB transfer overwrote compiled code");
+            for (unsigned i=0;i<2;++i)
+                check(call(i ? 0x14158 : 0x15140,{pipe,0x15900,18,0x15800}).second.registers[2]==0,"Native USB descriptor transfer failed");
+            check(data[0x15900]==18 && data[0x15901]==1 && load_native_word(data,0x1570c)==0 && host.reads==3,
+                  "USB read lost data or executed its callback inline");
+            check(usb_threads.run(nt_iop_generated_run,data,256,router).reason==NativeStop::thread_wait &&
+                  load_native_word(data,0x15700)==0 && load_native_word(data,0x15704)==18 &&
+                  load_native_word(data,0x15708)==0x16230 && load_native_word(data,0x1570c)==2 &&
+                  usb_threads.state(1).interrupt_depth==0,
+                  "USB foreground callbacks lost ordering, length, caller GP or normal thread context");
+            store_native_word(data,0x15800,0x00010900); store_native_word(data,0x15804,0);
+            check(call(0x14158,{pipe,0,0,0x15800}).second.registers[2]==0,
+                  "USB did not adopt an active host configuration");
+            usb_threads.run(nt_iop_generated_run,data,128,router);
+            check(load_native_word(data,0x15704)==0 && load_native_word(data,0x1570c)==3,
+                  "Zero-length USB configuration lost deferred completion");
+            store_native_word(data,0x15800,0x00000b01);
+            check(call(0x14158,{pipe,0,0,0x15800}).second.registers[2]==0,"USB interface selection failed");
+            usb_threads.run(nt_iop_generated_run,data,128,router);
+            check(load_native_word(data,0x1570c)==4,"USB interface callback was not delivered");
+            store_native_word(data,0x15800,0x00020900);
+            check(call(0x14158,{pipe,0,0,0x15800}).first.reason==NativeStop::import_request,
+                  "USB invented a host configuration that was not active");
+            check(call(0x14150,{pipe}).second.registers[2]==0 && host.closed==1 &&
+                  call(0x14150,{pipe}).second.registers[2]==0x102,"USB close did not release its host pipe");
             host.devices.clear();
             check(call(0x14120,{0x15440}).first.reason==NativeStop::import_request && !usb.driver_count(),
                   "USB registration concealed a host topology change");

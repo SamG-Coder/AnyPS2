@@ -344,6 +344,7 @@ the data as instructions. Keep all converted commercial content under `work/`.
 | `AnyPS2` | Front door for the separate command-line tools |
 | `ps2-import` | Read ISO9660, resolve SYSTEM.CNF, validate and extract boot ELF |
 | `ps2-inspect` | Inspect ELF metadata and discovered control flow |
+| `ps2-iop-inspect` | Report offline IOP call neighborhoods, argument patterns and callback candidates |
 | `ps2-recompile` | Generate an experimental EE LLVM entry-flow project from a boot ELF |
 | `ps2-iop-recompile`, `nt_iop_codegen` | Convert supported IOP modules into LLVM projects |
 | `ps2-convert-inventory` | Inventory recognizable disc executables, convert independent modules, and group missing APIs |

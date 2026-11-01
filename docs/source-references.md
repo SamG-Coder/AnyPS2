@@ -1720,6 +1720,14 @@ registration return codes and synchronous probe/connect ordering. Independent
 C++ ownership replaces controller initialization and guest linked lists. No
 reference implementation or commercial code is copied. Unsupported transfers
 and topology changes stop; discovery never fabricates an empty host bus.
+Control pipes now retain a Windows hub handle and verify the attached device.
+Standard descriptor reads use the documented
+[USB_DESCRIPTOR_REQUEST](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/usbioctl/ns-usbioctl-_usb_descriptor_request)
+contract. Configuration selection adopts only a matching, currently active
+Windows configuration; changing host device configuration remains unsupported.
+The pinned `usbd_main.c` callback thread and `usbd_api.c` transfer interface inform
+deferred foreground completion. Callbacks run as serialized compiled native
+continuations with owned stacks, rather than interrupt callbacks or inline calls.
 
 The pinned PS2SDK sysclib public interfaces define bcopy source/destination order,
 word-copy byte-count truncation and string search/span signatures. Native LLVM
@@ -1752,3 +1760,14 @@ callback scheduler. Optical seek/spin timing is not reproduced. The pinned
 PCSX2 `CDVDisoReader.cpp` documents the PS2 ISO convention in which the first
 volume's block count points at the next volume descriptor. AnyPS2 independently
 validates that metadata; an unrecognized layout is not reported as single-layer.
+
+The pinned PS2SDK thfpool public header, threadman fixed-pool service and kernel
+error definitions specify four-byte block stride, FIFO/priority waits, high/low
+allocation, status fields and error codes. The independent native implementation
+uses the existing bounded heap and continuation scheduler with host-owned free
+lists; no kernel structures or allocator instructions are reproduced in data.
+The pinned PS2SDK SIF RPC public structures and client routines specify bind,
+call, reply and busy-state contracts. Native clients retain packet ownership
+until the peer replies, deliver compiled callbacks with the caller's global
+pointer, and resume waiting native continuations after callback completion.
+Notification-free asynchronous calls remain an explicit unsupported boundary.

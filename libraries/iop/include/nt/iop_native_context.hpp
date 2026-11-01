@@ -9,6 +9,7 @@
 #include <nt/iop_native_driver_files.hpp>
 #include <nt/iop_native_semaphores.hpp>
 #include <nt/iop_native_mailboxes.hpp>
+#include <nt/iop_native_fixed_pool.hpp>
 #include <nt/iop_native_threads.hpp>
 #include <nt/iop_native_alarms.hpp>
 #include <nt/iop_native_sif_inbound.hpp>
@@ -53,13 +54,15 @@ public:
           audio_output(audio::make_output()),sound(libraries,*audio_output),
           usb_host(usb::make_host()),usb(libraries,heap,*usb_host),dev9(libraries),
           sif(destination),peer_(destination ? std::make_unique<NativeSifCommandEndpoint>(*destination,command_buffer,sif,std::move(delivery)) : nullptr),
-          commands(peer_.get()),inbound(ram,layout.packet_buffer),callbacks({&alarms,&sif,&inbound,&hard_timers,&vblank,&cdvdman}),
+          commands(peer_.get()),inbound(ram,layout.packet_buffer),callbacks({&alarms,&sif,&inbound,&hard_timers,&vblank,&cdvdman,&rpc_clients}),
           interrupts(layout.interrupt_stack,&callbacks),sif_control(interrupts,&sif),threads(interrupts,&heap),
-          rpc_servers(peer_.get(),&threads),rpc_data(peer_.get()),events(&threads),semaphores(&threads),mailboxes(&threads),
+          rpc_servers(peer_.get(),&threads),rpc_data(peer_.get()),rpc_clients(heap,threads,peer_.get(),[this] { return command_session.rpc_ready(); },ram),
+          events(&threads),semaphores(&threads),mailboxes(&threads),fixed_pools(heap,&threads),
           system(events,boot,ram),command_session(events,system,sif_control,peer_.get()),stdio(std::move(output)),
           disc_service(disc.empty() ? nullptr : std::make_unique<NativeDiscServices>(disc,&descriptors,&events)),
           dmacman_(dmac_priority_),router(providers()),arena_(ram),packet_buffer_(layout.packet_buffer) {
-        inbound.connect(commands,command_session,sif_control,&rpc_servers);
+        inbound.connect(commands,command_session,sif_control,&rpc_servers,&rpc_clients);
+        usb.connect(threads);
         hard_timers.connect(interrupts);
         vblank.connect(events,ram);
         serial_.connect_disconnected_ports(interrupts);
@@ -124,9 +127,11 @@ public:
     NativeThreadServices threads;
     NativeRpcServers rpc_servers;
     NativeRpcDataServices rpc_data;
+    NativeRpcClients rpc_clients;
     NativeEventServices events;
     NativeSemaphoreServices semaphores;
     NativeMailboxServices mailboxes;
+    NativeFixedPoolServices fixed_pools;
     NativeSystemServices system;
     NativeSifCommandSession command_session;
     NativeStdioServices stdio;
@@ -141,8 +146,8 @@ private:
     }
     std::vector<NativeServices*> providers() {
         std::vector<NativeServices*> result{&boot_callbacks,&heaplib,&prnt,&jumps,&sysclib,&drivers,&driver_files,&archives,&heap,&libraries,
-            &boot,&modload,&interrupts,&events,&semaphores,&mailboxes,&threads,&system,&alarms,&sif,&sif_control,&stdio,
-            &commands,&command_session,&rpc_servers,&rpc_data,&serial_,&dmacman_,&cdvdman,&secrman,&hard_timers,&vblank,&sound,&usb,&dev9};
+            &boot,&modload,&interrupts,&events,&semaphores,&mailboxes,&fixed_pools,&threads,&system,&alarms,&sif,&sif_control,&stdio,
+            &commands,&command_session,&rpc_servers,&rpc_data,&rpc_clients,&serial_,&dmacman_,&cdvdman,&secrman,&hard_timers,&vblank,&sound,&usb,&dev9};
         if (disc_service) result.push_back(disc_service.get());
         return result;
     }

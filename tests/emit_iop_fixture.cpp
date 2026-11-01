@@ -1188,11 +1188,19 @@ int main(int argc,char** argv) {
         for (unsigned i=0;i<std::size(usb_probe);++i) usb_put(0x80+i*4,usb_probe[i]);
         for (unsigned i=0;i<std::size(usb_connect);++i) usb_put(0xa0+i*4,usb_connect[i]);
         usb_put(0xc0,0x03e00008); usb_put(0xc4,0x24020000);
+        constexpr std::uint32_t usb_completion[]{0xacc40000,0xacc50004,0xacdc0008,0x8cc8000c,0,
+            0x25080001,0xacc8000c,0x03e00008,0};
+        for (unsigned i=0;i<std::size(usb_completion);++i) usb_put(0x100+i*4,usb_completion[i]);
+        constexpr std::uint32_t usb_submit[]{0x27bdffe0,0xafbf001c,0x3c080001,0x35085100,0xafa80010,
+            0x3c080001,0x35085700,0xafa80014,0x0c0054bf,0,0x8fbf001c,0x27bd0020,0x03e00008,0};
+        for (unsigned i=0;i<std::size(usb_submit);++i) usb_put(0x140+i*4,usb_submit[i]);
+        bundle_roots.push_back(0x15140);
         usb_put(0x448,0x15480); usb_put(0x44c,0x15080); usb_put(0x450,0x150a0); usb_put(0x454,0x150c0);
         usb_client.memory[0x480]='t';
         usb_put(0x2e0,0x41e00000); usb_put(0x2e8,0x102);
         std::copy(std::begin(usb_name),std::end(usb_name),usb_client.memory.begin()+0x2ec);
         usb_put(0x2f4,0x03e00008); usb_put(0x2f8,0x24000004);
+        usb_put(0x2fc,0x03e00008); usb_put(0x300,0x2400000b);
         {
             const std::array modules{usb,usb_client};
             const auto discovered=nt::iop_codegen::ir::discover_bundle(modules);
@@ -1329,7 +1337,44 @@ int main(int argc,char** argv) {
             try { nt::iop_codegen::ir::discover(dev9,private_entry); } catch (const std::runtime_error&) { rejected=true; }
             if (!rejected) throw std::runtime_error("DEV9 replacement exposed private driver code");
         }
-        const std::array bundle{module,provider,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services,dev9};
+        nt::elf::IopModule fixed_pool{0x25000,0x25014,nt::Bytes(0x100),0x100,{}};
+        fixture::put32(fixed_pool.memory,0,0x41e00000); fixture::put32(fixed_pool.memory,8,0x101);
+        constexpr char pool_library[]="thfpool";
+        std::copy(std::begin(pool_library),std::end(pool_library),fixed_pool.memory.begin()+12);
+        const unsigned pool_ordinals[]{4,5,6,7,8,9,11,12};
+        for (unsigned i=0;i<std::size(pool_ordinals);++i) {
+            fixture::put32(fixed_pool.memory,20+i*8,0x03e00008);
+            fixture::put32(fixed_pool.memory,24+i*8,0x24000000|pool_ordinals[i]);
+            bundle_roots.push_back(fixed_pool.base+20+i*8);
+        }
+        nt::elf::IopModule edge_table{0x26000,0x26000,nt::Bytes(0x120),0x120,{}};
+        const auto edge_word=[&](unsigned address,std::uint32_t word) { fixture::put32(edge_table.memory,address-edge_table.base,word); };
+        // The range predicate is defined on an incoming branch edge, away from
+        // the table dispatch block. All constants and instructions are synthetic.
+        edge_word(0x26000,0x10a00007); edge_word(0x26004,0x2c880003);
+        edge_word(0x26008,0x03e00008); edge_word(0x2600c,0x24020063);
+        constexpr std::uint32_t edge_dispatch[]{0x11000017,0x00041080,0x3c010002,0x00220821,0x8c226100,0,0x00400008,0};
+        for (unsigned i=0;i<std::size(edge_dispatch);++i) edge_word(0x26020+i*4,edge_dispatch[i]);
+        for (unsigned i=0;i<3;++i) {
+            edge_word(0x26060+i*8,0x03e00008); edge_word(0x26064+i*8,0x24020011+i*2);
+            edge_word(0x26100+i*4,0x26060+i*8);
+        }
+        edge_word(0x26080,0x03e00008); edge_word(0x26084,0x2402005b);
+        bundle_roots.push_back(edge_table.entry);
+        nt::elf::IopModule rpc_client{0x27000,0x27014,nt::Bytes(0x120),0x120,{}};
+        fixture::put32(rpc_client.memory,0,0x41e00000); fixture::put32(rpc_client.memory,8,0x101);
+        constexpr char rpc_client_library[]="sifcmd";
+        std::copy(std::begin(rpc_client_library),std::end(rpc_client_library),rpc_client.memory.begin()+12);
+        const unsigned rpc_client_ordinals[]{15,16,18};
+        for (unsigned i=0;i<std::size(rpc_client_ordinals);++i) {
+            fixture::put32(rpc_client.memory,20+i*8,0x03e00008);
+            fixture::put32(rpc_client.memory,24+i*8,0x24000000|rpc_client_ordinals[i]);
+            bundle_roots.push_back(rpc_client.base+20+i*8);
+        }
+        constexpr std::uint32_t rpc_client_callback[]{0xac9c0000,0x2402004d,0xac820004,0x03e00008,0};
+        for (unsigned i=0;i<std::size(rpc_client_callback);++i) fixture::put32(rpc_client.memory,0x100+i*4,rpc_client_callback[i]);
+        bundle_roots.push_back(0x27100);
+        const std::array bundle{module,provider,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services,dev9,fixed_pool,edge_table,rpc_client};
         {
             auto overwritten=bundle; fixture::put32(overwritten[3].memory,0x330,0x00a02021);
             bool rejected=false;
@@ -1384,7 +1429,7 @@ int main(int argc,char** argv) {
             if (!failed_bundle || !partial.str().empty()) throw std::runtime_error("Invalid bundle emitted partial native code");
         }
         // Earlier owners must be revisited when a later module discovers a callback.
-        const std::array reversed{provider,module,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services,dev9};
+        const std::array reversed{provider,module,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services,dev9,fixed_pool,edge_table,rpc_client};
         std::ostringstream reverse_code;
         nt::iop_codegen::emit_bundle(reverse_code,reversed,bundle_roots);
         for (const auto target : {0xa061U,0xa080U,0xb800U}) {
@@ -1420,7 +1465,7 @@ int main(int argc,char** argv) {
             put(0x8800,0x00401821);
             put(first+(count-2)*4,0x03e00008); put(first+(count-1)*4,0);
             std::vector<std::uint32_t> roots=bundle_roots; roots.push_back(first);
-            const std::array large_bundle{large,provider,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services,dev9};
+            const std::array large_bundle{large,provider,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services,dev9,fixed_pool,edge_table,rpc_client};
             std::ostringstream llvm; nt::iop_codegen::emit_bundle(llvm,large_bundle,roots);
             const auto text=llvm.str();
             nt::write_file(argv[3],nt::ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));

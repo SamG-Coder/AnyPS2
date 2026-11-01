@@ -31,7 +31,7 @@ inline std::optional<std::set<std::uint32_t>> table_targets(std::span<const elf:
 // Generated indirect transfers still check their actual runtime destination.
 template<class Decode>
 std::optional<std::set<std::uint32_t>> initial_jump_table(const elf::IopModule& module,
-    std::span<const elf::IopModule> data,std::uint32_t pc,Decode decode) {
+    std::span<const elf::IopModule> data,const Program& program,std::uint32_t pc,Decode decode) {
     if (pc<module.base || pc-module.base<28 || pc-module.base+4>module.initialized_size) return {};
     std::array<Instruction,8> code;
     Instruction guard,branch;
@@ -161,6 +161,23 @@ std::optional<std::set<std::uint32_t>> initial_jump_table(const elf::IopModule& 
     }
     const auto& shift=code[2]; const auto& upper=code[3]; const auto& add=code[4];
     const auto& load=code[5]; const auto& jump=code[7];
+    // A predecessor may compute this block's range predicate in its delay
+    // slot. Follow the explicit edge instead of requiring adjacent layout.
+    // This contributes candidates only: the generated transfer still checks
+    // its destination even when another incoming edge has an unknown index.
+    if (code[1].operation==Operation::equal && code[1].operand==0) {
+        for (const auto& [address,predecessor]:program.instructions) {
+            if ((predecessor.flow!=Flow::conditional && predecessor.flow!=Flow::direct) ||
+                predecessor.target!=code[1].address) continue;
+            const auto slot=program.instructions.find(address+4);
+            if (slot==program.instructions.end()) continue;
+            const auto& candidate=slot->second;
+            if (candidate.operation!=Operation::less_immediate_unsigned || candidate.operand!=code[1].source ||
+                candidate.source!=shift.operand || !candidate.immediate || candidate.immediate>256) continue;
+            if (guard.operation!=Operation::less_immediate_unsigned || candidate.immediate>guard.immediate) guard=candidate;
+            branch=code[1];
+        }
+    }
     if (guard.operation!=Operation::less_immediate_unsigned || !guard.immediate || guard.immediate>256 ||
         branch.operation!=Operation::equal || branch.source!=guard.operand || branch.operand!=0 ||
         (branch.target>=pc-20 && branch.target<=pc+4) ||

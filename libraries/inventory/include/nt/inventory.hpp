@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include <nt/iop_inspection.hpp>
 namespace nt::inventory {
 // Highest stage this pass actually reached. Later stages are not implied.
 enum class Stage { discovered, parsed, analyzed, llvm_generated, machine_compiled };
@@ -82,4 +83,5 @@ void compile_inventory(Inventory& inventory,const Options& options);
 void record_iop_calls(Inventory& inventory,std::span<const elf::IopModule> modules,
     std::span<const std::string> sources,std::span<const iop_codegen::ir::ModuleDiagnosis> diagnoses);
 void write_call_reports(const Inventory& inventory,const std::filesystem::path& output);
+std::string format_neighborhood(const iop_codegen::ir::Neighborhood& report);
 }

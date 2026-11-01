@@ -43,6 +43,59 @@ std::string label(const LibraryCall& call) {
     return call.library+" "+std::to_string(call.version>>8)+"."+std::to_string(call.version&255)+" #"+std::to_string(call.selector);
 }
 }
+std::string format_neighborhood(const iop_codegen::ir::Neighborhood& report) {
+    std::ostringstream out;
+    out<<"# Offline IOP call neighborhood\n\nAnchor: "<<hex32(report.anchor)<<"; range: "<<hex32(report.first)
+       <<".."<<hex32(report.last)<<" (exclusive).\n\n"
+       <<"Static candidates only: linear windows may include unreachable code or embedded data. Unknown arguments are not zero.\n"
+       <<"Constants describe a local straight-line suffix, including the call delay slot; they are not whole-program proofs.\n"
+       <<"Native binding names do not establish service support or successful execution.\n\n";
+    std::map<std::string,std::size_t> groups;
+    for (const auto& site:report.calls) {
+        std::string identity=site.indirect ? "indirect call" : "internal "+hex32(site.target);
+        if (site.import) {
+            LibraryCall call; call.domain="iop"; call.library=site.import->library; call.version=site.import->version;
+            call.selector=site.import->ordinal; call.binding=CallBinding::unresolved;
+            identity=label(call); const auto known=public_name(call);
+            if (!known.name.empty()) identity+=" "+std::string(known.name);
+        }
+        ++groups[identity];
+        out<<"## "<<hex32(site.address)<<" -> "<<identity<<"\n\n";
+        for (unsigned index=0;index<site.arguments.size();++index) {
+            out<<"arg"<<index<<'=';
+            if (site.arguments[index]) for (const auto value:*site.arguments[index]) out<<hex32(value)<<' ';
+            else out<<'?';
+            out<<'\n';
+        }
+        for (const auto& [offset,values]:site.stack_words) {
+            out<<"stack+"<<offset<<'='; for (const auto value:values) out<<hex32(value)<<' '; out<<'\n';
+        }
+        for (const auto& [argument,bytes]:site.stack_arguments) {
+            constexpr char digits[]="0123456789abcdef";
+            out<<"arg"<<argument<<" stack bytes:";
+            for (const auto value:bytes) {
+                out<<' ';
+                if (value) out<<digits[*value>>4]<<digits[*value&15]; else out<<"??";
+            }
+            out<<'\n';
+        }
+        if (!site.code_candidates.empty()) {
+            out<<"callback/address candidates:";
+            for (const auto target:site.code_candidates) out<<' '<<hex32(target);
+            out<<'\n';
+        }
+        out<<'\n';
+    }
+    out<<"## Grouped call sites\n\n";
+    for (const auto& [name,count]:groups) out<<count<<" x "<<name<<'\n';
+    out<<"\n## Function-entry candidates\n\n";
+    for (const auto address:report.function_candidates) out<<hex32(address)<<'\n';
+    out<<"\n## Structural patterns\n\n";
+    for (const auto& [name,count]:report.patterns) out<<name<<'='<<count<<'\n';
+    out<<"\n## Undecoded words\n\n";
+    for (const auto& [address,why]:report.unknown) out<<hex32(address)<<' '<<why<<'\n';
+    return out.str();
+}
 void record_iop_calls(Inventory& inventory,std::span<const elf::IopModule> modules,
                      std::span<const std::string> sources,std::span<const iop_codegen::ir::ModuleDiagnosis> diagnoses) {
     if (modules.size()!=sources.size() || (!diagnoses.empty() && diagnoses.size()!=modules.size()))

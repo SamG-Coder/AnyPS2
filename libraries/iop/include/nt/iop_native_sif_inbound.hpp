@@ -2,6 +2,7 @@
 #include <nt/iop_native_sif_commands.hpp>
 #include <nt/iop_native_sif_session.hpp>
 #include <nt/iop_native_rpc.hpp>
+#include <nt/iop_native_rpc_client.hpp>
 
 namespace nt::iop {
 // One serialized inbound mailbox, polled only at the native interrupt domain's
@@ -10,9 +11,9 @@ class NativeSifInbound final : public NativeCallbackSource {
 public:
     NativeSifInbound(std::span<std::uint8_t> ram,std::uint32_t packet_buffer)
         : ram_(ram),packet_buffer_(packet_buffer) {}
-    void connect(NativeSifCommands& commands,NativeSifCommandSession& session,NativeSifControl& link,NativeRpcServers* rpc=nullptr) {
+    void connect(NativeSifCommands& commands,NativeSifCommandSession& session,NativeSifControl& link,NativeRpcServers* rpc=nullptr,NativeRpcClients* clients=nullptr) {
         if (commands_) throw std::logic_error("Native SIF inbound source already connected");
-        commands_=&commands; session_=&session; link_=&link; rpc_=rpc;
+        commands_=&commands; session_=&session; link_=&link; rpc_=rpc; clients_=clients;
     }
     bool busy() const { return size_ || active_ || failed_.has_value() || (commands_ && commands_->busy()); }
     NativeServiceReply submit(std::span<const std::uint8_t> packet,std::span<const std::uint8_t> payload={}) {
@@ -28,7 +29,8 @@ public:
         const auto command=load_native_word(packet,8);
         NativeServiceReply result;
         if (link_->ready()) {
-            if (bind_reply_ || (command==0x80000009 && rpc_ && !commands_->system_table_configured())) {
+            if (clients_ && clients_->owns_reply(packet)) result=clients_->receive(packet,payload_);
+            else if (bind_reply_ || (command==0x80000009 && rpc_ && !commands_->system_table_configured())) {
                 if (!bind_reply_) {
                     std::array<std::uint8_t,64> reply{};
                     result=rpc_->prepare_bind(packet,ram_,reply);
@@ -76,6 +78,7 @@ private:
     NativeSifCommandSession* session_=nullptr;
     NativeSifControl* link_=nullptr;
     NativeRpcServers* rpc_=nullptr;
+    NativeRpcClients* clients_=nullptr;
     std::optional<std::array<std::uint8_t,64>> bind_reply_;
     std::array<std::uint8_t,112> packet_{};
     std::size_t size_=0;

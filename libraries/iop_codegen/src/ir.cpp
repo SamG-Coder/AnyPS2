@@ -25,7 +25,7 @@ std::optional<Operation> native_import_operation(const elf::IopImport& import) {
     if (import.library=="intrman" && (import.version>>8)==1 &&
         ((import.ordinal>=4 && import.ordinal<=9) || import.ordinal==14 || import.ordinal==17 || import.ordinal==18 || import.ordinal==23))
         return Operation::native_import;
-    if (import.library=="sifcmd" && (import.version>>8)==1 && (import.ordinal==4 || (import.ordinal>=6 && import.ordinal<=14) || import.ordinal==17 || import.ordinal==19 || import.ordinal==20 || import.ordinal==21 || import.ordinal==22 || import.ordinal==23 || import.ordinal==24 || import.ordinal==25 || import.ordinal==28 || import.ordinal==29)) return Operation::native_import;
+    if (import.library=="sifcmd" && (import.version>>8)==1 && (import.ordinal==4 || (import.ordinal>=6 && import.ordinal<=18) || import.ordinal==17 || import.ordinal==19 || import.ordinal==20 || import.ordinal==21 || import.ordinal==22 || import.ordinal==23 || import.ordinal==24 || import.ordinal==25 || import.ordinal==28 || import.ordinal==29)) return Operation::native_import;
     if (import.library=="stdio" && (import.version>>8)==1 && import.ordinal==4) return Operation::native_import;
     if (import.library=="sifman" && (import.version>>8)==1 &&
         (import.ordinal==2 || (import.ordinal>=5 && import.ordinal<=8) || (import.ordinal>=21 && import.ordinal<=27) || (import.ordinal>=29 && import.ordinal<=32)))
@@ -36,7 +36,7 @@ std::optional<Operation> native_import_operation(const elf::IopImport& import) {
     if (import.library=="timrman" && (import.version>>8)==1 &&
         (import.ordinal==4 || (import.ordinal>=6 && import.ordinal<=12) || import.ordinal==16)) return Operation::native_import;
     if (import.library=="vblank" && (import.version>>8)==1 && import.ordinal>=4 && import.ordinal<=9) return Operation::native_import;
-    if ((import.library=="thsemap" || import.library=="thmsgbx") && (import.version>>8)==1 && ((import.ordinal>=4 && import.ordinal<=9) || import.ordinal==11 || import.ordinal==12)) return Operation::native_import;
+    if ((import.library=="thsemap" || import.library=="thmsgbx" || import.library=="thfpool") && (import.version>>8)==1 && ((import.ordinal>=4 && import.ordinal<=9) || import.ordinal==11 || import.ordinal==12)) return Operation::native_import;
     if (import.library=="thevent" && (import.version>>8)==1 &&
         ((import.ordinal>=4 && import.ordinal<=11) || import.ordinal==13 || import.ordinal==14))
         return Operation::native_import;
@@ -300,7 +300,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         call.operation=*operation; call.flow=Flow::native_return;
         if (import.library=="sysclib" && import.ordinal==16) call.memory_convention=MemoryConvention::source_first;
         if (import.library=="sysclib" && import.ordinal==40) call.memory_convention=MemoryConvention::words;
-        call.immediate=import.ordinal|(!host ? 0x20000U : import.library=="loadcore" ? 0x10000U : import.library=="ioman" ? 0x30000U : import.library=="intrman" ? 0x40000U : import.library=="thevent" ? 0x50000U : import.library=="thbase" ? 0x60000U : import.library=="sifman" ? 0x70000U : import.library=="stdio" ? 0x80000U : import.library=="sifcmd" ? 0x90000U : import.library=="thsemap" ? 0xa0000U : import.library=="thmsgbx" ? 0xb0000U : import.library=="sysclib" ? 0xc0000U : import.library=="heaplib" ? 0xd0000U : import.library=="modload" ? 0xe0000U : import.library=="romdrv" ? 0xf0000U : import.library=="dmacman" ? 0x100000U : import.library=="cdvdman" ? 0x110000U : import.library=="secrman" ? 0x120000U : import.library=="timrman" ? 0x130000U : import.library=="vblank" ? 0x140000U : 0U);
+        call.immediate=import.ordinal|(!host ? 0x20000U : import.library=="loadcore" ? 0x10000U : import.library=="ioman" ? 0x30000U : import.library=="intrman" ? 0x40000U : import.library=="thevent" ? 0x50000U : import.library=="thbase" ? 0x60000U : import.library=="sifman" ? 0x70000U : import.library=="stdio" ? 0x80000U : import.library=="sifcmd" ? 0x90000U : import.library=="thsemap" ? 0xa0000U : import.library=="thmsgbx" ? 0xb0000U : import.library=="sysclib" ? 0xc0000U : import.library=="heaplib" ? 0xd0000U : import.library=="modload" ? 0xe0000U : import.library=="romdrv" ? 0xf0000U : import.library=="dmacman" ? 0x100000U : import.library=="cdvdman" ? 0x110000U : import.library=="secrman" ? 0x120000U : import.library=="timrman" ? 0x130000U : import.library=="vblank" ? 0x140000U : import.library=="thfpool" ? 0x180000U : 0U);
         native_imports.emplace(call.address,call);
         if (!host) {
             auto bound=import; bound.offset+=module.base; bound.table_offset+=module.base;
@@ -349,7 +349,24 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         if (stored!=input.stack_words.end() && stored->second)
             for (const auto entry : *stored->second) if (entry) discover_callback(entry,source,false);
     };
-    const auto discover_service_callbacks=[&](std::uint32_t source,std::uint32_t service,const Constants& input) {
+    const auto callback_stack_slot=[&](std::uint32_t service,std::uint32_t import_site)->std::optional<unsigned> {
+        if (service==0x90010) return 28; // sceSifCallRpc end_function, argument eight.
+        if (service==0x16000b) return 16; // sceUsbdTransferPipe callback, argument five.
+        if ((service>>16)==2)
+            for (const auto& import:program.library_imports)
+                if (import.offset==import_site && import.library=="usbd" && (import.version>>8)==1 && import.ordinal==11)
+                    return 16;
+        return {};
+    };
+    const auto discover_service_callbacks=[&](std::uint32_t source,std::uint32_t service,const Constants& input,std::uint32_t import_site) {
+        if (const auto offset=callback_stack_slot(service,import_site);offset && input.stack_offsets[29]) {
+            const auto slot=std::int64_t(*input.stack_offsets[29])+*offset;
+            if (slot<=std::numeric_limits<std::int32_t>::max()) {
+                const auto value=input.stack_words.find(static_cast<std::int32_t>(slot));
+                if (value!=input.stack_words.end() && value->second)
+                    for (const auto target:*value->second) if (target) discover_callback(target,source,false);
+            }
+        }
         if (service!=0xe000c && service!=0xe000d && service!=0x110025) return;
         const auto count=service==0xe000c ? 3U : 1U;
         for (unsigned index=0;index<count;++index) if (input.registers[4+index])
@@ -506,7 +523,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
             if (instruction.flow==Flow::native_return) {
                 if (instruction.operation==Operation::native_import && instruction.immediate==0x140008 && input.registers[6])
                     for (const auto address : *input.registers[6]) if (address) discover_callback(address,pc,false);
-                if (instruction.operation==Operation::native_import) discover_service_callbacks(pc,instruction.immediate,input);
+                if (instruction.operation==Operation::native_import) discover_service_callbacks(pc,instruction.immediate,input,pc);
                 if (instruction.operation==Operation::native_import && instruction.immediate==0x90011 && input.registers[6])
                     for (const auto address : *input.registers[6]) if (address) discover_callback(address,pc,false);
                 if (instruction.operation==Operation::native_import && instruction.immediate==0x9000a && input.registers[5])
@@ -582,7 +599,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                 // unresolved transfers before either backend emits any output.
                 std::set<std::uint32_t> physical;
                 if (targets) for (const auto target : *targets) physical.insert(physical_address(target));
-                else if (const auto table=initial_jump_table(module,data_modules,pc,decode)) {
+                else if (const auto table=initial_jump_table(module,data_modules,program,pc,decode)) {
                     physical=*table; table_transfers.insert(pc);
                 }
                 else if (const auto tail=inline_tail_targets(module,program,states,instruction,decode)) {
@@ -606,8 +623,8 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
             // Inspect each direct call before unrelated callers merge at the import.
             if (instruction.flow==Flow::call || instruction.flow==Flow::direct) {
                 const auto target=native_imports.find(instruction.target);
-                if (target!=native_imports.end() && target->second.immediate==0x60004) {
-                    discover_stack_thread(pc,successor);
+                if (target!=native_imports.end() && (target->second.immediate==0x60004 || callback_stack_slot(target->second.immediate,instruction.target))) {
+                    if (target->second.immediate==0x60004) discover_stack_thread(pc,successor);
                     // Different callers can erase the absolute stack relationship
                     // at a shared helper. Replay its straight-line suffix with a
                     // fresh symbolic stack to recover locally built descriptors.
@@ -622,9 +639,10 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                     Constants local;
                     for (auto at=begin;at<pc;at+=4) local=transfer(program.instructions.at(at),std::move(local));
                     local=transfer(delay,transfer(instruction,std::move(local)));
-                    discover_stack_thread(pc,local);
+                    if (target->second.immediate==0x60004) discover_stack_thread(pc,local);
+                    else discover_service_callbacks(pc,target->second.immediate,local,instruction.target);
                 }
-                if (target!=native_imports.end()) discover_service_callbacks(pc,target->second.immediate,successor);
+                if (target!=native_imports.end()) discover_service_callbacks(pc,target->second.immediate,successor,instruction.target);
                 if (target!=native_imports.end() && (target->second.immediate>>16)==2) {
                     // Code pointers escaping to a compiled library can be
                     // retained as callbacks in that library's private state.
@@ -805,6 +823,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         if (program.instructions.contains(pc) && !program.open_indirect_sites.contains(pc)) program.guarded_callback_sites.insert(pc);
     return program;
 }
+Instruction decode_instruction(std::uint32_t pc,std::uint32_t word) { return decode(pc,word); }
 Program discover(const elf::IopModule& module,std::span<const std::uint32_t> entries) {
     return discover_module(module,entries,elf::iop_exports(module),std::span(&module,1));
 }

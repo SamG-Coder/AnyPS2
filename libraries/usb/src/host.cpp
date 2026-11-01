@@ -39,8 +39,120 @@ struct DeviceSet {
     HDEVINFO value=INVALID_HANDLE_VALUE;
     ~DeviceSet() { if (value!=INVALID_HANDLE_VALUE) SetupDiDestroyDeviceInfoList(value); }
 };
+class WindowsControlPipe final : public ControlPipe {
+public:
+    WindowsControlPipe(const std::wstring& path,unsigned port)
+        : hub_{CreateFileW(path.c_str(),GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,
+                           nullptr,OPEN_EXISTING,0,nullptr)},port_(port) {
+        if (hub_.value==INVALID_HANDLE_VALUE) error_=GetLastError();
+    }
+    bool matches(const Device& device) {
+        if (hub_.value==INVALID_HANDLE_VALUE) return false;
+        alignas(USB_NODE_CONNECTION_INFORMATION_EX) std::uint8_t bytes[
+            sizeof(USB_NODE_CONNECTION_INFORMATION_EX)+32*sizeof(USB_PIPE_INFO)]{};
+        auto* connection=reinterpret_cast<USB_NODE_CONNECTION_INFORMATION_EX*>(bytes);
+        connection->ConnectionIndex=port_;
+        DWORD received=0;
+        if (!DeviceIoControl(hub_.value,IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX,bytes,sizeof(bytes),
+                             bytes,sizeof(bytes),&received,nullptr)) return fail(GetLastError());
+        if (received<offsetof(USB_NODE_CONNECTION_INFORMATION_EX,PipeList) || connection->ConnectionStatus!=DeviceConnected ||
+            device.descriptors.size()<sizeof(USB_DEVICE_DESCRIPTOR) ||
+            std::memcmp(&connection->DeviceDescriptor,device.descriptors.data(),sizeof(USB_DEVICE_DESCRIPTOR)))
+            return fail(ERROR_DEVICE_NOT_CONNECTED);
+        descriptors_=device.descriptors;
+        return true;
+    }
+    bool read_descriptor(std::uint16_t value,std::uint16_t index,std::uint16_t length,
+                         std::vector<std::uint8_t>& output) override {
+        error_=0;
+        unsigned capacity=length;
+        // Windows requires room for a whole configuration even when the caller
+        // requests only its prefix. Return the requested prefix after the read.
+        if ((value>>8)==2) {
+            unsigned configuration=0;
+            for (std::size_t at=18;at<descriptors_.size();) {
+                const auto size=unsigned(descriptors_[at+2])|(unsigned(descriptors_[at+3])<<8);
+                if (configuration++==(value&255)) { capacity=std::max(capacity,size); break; }
+                at+=size;
+            }
+        }
+        std::vector<std::uint8_t> bytes(sizeof(USB_DESCRIPTOR_REQUEST)+capacity);
+        auto* request=reinterpret_cast<USB_DESCRIPTOR_REQUEST*>(bytes.data());
+        request->ConnectionIndex=port_; request->SetupPacket.bmRequest=0x80; request->SetupPacket.bRequest=6;
+        request->SetupPacket.wValue=value; request->SetupPacket.wIndex=index;
+        request->SetupPacket.wLength=static_cast<USHORT>(capacity);
+        DWORD received=0;
+        if (!DeviceIoControl(hub_.value,IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION,request,static_cast<DWORD>(bytes.size()),
+                             request,static_cast<DWORD>(bytes.size()),&received,nullptr)) return fail(GetLastError());
+        const auto offset=offsetof(USB_DESCRIPTOR_REQUEST,Data);
+        if (received<offset || received>offset+capacity) return fail(ERROR_INVALID_DATA);
+        const auto count=std::min<std::size_t>(length,received-offset);
+        output.assign(bytes.begin()+offset,bytes.begin()+offset+count);
+        return true;
+    }
+    bool use_configuration(std::uint8_t configuration) override {
+        alignas(USB_NODE_CONNECTION_INFORMATION_EX) std::uint8_t bytes[
+            sizeof(USB_NODE_CONNECTION_INFORMATION_EX)+32*sizeof(USB_PIPE_INFO)]{};
+        auto* connection=reinterpret_cast<USB_NODE_CONNECTION_INFORMATION_EX*>(bytes);
+        connection->ConnectionIndex=port_;
+        DWORD received=0;
+        if (!DeviceIoControl(hub_.value,IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX,bytes,sizeof(bytes),
+                             bytes,sizeof(bytes),&received,nullptr)) return fail(GetLastError());
+        if (received<offsetof(USB_NODE_CONNECTION_INFORMATION_EX,PipeList) || connection->ConnectionStatus!=DeviceConnected ||
+            std::memcmp(&connection->DeviceDescriptor,descriptors_.data(),sizeof(USB_DEVICE_DESCRIPTOR)))
+            return fail(ERROR_DEVICE_NOT_CONNECTED);
+        // The Windows driver already owns configuration. Reuse verified state;
+        // changing or unconfiguring a host peripheral needs a different backend.
+        if (!configuration || connection->CurrentConfigurationValue!=configuration) return fail(ERROR_NOT_SUPPORTED);
+        configuration_=configuration; error_=0; return true;
+    }
+    bool use_interface(std::uint8_t interface_number,std::uint8_t alternate) override {
+        if (!configuration_ || !use_configuration(configuration_)) return false;
+        unsigned alternatives=0,only_setting=0;
+        for (std::size_t at=18;at<descriptors_.size();) {
+            const auto size=unsigned(descriptors_[at+2])|(unsigned(descriptors_[at+3])<<8);
+            const auto end=at+size;
+            if (descriptors_[at+5]==configuration_) {
+                for (auto next=at+descriptors_[at];next<end;next+=descriptors_[next])
+                    if (descriptors_[next+1]==4 && descriptors_[next]>=9 && descriptors_[next+2]==interface_number) {
+                        ++alternatives; only_setting=descriptors_[next+3];
+                    }
+            }
+            at=end;
+        }
+        // A configured interface with one legal setting is already in that
+        // setting. Multiple alternatives require an active-driver query.
+        if (alternatives!=1 || only_setting!=alternate) return fail(ERROR_NOT_SUPPORTED);
+        error_=0; return true;
+    }
+    std::uint32_t error() const override { return error_; }
+private:
+    bool fail(DWORD value) { error_=value; return false; }
+    Handle hub_;
+    unsigned port_;
+    DWORD error_=0;
+    std::uint8_t configuration_=0;
+    std::vector<std::uint8_t> descriptors_;
+};
 class WindowsHost final : public Host {
 public:
+    std::unique_ptr<ControlPipe> open_control(const Device& device) override {
+        error_=0;
+        const auto separator=device.key.rfind(L'#');
+        if (separator==std::wstring::npos || separator+1==device.key.size() || !valid_descriptors(device.descriptors)) {
+            fail(ERROR_INVALID_DATA); return {};
+        }
+        unsigned port=0;
+        for (auto at=separator+1;at<device.key.size();++at) {
+            const auto digit=device.key[at];
+            if (digit<L'0' || digit>L'9' || port>25) { fail(ERROR_INVALID_DATA); return {}; }
+            port=port*10+unsigned(digit-L'0');
+        }
+        if (!port || port>255) { fail(ERROR_INVALID_DATA); return {}; }
+        auto pipe=std::make_unique<WindowsControlPipe>(device.key.substr(0,separator),port);
+        if (!pipe->matches(device)) { fail(pipe->error()); return {}; }
+        return pipe;
+    }
     bool scan(std::vector<Device>& devices) override {
         error_=0;
         DeviceSet set{SetupDiGetClassDevsW(&GUID_DEVINTERFACE_USB_HUB,nullptr,nullptr,DIGCF_PRESENT|DIGCF_DEVICEINTERFACE)};

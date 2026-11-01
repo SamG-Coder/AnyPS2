@@ -8,6 +8,7 @@ namespace nt::iop {
 struct NativeCallback {
     std::uint32_t address,argument;
     std::optional<std::uint32_t> second_argument;
+    std::optional<std::uint32_t> global_pointer;
 };
 class NativeCallbackSource {
 public:

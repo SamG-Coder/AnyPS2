@@ -3,7 +3,7 @@
 #include <optional>
 
 namespace nt::iop {
-enum class NativeWaitKind : std::uint32_t { semaphore=3,event=4,mailbox=5,module=0x100 };
+enum class NativeWaitKind : std::uint32_t { semaphore=3,event=4,mailbox=5,fixed_pool=7,module=0x100,rpc=0x101 };
 class NativeWaitQueue {
 public:
     virtual ~NativeWaitQueue()=default;

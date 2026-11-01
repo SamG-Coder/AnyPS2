@@ -49,6 +49,28 @@ name match. The public name catalogue is conversion tooling only; it is not a
 runtime instruction or address lookup table. See
 [source references](source-references.md#offline-library-call-mapping) for provenance.
 
+To inspect a blocked IOP function and its surrounding code without running the
+game, use `AnyPS2 inspect-iop <module.irx> <base-hex> <new-report.md>
+--capture <stop-directory> --radius <hex-byte-radius>`. An explicit
+`--anchor <hex-address>` can replace the capture. The tool selects the observed
+PC when it belongs to the module, or its return call site otherwise. It groups
+nearby imports using the existing public API catalogue and reports local
+constant arguments, stack-built request bytes, callback/address candidates,
+function-entry candidates and undecoded words. Use these groups to choose a
+coherent native-service batch before rebuilding. The report contains private
+input-derived data and belongs under ignored `work/`.
+
+For captures that can stop in different modules, use `AnyPS2 inspect-iop
+--bundle <new-report.md> --capture <stop-directory> --radius <hex-byte-radius>
+--modules <base-hex> <module.irx> ...`. Bundle bases accept the same `sealed@`
+and `romdrv@` prefixes as the converter. The inspector locates the caller's
+module from the supplied relocation ranges; overlapping owners are rejected.
+
+This is a bounded static neighborhood, not a proof that every scanned word is
+executable or reachable. Unknown values stay unknown; embedded data can produce
+undecoded words. Static candidates neither bypass runtime checks nor authorize
+successful service responses.
+
 ```powershell
 # Explicit destination, or substitute inventory to skip linking.
 .\build\Release\AnyPS2.exe convert 'path/to/owned-game.iso' work/game-native --jobs 4
@@ -93,6 +115,34 @@ grouping. Word sign extension, wraparound and untouched upper lanes are retained
 Future patterns belong in the converter with compiled behavior regressions.
 
 ## Coverage and measurement limits
+
+For repeated startup validation of an existing converted project, run
+`cmake -C <private-settings.cmake> -P cmake/validate_native.cmake`. The settings
+file supplies `SOURCE_ROOT`, `NATIVE_BUILD`, `NATIVE_DATA`, `DISC`, `IOP_DATA`,
+`TEST_TARGETS` and the CTest regex `RELATED_TESTS`. It rebuilds the selected
+test targets, runs only those Release tests, rebuilds the native executable,
+and runs it headlessly with a bounded duration. Set `RUN_SECONDS` and `JOBS`
+to override the defaults of 120 seconds and four workers.
+
+For an IOP conversion change, also set `IOP_INPUTS_JSON` to a private JSON array
+of arguments for `ps2-iop-recompile --bundle`, and `NATIVE_PROJECT` to the
+existing generated EE project. Include `ps2-iop-recompile` in `TEST_TARGETS`.
+The command regenerates the IOP bundle and reconfigures the existing executable
+before building. Service-only changes reuse the generated bundle.
+
+Each run saves build/test logs, the native log, memory/framebuffer captures,
+and previous/current summaries under ignored `work/native-validation/`.
+A matching boundary is reported as no verified forward progress. A changed
+boundary still requires review; operation counts, polling, or a successful
+pipeline never establish a title screen or gameplay. Use a normal visible
+launch after a batch when inspecting the actual game output.
+Optional `INSPECT_MODULE`, `INSPECT_BASE` and `INSPECT_RADIUS` settings add the
+offline neighborhood report to each captured run; include `ps2-iop-inspect` in
+`TEST_TARGETS` so the inspector is rebuilt with the batch.
+Use `INSPECT_INPUTS_JSON` with the converter's base/module argument array to
+select the stopped caller's module automatically. Regeneration through
+`IOP_INPUTS_JSON` already supplies that array. A failed inspection keeps the
+captured execution boundary and reports its own error separately.
 
 Libraries are independent conversion artifacts, not a claim that every module
 has been selected and bound into a working game. Cross-module initialization,

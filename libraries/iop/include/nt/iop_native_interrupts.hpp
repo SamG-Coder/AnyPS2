@@ -112,6 +112,7 @@ public:
                     if (callback) {
                         source_active_=true; enter(cpu,callback->address,callback->argument);
                         if (callback->second_argument) cpu.registers[5]=*callback->second_argument;
+                        if (callback->global_pointer) cpu.registers[28]=*callback->global_pointer;
                     }
                 }
             }
