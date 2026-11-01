@@ -3,9 +3,27 @@
 #include <nt/binary.hpp>
 #include <filesystem>
 #include <fstream>
+#include <span>
 #include <stdexcept>
 
 namespace probe {
+// Optional IOP observation shares the private stop directory. An idle scheduler
+// has no active continuation; do not invent a CPU snapshot in that case.
+template<class Cpu>
+void capture_iop(const std::filesystem::path& directory,std::span<const std::uint8_t> ram,const Cpu* state) {
+    nt::write_file(directory/"iop-ram.bin",ram);
+    std::ofstream out(directory/"iop-cpu.txt");
+    out.exceptions(std::ios::failbit|std::ios::badbit);
+    out<<"format=anyps2-iop-observation-v1\nresumable=false\nactive="<<(state!=nullptr)<<'\n';
+    if (state) {
+        out<<"pc="<<state->pc<<"\nexecuted="<<state->executed<<"\nbranch_target="<<state->branch_target
+           <<"\ndelay_slot="<<state->delay_slot<<"\nload_register="<<state->load_register<<"\nload_value="<<state->load_value
+           <<"\nstatus="<<state->status<<"\ncause="<<state->cause<<"\nepc="<<state->epc
+           <<"\ninterrupt_depth="<<state->interrupt_depth<<"\nhi="<<state->hi<<"\nlo="<<state->lo<<'\n';
+        for (unsigned index=0;index<state->registers.size();++index) out<<"gpr"<<index<<'='<<state->registers[index]<<'\n';
+    }
+    out.close();
+}
 template<class Pixel>
 void capture_image(const std::filesystem::path& path,unsigned width,unsigned height,Pixel pixel) {
     std::ofstream image(path,std::ios::binary);

@@ -57,6 +57,8 @@ public:
     }
     bool invoked() const { return invoked_; }
     nt::iop::NativeResult result() const { return result_; }
+    std::span<const std::uint8_t> data() const { return state_->ram; }
+    const nt::iop::Cpu* active_state() const { return state_->services->threads.active_state(); }
     std::uint64_t executed() const { return retired_lifetimes_+state_->startup->executed(); }
     std::uint32_t generations() const { return generations_; }
     std::size_t returned() const { return state_->startup->returned().size(); }
@@ -90,24 +92,26 @@ public:
     const std::string& load_path() const { return state_->services->modload.load_path(); }
     std::uint64_t load_bytes() const { return state_->services->modload.load_bytes(); }
     std::uint64_t load_hash() const { return state_->services->modload.load_hash(); }
-    nt::ee::Stop pump() {
+    nt::ee::Stop pump(std::uint64_t work_budget=1000000) {
         if (!accepted_) return nt::ee::Stop::budget;
         if (!platform_.sif_link.reset_teardown_complete()) return nt::ee::Stop::budget;
         if (!started_) {
-            start();
-            platform_.sif_link.replace_peer(state_->services->sif_control.sub_address(),state_->services->sif_control.sub_flags());
-            return state_->startup->finished() && result_.reason==nt::iop::NativeStop::thread_wait ?
+            start(work_budget);
+            if (started_)
+                platform_.sif_link.replace_peer(state_->services->sif_control.sub_address(),state_->services->sif_control.sub_flags());
+            return result_.reason==nt::iop::NativeStop::budget || (started_ && result_.reason==nt::iop::NativeStop::thread_wait) ?
                 nt::ee::Stop::budget : nt::ee::Stop::unsupported_system;
         }
         auto& control=state_->services->sif_control;
         auto& link=platform_.sif_link;
         control.acknowledge_sub(control.sub_flags() & ~link.peer_flags());
         control.publish_main(link.main_address(),link.main_flags());
-        result_=state_->services->threads.run(nt::iop::run_llvm,state_->ram,1000000,*state_->services,
+        result_=state_->services->threads.run(nt::iop::run_llvm,state_->ram,work_budget,*state_->services,
             nt::iop::NativeThreadServices::CompletionPolicy::continue_workers);
         link.acknowledge_main(link.main_flags() & ~control.main_flags());
         link.publish_peer(control.sub_address(),control.sub_flags());
-        return result_.reason==nt::iop::NativeStop::thread_wait ? nt::ee::Stop::budget : nt::ee::Stop::unsupported_system;
+        return result_.reason==nt::iop::NativeStop::thread_wait || result_.reason==nt::iop::NativeStop::budget ?
+            nt::ee::Stop::budget : nt::ee::Stop::unsupported_system;
     }
 private:
     std::unique_ptr<Session> prepare() {
@@ -185,17 +189,17 @@ private:
         }
         next.services->modload.attach_sealed(sealed);
     }
-    void start() {
-        started_=true;
+    void start(std::uint64_t work_budget=1000000) {
         state_->services->sif_control.publish_main(platform_.sif_link.main_address(),platform_.sif_link.main_flags());
-        result_=state_->startup->advance(1000000);
+        result_=state_->startup->advance(work_budget);
         if (!state_->startup->finished()) return;
         const auto initialized=state_->services->initialize_commands();
         if (initialized.status!=nt::iop::NativeServiceStatus::returned) {
             result_={nt::iop::NativeStop::import_request,0,0,0x70005}; return;
         }
+        started_=true;
         state_->services->interrupts.invoke({9,{},nt::iop::NativeServiceKind::intrman},state_->ram);
-        result_=state_->services->threads.run(nt::iop::run_llvm,state_->ram,1000000,*state_->services,
+        result_=state_->services->threads.run(nt::iop::run_llvm,state_->ram,work_budget,*state_->services,
             nt::iop::NativeThreadServices::CompletionPolicy::continue_workers);
     }
     static nt::ee::IoRead commands(void* opaque,std::span<const nt::ee::NativeSifPacket> packets) {

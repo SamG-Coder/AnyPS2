@@ -38,6 +38,7 @@ public:
     }
     bool contains(std::uint32_t id) const { return threads_.contains(id); }
     const Cpu& state(std::uint32_t id) const { return threads_.at(id).cpu; }
+    const Cpu* active_state() const { return current_ ? &threads_.at(*current_).cpu : nullptr; }
     std::uint64_t executed() const { return executed_; }
     std::optional<std::uint32_t> current_waiter() const override {
         if (!current_ || threads_.at(*current_).cpu.interrupt_depth) return {};

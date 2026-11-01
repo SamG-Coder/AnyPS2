@@ -359,6 +359,10 @@ int main(int argc,char** argv) {
         if (!capture_directory.empty()) capture.save(capture_directory);
         if (!stop_directory.empty()) {
             probe::capture_stop(stop_directory,state,memory,stop);
+#ifdef ANYPS2_NATIVE_IOP
+            if (iop_reset && iop_reset->invoked())
+                probe::capture_iop(stop_directory,iop_reset->data(),iop_reset->active_state());
+#endif
             if (gpu.drawing.submitted_draws()) {
                 const auto& pixels=gpu.drawing.pixels();
                 nt::write_file(stop_directory/"graphics-storage.bin",

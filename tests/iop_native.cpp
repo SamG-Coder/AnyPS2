@@ -2581,10 +2581,19 @@ int main() {
             store_native_word(ram,0xcb90,0); store_native_word(ram,0xcb94,12);
             check(run_native(nt_iop_generated_run,print,ram,1,&diagnostics).reason==NativeStop::budget &&
                   diagnostic_output.back()=="[abc   ] [0] [+0012]","Dynamic printf width/precision or zero-value alternate formatting differs");
+            diagnostic_string(0xca00,"%p [%12p] [%-12p] [%012p]");
+            print=initial(); print.pc=diagnostic_entry; print.registers[4]=0xca00;
+            print.registers[5]=0xffffffff; print.registers[6]=0; print.registers[7]=0x80001234; print.registers[29]=0xcb80;
+            store_native_word(ram,0xcb90,0xab);
+            const std::string pointer_text="0xffffffff [  0x00000000] [0x80001234  ] [0x00000000ab]";
+            check(run_native(nt_iop_generated_run,print,ram,1,&diagnostics).reason==NativeStop::budget &&
+                print.registers[2]==pointer_text.size() && diagnostic_output.back()==pointer_text,
+                "Compiled pointer formatting dereferenced a value or lost width, aliases or stack arguments");
             const auto prior_messages=diagnostic_output.size();
             diagnostic_string(0xca00,"must not print %n");
             print=initial(); print.pc=diagnostic_entry; print.registers[4]=0xca00;
-            check(run_native(nt_iop_generated_run,print,ram,1,&diagnostics).reason==NativeStop::import_request && !print.executed &&
+            const auto rejected_format=run_native(nt_iop_generated_run,print,ram,1,&diagnostics);
+            check(rejected_format.reason==NativeStop::import_request && rejected_format.address==0xca00 && !print.executed &&
                   diagnostic_output.size()==prior_messages,"Unsupported printf emitted partial text or retired");
             diagnostic_string(0xca00,"must not print %s"); ram[0xffff]='X';
             print=initial(); print.pc=diagnostic_entry; print.registers[4]=0xca00; print.registers[5]=0xffff;
@@ -3396,6 +3405,13 @@ int main() {
                   ram[0xcb00]==0xa5 && ram[0xcb02+printed.size()]==0xa5,"sprintf lost register/stack arguments or terminator bounds");
             check(sprintf_call("",0xffff,NativeStop::unmapped_code,0xffffffff)==0 && ram.back()==0,
                   "Empty sprintf did not write exactly a terminator or read unused arguments");
+            const std::string pointers="0xfffffff9 0x0000002a 0x8000c600";
+            check(sprintf_call("%p %p %p",0xa000cb01,NativeStop::unmapped_code)==pointers.size() &&
+                std::equal(pointers.begin(),pointers.end(),ram.begin()+0xcb01) && ram[0xcb01+pointers.size()]==0,
+                "Compiled sprintf pointer output differs from diagnostic formatting");
+            sprintf_call("%p",0xffff,NativeStop::address_fault);
+            sprintf_call("%p",0x1000,NativeStop::code_write);
+            sprintf_call("%p %p %p",0xcb00,NativeStop::address_fault,0xfffffff8);
             sprintf_call("%d",0xffff,NativeStop::address_fault);
             sprintf_call("%d",0x1000,NativeStop::code_write);
             sprintf_call("prefix %f",0xcb00,NativeStop::import_request);
@@ -4338,6 +4354,44 @@ int main() {
             check(finished.reason==NativeStop::unmapped_code && finished.pc==0x5000 && cpu.registers[2]==1 &&
                   loader.load_decision()==8 && load_native_word(guest,0x7000)==0x61,
                   "Held sealed entry did not run and finish through decision 8");
+            for (const auto entry:{0xb280U,0xb288U}) {
+                NativeHeapServices scheduled_heap(0x10000,0xb000,0x10000);
+                NativeInterruptServices interrupts(0xa000);
+                NativeThreadServices workers(interrupts,&scheduled_heap);
+                NativeModloadServices scheduled_loader;
+                scheduled_loader.attach_heap(scheduled_heap);
+                scheduled_loader.attach_scheduler(workers);
+                scheduled_loader.attach_disc(image_file.path);
+                scheduled_loader.attach_sealed({{nt::fingerprint(file),nt::fingerprint(image),0xb000,entry,16,0x600,0}});
+                check(scheduled_heap.hold(0xb000,0x600),"Scheduled image hold failed");
+                NativeServiceRouter services({&scheduled_loader,&workers,&interrupts});
+                auto caller=initial(); caller.pc=0xb42c; caller.registers[31]=0xfffffffc;
+                caller.registers[4]=0x2000; caller.registers[5]=0; caller.registers[6]=0;
+                caller.registers[7]=0x7000; caller.registers[16]=123; caller.registers[29]=0x9000;
+                const auto caller_id=workers.admit(caller);
+                check(workers.invoke({14,{caller_id,64},NativeServiceKind::thbase},guest).value==0,
+                      "Loader caller priority setup failed");
+                store_native_word(guest,0x7000,0x11111111);
+                check(workers.run(nt_iop_generated_run,guest,1,services).reason==NativeStop::budget &&
+                      scheduled_loader.load_decision()==7 && load_native_word(guest,0x7000)==0x11111111,
+                      "Module load reported completion before its compiled initializer ran");
+                auto other=initial(); other.pc=0xb290; other.registers[31]=0xfffffffc;
+                const auto other_id=workers.admit(other);
+                check(workers.invoke({14,{other_id,48},NativeServiceKind::thbase},guest).value==0,
+                      "Competing module worker priority setup failed");
+                const auto initialized=workers.run(nt_iop_generated_run,guest,64,services);
+                check(initialized.reason==NativeStop::unmapped_code && initialized.pc==0xfffffffc &&
+                      scheduled_loader.load_decision()==8 && workers.state(other_id).executed==0 &&
+                      workers.state(caller_id).executed==1 && workers.state(caller_id).registers[2]==1 &&
+                      load_native_word(guest,0x7000)==(entry==0xb280 ? 0x60U : 0x61U),
+                      "Module initializer borrowed its caller priority or woke the caller before completion");
+                check(workers.run(nt_iop_generated_run,guest,64,services).reason==NativeStop::unmapped_code &&
+                      workers.state(other_id).registers[2]==0x62 &&
+                      workers.run(nt_iop_generated_run,guest,64,services).reason==NativeStop::unmapped_code &&
+                      workers.state(caller_id).registers[16]==123 && workers.state(caller_id).registers[29]==0x9000 &&
+                      workers.state(caller_id).registers[2]==1,
+                      "Module completion lost the caller context or subsequent ready worker");
+            }
         }
         std::cout<<"Compiled IOP LLVM execution passed; dmacman register checks use the diagnostic device library\n";
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }

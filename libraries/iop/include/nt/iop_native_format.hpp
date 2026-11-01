@@ -91,7 +91,12 @@ NativeServiceReply format_native(std::uint32_t format_address,std::span<const st
         if (spec=='%' && !left && !zero && !plus && !space && !alternate && !width && !precision && !long_word) {
             if (output.size()==16384) return {}; output+='%'; continue;
         }
-        const bool numeric=spec=='d' || spec=='i' || spec=='u' || spec=='x' || spec=='X' || spec=='o';
+        const bool pointer=spec=='p';
+        // Stable native diagnostic spelling for the converted 32-bit pointer,
+        // never the address of its host backing allocation. %p is deliberately
+        // implementation-defined: use 0x plus eight lowercase hex digits.
+        if (pointer && (long_word || plus || space || alternate || precision)) return {};
+        const bool numeric=pointer || spec=='d' || spec=='i' || spec=='u' || spec=='x' || spec=='X' || spec=='o';
         if (!numeric && (long_word || (spec!='s' && spec!='c') || zero || plus || space || alternate)) return {};
         if (spec=='c' && precision) return {};
         std::uint32_t value;
@@ -104,7 +109,7 @@ NativeServiceReply format_native(std::uint32_t format_address,std::span<const st
             const bool sign=spec=='d' || spec=='i';
             const auto magnitude=sign && signed_value<0 ? 0U-value : value;
             char buffer[32];
-            const auto converted=std::to_chars(buffer,buffer+sizeof(buffer),magnitude,spec=='o' ? 8 : (spec=='x' || spec=='X') ? 16 : 10);
+            const auto converted=std::to_chars(buffer,buffer+sizeof(buffer),magnitude,spec=='o' ? 8 : (pointer || spec=='x' || spec=='X') ? 16 : 10);
             text.assign(buffer,converted.ptr);
             if (spec=='X') for (auto& c : text) if (c>='a' && c<='f') c=static_cast<char>(c-'a'+'A');
             if (!magnitude && precision==0) text.clear();
@@ -112,6 +117,7 @@ NativeServiceReply format_native(std::uint32_t format_address,std::span<const st
             if (sign) prefix=signed_value<0 ? "-" : plus ? "+" : space ? " " : "";
             if (alternate && (spec=='x' || spec=='X') && magnitude) prefix=spec=='x' ? "0x" : "0X";
             if (alternate && spec=='o' && (text.empty() || text.front()!='0')) prefix="0";
+            if (pointer) { prefix="0x"; text.insert(0,8-text.size(),'0'); }
         }
         const auto length=prefix.size()+text.size();
         const auto padding=width>length ? width-length : 0;

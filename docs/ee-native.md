@@ -2297,3 +2297,24 @@ the compiled entry returns. Sealed code that has not started is not listed.
 Outputs preserve pointer aliases, validate capacity and code protection before
 writing, and leave reserved status words untouched. Unsupported stop/unload
 operations remain diagnostic boundaries.
+
+Native diagnostic and string formatting share a bounded `%p` implementation.
+Its implementation-defined spelling is `0x` plus eight lowercase hex digits,
+including `0x00000000` for null. It retains the converted 32-bit pointer value
+and never dereferences it or exposes a host allocation address. Field width,
+left alignment and zero padding are supported; precision and length modifiers
+on `%p` remain unsupported. This is an explicit native formatting contract,
+not a claim to reproduce every console libc's diagnostic spelling.
+
+The EE integration treats exhaustion of a compiled IOP work slice as a resumable
+yield. Startup entries retain their continuations across slices and publish the
+command endpoint only after initialization completes. Worker slices likewise
+resume without turning budget exhaustion into an unsupported-system stop.
+
+Disc-loaded compiled module entries run in a dedicated native initialization
+continuation at loader priority 8. The requester waits for completion instead
+of lending its priority and context to the initializer. The real entry return
+updates residency and wakes the requester with its module ID; workers started
+by initialization participate in the existing scheduler. Stop captures include
+private IOP RAM and the active continuation's register state for diagnosing
+initialization ordering and polling. These observations are not resumable saves.

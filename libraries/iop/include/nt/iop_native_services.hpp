@@ -116,7 +116,10 @@ inline NativeResult run_native(NativeEntry entry,Cpu& cpu,std::span<std::uint8_t
             returning ? std::array<std::uint32_t,4>{reg(2),reg(3),0,0} : std::array<std::uint32_t,4>{reg(4),reg(5),reg(6),reg(7)},
             kind,cpu.pc,cpu.interrupt_depth!=0,reg(28),reg(29),&cpu,resume};
         const auto reply=services->invoke(request,ram);
-        if (reply.status==NativeServiceStatus::unsupported || reply.status==NativeServiceStatus::unavailable) return result;
+        if (reply.status==NativeServiceStatus::unsupported || reply.status==NativeServiceStatus::unavailable) {
+            if (reply.address) result.address=reply.address;
+            return result;
+        }
         if (reply.status==NativeServiceStatus::address_fault) return {NativeStop::address_fault,cpu.pc,reply.address};
         if (reply.status==NativeServiceStatus::code_write) return {NativeStop::code_write,cpu.pc,reply.address};
         if (reply.status==NativeServiceStatus::unmapped_code) return {NativeStop::unmapped_code,cpu.pc,reply.address};

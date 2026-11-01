@@ -59,6 +59,7 @@ public:
         vblank.connect(events,ram);
         serial_.connect_disconnected_ports(interrupts);
         modload.attach_heap(heap);
+        modload.attach_scheduler(threads);
         if (!disc.empty()) modload.attach_disc(disc);
     }
     NativeServiceContext(const NativeServiceContext&)=delete;

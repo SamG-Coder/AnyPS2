@@ -88,7 +88,10 @@ void run_iop_reset_tests() {
         require(!reset.finished() && !reset.returned() && reset.executed()==4 && !platform.sif_link.peer_flags());
         require(reset.pump()==Stop::budget && reset.executed()==4);
         platform.sif_link.service(0x79,4,0x30000);
-        require(reset.pump()==Stop::budget && reset.finished() && reset.returned()==2 && reset.executed()==8);
+        require(reset.pump(1)==Stop::budget && !reset.finished() && reset.executed()==5 && !platform.sif_link.peer_flags());
+        for (unsigned slice=0;slice<8 && !reset.finished();++slice)
+            require(reset.pump(1)==Stop::budget);
+        require(reset.finished() && reset.returned()==2 && reset.executed()==8);
         require(reset.last_server()==0 && !reset.cdvd_initialized());
         require(std::equal(before.begin()+0x6000,before.begin()+0x6070,ram.begin()+0x6000));
         require(reset.pump()==Stop::budget && reset.executed()==8);

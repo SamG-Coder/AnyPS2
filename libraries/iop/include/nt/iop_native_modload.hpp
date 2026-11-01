@@ -2,6 +2,7 @@
 #include <nt/iop_native_services.hpp>
 #include <nt/iop_native_code.hpp>
 #include <nt/iop_native_heap.hpp>
+#include <nt/iop_native_threads.hpp>
 #include <nt/binary.hpp>
 #include <nt/disc_files.hpp>
 #include <algorithm>
@@ -24,7 +25,7 @@ struct SealedModule {
 };
 // Native loader ABI ownership. Callback registration does not load a module,
 // authenticate executable content, or mark any module resident.
-class NativeModloadServices final : public NativeServices {
+class NativeModloadServices final : public NativeServices, public NativeWaitQueue {
 public:
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
         if (request.kind==NativeServiceKind::native_return) return finish_load(request,ram);
@@ -74,6 +75,10 @@ public:
     }
     void attach_disc(const std::filesystem::path& image) { files_=std::make_unique<disc::Files>(image); }
     void attach_heap(NativeHeapServices& heap) { heap_=&heap; }
+    void attach_scheduler(NativeThreadServices& threads) { threads_=&threads; }
+    // A running initializer owns its continuation until completion. Cancellation
+    // cannot discard it while other modules may retain its published callbacks.
+    bool cancel_wait(std::uint32_t,std::uint32_t) override { return false; }
     void attach_catalog(std::vector<std::uint64_t> source_hashes) { catalog_=std::move(source_hashes); }
     void attach_sealed(std::vector<SealedModule> modules) { sealed_=std::move(modules); }
     // Startup and disc-loaded entries share one actual lifecycle registry.
@@ -301,7 +306,10 @@ private:
         return {NativeServiceStatus::returned,static_cast<std::uint32_t>(known ? -206 : -202)};
     }
     NativeServiceReply finish_load(const NativeServiceRequest& request,std::span<std::uint8_t> ram) {
-        if (!pending_ || request.context!=pending_->owner || !request.context || request.context->native_call_owner!=this)
+        if (!pending_ || !request.context || request.context->native_call_owner!=this)
+            return {};
+        const bool worker=pending_->worker!=0;
+        if (worker ? (!threads_ || request.context!=&threads_->state(pending_->worker)) : request.context!=pending_->owner)
             return {};
         const auto entry_result=request.arguments[0];
         if (pending_->result) {
@@ -324,6 +332,13 @@ private:
         }
         auto caller=pending_->caller;
         caller.registers[2]=pending_->id;
+        if (worker) {
+            threads_->resume_wait(pending_->waiter,static_cast<std::int32_t>(pending_->id));
+            pending_.reset();
+            load_decision_=8;
+            auto exit=request; exit.kind=NativeServiceKind::thbase; exit.selector=8; exit.arguments={};
+            return threads_->invoke(exit,ram);
+        }
         pending_.reset();
         load_decision_=8;
         NativeServiceReply reply{NativeServiceStatus::restored};
@@ -345,6 +360,9 @@ private:
             load_decision_=11;
             return {NativeServiceStatus::unavailable};
         }
+        const auto waiter=threads_ ? threads_->current_waiter() : std::nullopt;
+        if (threads_ && (!waiter || request.context!=&threads_->state(*waiter)))
+            return {NativeServiceStatus::unavailable};
         if (!module.memory_size || module.initialized_size>module.memory_size ||
             module.entry<module.base || module.entry-module.base>=module.memory_size) {
             load_decision_=9;
@@ -446,6 +464,20 @@ private:
             NativeModuleKind::compiled,module.details};
         pending_=Pending{request.context,caller,a[3],next_id_,module.base,arguments.value,info,stack.value,
             {module.source_hash,next_id_,native,2}};
+        if (threads_) {
+            Cpu worker; worker.pc=module.entry; worker.registers[28]=module.global_pointer;
+            worker.registers[29]=stack.value+stack_size-16U;
+            worker.registers[31]=native_service_return; worker.native_call_owner=this;
+            worker.registers[4]=argc; worker.registers[5]=info+48U; worker.registers[7]=info;
+            // Host-admitted initializers use the loader's priority (8), not the
+            // priority of the RPC worker that requested the module.
+            try { pending_->worker=threads_->admit(worker); }
+            catch (...) { pending_.reset(); rollback(); throw; }
+            pending_->waiter=*waiter;
+            threads_->suspend_wait(*waiter,next_id_,NativeWaitKind::module,*this);
+            ++next_id_; load_decision_=7;
+            return {NativeServiceStatus::yielded};
+        }
         ++next_id_;
         load_decision_=7;
         NativeServiceReply reply{NativeServiceStatus::called,module.entry};
@@ -486,8 +518,10 @@ private:
         Cpu caller;
         std::uint32_t result,id,image,arguments,info,stack;
         ResidentModule module;
+        std::uint32_t waiter=0,worker=0;
     };
     NativeHeapServices* heap_=nullptr;
+    NativeThreadServices* threads_=nullptr;
     std::vector<SealedModule> sealed_;
     std::vector<ResidentModule> resident_;
     std::optional<Pending> pending_;

@@ -2551,3 +2551,17 @@ lists with total counts, status metadata, name/address lookup, aliased output
 pointers, startup-to-resident transitions and released IDs. Invalid output
 ranges and code writes leave buffers unchanged. The native SIF startup test
 also checks that completed compiled entries appear in the same loader registry.
+
+Compiled printf/Kprintf and sprintf tests cover pointer formatting through
+register and stack arguments, null and aliased pointer values, width/alignment,
+bounded destination writes and rejected code writes. Formatting a pointer does
+not require readable memory at that address.
+
+The native reset integration repeats initialization with one-operation slices,
+checking that partial startup neither fails nor publishes readiness and that
+the same compiled entries finish without restarting their execution.
+
+The compiled module-loading regression also checks dedicated initializer
+scheduling against a higher-priority worker than the requesting thread,
+resident/released entry returns, deferred completion and preserved caller
+registers. It rejects completion before compiled initialization executes.

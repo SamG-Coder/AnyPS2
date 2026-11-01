@@ -22,7 +22,11 @@ public:
         // format is a callback-specific control request, not an empty string.
         if (kernel && !request.arguments[0]) return {};
         std::string output;
-        const auto formatted=format_native(request.arguments[0],ram,NativeFormatArguments(request,ram,1),output);
+        auto formatted=format_native(request.arguments[0],ram,NativeFormatArguments(request,ram,1),output);
+        if (formatted.status==NativeServiceStatus::unsupported || formatted.status==NativeServiceStatus::unavailable) {
+            formatted.status=NativeServiceStatus::unavailable;
+            if (!formatted.address) formatted.address=request.arguments[0];
+        }
         if (formatted.status!=NativeServiceStatus::returned) return formatted;
         // No output is emitted until the entire format and argument set validate.
         if (!sink_(output)) return {NativeServiceStatus::returned,0xffffffff};

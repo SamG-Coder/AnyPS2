@@ -1210,6 +1210,10 @@ under ignored work/ and must never become a committed test fixture.
 
 ## Native loader ABI references
 
+The pinned PS2SDK `iop/system/modload/src/modload.c` also documents the separate
+priority-8 module loader thread. AnyPS2 implements that ordering independently
+with its existing native continuation scheduler and a module-completion wait.
+
 Native modload ABI binding and callback ownership use the pinned PS2SDK
 `iop/system/modload/include/modload.h`, `src/exports.tab`, and
 `src/modload.c` registration/query contracts. The native owner stores only
