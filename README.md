@@ -48,7 +48,7 @@ Native services aim to reproduce the *observable behavior* of console operations
 
 ### Gran Turismo 4 milestone
 
-GT4 has displayed its opening warning using Vulkan. More recent local startup work has also reached triangle rendering. The latest documented observed boundary is a LIBSD `KON` sample-voice start, for which native playback is still missing.
+GT4 has displayed its opening warning using Vulkan. An earlier generated build also reached triangle rendering and a LIBSD `KON` sample-voice start, for which native playback is still missing. After stricter code discovery exposed startup regressions, the latest regenerated build again renders the warning and starts ten threads, but still stops at a missing EE callback before that earlier boundary. See the [correctness review](docs/ee-correctness-review.md) for verified fixes and remaining gaps.
 
 This is **real progress in the conversion pipeline**, but not proof of a complete boot, correct gameplay, or improved performance. Some subsystems are validated with synthetic programs and are not yet proven with GT4 itself.
 
@@ -97,6 +97,7 @@ Generated output directories must be new. Converted commercial game data is not 
 ## Technical documentation
 
 - [EE native conversion](docs/ee-native.md) — R5900 conversion, LLVM generation, memory, call discovery and limits
+- [EE correctness review](docs/ee-correctness-review.md) — regression fixes, validation evidence and unresolved audit items
 - [Testing](docs/testing.md) — synthetic fixtures and opt-in local game validation
 - [Batch conversion](docs/batch-conversion.md) — conversion workflow, LLVM build and performance measurements
 - [SIF implementation](docs/sif.md) — native EE/IOP communication work

@@ -552,6 +552,139 @@ int main(int argc,char** argv) {
         word(0x140,0x0080102d); word(0x144,0x03e00008); word(0x148,0);
         word(0x180,7); word(0x184,0x1040);
         nt::write_file(std::string(argv[2])+".indirect",elf);
+        // Runtime mutates a callback slot between calls. Both targets must be
+        // discovered, but neither call may be folded to an initial slot value.
+        elf=original;
+        elf.resize(0x208,0); std::fill(elf.begin()+0x100,elf.end(),0);
+        word(68,0x100); word(72,0x100); word(88,0x200); word(100,8); word(104,16);
+        const std::uint32_t pointer_flow[]{0x24042000,0x24081080,0xac880000,0x8c990000,
+            0x10000003,0,0,0,0x0320f809,0,
+            0x24081090,0xac880000,0x8c990000,0x0320f809,0,
+            0x240810a0,0xac880004,0x24193000,0x0320f809,0};
+        for (unsigned n=0;n<std::size(pointer_flow);++n) word(0x100+n*4,pointer_flow[n]);
+        word(0x180,0x03e00008); word(0x184,0x2402000b);
+        word(0x190,0x03e00008); word(0x194,0x24020016);
+        word(0x1a0,0x4c000000); // Uncalled payload must never be compiled.
+        nt::write_file(std::string(argv[2])+".pointer-flow",elf);
+        word(0x110,0x08000428); // Direct flow now reaches the unsupported payload.
+        nt::write_file(std::string(argv[2])+".pointer-flow-unsupported",elf);
+        elf=original;
+        elf.resize(0x208,0); std::fill(elf.begin()+0x100,elf.end(),0);
+        word(68,0x100); word(72,0x100); word(88,0x200); word(100,8); word(104,256);
+        const std::uint32_t table_setup[]{0x24092000,0x24082040,0xad090000,0x24070002,0xad070004,
+            0x240610e0,0x10000002,0,0,0xad26000c,0x240a10d0,0xad2a0010,
+            0x24050001,0x0c000420,0,0x2403007b,12};
+        for (unsigned n=0;n<std::size(table_setup);++n) word(0x100+n*4,table_setup[n]);
+        const std::uint32_t table_consumer[]{0x24112040,0x8e240004,0x00a4382b,0x10e00009,
+            0x2402000c,0x8e230000,0x00a22818,0x00a31021,0x8c460000,0x00c00008,0};
+        for (unsigned n=0;n<std::size(table_consumer);++n) word(0x180+n*4,table_consumer[n]);
+        word(0x1b4,0x03e00008); word(0x1d0,0x4c000000);
+        word(0x1e0,0x03e00008); word(0x1e4,0x2402002a);
+        nt::write_file(std::string(argv[2])+".indexed-callback",elf);
+        // The same table is populated by a helper with a runtime record index.
+        // Callback and opaque context are both executable-looking arguments.
+        elf.resize(0x308,0);
+        word(68,0x180); word(72,0x180); word(88,0x300);
+        std::fill(elf.begin()+0x100,elf.begin()+0x180,0);
+        const std::uint32_t registration_setup[]{0x24092000,0x24082040,0xad090000,0x24070002,0xad070004,
+            0x24040001,0x240510e0,0x240610d0,0x0c000440,0,
+            0x24050001,0x0c000420,0,0x2403007b,12};
+        for (unsigned n=0;n<std::size(registration_setup);++n) word(0x100+n*4,registration_setup[n]);
+        const std::uint32_t registration[]{0x24082040,0x8d090000,0x240a000c,0x008a5018,
+            0x012a4821,0xad250000,0xad260004,0x03e00008,0};
+        for (unsigned n=0;n<std::size(registration);++n) word(0x200+n*4,registration[n]);
+        nt::write_file(std::string(argv[2])+".registered-indexed-callback",elf);
+        std::fill(elf.begin()+0x100,elf.end(),0);
+        const std::uint32_t nested_setup[]{0x24042000,0x240510e0,0x240610d0,0x24072040,
+            0x0c000440,0,0x24042040,0x0c000420,0,0x2403007b,12};
+        for (unsigned n=0;n<std::size(nested_setup);++n) word(0x100+n*4,nested_setup[n]);
+        const std::uint32_t nested_consumer[]{0x8c88001c,0x8d19001c,0x03200008,0};
+        for (unsigned n=0;n<std::size(nested_consumer);++n) word(0x180+n*4,nested_consumer[n]);
+        const std::uint32_t nested_registration[]{0xac85001c,0xac860020,0xace4001c,0x03e00008,0};
+        for (unsigned n=0;n<std::size(nested_registration);++n) word(0x200+n*4,nested_registration[n]);
+        word(0x1d0,0x4c000000); word(0x1e0,0x03e00008); word(0x1e4,0x2402002a);
+        nt::write_file(std::string(argv[2])+".nested-callback",elf);
+        word(0x200,0xac850018); // Different field: no callback-consumer evidence.
+        nt::write_file(std::string(argv[2])+".nested-callback-unrelated",elf);
+        std::fill(elf.begin()+0x100,elf.end(),0);
+        const std::uint32_t referenced_setup[]{0x241d2040,0x24042000,0x03a0282d,0x240610d0,
+            0x240810e0,0x10800003,0,0x0c000440,0xafa80000,0x24042000,0x0c000420,0,0x2403007b,12};
+        for (unsigned n=0;n<std::size(referenced_setup);++n) word(0x100+n*4,referenced_setup[n]);
+        const std::uint32_t bound_consumer[]{0x8c990008,0x03200008,0x8c84000c};
+        for (unsigned n=0;n<std::size(bound_consumer);++n) word(0x180+n*4,bound_consumer[n]);
+        const std::uint32_t reference_setter[]{0x8ca80000,0xac86000c,0x03e00008,0xac880008};
+        for (unsigned n=0;n<std::size(reference_setter);++n) word(0x200+n*4,reference_setter[n]);
+        word(0x1d0,0x4c000000); word(0x1e0,0x03e00008); word(0x1e4,0x2402002a);
+        nt::write_file(std::string(argv[2])+".referenced-stack-callback",elf);
+        word(0x204,0xac860010); // Not the context field supplied at the indirect call.
+        nt::write_file(std::string(argv[2])+".referenced-stack-unrelated",elf);
+        // Copy a function/context record by reference after an intervening call.
+        // The consumer addresses the embedded record through a displaced base.
+        elf.resize(0x388,0); word(68,0x280); word(72,0x280); word(88,0x380);
+        std::fill(elf.begin()+0x100,elf.end(),0);
+        const std::uint32_t record_main[]{0x241d2080,0x0c000440,0,0x2403007b,12,0x03e00008,0};
+        for (unsigned n=0;n<std::size(record_main);++n) word(0x100+n*4,record_main[n]);
+        const std::uint32_t record_consumer[]{0x24880018,0x8d190000,0x03200008,0x8d040004};
+        for (unsigned n=0;n<std::size(record_consumer);++n) word(0x180+n*4,record_consumer[n]);
+        const std::uint32_t record_caller[]{0x03e08021,0x27bdfff0,0x03a08821,0x240810e0,
+            0xafa80000,0x240810d0,0xafa80004,0x0c000460,0,0x24042000,0x02202821,
+            0x0c000450,0,0x24042000,0x0c000420,0,0x27bd0010,0x02000008,0};
+        // Leave room between the caller and its leaf setter.
+        for (unsigned n=0;n<std::size(record_caller);++n) word(0x200+n*4,record_caller[n]);
+        word(0x22c,0x0c000468); // setter at 0x11a0
+        word(0x230,0x24060000);
+        // Address arithmetic loses argument identity, as with an allocated object.
+        const std::uint32_t record_setter[]{0x00862021,0x68a80007,0x6ca80000,0xb088001f,0xb4880018,0x03e00008,0};
+        for (unsigned n=0;n<std::size(record_setter);++n) word(0x2a0+n*4,record_setter[n]);
+        word(0x280,0x03e00008); word(0x284,0);
+        word(0x1d0,0x4c000000); word(0x1e0,0x03e00008); word(0x1e4,0x2402002a);
+        nt::write_file(std::string(argv[2])+".copied-callback-record",elf);
+        word(0x2ac,0xb088001b); word(0x2b0,0xb4880014);
+        nt::write_file(std::string(argv[2])+".copied-record-unrelated",elf);
+        word(0x2a4,0xdca80000); word(0x2a8,0xfc880018); word(0x2ac,0x03e00008); word(0x2b0,0);
+        nt::write_file(std::string(argv[2])+".copied-aligned-record",elf);
+        // A thread descriptor remains in s4 across a call and a retry edge.
+        // Its entry is discovered only from the descriptor passed to CreateThread.
+        elf=original;
+        elf.resize(0x308,0); std::fill(elf.begin()+0x100,elf.end(),0);
+        word(68,0x200); word(72,0x200); word(88,0x300); word(100,8); word(104,0x6000);
+        const std::uint32_t thread_main[]{0x24040000,0x24056000,0x24061000,0x24072000,
+            0x240811e0,0x2403003c,12,0x0040e821,0x0c000420,0,
+            0x00402021,0x2405002a,0x24030022,12,0x24030032,12,0x2403007b,12};
+        for (unsigned n=0;n<std::size(thread_main);++n) word(0x100+n*4,thread_main[n]);
+        word(0x148,0x03e00008);
+        const std::uint32_t thread_creator[]{0x27bdffc0,0xafbf003c,0x27b40010,0x240811c0,
+            0xafa80014,0x24084000,0xafa80018,0x24081000,0xafa8001c,0x2408000a,0xafa80024,
+            0,0x0c000460,0,0x10000002,0,0,0x0c000450,0x0280202d,
+            0x0440fff8,0,0x8fbf003c,0x03e00008,0x27bd0040};
+        for (unsigned n=0;n<std::size(thread_creator);++n) word(0x180+n*4,thread_creator[n]);
+        word(0x240,0x24030020); word(0x244,12); word(0x248,0x03e00008); word(0x24c,0);
+        word(0x280,0x03e00008); word(0x284,0x24080000);
+        word(0x2c0,0x00801021); word(0x2c4,0x2403007b); word(0x2c8,12);
+        word(0x2cc,0x03e00008);
+        word(0x2e0,0x24030023); word(0x2e4,12); word(0x2e8,0x03e00008);
+        nt::write_file(std::string(argv[2])+".frame-thread",elf);
+        word(0x1ac,0xa2800004); // Aliased partial overwrite invalidates the older entry.
+        nt::write_file(std::string(argv[2])+".frame-thread-overwritten",elf);
+        word(0x1ac,0xae800004);
+        nt::write_file(std::string(argv[2])+".frame-thread-cleared",elf);
+        elf=original;
+        elf.resize(0x308,0); std::fill(elf.begin()+0x100,elf.end(),0);
+        word(68,0x200); word(72,0x200); word(88,0x300); word(100,8); word(104,0x100);
+        const std::uint32_t loop_setup[]{0x24040000,0x240510e0,0x240610d0,0x0c000450,0,
+            0x24040001,0x0c000450,0,0x0c000420,0,0x2403007b,12,0x03e00008,0};
+        for (unsigned n=0;n<std::size(loop_setup);++n) word(0x100+n*4,loop_setup[n]);
+        const std::uint32_t loop_consumer[]{0x24102000,0x24110002,0x24020000,0x03e09021,
+            0x8e190000,0x53200004,0x2631ffff,0x0320f809,0x8e040004,0x2631ffff,
+            0x0621fff9,0x26100008,0x02400008,0};
+        for (unsigned n=0;n<std::size(loop_consumer);++n) word(0x180+n*4,loop_consumer[n]);
+        const std::uint32_t loop_setter[]{0x000440c0,0x24092000,0x01284821,0xad260004,
+            0x03e00008,0xad250000};
+        for (unsigned n=0;n<std::size(loop_setter);++n) word(0x240+n*4,loop_setter[n]);
+        word(0x1d0,0x4c000000); word(0x1e0,0x24420015); word(0x1e4,0x03e00008); word(0x1e8,0);
+        nt::write_file(std::string(argv[2])+".countdown-callbacks",elf);
+        word(0x198,0x2631fffe); // One arm changes the count differently: no proved bound.
+        nt::write_file(std::string(argv[2])+".countdown-unproved",elf);
         elf=original;
         elf.resize(0x190,0); word(100,16); word(104,36);
         const std::uint32_t constructors[]{0x24102000,0x8e020000,0x8e190004,0x0320f809,0,

@@ -175,6 +175,9 @@ if(BUILD_TESTING)
             COMMAND "${ANYPS2_CLANG}" -target x86_64-pc-windows-msvc -Werror -Wno-override-module -O2 -c
                 "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.ll" -o "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj"
             DEPENDS emit-ee-fixture VERBATIM)
+        # Several native test programs share this object. Give generation one
+        # owner so parallel Visual Studio builds cannot truncate each other's IR.
+        add_custom_target(ee-fixture-object DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj")
         add_executable(ee-llvm-tests tests/ee_native.cpp tests/ee_batch.cpp tests/ee_file_rpc.cpp libraries/ee_native/src/io.cpp libraries/ee_native/src/numeric.cpp libraries/ee_native/src/vector.cpp "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj")
         target_sources(vu-native-tests PRIVATE libraries/ee_native/src/io.cpp libraries/ee_native/src/vector.cpp "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj")
         target_link_libraries(ee-llvm-tests PRIVATE nt_ee_native nt_fileio)
@@ -191,6 +194,12 @@ if(BUILD_TESTING)
             "-DGENERATOR=${CMAKE_GENERATOR}" "-DPLATFORM=${CMAKE_GENERATOR_PLATFORM}"
             "-DEXE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/vector_section_project.cmake")
         set_tests_properties(ee-vector-container PROPERTIES TIMEOUT 120)
+        add_test(NAME ee-pointer-flow COMMAND "${CMAKE_COMMAND}"
+            "-DFIXTURE=$<TARGET_FILE:emit-ee-fixture>" "-DCONVERTER=$<TARGET_FILE:ps2-recompile>"
+            "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}" "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/pointer-flow-tests"
+            "-DGENERATOR=${CMAKE_GENERATOR}" "-DPLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+            "-DEXE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/pointer_flow_project.cmake")
+        set_tests_properties(ee-pointer-flow PROPERTIES TIMEOUT 180)
         add_test(NAME ee-native-images COMMAND "${CMAKE_COMMAND}"
             -DFIXTURE=$<TARGET_FILE:emit-ee-fixture> -DCONVERTER=$<TARGET_FILE:ps2-recompile>
             -DSCRATCH=${CMAKE_BINARY_DIR}/image-project-tests -DROOT=${CMAKE_CURRENT_SOURCE_DIR}
@@ -219,6 +228,9 @@ if(BUILD_TESTING)
             "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj" "${CMAKE_CURRENT_BINARY_DIR}/iop-llvm-fixture.obj")
         target_link_libraries(sif-native-tests PRIVATE nt_ee_native nt_iop_native nt_fileio)
         add_test(NAME native-sif-link COMMAND sif-native-tests)
+        add_dependencies(ee-llvm-tests ee-fixture-object)
+        add_dependencies(vu-native-tests ee-fixture-object)
+        add_dependencies(sif-native-tests ee-fixture-object)
         add_test(NAME iop-llvm-project COMMAND "${CMAKE_COMMAND}"
             "-DEEFIXTURE=$<TARGET_FILE:emit-ee-fixture>" "-DEECONVERTER=$<TARGET_FILE:ps2-recompile>"
             "-DFIXTURE=$<TARGET_FILE:emit-iop-fixture>" "-DCONVERTER=$<TARGET_FILE:ps2-iop-recompile>"

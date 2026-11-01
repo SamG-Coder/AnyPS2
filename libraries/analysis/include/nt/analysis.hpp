@@ -12,6 +12,8 @@ namespace nt::analysis {
 struct Program {
     std::map<std::uint32_t, r5900::Instruction> instructions;
     std::set<std::uint32_t> unresolved;
+    std::set<std::uint32_t> ordinary;
+    std::set<std::uint32_t> entries;
 };
 enum class CallKind { direct, conditional, indirect, direct_jump, indirect_jump, return_link, return_exception, service };
 struct CallSite {

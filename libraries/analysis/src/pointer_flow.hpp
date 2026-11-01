@@ -1,0 +1,268 @@
+#pragma once
+#include <nt/analysis.hpp>
+#include <deque>
+#include <tuple>
+
+namespace nt::analysis::pointer_flow {
+// The low word can carry a pointer. Conditional and partial writes invalidate it
+// too. No value semantics are inferred for operations listed only by effect.
+inline std::optional<unsigned> write(const r5900::Instruction& i) {
+    using r5900::Op;
+    switch (i.op) {
+    case Op::unsupported: case Op::syscall: return {};
+    case Op::jal: case Op::bltzal: case Op::bgezal: case Op::bltzall: case Op::bgezall: return 31;
+    case Op::lui: case Op::addi: case Op::addiu: case Op::daddi: case Op::daddiu:
+    case Op::slti: case Op::sltiu: case Op::andi: case Op::ori: case Op::xori:
+    case Op::lb: case Op::lbu: case Op::lh: case Op::lhu: case Op::lw: case Op::lwu:
+    case Op::ld: case Op::lq: case Op::lwl: case Op::lwr: case Op::ldl: case Op::ldr:
+    case Op::mfc0: case Op::mfc1: case Op::cfc1: case Op::cfc2: case Op::qmfc2: return i.rt;
+    case Op::jalr: case Op::sll: case Op::srl: case Op::sra: case Op::sllv: case Op::srlv: case Op::srav:
+    case Op::dsll: case Op::dsrl: case Op::dsra: case Op::dsll32: case Op::dsrl32: case Op::dsra32:
+    case Op::dsllv: case Op::dsrlv: case Op::dsrav: case Op::movz: case Op::movn:
+    case Op::add: case Op::sub: case Op::addu: case Op::subu: case Op::dadd: case Op::dsub:
+    case Op::daddu: case Op::dsubu: case Op::bit_and: case Op::bit_or: case Op::bit_xor: case Op::bit_nor:
+    case Op::slt: case Op::sltu: case Op::mfhi: case Op::mflo: case Op::mfhi1: case Op::mflo1: case Op::mfsa:
+    case Op::mult: case Op::multu: case Op::mult1: case Op::multu1:
+    case Op::madd: case Op::maddu: case Op::madd1: case Op::maddu1: case Op::plzcw:
+    case Op::pextlb: case Op::pextlh: case Op::pextlw: case Op::pextub: case Op::pextuh: case Op::pextuw:
+    case Op::pand: case Op::por: case Op::pxor: case Op::pnor: case Op::padduw:
+    case Op::pceqb: case Op::pceqh: case Op::pceqw: case Op::ppac5: case Op::pext5:
+    case Op::ppacb: case Op::ppach: case Op::ppacw: case Op::pcpyh: case Op::pcpyld: case Op::pcpyud:
+    case Op::paddw: case Op::psubw: case Op::pcgtw: case Op::pmaxw: case Op::pminw: case Op::pabsw:
+    case Op::paddsw: case Op::psubsw: case Op::psubuw: case Op::paddh: case Op::psubh:
+    case Op::pcgth: case Op::pmaxh: case Op::pminh: case Op::pabsh: case Op::paddsh:
+    case Op::psubsh: case Op::padduh: case Op::psubuh: case Op::paddb: case Op::psubb:
+    case Op::pcgtb: case Op::paddsb: case Op::psubsb: case Op::paddub: case Op::psubub:
+    case Op::padsbh: case Op::psllvw: case Op::psrlvw: case Op::psravw:
+    case Op::psllh: case Op::psrlh: case Op::psrah: case Op::psllw: case Op::psrlw: case Op::psraw:
+    case Op::pexeh: case Op::prevh: case Op::pexew: case Op::prot3w: case Op::pexch: case Op::pexcw:
+    case Op::pinth: case Op::pinteh: case Op::qfsrv: case Op::pmfhi: case Op::pmflo:
+    case Op::pmultw: case Op::pmultuw: case Op::pmadduw: case Op::pmfhl:
+    case Op::pmulth: case Op::pmaddh: case Op::pmsubh: case Op::phmadh: case Op::phmsbh: return i.rd;
+    case Op::sw: case Op::sd: case Op::sq: case Op::sb: case Op::sh:
+    case Op::swl: case Op::swr: case Op::sdl: case Op::sdr: case Op::swc1: case Op::sqc2:
+    case Op::sync: case Op::pref: case Op::cache: case Op::breakpoint: case Op::eret:
+    case Op::jr: case Op::j: case Op::beq: case Op::bne: case Op::blez: case Op::bgtz:
+    case Op::bltz: case Op::bgez: case Op::beql: case Op::bnel: case Op::blezl: case Op::bgtzl:
+    case Op::bltzl: case Op::bgezl: case Op::bc1f: case Op::bc1t: case Op::bc1fl: case Op::bc1tl:
+    case Op::bc0f: case Op::bc0t: case Op::bc0fl: case Op::bc0tl:
+    case Op::mthi: case Op::mtlo: case Op::mthi1: case Op::mtlo1: case Op::mtsa: case Op::mtsab: case Op::mtsah:
+    case Op::div: case Op::divu: case Op::div1: case Op::divu1: case Op::pdivw: case Op::pdivuw: case Op::pdivbw:
+    case Op::pmthi: case Op::pmtlo: case Op::pmthl:
+    case Op::mtc0: case Op::mtc1: case Op::ctc1: case Op::ctc2: case Op::qmtc2: case Op::lwc1: case Op::lqc2:
+    case Op::ei: case Op::di: case Op::tlbr: case Op::tlbwi: case Op::tlbwr: case Op::tlbp:
+    case Op::tge: case Op::tgeu: case Op::tlt: case Op::tltu: case Op::teq: case Op::tne:
+    case Op::tgei: case Op::tgeiu: case Op::tlti: case Op::tltiu: case Op::teqi: case Op::tnei:
+    case Op::mov_s: case Op::abs_s: case Op::neg_s: case Op::mul_s: case Op::div_s:
+    case Op::add_s: case Op::sub_s: case Op::max_s: case Op::min_s: case Op::cvt_s_w: case Op::cvt_w_s:
+    case Op::compare_s: case Op::adda_s: case Op::suba_s: case Op::mula_s: case Op::sqrt_s:
+    case Op::rsqrt_s: case Op::madd_s: case Op::msub_s: case Op::madda_s: case Op::msuba_s:
+    case Op::vsub: case Op::vadd: case Op::vsub_bc: case Op::vadd_bc: case Op::vmove: case Op::vmr32:
+    case Op::vmul: case Op::vmul_bc: case Op::vmax: case Op::vmax_bc: case Op::vmini: case Op::vmini_bc:
+    case Op::vabs: case Op::vnop: case Op::vitof0: case Op::vitof4: case Op::vitof12: case Op::vitof15:
+    case Op::vftoi0: case Op::vftoi4: case Op::vftoi12: case Op::vftoi15: case Op::vcallms: case Op::vcallmsr:
+    case Op::vmula_bc: case Op::vmula: case Op::vmadd: case Op::vmsub: case Op::vmadd_bc: case Op::vmsub_bc:
+    case Op::vmadda: case Op::vmsuba: case Op::vmadda_bc: case Op::vmsuba_bc:
+    case Op::vdiv: case Op::vsqrt: case Op::vrsqrt: case Op::vwaitq: case Op::vclip:
+    case Op::vopmula: case Op::vopmsub: case Op::vrnext: case Op::vrget: case Op::vrinit: case Op::vrxor:
+    case Op::vadda: case Op::vsuba: case Op::vadda_bc: case Op::vsuba_bc: case Op::vmul_q: case Op::vmul_i: return 0;
+    }
+    return {};
+}
+inline bool preserved(unsigned reg) { return (reg>=16 && reg<=23) || reg==28 || reg==29 || reg==30; }
+struct FrameAddress {
+    std::uint32_t root,offset;
+    auto operator<=>(const FrameAddress&) const=default;
+};
+struct Edge {
+    std::uint32_t from,to;
+    bool delay=false,call=false;
+};
+// Edges execute the instruction at `from`, then its delay slot when selected,
+// and finally apply a call's ABI clobbers. Likely-false edges omit the slot.
+struct Graph {
+    std::map<std::uint32_t,std::vector<Edge>> next,previous;
+    explicit Graph(const Program& program) {
+        using r5900::Op;
+        const auto add=[&](Edge edge) {
+            if (!program.instructions.contains(edge.to)) return;
+            next[edge.from].push_back(edge); previous[edge.to].push_back(edge);
+        };
+        for (const auto& [pc,i]:program.instructions) {
+            if ((!program.ordinary.empty() && !program.ordinary.contains(pc)) || pc>0xfffffff7U ||
+                i.terminal() || i.op==Op::syscall) continue;
+            if (!i.branch()) { add({pc,pc+4}); continue; }
+            const bool link=i.op==Op::jal || (i.op==Op::jalr && i.rd) || (i.op>=Op::bltzal && i.op<=Op::bgezall);
+            const bool always=(i.op==Op::beq || i.op==Op::beql) && i.rs==i.rt;
+            const bool never=(i.op==Op::bne || i.op==Op::bnel) && i.rs==i.rt;
+            if (link) add({pc,pc+8,true,true});
+            else if (!i.indirect() && !never) add({pc,i.target(),true});
+            if (!always && i.op!=Op::j && i.op!=Op::jal && i.op!=Op::jr && i.op!=Op::jalr)
+                add({pc,pc+8,!i.likely()});
+        }
+        // Discovery records both syntactic arms. Once a constant condition has
+        // pruned one edge, disconnected fallthrough instructions must not act
+        // as fresh roots in a backward slice.
+        if (!program.entries.empty()) {
+            std::deque<std::uint32_t> pending(program.entries.begin(),program.entries.end());
+            std::set<std::uint32_t> reached;
+            while (!pending.empty()) {
+                const auto pc=pending.front(); pending.pop_front();
+                if (!reached.insert(pc).second) continue;
+                const auto instruction=program.instructions.find(pc);
+                if (instruction==program.instructions.end()) continue;
+                const auto& i=instruction->second;
+                if (i.op==Op::jal || (i.op>=Op::bltzal && i.op<=Op::bgezall)) pending.push_back(i.target());
+                if (const auto edges=next.find(pc);edges!=next.end())
+                    for (const auto& edge:edges->second) pending.push_back(edge.to);
+            }
+            for (auto& [pc,edges]:previous)
+                std::erase_if(edges,[&](const auto& edge) { return !reached.contains(edge.from); });
+        }
+    }
+};
+// Recover affine stack aliases relative to one function entry. Requiring the
+// same root and offset on every incoming path prevents unrelated frames from
+// being equated, while ABI-preserved aliases can survive intervening calls.
+inline std::optional<FrameAddress> frame_address(const Program& program,const Graph& graph,
+                                                std::uint32_t before,unsigned reg) {
+    using r5900::Op;
+    struct State {
+        std::uint32_t pc,offset; unsigned reg;
+        auto operator<=>(const State&) const=default;
+    };
+    std::deque<State> pending{{before,0,reg}};
+    std::set<State> visited;
+    std::optional<FrameAddress> result;
+    unsigned budget=512;
+    const auto reverse=[&](std::uint32_t pc,State& state) {
+        const auto found=program.instructions.find(pc);
+        if (found==program.instructions.end()) return false;
+        const auto& i=found->second;
+        const auto effect=write(i);
+        if (!effect || i.terminal()) return false;
+        if (*effect!=state.reg) return true;
+        if (i.op==Op::addiu || i.op==Op::daddiu) {
+            state.reg=i.rs; state.offset+=std::uint32_t(i.immediate); return state.reg!=0;
+        }
+        if ((i.op==Op::addu || i.op==Op::daddu || i.op==Op::bit_or) && (!i.rs || !i.rt)) {
+            state.reg=i.rs ? i.rs : i.rt; return state.reg!=0;
+        }
+        return false;
+    };
+    while (!pending.empty() && budget--) {
+        auto state=pending.front(); pending.pop_front();
+        if (!visited.insert(state).second) continue;
+        const auto edges=graph.previous.find(state.pc);
+        if (edges==graph.previous.end() || edges->second.empty()) {
+            if (state.reg!=29) return {};
+            const FrameAddress value{state.pc,state.offset};
+            if (result && *result!=value) return {};
+            result=value; continue;
+        }
+        for (const auto& edge:edges->second) {
+            auto next=state;
+            if (edge.call && !preserved(next.reg)) return {};
+            if (edge.delay && !reverse(edge.from+4,next)) return {};
+            if (!reverse(edge.from,next)) return {};
+            next.pc=edge.from; pending.push_back(next);
+        }
+    }
+    return pending.empty() ? result : std::nullopt;
+}
+// Recover one agreed scalar constant across predecessor blocks. Path states
+// stay separate; a clobbered or unknown incoming value makes the result unknown.
+inline std::optional<std::uint32_t> constant(const Program& program,const Graph& graph,
+                                            std::uint32_t before,unsigned reg) {
+    using r5900::Op;
+    struct Operation {
+        bool bit_or; std::uint32_t value;
+        auto operator<=>(const Operation&) const=default;
+    };
+    struct State {
+        std::uint32_t pc; unsigned reg; std::vector<Operation> operations;
+        auto operator<=>(const State&) const=default;
+    };
+    std::deque<State> pending{{before,reg,{}}};
+    std::set<State> visited;
+    std::optional<std::uint32_t> result;
+    bool unknown=false;
+    unsigned budget=512;
+    const auto accept=[&](const State& state,std::uint32_t value) {
+        for (auto op=state.operations.rbegin();op!=state.operations.rend();++op)
+            value=op->bit_or ? value|op->value : value+op->value;
+        if (result && *result!=value) unknown=true;
+        result=value;
+    };
+    const auto reverse=[&](std::uint32_t pc,State& state) {
+        const auto found=program.instructions.find(pc);
+        if (found==program.instructions.end()) { unknown=true; return false; }
+        const auto& i=found->second;
+        const auto effect=write(i);
+        if (!effect || i.terminal()) { unknown=true; return false; }
+        if (*effect!=state.reg) return true;
+        if (i.op==Op::lui) { accept(state,std::uint32_t(i.immediate)<<16); return false; }
+        if (i.op==Op::addiu || i.op==Op::daddiu || i.op==Op::ori) {
+            if (i.immediate) state.operations.push_back({i.op==Op::ori,i.op==Op::ori ? std::uint16_t(i.immediate) : std::uint32_t(i.immediate)});
+            state.reg=i.rs; return true;
+        }
+        if ((i.op==Op::addu || i.op==Op::daddu || i.op==Op::bit_or) && (!i.rs || !i.rt)) {
+            state.reg=i.rs ? i.rs : i.rt; return true;
+        }
+        if (i.op==Op::sll && !i.sa) { state.reg=i.rt; return true; }
+        unknown=true; return false;
+    };
+    while (!pending.empty() && budget-- && !unknown) {
+        auto state=std::move(pending.front()); pending.pop_front();
+        if (!state.reg) { accept(state,0); continue; }
+        if (!visited.insert(state).second) continue;
+        const auto edges=graph.previous.find(state.pc);
+        if (edges==graph.previous.end()) { unknown=true; break; }
+        for (const auto& edge:edges->second) {
+            auto next=state;
+            if (edge.call && !preserved(next.reg)) { unknown=true; break; }
+            if (edge.delay && !reverse(edge.from+4,next)) continue;
+            if (!next.reg) { accept(next,0); continue; }
+            if (reverse(edge.from,next)) { next.pc=edge.from; pending.push_back(std::move(next)); }
+        }
+    }
+    return unknown || !pending.empty() ? std::nullopt : result;
+}
+// Prove one affine update on every forward path through a bounded loop body.
+// Nested loops, unknown writes and volatile values across calls are rejected.
+inline std::optional<std::int64_t> path_delta(const Program& program,const Graph& graph,
+    std::uint32_t first,std::uint32_t last,unsigned reg) {
+    using r5900::Op;
+    std::deque<std::pair<std::uint32_t,std::int64_t>> pending{{first,0}};
+    std::set<std::pair<std::uint32_t,std::int64_t>> visited;
+    std::optional<std::int64_t> result;
+    const auto step=[&](std::uint32_t pc,std::int64_t& delta) {
+        const auto found=program.instructions.find(pc);
+        if (found==program.instructions.end()) return false;
+        const auto& i=found->second;
+        const auto effect=write(i);
+        if (!effect) return false;
+        if (*effect!=reg) return true;
+        if ((i.op!=Op::addiu && i.op!=Op::daddiu) || i.rs!=reg) return false;
+        delta+=i.immediate; return true;
+    };
+    unsigned budget=256;
+    while (!pending.empty() && budget--) {
+        const auto [pc,value]=pending.front(); pending.pop_front();
+        if (!visited.emplace(pc,value).second) continue;
+        if (pc==last) {
+            if (result && *result!=value) return {};
+            result=value; continue;
+        }
+        const auto edges=graph.next.find(pc);
+        if (edges==graph.next.end() || edges->second.empty()) return {};
+        for (const auto& edge:edges->second) {
+            auto delta=value;
+            if (edge.to<=pc || edge.to>last || (edge.call && !preserved(reg)) ||
+                !step(pc,delta) || (edge.delay && !step(pc+4,delta))) return {};
+            pending.emplace_back(edge.to,delta);
+        }
+    }
+    return pending.empty() ? result : std::nullopt;
+}
+}

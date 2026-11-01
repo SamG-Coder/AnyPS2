@@ -263,6 +263,8 @@ void project(const std::filesystem::path& input,const std::filesystem::path& des
                 if (!prepared.discovered.instructions.emplace(pc,instruction).second)
                     throw std::runtime_error("Executable image has an ambiguous compiled target");
             prepared.discovered.unresolved.insert(extra.discovered.unresolved.begin(),extra.discovered.unresolved.end());
+            prepared.discovered.ordinary.insert(extra.discovered.ordinary.begin(),extra.discovered.ordinary.end());
+            prepared.discovered.entries.insert(extra.discovered.entries.begin(),extra.discovered.entries.end());
             prepared.calls.insert(prepared.calls.end(),extra.calls.begin(),extra.calls.end());
             prepared.pointers.insert(prepared.pointers.end(),extra.pointers.begin(),extra.pointers.end());
             for (auto range:extra.ranges) { range.image=id; prepared.ranges.push_back(range); }
