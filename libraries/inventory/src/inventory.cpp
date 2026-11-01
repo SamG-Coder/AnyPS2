@@ -274,7 +274,18 @@ void record_ee(Accumulator& accumulator,const std::string& id,ByteView bytes,con
     unit.kind=boot?"ee-boot":packed?"ee-packed":"ee-elf";
     try {
         const auto executable=elf::parse(bytes);
-        (void)executable;
+        for (std::size_t index=0;index<executable.vector_sections.size();++index) {
+            const auto& section=executable.vector_sections[index];
+            Unit vector_unit;
+            vector_unit.id=id+"/.vutext["+std::to_string(index)+"]";
+            vector_unit.kind="vu-container";
+            vector_unit.stage=Stage::parsed;
+            vector_unit.analysis_base=section.address;
+            vector_unit.detail=std::to_string(section.size)+" bytes of VU payload storage; upload framing and VU entry points are not yet recovered";
+            accumulator.gap("vu-container","ELF VU section requires separate conversion",1,section.address,
+                vector_unit.id,"Preserved in the input image and excluded from EE callback discovery. Not compiled or executed.");
+            accumulator.inventory.units.push_back(std::move(vector_unit));
+        }
         unit.stage=Stage::parsed;
     } catch (const std::exception& error) {
         unit.detail=error.what();

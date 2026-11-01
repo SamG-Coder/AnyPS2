@@ -15,8 +15,11 @@ struct Executable {
     // An AnyPS2 import note records that the source container had no section
     // permissions. Only discovered flow establishes code in such an image.
     bool inferred_permissions=false;
-    // Allocated section metadata can distinguish data inside a mixed LOAD.
+    // Allocated section metadata distinguishes non-EE contents inside a mixed LOAD.
     std::vector<AddressRange> non_executable_sections;
+    // VU payload containers remain in the load image but are not EE functions.
+    // Their upload framing and VU entry points still require separate conversion.
+    std::vector<AddressRange> vector_sections;
 };
 Executable parse(ByteView bytes);
 bool executable_address(const Executable&,std::uint32_t address,unsigned bytes=4,bool allow_inferred=false);

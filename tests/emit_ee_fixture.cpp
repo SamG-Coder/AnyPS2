@@ -1,6 +1,7 @@
 #include <nt/ee_codegen.hpp>
 #include "disc_fixture.hpp"
 #include "ee_batch_fixture.hpp"
+#include "vector_section_fixture.hpp"
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -423,6 +424,7 @@ int main(int argc,char** argv) {
     if (functions<10) throw std::runtime_error("Large EE program was not partitioned");
     std::ofstream output(argv[1]); output<<text;
     if (argc==3) {
+        nt::write_file(std::string(argv[2])+".vector",fixture::vector_container_elf());
         nt::Bytes elf(0x184,0);
         const std::uint8_t identity[]{0x7f,'E','L','F',1,1,1};
         std::copy(std::begin(identity),std::end(identity),elf.begin());

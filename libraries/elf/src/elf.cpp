@@ -42,7 +42,16 @@ void read_sections(ByteView bytes,Executable& executable) {
         const auto type=le32(bytes,at+4),flags=le32(bytes,at+8);
         if (!(flags&2)) continue; // Only allocated tables belong to the program.
         const auto section_address=le32(bytes,at+12),section_offset=le32(bytes,at+16),section_size=le32(bytes,at+20);
-        if (section_size && !(flags&4)) {
+        std::string section_name;
+        if (!names.empty()) {
+            const auto name=le32(bytes,at);
+            if (name>=names.size()) throw std::runtime_error("Invalid ELF section name");
+            const auto end=std::find(names.begin()+name,names.end(),0);
+            if (end==names.end()) throw std::runtime_error("Unterminated ELF section name");
+            section_name.assign(names.begin()+name,end);
+        }
+        const bool vector_code=type==1 && section_name==".vutext";
+        if (section_size && (!(flags&4) || vector_code)) {
             const auto end=std::uint64_t(section_address)+section_size;
             const auto mapped=std::any_of(executable.segments.begin(),executable.segments.end(),[&](const auto& segment) {
                 return section_address>=segment.address && end<=std::uint64_t(segment.address)+(type==8 ? segment.memory_size : segment.file_size) &&
@@ -51,16 +60,9 @@ void read_sections(ByteView bytes,Executable& executable) {
             if (end>0x100000000ULL || !mapped) throw std::runtime_error("ELF allocated data section is not mapped");
             if (type!=8) require_range(bytes,section_offset,section_size);
             executable.non_executable_sections.push_back({section_address,section_size});
+            if (vector_code) executable.vector_sections.push_back({section_address,section_size});
         }
-        bool legacy=false;
-        if (type==1 && !names.empty()) {
-            const auto name=le32(bytes,at);
-            if (name>=names.size()) throw std::runtime_error("Invalid ELF section name");
-            const auto end=std::find(names.begin()+name,names.end(),0);
-            if (end==names.end()) throw std::runtime_error("Unterminated ELF section name");
-            const std::string text(names.begin()+name,end);
-            legacy=text==".ctors" || text==".dtors";
-        }
+        const bool legacy=type==1 && (section_name==".ctors" || section_name==".dtors");
         const bool array=type==14 || type==15 || type==16; // INIT, FINI, PREINIT_ARRAY.
         if (!legacy && !array) continue;
         const auto address=le32(bytes,at+12),offset=le32(bytes,at+16),size=le32(bytes,at+20),entry_size=le32(bytes,at+36);

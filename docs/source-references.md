@@ -1,5 +1,12 @@
 # Source references and provenance
 
+ELF `.vutext` classification uses the section convention recorded in PS2SDK's
+[`tools/srxfixup/src/eefixconf.c`](https://github.com/ps2dev/ps2sdk/blob/2a18d15da1332665451a9bcf9a0d4df9029c9490/tools/srxfixup/src/eefixconf.c).
+These VU payload containers can share an executable LOAD with EE code. AnyPS2
+retains their bytes and reports their separate conversion requirement; an EE
+function-pointer candidate does not make their contents EE instructions. The
+implementation is original and does not copy the upstream linker configuration.
+
 The Vulkan sprite batch implementation follows Khronos' public
 [synchronization rules](https://docs.vulkan.org/spec/latest/chapters/synchronization.html),
 [`vkCmdCopyBuffer`](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdCopyBuffer.html)

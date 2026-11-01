@@ -1,5 +1,6 @@
 #include <nt/inventory.hpp>
 #include "reboot_fixture.hpp"
+#include "vector_section_fixture.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -161,6 +162,27 @@ int main(int argc,char** argv) {
         options.compile=false;
         const auto inventory=nt::inventory::convert_disc(disc,options);
         check(std::filesystem::exists(options.output/"library-calls.json"),"Call inventory was not emitted");
+        {
+            const auto vector_elf=fixture::vector_container_elf();
+            auto branch=vector_elf; put32(branch,0x100,0x08000418);
+            const auto rejected=nt::ee_codegen::assess(branch);
+            check(!rejected.convertible && rejected.unresolved_count==1 && rejected.unresolved_sample[0]==0x1060,
+                "An actual EE jump into a VU container was silently discarded");
+            const auto vector_disc=root/"vector.iso";
+            nt::write_file(vector_disc,iso_with({{"SYSTEM.CNF;1",nt::Bytes(cnf.begin(),cnf.end())},
+                {"BOOT.ELF;1",vector_elf}}));
+            auto vector_options=options; vector_options.output=root/"vector";
+            const auto vector_inventory=nt::inventory::convert_disc(vector_disc,vector_options);
+            const auto* ee=find_exact(vector_inventory,"BOOT.ELF;1");
+            const auto* vu=find_exact(vector_inventory,"BOOT.ELF;1/.vutext[0]");
+            check(ee && ee->stage==nt::inventory::Stage::llvm_generated && ee->instructions==5,
+                "A stored VU payload pointer was compiled as an EE function");
+            check(vu && vu->stage==nt::inventory::Stage::parsed && vu->modules.empty() && vu->analysis_base==0x1060,
+                "VU container was hidden or falsely reported as converted");
+            check(std::any_of(vector_inventory.gaps.begin(),vector_inventory.gaps.end(),[](const auto& gap) {
+                return gap.subsystem=="vu-container";
+            }),"Separate VU conversion requirement was not reported");
+        }
         {
             auto audit_options=options;
             audit_options.output=root/"audit"; audit_options.generate=false;

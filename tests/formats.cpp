@@ -1,5 +1,6 @@
 #include "disc_fixture.hpp"
 #include "reboot_fixture.hpp"
+#include "vector_section_fixture.hpp"
 #include <nt/reboot_image.hpp>
 #include <nt/iop_module.hpp>
 #include <nt/iop_libraries.hpp>
@@ -80,6 +81,21 @@ void test_elf() {
     lifecycle[0x182]='d'; put32(lifecycle,0x104,1);
     check(nt::elf::parse(lifecycle).lifecycle_entries.size()==1,"Legacy destructor count form lost");
     auto invalid=lifecycle; put32(invalid,0xe4,2); rejects([&] { nt::elf::parse(invalid); });
+}
+void test_vector_section() {
+    const auto bytes=fixture::vector_container_elf();
+    const auto parsed=nt::elf::parse(bytes);
+    check(parsed.vector_sections.size()==1 && parsed.vector_sections[0].address==0x1060 &&
+          parsed.vector_sections[0].size==16,"ELF VU container metadata was lost");
+    check(nt::elf::executable_address(parsed,0x1000) && !nt::elf::executable_address(parsed,0x1060) &&
+          !nt::elf::executable_address(parsed,0x105c,8),"VU container was exposed as EE code");
+    for (const auto [at,value]:std::initializer_list<std::pair<unsigned,unsigned>>{
+            {24,0x1060},{0x234,0x2000},{0x238,0x164},{0x23c,0x100},{0x228,19}}) {
+        auto bad=bytes; put32(bad,at,value);
+        rejects([&] { nt::elf::parse(bad); });
+    }
+    auto bad=bytes; std::fill(bad.begin()+0x2a0,bad.begin()+0x2b3,'x');
+    rejects([&] { nt::elf::parse(bad); });
 }
 void test_reboot_image() {
     const auto image=fixture::reboot_image();
@@ -297,6 +313,7 @@ int main() {
         ("anyps2-format-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".iso");
     try {
         test_elf();
+        test_vector_section();
         test_reboot_image();
         test_iop_module();
         test_iop_imports();

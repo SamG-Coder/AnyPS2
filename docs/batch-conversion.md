@@ -11,6 +11,13 @@ ELFs, length-prefixed DEFLATE segmented images and IOP modules become independen
 not select executable content. The source-to-artifact encoding preserves case,
 separators and long names even on case-insensitive filesystems.
 
+Allocated ELF `.vutext` containers are retained as VU input and excluded from
+EE function discovery, even when the enclosing LOAD has its executable flag set.
+The inventory reports them as unconverted `vu-container` units until their
+upload framing and VU entry points are recovered. Reading or storing a pointer
+to those bytes does not make them an EE function; an actual EE branch into a
+declared VU container remains an unresolved conversion error.
+
 | Output | Purpose |
 | --- | --- |
 | `bin/ps2-native.exe` | Native boot executable, when its reached code converts |
