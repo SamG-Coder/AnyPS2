@@ -31,8 +31,8 @@ struct VulkanRenderer::Impl {
     VkDevice device{};
     VkQueue queue{};
     unsigned family=0;
-    VkBuffer buffer{};
-    VkDeviceMemory allocation{};
+    VkBuffer buffer{},storage{};
+    VkDeviceMemory allocation{},storage_allocation{};
     void* mapped=nullptr;
     VkDescriptorSetLayout set_layout{};
     VkDescriptorPool descriptors{};
@@ -49,6 +49,7 @@ struct VulkanRenderer::Impl {
     std::vector<VkImage> images;
     std::string name;
     std::atomic<unsigned> errors=0;
+    RenderStatistics statistics;
     static VKAPI_ATTR VkBool32 VKAPI_CALL report(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
         VkDebugUtilsMessageTypeFlagsEXT, const VkDebugUtilsMessengerCallbackDataEXT*, void* user) {
         if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ++static_cast<Impl*>(user)->errors;
@@ -67,11 +68,32 @@ struct VulkanRenderer::Impl {
         if (descriptors) vkDestroyDescriptorPool(device,descriptors,nullptr);
         if (set_layout) vkDestroyDescriptorSetLayout(device,set_layout,nullptr);
         if (buffer) vkDestroyBuffer(device,buffer,nullptr);
+        if (storage) vkDestroyBuffer(device,storage,nullptr);
         if (allocation) vkFreeMemory(device,allocation,nullptr);
+        if (storage_allocation) vkFreeMemory(device,storage_allocation,nullptr);
         if (device) vkDestroyDevice(device,nullptr);
         if (surface) vkDestroySurfaceKHR(instance,surface,nullptr);
         if (debug) reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(vkGetInstanceProcAddr(instance,"vkDestroyDebugUtilsMessengerEXT"))(instance,debug,nullptr);
         if (instance) vkDestroyInstance(instance,nullptr);
+    }
+    void create_buffer(VkBufferUsageFlags usage,VkMemoryPropertyFlags required,VkMemoryPropertyFlags preferred,
+                       VkBuffer& result,VkDeviceMemory& memory) {
+        VkBufferCreateInfo b{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO}; b.size=buffer_bytes; b.usage=usage;
+        check(vkCreateBuffer(device,&b,nullptr,&result),"Create graphics buffer");
+        VkMemoryRequirements requirements; vkGetBufferMemoryRequirements(device,result,&requirements);
+        VkPhysicalDeviceMemoryProperties properties; vkGetPhysicalDeviceMemoryProperties(physical,&properties);
+        unsigned type=properties.memoryTypeCount;
+        for (unsigned i=0;i<properties.memoryTypeCount;++i) {
+            const auto flags=properties.memoryTypes[i].propertyFlags;
+            if (!(requirements.memoryTypeBits&(1U<<i)) || (flags&required)!=required) continue;
+            if (type==properties.memoryTypeCount) type=i;
+            if ((flags&preferred)==preferred) { type=i; break; }
+        }
+        if (type==properties.memoryTypeCount) throw std::runtime_error("No compatible Vulkan buffer memory");
+        VkMemoryAllocateInfo a{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        a.allocationSize=requirements.size; a.memoryTypeIndex=type;
+        check(vkAllocateMemory(device,&a,nullptr,&memory),"Allocate graphics buffer");
+        check(vkBindBufferMemory(device,result,memory,0),"Bind graphics buffer");
     }
     void initialize(void* window, bool validation) {
         std::vector<const char*> extensions;
@@ -125,17 +147,13 @@ struct VulkanRenderer::Impl {
         VkDeviceCreateInfo dc{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO}; dc.queueCreateInfoCount=1; dc.pQueueCreateInfos=&q;
         dc.enabledExtensionCount=surface?1:0; dc.ppEnabledExtensionNames=&swap_extension;
         check(vkCreateDevice(physical,&dc,nullptr,&device),"Create device"); vkGetDeviceQueue(device,family,0,&queue);
-        VkBufferCreateInfo b{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO}; b.size=buffer_bytes; b.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        check(vkCreateBuffer(device,&b,nullptr,&buffer),"Create GS buffer");
-        VkMemoryRequirements requirements; vkGetBufferMemoryRequirements(device,buffer,&requirements);
-        VkPhysicalDeviceMemoryProperties memory; vkGetPhysicalDeviceMemoryProperties(physical,&memory);
-        unsigned type=memory.memoryTypeCount;
-        for (unsigned i=0;i<memory.memoryTypeCount;++i)
-            if ((requirements.memoryTypeBits&(1U<<i)) && (memory.memoryTypes[i].propertyFlags&(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))==(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {type=i;break;}
-        if (type==memory.memoryTypeCount) throw std::runtime_error("No coherent host-visible Vulkan memory");
-        VkMemoryAllocateInfo a{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO}; a.allocationSize=requirements.size; a.memoryTypeIndex=type;
-        check(vkAllocateMemory(device,&a,nullptr,&allocation),"Allocate GS buffer");
-        check(vkBindBufferMemory(device,buffer,allocation,0),"Bind GS buffer"); check(vkMapMemory(device,allocation,0,buffer_bytes,0,&mapped),"Map GS buffer");
+        constexpr auto transfers=VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        create_buffer(transfers|VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,0,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,storage,storage_allocation);
+        // GPU working storage is separate from CPU staging. Cached coherent
+        // host memory makes full-store readback a normal native memory copy.
+        create_buffer(transfers,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                      VK_MEMORY_PROPERTY_HOST_CACHED_BIT,buffer,allocation);
+        check(vkMapMemory(device,allocation,0,buffer_bytes,0,&mapped),"Map graphics staging buffer");
         VkDescriptorSetLayoutBinding binding{0,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,VK_SHADER_STAGE_COMPUTE_BIT,nullptr};
         VkDescriptorSetLayoutCreateInfo sl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; sl.bindingCount=1; sl.pBindings=&binding;
         check(vkCreateDescriptorSetLayout(device,&sl,nullptr,&set_layout),"Create descriptor layout");
@@ -144,7 +162,7 @@ struct VulkanRenderer::Impl {
         check(vkCreateDescriptorPool(device,&dp,nullptr,&descriptors),"Create descriptors");
         VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO}; da.descriptorPool=descriptors; da.descriptorSetCount=1; da.pSetLayouts=&set_layout;
         check(vkAllocateDescriptorSets(device,&da,&set),"Allocate descriptors");
-        VkDescriptorBufferInfo bi{buffer,0,buffer_bytes};
+        VkDescriptorBufferInfo bi{storage,0,buffer_bytes};
         VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}; write.dstSet=set; write.descriptorCount=1; write.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; write.pBufferInfo=&bi;
         vkUpdateDescriptorSets(device,1,&write,0,nullptr);
         VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(Sprite)};
@@ -199,9 +217,10 @@ VulkanRenderer::~VulkanRenderer()=default;
 void VulkanRenderer::synchronize() { check(vkDeviceWaitIdle(impl_->device),"Synchronize graphics"); }
 const std::string& VulkanRenderer::device_name() const {return impl_->name;}
 unsigned VulkanRenderer::validation_errors() const {return impl_->errors.load();}
-void VulkanRenderer::sprite(std::span<std::uint32_t> memory,const Sprite& draw,std::span<const std::uint32_t> palette) {
-    if ((draw.flags&64) && palette.size()!=16) throw std::runtime_error("PSMT4 requires sixteen palette entries");
-    if (memory.size_bytes()!=memory_bytes || draw.right>2048 || draw.bottom>2048 || draw.left>draw.right || draw.top>draw.bottom || !draw.pitch || draw.pitch>63 || draw.base>16383)
+const RenderStatistics& VulkanRenderer::statistics() const { return impl_->statistics; }
+namespace {
+void validate_sprite(const Sprite& draw) {
+    if (draw.right>2048 || draw.bottom>2048 || draw.left>draw.right || draw.top>draw.bottom || !draw.pitch || draw.pitch>63 || draw.base>16383)
         throw std::runtime_error("Invalid Vulkan sprite bounds or GS memory");
     if (draw.left==draw.right || draw.top==draw.bottom) return;
     if ((draw.flags&256) || (draw.test&0x4000)) {
@@ -225,17 +244,74 @@ void VulkanRenderer::sprite(std::span<std::uint32_t> memory,const Sprite& draw,s
             draw.u0<0 || draw.u0>16383 || draw.v0<0 || draw.v0>16383 || !delta(draw.du) || !delta(draw.dv))
             throw std::runtime_error("Unsupported Vulkan texture parameters");
     }
+}
+}
+void VulkanRenderer::sprite(std::span<std::uint32_t> memory,const Sprite& draw,std::span<const std::uint32_t> palette) {
+    if ((draw.flags&64) && palette.size()!=16) throw std::runtime_error("PSMT4 requires sixteen palette entries");
+    SpriteCommand command{draw};
+    if (draw.flags&64) std::copy(palette.begin(),palette.end(),command.palette.begin());
+    sprites(memory,std::span(&command,1));
+}
+void VulkanRenderer::sprites(std::span<std::uint32_t> memory,std::span<const SpriteCommand> commands) {
+    if (memory.size_bytes()!=memory_bytes || commands.size()>65536)
+        throw std::runtime_error("Invalid Vulkan sprite batch or graphics storage");
+    std::uint64_t count=0;
+    for (const auto& command:commands) {
+        validate_sprite(command.draw);
+        count+=command.draw.left!=command.draw.right && command.draw.top!=command.draw.bottom;
+    }
+    if (!count) return;
     auto& v=*impl_; std::memcpy(v.mapped,memory.data(),memory_bytes);
-    if (draw.flags&1) std::memcpy(static_cast<std::uint8_t*>(v.mapped)+memory_bytes,memory.data(),memory_bytes);
-    if (draw.flags&64) std::memcpy(static_cast<std::uint8_t*>(v.mapped)+memory_bytes*2,palette.data(),64);
     v.begin();
+    const VkBufferCopy entire_store{0,0,memory_bytes};
+    vkCmdCopyBuffer(v.command,v.buffer,v.storage,1,&entire_store);
+    VkMemoryBarrier initial{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    initial.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
+    initial.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_TRANSFER_READ_BIT|VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(v.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0,1,&initial,0,nullptr,0,nullptr);
     vkCmdBindPipeline(v.command,VK_PIPELINE_BIND_POINT_COMPUTE,v.pipeline);
     vkCmdBindDescriptorSets(v.command,VK_PIPELINE_BIND_POINT_COMPUTE,v.layout,0,1,&v.set,0,nullptr);
-    vkCmdPushConstants(v.command,v.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(draw),&draw);
-    vkCmdDispatch(v.command,(draw.right-draw.left+7)/8,(draw.bottom-draw.top+7)/8,1);
-    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER}; barrier.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT; barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
-    vkCmdPipelineBarrier(v.command,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&barrier,0,nullptr,0,nullptr);
+    bool first=true;
+    for (const auto& command:commands) {
+        const auto& draw=command.draw;
+        if (draw.left==draw.right || draw.top==draw.bottom) continue;
+        if (!first) {
+            VkMemoryBarrier ordered{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            ordered.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;
+            ordered.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_TRANSFER_READ_BIT|VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(v.command,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT,0,1,&ordered,0,nullptr,0,nullptr);
+        }
+        first=false;
+        if (draw.flags&1) {
+            // Snapshot immediately before this draw, including prior draws in
+            // the same batch. This preserves overlapping framebuffer textures.
+            const VkBufferCopy copy{0,memory_bytes,memory_bytes};
+            vkCmdCopyBuffer(v.command,v.storage,v.storage,1,&copy);
+        }
+        if (draw.flags&64) vkCmdUpdateBuffer(v.command,v.storage,memory_bytes*2,64,command.palette.data());
+        if (draw.flags&(1|64)) {
+            VkMemoryBarrier uploaded{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            uploaded.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
+            uploaded.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(v.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                0,1,&uploaded,0,nullptr,0,nullptr);
+        }
+        vkCmdPushConstants(v.command,v.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(draw),&draw);
+        vkCmdDispatch(v.command,(draw.right-draw.left+7)/8,(draw.bottom-draw.top+7)/8,1);
+    }
+    VkMemoryBarrier copied{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    copied.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_TRANSFER_READ_BIT;
+    copied.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT|VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(v.command,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0,1,&copied,0,nullptr,0,nullptr);
+    vkCmdCopyBuffer(v.command,v.storage,v.buffer,1,&entire_store);
+    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER}; barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT; barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(v.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&barrier,0,nullptr,0,nullptr);
     v.submit(); std::memcpy(memory.data(),v.mapped,memory_bytes);
+    ++v.statistics.submissions; v.statistics.sprites+=count;
+    v.statistics.upload_bytes+=memory_bytes; v.statistics.readback_bytes+=memory_bytes;
 }
 void VulkanRenderer::present(std::span<const std::uint32_t> rgba,unsigned width,unsigned height) {
     auto& v=*impl_;

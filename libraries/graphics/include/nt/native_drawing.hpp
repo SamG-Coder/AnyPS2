@@ -24,14 +24,25 @@ public:
             if (packet.size()>65536-total) throw std::invalid_argument("Native graphics batch exceeds bound");
             total+=packet.size(); parse(candidate,packet,draws);
         }
+        if (draws.empty()) { state_=candidate; return; }
         auto pixels=pixels_;
+        std::vector<SpriteCommand> sprites;
+        const auto flush=[&] {
+            if (!sprites.empty()) { renderer.sprites(pixels,sprites); sprites.clear(); }
+        };
         for (const auto& operation:draws) {
-            if (const auto* draw=std::get_if<Draw>(&operation))
-                renderer.sprite(pixels,draw->sprite,std::span(candidate.palette).subspan(draw->bank*16,16));
-            else if (const auto* load=std::get_if<PaletteLoad>(&operation)) load_palette(candidate.palette,pixels,*load);
-            else for (const auto& write:std::get<ImageWrites>(operation))
-                pixels[write.address]=(pixels[write.address]&~write.mask)|write.value;
+            if (const auto* draw=std::get_if<Draw>(&operation)) {
+                SpriteCommand command{draw->sprite};
+                std::copy_n(candidate.palette.begin()+draw->bank*16,16,command.palette.begin());
+                sprites.push_back(command);
+            } else {
+                flush();
+                if (const auto* load=std::get_if<PaletteLoad>(&operation)) load_palette(candidate.palette,pixels,*load);
+                else for (const auto& write:std::get<ImageWrites>(operation))
+                    pixels[write.address]=(pixels[write.address]&~write.mask)|write.value;
+            }
         }
+        flush();
         // Pixel/state publication is atomic even if validation or GPU work fails.
         pixels_.swap(pixels); state_=candidate;
         for (const auto& operation:draws) if (const auto* draw=std::get_if<Draw>(&operation)) {

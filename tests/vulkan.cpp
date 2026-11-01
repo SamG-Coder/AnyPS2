@@ -4,6 +4,7 @@
 #include <array>
 #include <vector>
 #include <stdexcept>
+#include <chrono>
 
 int main() {
     try {
@@ -314,6 +315,49 @@ int main() {
                 const unsigned destination=2048+blocks[y/8][x/8]*64+((y%8)/2)*16+columns[y%2][x%8];
                 if(memory[destination]!=expected_color)throw std::runtime_error("Bilinear weight or palette expansion order differs");
             }
+        }
+        {
+            using nt::graphics::SpriteCommand;
+            std::vector<SpriteCommand> commands;
+            for (unsigned i=0;i<96;++i) {
+                const unsigned x=(i*3)%60,y=(i*7)%28;
+                commands.push_back({{x,y,x+4,y+4,0,1,0x80000000U|i*0x010101U,0}});
+            }
+            // Two palette changes, followed by a framebuffer-as-texture read.
+            commands.push_back({{0,0,2,2,0,1,0x11111111,0}});
+            SpriteCommand indexed{{0,0,2,2,32,1,0x80808080,0}};
+            indexed.draw.flags=13|64; indexed.draw.texture_pitch=2;
+            indexed.draw.texture_width=indexed.draw.texture_height=2;
+            indexed.draw.dx=indexed.draw.dy=32;
+            indexed.palette[1]=0x80665544; commands.push_back(indexed);
+            indexed.palette[1]=0x80998877; commands.push_back(indexed);
+            auto feedback=indexed;
+            feedback.draw.flags=13; feedback.draw.texture_base=32; feedback.draw.texture_pitch=1;
+            feedback.draw.base=64; commands.push_back(feedback);
+            std::vector<std::uint32_t> singles(1024*1024),batched=singles;
+            const auto began=std::chrono::steady_clock::now();
+            for (const auto& command:commands) gpu.sprite(singles,command.draw,command.palette);
+            const auto single_time=std::chrono::steady_clock::now()-began;
+            const auto submissions=gpu.statistics().submissions;
+            const auto batch_began=std::chrono::steady_clock::now();
+            gpu.sprites(batched,commands);
+            const auto batch_time=std::chrono::steady_clock::now()-batch_began;
+            if (batched!=singles || batched[4096]!=0x80998877 || gpu.statistics().submissions!=submissions+1)
+                throw std::runtime_error("Batched Vulkan draw order, palette changes or texture feedback differs");
+            auto bad=commands; bad.back().draw.pitch=0;
+            rejected=false;
+            try { gpu.sprites(batched,bad); } catch (const std::runtime_error&) { rejected=true; }
+            if (!rejected || batched!=singles || gpu.statistics().submissions!=submissions+1)
+                throw std::runtime_error("Invalid Vulkan batch submitted partial work");
+            nt::graphics::NativeDrawing separate,together;
+            separate.submit(gpu,std::array{packet}); separate.submit(gpu,std::array{packed});
+            const auto before=gpu.statistics().submissions;
+            together.submit(gpu,std::array{packet,packed});
+            if (separate.pixels()!=together.pixels() || gpu.statistics().submissions!=before+1)
+                throw std::runtime_error("Consecutive GIF draws were not batched equivalently");
+            std::cout<<"sprites="<<commands.size()<<" single_submit_ms="
+                <<std::chrono::duration<double,std::milli>(single_time).count()<<" batch_submit_ms="
+                <<std::chrono::duration<double,std::milli>(batch_time).count()<<'\n';
         }
         if (gpu.validation_errors()) throw std::runtime_error("Vulkan validation reported errors");
         std::cout << "Vulkan sprite readback verified on " << gpu.device_name() << "; validation errors=0\n";
