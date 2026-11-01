@@ -67,6 +67,13 @@ extern "C" std::uint64_t nt_ee_io_read32(nt::ee::Memory* memory,std::uint32_t ad
     publish(*memory,result.status,address);
     return (std::uint64_t(result.status)<<32)|result.value;
 }
+extern "C" std::uint64_t nt_ee_test_completions(nt::ee::Memory* memory) {
+    // Drain actual host completion notifications before observing the selection.
+    publish(*memory,nt::ee::Stop::budget,0);
+    const auto result=memory->io.test_completions ? memory->io.test_completions(memory->io.context) :
+        nt::ee::IoRead{nt::ee::Stop::unsupported_system};
+    return (std::uint64_t(result.status)<<32)|result.value;
+}
 extern "C" std::uint32_t nt_ee_io_write8(nt::ee::Memory* memory,std::uint32_t address,std::uint32_t value) {
     const auto result=memory->io.write8 ? memory->io.write8(memory->io.context,address,static_cast<std::uint8_t>(value)) : nt::ee::Stop::memory_fault;
     publish(*memory,result,address);

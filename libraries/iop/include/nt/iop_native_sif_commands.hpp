@@ -24,9 +24,14 @@ public:
             return {NativeServiceStatus::returned};
         }
         if (request.selector!=10 && request.selector!=11) return {};
+        const auto address=request.selector==10 ? a[1] : 0;
+        if (owns_system_slot(a[0])) {
+            if (address && !compiled(address)) return {NativeServiceStatus::unmapped_code,0,address};
+            system_handlers_[a[0]&0x7fffffffU]=Handler{address,request.selector==10 ? a[2] : 0};
+            return {NativeServiceStatus::returned};
+        }
         const auto slot=handler_slot(a[0],ram);
         if (!slot) return {};
-        const auto address=request.selector==10 ? a[1] : 0;
         if (address && !compiled(address)) return {NativeServiceStatus::unmapped_code,0,address};
         for (auto at=*slot;at<*slot+8;at+=4)
             if (nt_iop_native_code_word(at)) return {NativeServiceStatus::code_write,0,at};
@@ -34,7 +39,13 @@ public:
         store_native_word(ram,*slot+4,request.selector==10 ? a[2] : 0);
         return {NativeServiceStatus::returned};
     }
-    bool system_table_configured() const { return system_table_configured_; }
+    // The native command module owns its default registrations. Explicit guest
+    // tables retain the public ABI, including their caller-owned third word.
+    void initialize_system_handlers() { system_handlers_initialized_=true; }
+    bool uses_builtin_handler(std::uint32_t id) const {
+        return (id&0x80000000U) && !system_table_configured_ &&
+            !(owns_system_slot(id) && system_handlers_[id&0x7fffffffU]);
+    }
     bool busy() const { return pending_.has_value() || active_; }
     // Caller owns buffer storage and must reserve it until busy() becomes false.
     // One accepted packet at a time prevents a later arrival overwriting a sliced
@@ -42,11 +53,16 @@ public:
     NativeServiceReply receive(std::span<const std::uint8_t> packet,std::uint32_t buffer,std::span<std::uint8_t> ram) {
         if (busy() || packet.size()<16 || packet.size()>112 || packet[0]!=packet.size() ||
             packet[1] || packet[2] || packet[3]) return {};
-        const auto slot=handler_slot(load_native_word(packet,8),ram);
-        if (!slot) return {};
-        const auto handler=load_native_word(ram,*slot),argument=load_native_word(ram,*slot+4);
-        if (!handler) return {NativeServiceStatus::returned}; // A removed command has no consumer.
-        if (!compiled(handler)) return {NativeServiceStatus::unmapped_code,0,handler};
+        const auto id=load_native_word(packet,8);
+        Handler handler;
+        if (owns_system_slot(id)) handler=system_handlers_[id&0x7fffffffU].value_or(Handler{});
+        else {
+            const auto slot=handler_slot(id,ram);
+            if (!slot) return {};
+            handler={load_native_word(ram,*slot),load_native_word(ram,*slot+4)};
+        }
+        if (!handler.address) return {NativeServiceStatus::returned}; // A removed command has no consumer.
+        if (!compiled(handler.address)) return {NativeServiceStatus::unmapped_code,0,handler.address};
         const auto output=range(buffer,static_cast<std::uint32_t>(packet.size()),ram);
         if (!output) return {NativeServiceStatus::address_fault,0,buffer};
         for (auto at=*output;at<*output+packet.size();at+=4)
@@ -57,7 +73,7 @@ public:
             if (start && *output<*start+table.count*table.stride && *start<*output+packet.size()) return {};
         }
         std::memmove(ram.data()+*output,packet.data(),packet.size());
-        pending_=NativeCallback{handler,buffer,argument};
+        pending_=NativeCallback{handler.address,buffer,handler.argument};
         return {NativeServiceStatus::returned,1};
     }
     std::optional<NativeCallback> take() override {
@@ -69,6 +85,10 @@ public:
         active_=false;
     }
 private:
+    bool owns_system_slot(std::uint32_t id) const {
+        return system_handlers_initialized_ && !system_table_configured_ && (id&0x80000000U) &&
+            (id&0x7fffffffU)<system_handlers_.size();
+    }
     NativeServiceReply send(const NativeServiceRequest& request,std::span<std::uint8_t> ram) {
         const auto& a=request.arguments;
         const bool with_callback=request.selector==28 || request.selector==29;
@@ -136,9 +156,13 @@ private:
         return *start+index*table.stride;
     }
     struct Table { std::uint32_t address=0,count=0,stride=0; };
+    struct Handler { std::uint32_t address=0,argument=0; };
     NativeSifCommandEndpoint* peer_;
     std::array<Table,2> tables_{};
+    // The public IOP command module has 32 default system slots. An empty optional
+    // retains native protocol handling; an explicitly removed slot suppresses it.
+    std::array<std::optional<Handler>,32> system_handlers_{};
     std::optional<NativeCallback> pending_;
-    bool active_=false,system_table_configured_=false;
+    bool active_=false,system_table_configured_=false,system_handlers_initialized_=false;
 };
 }

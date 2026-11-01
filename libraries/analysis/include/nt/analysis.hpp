@@ -4,12 +4,26 @@
 #include <map>
 #include <set>
 #include <array>
+#include <optional>
+#include <string_view>
+#include <vector>
 
 namespace nt::analysis {
 struct Program {
     std::map<std::uint32_t, r5900::Instruction> instructions;
     std::set<std::uint32_t> unresolved;
 };
+enum class CallKind { direct, conditional, indirect, direct_jump, indirect_jump, return_link, return_exception, service };
+struct CallSite {
+    std::uint32_t pc;
+    CallKind kind;
+    std::optional<std::uint32_t> target;
+    bool initial_data_candidate=false;
+};
+// An inventory of reached transfer sites, not proof that all dynamic values or
+// executable content have been found. Return addresses remain runtime values.
+std::vector<CallSite> call_sites(ByteView bytes,const elf::Executable&,const Program&);
+std::string_view name(CallKind kind);
 // Follow direct flow from entry. Indirect targets require explicit future evidence.
 Program discover(ByteView bytes, const elf::Executable& executable, std::size_t limit = 100000,
                  std::span<const std::uint32_t> additional_entries = {}, bool stop_at_syscall = false);

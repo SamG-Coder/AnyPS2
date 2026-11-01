@@ -1,15 +1,57 @@
 #pragma once
 #include <nt/audio.hpp>
 #include <nt/iop_native_libraries.hpp>
+#include <nt/iop_native_callbacks.hpp>
+#include <nt/iop_native_heap.hpp>
 #include <algorithm>
 #include <bit>
+#include <deque>
 
 namespace nt::iop {
 // The converter lowers validated LIBSD public entries to this native owner.
 // Unimplemented sound operations stop before changing state or reporting success.
-class NativeSoundServices final : public NativeServices {
+class NativeSoundServices final : public NativeServices,public NativeCallbackSource {
 public:
     NativeSoundServices(NativeLibraryServices& libraries,audio::Output& output) : libraries_(libraries),output_(output) {}
+    void connect(NativeHeapServices& heap) { heap_=&heap; }
+    std::optional<NativeCallback> take() override {
+        if (active_ || failure_) return {};
+        for (unsigned core=0;core<2;++core) {
+            auto& stream=streams_[core];
+            if (!stream.active) continue;
+            audio::StreamState state;
+            if (!output_.stream_state(core,state)) { failure_=NativeResult{NativeStop::service_request,stream.pc,0,18}; return {}; }
+            if (state.queued) continue;
+            if (stream.refill.address) {
+                store_native_word(arena_,scratch_,0); store_native_word(arena_,scratch_+4,0);
+                active_=true; active_stream_=core;
+                return NativeCallback{stream.refill.address,core,stream.refill.argument,stream.refill.gp,scratch_,scratch_+4};
+            }
+            if (stream.loop) {
+                stream.half^=1;
+                if (!submit_stream(core)) { failure_=NativeResult{NativeStop::service_request,stream.pc,0,18}; return {}; }
+            } else stream.active=false;
+            notify(core);
+        }
+        if (callbacks_.empty()) return {};
+        const auto callback=callbacks_.front(); callbacks_.pop_front(); active_=true;
+        return callback;
+    }
+    void finish(std::uint32_t) override {
+        active_=false;
+        if (!active_stream_) return;
+        const auto core=*active_stream_; active_stream_.reset(); auto& stream=streams_[core];
+        if (!stream.active) return; // A callback may cancel its own stream.
+        const auto pointer=load_native_word(arena_,scratch_),size=load_native_word(arena_,scratch_+4);
+        if (!pointer && !size) { stream.active=false; return; }
+        const auto address=ram_offset(pointer,1,arena_.size());
+        if (!address || !size || size%1024 || size>arena_.size()-*address) {
+            failure_=NativeResult{NativeStop::address_fault,stream.refill.address,pointer}; return;
+        }
+        stream.address=*address; stream.size=size;
+        if (!submit_stream(core)) failure_=NativeResult{NativeStop::service_request,stream.pc,pointer,18};
+    }
+    std::optional<NativeResult> failure() const override { return failure_; }
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
         if (request.kind!=NativeServiceKind::libsd) return {};
         if (request.selector==0) {
@@ -25,12 +67,13 @@ public:
             return {NativeServiceStatus::returned};
         }
         if (!registered_) return {NativeServiceStatus::unavailable};
-        if (request.selector==2) { output_.close(); initialized_=false; return returned(); }
+        if (request.selector==2) { output_.close(); initialized_=false; streams_={}; callbacks_.clear(); return returned(); }
         if (request.selector==4) {
             if (request.interrupt_context || request.arguments[0]>1 || !output_.initialize(request.arguments[0]!=0))
                 return {NativeServiceStatus::unavailable};
             const auto old=cores_;
-            cores_={}; voices_={}; handlers_={};
+            cores_={}; voices_={}; handlers_={}; streams_={}; completed_={true,true}; callbacks_.clear(); failure_.reset(); arena_=ram;
+            active_=false; active_stream_.reset(); digital_mode_=0;
             if (!request.arguments[0] || samples_.empty()) samples_.assign(sample_capacity,0);
             for (unsigned core=0;core<2;++core) {
                 auto& c=cores_[core]; c.mix=core ? 0xffc : 0xff0;
@@ -48,14 +91,37 @@ public:
         case 5: case 6: return parameter(static_cast<std::uint16_t>(a[0]),static_cast<std::uint16_t>(a[1]),request.selector==5);
         case 7: case 8: return routing(static_cast<std::uint16_t>(a[0]),a[1],request.selector==7);
         case 9: case 10: return address(static_cast<std::uint16_t>(a[0]),a[1],request.selector==9);
+        case 11: case 12: return core_attribute(static_cast<std::uint16_t>(a[0]),static_cast<std::uint16_t>(a[1]),request.selector==11);
+        case 17: return voice_transfer(request,ram);
+        case 18: return block_transfer(request,ram);
+        case 19: return returned(completed_[a[0]&1] ? 1U : 0U);
+        case 20: return stream_status(a[0]&1);
         case 23: case 24: return effect(a[0]&1U,a[1],request.selector==23,ram);
         case 25: return clear_effect(a[0]&1U,a[1],a[2]);
         case 26: case 27: return handler(request,ram);
+        case 28: return returned(handlers_[a[0]&1].argument);
+        case 29: return returned(handlers_[2].argument);
+        case 30: return stop_stream(a[0]&1);
         default: return unavailable();
         }
     }
 private:
     static constexpr std::uint32_t sample_capacity=2*1024*1024;
+    static constexpr std::array<std::uint32_t,10> effect_sizes{16,0x26c0,0x1f40,0x4840,0x6fe0,0xade0,0xf6c0,0x18040,0x18040,0x3c00};
+    static std::optional<audio::ReverbSpace> effect_space(unsigned mode) {
+        using audio::ReverbSpace;
+        switch (mode) {
+        case 0: return ReverbSpace::off;
+        case 1: return ReverbSpace::room;
+        case 2: return ReverbSpace::studio_small;
+        case 3: return ReverbSpace::studio_medium;
+        case 4: return ReverbSpace::studio_large;
+        case 5: return ReverbSpace::hall;
+        case 6: return ReverbSpace::space;
+        case 9: return ReverbSpace::pipe;
+        default: return {}; // Variable echo/delay still needs a native provider.
+        }
+    }
     struct Voice {
         std::array<std::uint16_t,2> volume{},envelope{};
         std::uint16_t pitch=0x3fff;
@@ -67,8 +133,12 @@ private:
         std::uint16_t mix=0;
         std::uint32_t effect_end=0,effect_begin=0;
         std::array<std::uint32_t,5> effect{};
+        std::uint32_t transfer_address=0,interrupt_address=0,end_mask=0;
+        std::uint16_t noise_clock=0;
+        bool effect_enabled=false,irq_enabled=false,muted=false;
     };
-    struct Handler { std::uint32_t address=0,argument=0; };
+    struct Handler { std::uint32_t address=0,argument=0,gp=0; };
+    struct Stream { bool active=false,loop=false; unsigned half=0; std::uint32_t address=0,size=0,pc=0; std::uint64_t origin=0; Handler refill; };
     static NativeServiceReply returned(std::uint32_t value=0) { return {NativeServiceStatus::returned,value}; }
     static NativeServiceReply unavailable() { return {NativeServiceStatus::unavailable}; }
     static float fixed_gain(std::uint16_t value) {
@@ -90,10 +160,14 @@ private:
         return output_.configure_voice(index,mix);
     }
     bool apply_core(unsigned core,const Core& c) {
+        const auto space=effect_space(c.effect[1]&~0x100U);
+        if (!space) return false;
         audio::CoreMix mix;
         mix.output={fixed_gain(c.master[0]),fixed_gain(c.master[1])};
+        if (c.muted) mix.output={};
         mix.external_direct=gated(c.external,c.mix,2); mix.external_effect=gated(c.external,c.mix,0);
         mix.input_direct=gated(c.input,c.mix,6); mix.input_effect=gated(c.input,c.mix,4);
+        mix.reverb={*space,{linear_gain(c.depth[0]),linear_gain(c.depth[1])},c.effect_enabled};
         if (!output_.configure_core(core,mix)) return false;
         for (unsigned v=core*24;v<(core+1)*24;++v) if (!apply_voice(v,voices_[v],c)) return false;
         return true;
@@ -137,6 +211,17 @@ private:
         if (entry&0xfe) return unavailable();
         const unsigned core=entry&1U,kind=entry>>8; value&=0xffffff;
         if (kind==0x13 || kind==0x14) return (!writing || !value) ? returned() : unavailable();
+        if (kind==0x17) {
+            auto& ended=cores_[core].end_mask;
+            if (writing) ended=0; // The public clear operation acknowledges latched endings.
+            return returned(ended);
+        }
+        if (kind==0x16 && writing) {
+            for (unsigned voice=0;voice<24;++voice)
+                if ((value&(1U<<voice)) && !output_.stop_voice(core*24+voice)) return unavailable();
+            return returned();
+        }
+        if (kind==0x15 && writing && !value) return returned();
         if (kind<0x18 || kind>0x1b) return unavailable();
         auto c=cores_[core]; auto& field=c.route[kind-0x18];
         if (!writing) return returned(field);
@@ -146,26 +231,146 @@ private:
     }
     NativeServiceReply address(std::uint16_t entry,std::uint32_t value,bool writing) {
         const unsigned core=entry&1U,kind=entry>>8,voice=(entry&0x3e)>>1;
-        if (entry&0xc0 || kind<0x1c || kind>0x21 || (kind<0x20 && voice) || voice>=24) return unavailable();
+        // The address interface selects core/voice independently of bits 6-7.
+        if (kind<0x1c || kind>0x21 || (kind<0x20 && voice) || voice>=24) return unavailable();
         std::uint32_t* field=nullptr;
         if (kind==0x1d) field=&cores_[core].effect_end;
         else if (kind==0x1c) field=&cores_[core].effect_begin;
+        else if (kind==0x1e) field=&cores_[core].transfer_address;
+        else if (kind==0x1f) field=&cores_[core].interrupt_address;
         else if (kind==0x20) field=&voices_[core*24+voice].start;
         else if (kind==0x21) field=&voices_[core*24+voice].loop;
         else return unavailable();
         if (!writing) return returned(*field);
         if (value>=sample_capacity) return unavailable();
-        *field=kind==0x1d ? value|0x1ffffU : value&~7U;
+        *field=kind==0x1d ? value|0x1ffffU : value&~15U;
+        return returned();
+    }
+    NativeServiceReply core_attribute(std::uint16_t entry,std::uint16_t value,bool writing) {
+        const unsigned core=entry&1,kind=entry&~1U;
+        auto c=cores_[core];
+        if (kind==8) {
+            if (writing) cores_[core].noise_clock=value&63;
+            return returned(cores_[core].noise_clock);
+        }
+        if (kind==10) {
+            if (!writing) return returned(digital_mode_);
+            // Host PCM output can preserve the PCM path only. Encoded digital
+            // bypass modes require a native encoded-audio backend.
+            if ((value&15)!=0 || (value&~0x0c80U)) return unavailable();
+            digital_mode_=value; return returned();
+        }
+        bool* field=kind==2 ? &c.effect_enabled : kind==4 ? &c.irq_enabled : kind==6 ? &c.muted : nullptr;
+        if (!field) return unavailable();
+        if (!writing) return returned(*field);
+        *field=(value&1)!=0;
+        if (!apply_core(core,c)) return unavailable();
+        cores_[core]=c; return returned();
+    }
+    void notify(unsigned core) {
+        const auto& handler=handlers_[core];
+        if (handler.address) callbacks_.push_back({handler.address,core,handler.argument,handler.gp});
+    }
+    NativeServiceReply voice_transfer(const NativeServiceRequest& request,std::span<std::uint8_t> ram) {
+        const auto& a=request.arguments; const unsigned core=a[0]&1,mode=a[1]&0xffff;
+        if ((mode&~9U) || streams_[core].active || callbacks_.size()>=1024) return unavailable();
+        if (request.stack_pointer>0xffffffebU) return {NativeServiceStatus::address_fault,0,request.stack_pointer};
+        const auto stack=ram_offset(request.stack_pointer+16,4,ram.size());
+        if (!stack) return {NativeServiceStatus::address_fault,0,request.stack_pointer};
+        const auto requested=load_native_word(ram,*stack);
+        if (requested>sample_capacity) return returned(0xffffffff);
+        const auto alignment=(mode&8) ? 2U : 64U;
+        const auto count=(requested+alignment-1)&~(alignment-1),destination=a[3]&~1U;
+        const auto source=ram_offset(a[2],1,ram.size());
+        if (!source || count>ram.size()-*source) return {NativeServiceStatus::address_fault,0,a[2]};
+        if (destination>samples_.size() || count>samples_.size()-destination) return returned(0xffffffff);
+        if (mode&1) {
+            for (auto word=*source&~3U;word<*source+count;word+=4)
+                if (nt_iop_native_code_word(word)) return {NativeServiceStatus::code_write,0,a[2]};
+            std::copy_n(samples_.begin()+destination,count,ram.begin()+*source);
+        } else std::copy_n(ram.begin()+*source,count,samples_.begin()+destination);
+        cores_[core].transfer_address=destination+count; completed_[core]=true;
+        // The direct native copy has finished. Defer the compiled interrupt
+        // callback to the scheduler; polling observes the completed copy.
+        if (!(mode&8)) notify(core);
+        if (count && cores_[core].irq_enabled && cores_[core].interrupt_address>=destination &&
+            cores_[core].interrupt_address<destination+count && handlers_[2].address)
+            callbacks_.push_back({handlers_[2].address,1U<<core,handlers_[2].argument,handlers_[2].gp});
+        return returned((mode&8) ? 0U : requested);
+    }
+    bool submit_stream(unsigned core) {
+        auto& stream=streams_[core];
+        const auto address=stream.address+stream.half*stream.size;
+        if (address>arena_.size() || stream.size>arena_.size()-address || !stream.size || stream.size%1024) return false;
+        std::vector<std::int16_t> pcm(stream.size/2);
+        // LIBSD input buffers store 256 left samples followed by 256 right
+        // samples in each 1024-byte block. XAudio2 consumes interleaved stereo.
+        for (unsigned block=0;block<stream.size;block+=1024)
+            for (unsigned frame=0;frame<256;++frame)
+                for (unsigned channel=0;channel<2;++channel) {
+                    const auto at=address+block+channel*512+frame*2;
+                    const auto word=std::uint16_t(arena_[at]|(unsigned(arena_[at+1])<<8));
+                    pcm[block/2+frame*2+channel]=std::bit_cast<std::int16_t>(word);
+                }
+        audio::StreamState state;
+        if (!output_.stream_state(core,state)) return false;
+        stream.origin=state.frames;
+        return output_.submit_stream(core,pcm);
+    }
+    NativeServiceReply stream_status(unsigned core) {
+        const auto& stream=streams_[core];
+        if (!stream.active) return returned();
+        audio::StreamState state;
+        if (!output_.stream_state(core,state)) return unavailable();
+        const auto consumed=state.frames>=stream.origin ? state.frames-stream.origin : 0;
+        const auto offset=std::min<std::uint64_t>(consumed*4,stream.size);
+        return returned((stream.half<<24)|((stream.address+stream.half*stream.size+static_cast<unsigned>(offset))&0xffffff));
+    }
+    NativeServiceReply stop_stream(unsigned core) {
+        const auto state=stream_status(core);
+        if (state.status!=NativeServiceStatus::returned || !output_.stop_stream(core)) return unavailable();
+        streams_[core]={}; return state;
+    }
+    NativeServiceReply block_transfer(const NativeServiceRequest& request,std::span<std::uint8_t> ram) {
+        const auto& a=request.arguments; const unsigned core=a[0]&1,mode=a[1]&0xffff;
+        if (mode==2) return stop_stream(core);
+        if (mode!=0 && mode!=0x10 && mode!=0x80) return unavailable();
+        if (streams_[core].active) return returned(0xffffffff);
+        const auto source=ram_offset(a[2],1,ram.size());
+        if (!source || a[3]>ram.size()-*source) return {NativeServiceStatus::address_fault,0,a[2]};
+        const bool loop=(mode&0x10)!=0;
+        const auto size=loop ? a[3]/2 : a[3];
+        if (!size || size%1024 || (loop && a[3]%2)) return returned(0xffffffff);
+        Handler refill;
+        if (mode==0x80) {
+            if (request.stack_pointer>0xffffffe7U) return {NativeServiceStatus::address_fault,0,request.stack_pointer};
+            const auto stack=ram_offset(request.stack_pointer+16,4,ram.size());
+            if (!stack || 8>ram.size()-*stack) return {NativeServiceStatus::address_fault,0,request.stack_pointer};
+            refill={load_native_word(ram,*stack),load_native_word(ram,*stack+4),request.global_pointer};
+            const auto target=ram_offset(refill.address,4,ram.size());
+            if (!target || !nt_iop_native_instruction(*target)) return {NativeServiceStatus::unmapped_code,0,refill.address};
+            if (!scratch_) {
+                if (!heap_) return unavailable();
+                const auto allocated=heap_->invoke({4,{0,8},NativeServiceKind::sysmem},ram);
+                if (allocated.status!=NativeServiceStatus::returned || !allocated.value) return unavailable();
+                scratch_=allocated.value;
+                if (scratch_>ram.size() || 8>ram.size()-scratch_ || nt_iop_native_code_word(scratch_) || nt_iop_native_code_word(scratch_+4))
+                    return {NativeServiceStatus::code_write,0,scratch_};
+            }
+        }
+        streams_[core]={true,loop,0,*source,size,request.call_site};
+        streams_[core].refill=refill;
+        if (!submit_stream(core)) { streams_[core]={}; return unavailable(); }
         return returned();
     }
     NativeServiceReply clear_effect(unsigned core,std::uint32_t channel,std::uint32_t mode) {
         // Byte capacities specified by LIBSD's public effect workspace ABI.
-        constexpr std::array<std::uint32_t,10> sizes{16,0x26c0,0x1f40,0x4840,0x6fe0,0xade0,0xf6c0,0x18040,0x18040,0x3c00};
-        if (mode>=sizes.size() || channel>1) return returned(0xffffffffU);
+        if (mode>=effect_sizes.size() || channel>1) return returned(0xffffffffU);
         if (!mode) return returned();
         const auto end=cores_[core].effect_end+1;
-        if (end>samples_.size() || sizes[mode]>end) return unavailable();
-        std::fill(samples_.begin()+end-sizes[mode],samples_.begin()+end,0);
+        if (end>samples_.size() || effect_sizes[mode]>end) return unavailable();
+        if (mode==(cores_[core].effect[1]&~0x100U) && !output_.clear_reverb(core)) return unavailable();
+        std::fill(samples_.begin()+end-effect_sizes[mode],samples_.begin()+end,0);
         return returned();
     }
     NativeServiceReply effect(unsigned core,std::uint32_t pointer,bool writing,std::span<std::uint8_t> ram) {
@@ -178,11 +383,22 @@ private:
         }
         std::array<std::uint32_t,5> config{};
         for (unsigned i=0;i<5;++i) config[i]=load_native_word(ram,*offset+i*4);
-        if ((config[1]&~0x100U)>9) return returned(0xffffffffU);
-        if (config[1]&~0x100U) return unavailable(); // No fabricated reverb output.
+        const auto mode=config[1]&~0x100U;
+        if (mode>=effect_sizes.size()) return returned(0xffffffffU);
+        if (!effect_space(mode)) return unavailable();
         config[0]=core; config[3]=0; config[4]=0;
-        auto& c=cores_[core]; c.effect=config; c.depth={static_cast<std::uint16_t>(config[2]),static_cast<std::uint16_t>(config[2]>>16)};
-        c.effect_begin=(c.effect_end+1-16)&~1U;
+        auto c=cores_[core]; const auto old_mode=c.effect[1]&~0x100U;
+        const auto end=c.effect_end+1;
+        const auto clear_size=std::max(effect_sizes[mode],c.effect_enabled ? effect_sizes[old_mode] : 0U);
+        if (end>samples_.size() || clear_size>end) return unavailable();
+        c.effect=config; c.depth={static_cast<std::uint16_t>(config[2]),static_cast<std::uint16_t>(config[2]>>16)};
+        c.effect_begin=(end-effect_sizes[mode])&~1U;
+        if (!apply_core(core,c)) return unavailable();
+        if (config[1]&0x100U) {
+            if (!output_.clear_reverb(core)) return unavailable();
+            std::fill(samples_.begin()+end-clear_size,samples_.begin()+end,0);
+        }
+        cores_[core]=c;
         return returned();
     }
     NativeServiceReply handler(const NativeServiceRequest& request,std::span<std::uint8_t> ram) {
@@ -196,7 +412,7 @@ private:
             if (!offset || !nt_iop_native_instruction(*offset)) return {NativeServiceStatus::unmapped_code,0,target};
         }
         const auto previous=handlers_[slot].address;
-        handlers_[slot]={target,a[transfer ? 2 : 1]};
+        handlers_[slot]={target,a[transfer ? 2 : 1],request.global_pointer};
         return returned(previous);
     }
     NativeLibraryServices& libraries_;
@@ -205,6 +421,16 @@ private:
     std::array<Core,2> cores_{};
     std::array<Handler,3> handlers_{};
     std::vector<std::uint8_t> samples_;
+    std::array<Stream,2> streams_{};
+    std::array<bool,2> completed_{true,true};
+    std::deque<NativeCallback> callbacks_;
+    std::optional<NativeResult> failure_;
+    std::span<std::uint8_t> arena_;
+    std::uint16_t digital_mode_=0;
+    bool active_=false;
+    NativeHeapServices* heap_=nullptr;
+    std::uint32_t scratch_=0;
+    std::optional<unsigned> active_stream_;
     bool registered_=false;
     bool initialized_=false;
 };

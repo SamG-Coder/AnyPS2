@@ -29,6 +29,63 @@ void run_ee_batch_tests();
 void run_ee_file_rpc_tests();
 int main() {
     try {
+        for (unsigned n=0;n<80;++n) {
+            const auto address=0x490000+n*32;
+            for (const unsigned image:{0U,1U,2U,3U}) {
+                check(nt_ee_generated_active_code_overlap(address,4,image));
+                check(nt_ee_generated_active_code_overlap(address-1,2,image));
+                check(!nt_ee_generated_active_code_overlap(address+4,28,image));
+                check(!nt_ee_generated_active_code_overlap(address,0,image));
+            }
+        }
+        check(nt_ee_generated_active_code_overlap(0x490004,32,1));
+        check(nt_ee_generated_active_code_overlap(0x490004,2500,1));
+        // Native submission completion controls all four compiled branch forms.
+        // Interrupt enables are deliberately independent of this selection.
+        for (unsigned selector=0;selector<4;++selector) for (unsigned completed : {0U,1U,4U,5U}) {
+            nt::ee::Memory memory;
+            nt::ee::NativePlatform platform;
+            platform.attach(memory);
+            check(memory.io.write32(memory.io.context,0x1000e020,5)==nt::ee::Stop::budget);
+            if (completed&1) check(platform.completions.complete(0));
+            if (completed&4) check(platform.completions.complete(2));
+            platform.completions.enable(1,true);
+            const bool taken=((selector&1)!=0)==(completed==5);
+            const bool delayed=selector<2 || taken;
+            std::array<std::uint8_t,16> data{42};
+            memory.data=data.data(); memory.size=data.size();
+            nt::runtime::State state;
+            const auto pc=0x480000U+selector*32;
+            state.pc=pc; state.set(10,99);
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall);
+            check(state.pc==pc+(taken ? 12U : 8U) && state.executed==(delayed ? 2U : 1U) &&
+                  state.gpr[10].lo==(delayed ? 42U : 99U) && !state.delay_slot);
+            state={}; state.pc=pc; state.set(4,16);
+            const auto fault=nt_ee_generated_run(&state,&memory,8);
+            check(fault==(delayed ? nt::ee::Stop::memory_fault : nt::ee::Stop::syscall));
+            if (delayed) check(state.pc==pc+4 && state.delay_slot && state.branch_pc==pc && state.executed==1);
+            // Clearing a recorded completion makes the condition false again.
+            platform.completions.acknowledge(5);
+            check(memory.io.test_completions(memory.io.context).value==0);
+            check(memory.io.write32(memory.io.context,0x1000e020,0)==nt::ee::Stop::budget);
+            check(memory.io.test_completions(memory.io.context).value==1);
+        }
+        {
+            nt::ee::Memory memory;
+            nt::runtime::State state; state.pc=0x480020;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system &&
+                  state.executed==0 && state.pc==0x480020 && !state.delay_slot);
+            struct Completion { bool ready=false; unsigned polls=0; } completion;
+            memory.io.context=&completion;
+            memory.io.poll=[](void* context) {
+                auto& value=*static_cast<Completion*>(context); ++value.polls; value.ready=true;
+            };
+            memory.io.test_completions=[](void* context) -> nt::ee::IoRead {
+                return {nt::ee::Stop::budget,static_cast<Completion*>(context)->ready ? 1U : 0U};
+            };
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget &&
+                  completion.polls==1 && state.pending_target==0x48002c && state.executed==1);
+        }
         {
             const std::uint64_t expected[]{0xffffffff8000ffffULL,0x7fff8000,0xffffffffffff0001ULL,
                 0x7fffffff,0x7ffe8000,0xffffffffffff0001ULL,
@@ -2588,6 +2645,86 @@ int main() {
             const std::array<std::uint32_t,2> incomplete{0x07000044,0x30000000};
             check(platform.packet_setup.consume(0,{reinterpret_cast<const std::uint8_t*>(incomplete.data()),sizeof(incomplete)},false)==nt::ee::Stop::invalid_state);
             check(platform.packet_setup.read(0x10003830).value==51);
+        }
+        {
+            // A native graphics batch pauses at command interrupts. Its compiled
+            // handler releases each owned suffix; final completion cannot race it.
+            std::vector<std::uint8_t> ram(0x10000);
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform;
+            platform.attach(memory);
+            struct Sink { unsigned batches=0,packets=0,waits=0; bool ready=true; } sink;
+            platform.packet_setup.graphics={&sink,[](void* raw,std::span<const nt::graphics::Packet> packets) {
+                auto& sink=*static_cast<Sink*>(raw); ++sink.batches; sink.packets+=static_cast<unsigned>(packets.size());
+                return true;
+            },[](void* raw) { auto& sink=*static_cast<Sink*>(raw); ++sink.waits; return sink.ready; },true};
+            const std::array<std::uint32_t,16> commands{
+                0x50000001,0x8000,0,0,0,0x91010000,
+                0x50000001,0x8000,0,0,0,0x91020000,0x0700002a,0,0,0};
+            const auto load=[&] { std::memcpy(ram.data()+0x1000,commands.data(),sizeof(commands)); };
+            const auto get=[&](unsigned at) { std::uint32_t value; std::memcpy(&value,ram.data()+at,4); return value; };
+            const auto write=[&](unsigned address,unsigned value) {
+                nt::runtime::State state; state.pc=0x360000; state.set(4,address); state.set(8,value);
+                return nt_ee_generated_run(&state,&memory,1);
+            };
+            const auto begin=[&] {
+                check(write(0x10009010,0x1000)==nt::ee::Stop::budget);
+                check(write(0x10009020,4)==nt::ee::Stop::budget);
+                return write(0x10009000,0x101);
+            };
+            check(write(0x1000e000,1)==nt::ee::Stop::budget);
+            load(); sink.ready=false;
+            check(begin()==nt::ee::Stop::unsupported_system && !sink.batches && !platform.packet_setup.pending(1));
+            check(!platform.interrupts.read(0x1000f000).value && !platform.completions.status());
+            sink.ready=true;
+            check(begin()==nt::ee::Stop::budget && sink.batches==1 && sink.packets==1);
+            check(platform.packet_setup.pending(1) && !platform.completions.status());
+            check(platform.packet_setup.read(0x10003c00).value==0xc00);
+            check(platform.packet_setup.read(0x10003c80).value==0x91010000);
+            check(platform.packet_setup.read(0x10003c60).value==0);
+            check(platform.interrupts.read(0x1000f000).value==(1U<<5));
+            check(platform.packet_submission.read(0x10009000).value&0x100);
+            check(platform.packet_submission.read(0x10009030).status==nt::ee::Stop::unsupported_system);
+            check(write(0x10009010,0x2000)==nt::ee::Stop::unsupported_system);
+            // Overwriting the caller's packet cannot alter an accepted suffix.
+            std::fill_n(ram.data()+0x1000,sizeof(commands),0xff);
+            nt::runtime::State state; state.set(4,5); state.set(5,0x368000); state.set(6,0); state.set(28,0x5000);
+            check(platform.interrupts.service(0x10,state,nt_ee_generated_contains).status==nt::ee::Stop::budget);
+            check(write(0x1000f010,1U<<5)==nt::ee::Stop::budget);
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
+            state=nt::ee::NativePlatform::initial_state(0x380000); state.cop0_status=0x10c01; state.set(29,0x9000);
+            check(nt::ee::run(nt_ee_generated_run,state,memory,40,services)==nt::ee::Stop::budget);
+            check(!platform.interrupts.active() && get(0x5000)==0x91020000 && get(0x5004)==2);
+            check(sink.batches==2 && sink.packets==2 && !platform.packet_setup.pending(1));
+            check(platform.packet_setup.read(0x10003c30).value==42 && !platform.packet_setup.read(0x10003c00).value);
+            check(!(platform.packet_submission.read(0x10009000).value&0x100));
+            check(platform.completions.status()==2 && !memory.pending_interrupts);
+            // Masked command interrupts retain all ordinary command effects.
+            platform.completions.acknowledge(2); load();
+            check(write(0x10003c20,1)==nt::ee::Stop::budget);
+            check(begin()==nt::ee::Stop::budget && sink.batches==3 && sink.packets==4);
+            check(!platform.packet_setup.pending(1) && platform.completions.status()==2 && !memory.pending_interrupts);
+            // Reset cancels owned work, without claiming the suffix completed.
+            platform.completions.acknowledge(2);
+            check(write(0x10003c20,0)==nt::ee::Stop::budget && begin()==nt::ee::Stop::budget);
+            check(write(0x10003c10,1)==nt::ee::Stop::budget && !platform.packet_setup.pending(1));
+            check(!(platform.packet_submission.read(0x10009000).value&0x100) && !platform.completions.status());
+            check(write(0x1000f000,1U<<5)==nt::ee::Stop::budget);
+            // A malformed suffix stops at release and never replays prior draws.
+            load(); const std::uint32_t bad=0x5000ffff; std::memcpy(ram.data()+0x1018,&bad,4);
+            check(begin()==nt::ee::Stop::budget); const auto batches=sink.batches;
+            check(write(0x10003c10,8)==nt::ee::Stop::invalid_state);
+            check(platform.packet_setup.pending(1) && sink.batches==batches && !platform.completions.status());
+            check(write(0x10003c10,8)==nt::ee::Stop::invalid_state && sink.batches==batches);
+            check(write(0x10003c10,1)==nt::ee::Stop::budget);
+            check(write(0x1000f000,1U<<5)==nt::ee::Stop::budget);
+            // MARK interrupts notify without suspending subsequent commands.
+            const std::array<std::uint32_t,4> marks{0x87000033,0x05000002,0,0};
+            std::memcpy(ram.data()+0x1000,marks.data(),sizeof(marks));
+            check(write(0x10008010,0x1000)==nt::ee::Stop::budget && write(0x10008020,1)==nt::ee::Stop::budget);
+            check(write(0x10008000,0x101)==nt::ee::Stop::budget && !platform.packet_setup.pending(0));
+            check(platform.packet_setup.read(0x10003800).value==0x800 && platform.packet_setup.read(0x10003850).value==2);
+            check(platform.interrupts.read(0x1000f000).value==(1U<<4) && platform.completions.status()==1);
+            check(write(0x10003810,8)==nt::ee::Stop::budget && !platform.packet_setup.read(0x10003800).value);
         }
         run_ee_batch_tests();
         run_ee_file_rpc_tests();

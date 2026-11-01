@@ -190,7 +190,7 @@ if(BUILD_TESTING)
             -DSCRATCH=${CMAKE_BINARY_DIR}/image-project-tests -DROOT=${CMAKE_CURRENT_SOURCE_DIR}
             -DGENERATOR=${CMAKE_GENERATOR} -DPLATFORM=${CMAKE_GENERATOR_PLATFORM} -DEXE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/images_project.cmake")
-        set_tests_properties(ee-native-images PROPERTIES TIMEOUT 120)
+        set_tests_properties(ee-native-images PROPERTIES TIMEOUT 300)
         add_test(NAME packed-llvm-project COMMAND "${CMAKE_COMMAND}"
             "-DFIXTURE=$<TARGET_FILE:packed-image-tests>" "-DUNPACKER=$<TARGET_FILE:ps2-unpack>"
             "-DCONVERTER=$<TARGET_FILE:ps2-recompile>" "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}"

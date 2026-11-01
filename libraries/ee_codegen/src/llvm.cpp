@@ -1,6 +1,7 @@
 #include <nt/ee_codegen.hpp>
 #include "llvm_writer.hpp"
 #include "memory.hpp"
+#include "code_protection.hpp"
 #include "native_layout.hpp"
 #include "images.hpp"
 #include "packed.hpp"
@@ -56,6 +57,7 @@ bool supported(Op op) {
     case Op::mfc0: case Op::mtc0:
     case Op::cfc2: case Op::ctc2:
     case Op::bc1f: case Op::bc1t: case Op::bc1fl: case Op::bc1tl:
+    case Op::bc0f: case Op::bc0t: case Op::bc0fl: case Op::bc0tl:
     case Op::movz: case Op::movn:
     case Op::padduw:
     case Op::j: case Op::jal: case Op::jr: case Op::jalr: case Op::beq: case Op::bne:
@@ -315,6 +317,7 @@ void emit_declarations(Writer& w) {
     w.out<<"declare i32 @nt_ee_validate_native_layout(ptr, i32, i32, i32, i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_address_space(ptr, i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_performance(ptr, i32, i32, i32, i32)\n";
+    w.out<<"declare i64 @nt_ee_test_completions(ptr)\n";
     w.out<<"declare i64 @nt_ee_io_read32(ptr, i32)\ndeclare i32 @nt_ee_io_write32(ptr, i32, i32)\ndeclare i32 @nt_ee_io_write8(ptr, i32, i32)\n";
     w.out<<"declare i32 @nt_ee_io_read64(ptr, ptr, i32, i32)\ndeclare i32 @nt_ee_io_write64(ptr, i32, i64)\n";
     declare_packed_intrinsics(w.out);
@@ -439,6 +442,7 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
             auto& stream=module_output(first/functions_per_module);
             Writer unit{stream};
             emit_declarations(unit);
+            unit.out<<"declare i1 @nt_ee_check_code_range(i64, i64, i32)\n";
             emit_payloads(unit,payloads);
             const auto end=std::min(first+functions_per_module,parts.size());
             for (auto index=first;index<end;++index) {
@@ -453,6 +457,7 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
     }
     emit_dispatcher(w,parts);
     emit_contains(w,instructions);
+    emit_code_protection(w,ranges);
 
     w.out<<"define i1 @nt_ee_generated_code_overlap(i32 %address, i32 %bytes) {\nentry:\n"
          <<"  %result = call i1 @nt_ee_generated_active_code_overlap(i32 %address, i32 %bytes, i32 1)\n  ret i1 %result\n}\n";
@@ -460,7 +465,7 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
     const auto address=w.value("zext i32 %address to i64");
     const auto bytes=w.value("zext i32 %bytes to i64");
     const auto end=w.binary("add","i64",address,bytes);
-    const auto overlap=code_overlap(w,address,end,ranges,"%image");
+    const auto overlap=w.value("call i1 @nt_ee_check_code_range(i64 "+address+", i64 "+end+", i32 %image)");
     w.out<<"  ret i1 "<<overlap<<"\n}\n";
     emit_declarations(w);
     if (!output) throw std::runtime_error("Cannot finish EE LLVM output");

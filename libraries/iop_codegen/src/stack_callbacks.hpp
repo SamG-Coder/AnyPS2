@@ -2,6 +2,36 @@
 #include "constants.hpp"
 
 namespace nt::iop_codegen::ir {
+// A normal higher-order function can keep its function argument in a saved
+// register across calls (for example, a collection visitor). This identifies
+// candidate call sites only; emitted code still checks the actual destination.
+inline bool argument_callback_call(const Program& program,const Instruction& call) {
+    if (call.flow!=Flow::indirect_call) return false;
+    for (unsigned distance=4;distance<=256 && distance<=call.address;distance+=4) {
+        const auto begin=program.instructions.find(call.address-distance);
+        if (begin==program.instructions.end()) continue;
+        const auto& move=begin->second;
+        if (move.operation!=Operation::add || move.destination<16 || move.destination>23 ||
+            !((move.source>=4 && move.source<=7 && !move.operand) ||
+              (move.operand>=4 && move.operand<=7 && !move.source))) continue;
+        Constants marker; marker.registers[move.destination]=constant(0x6d800001);
+        bool valid=true;
+        for (auto pc=begin->first+4;pc<call.address;pc+=4) {
+            const auto at=program.instructions.find(pc);
+            if (at==program.instructions.end()) { valid=false; break; }
+            const auto& i=at->second;
+            marker=transfer(i,std::move(marker));
+            if (i.flow==Flow::call || i.flow==Flow::indirect_call) {
+                const auto delay=program.instructions.find(pc+4);
+                if (delay==program.instructions.end() || delay->second.flow!=Flow::sequential) { valid=false; break; }
+                marker=transfer(delay->second,std::move(marker)); pc+=4;
+                for (unsigned reg=1;reg<32;++reg) if (reg<16 || reg>23) marker.registers[reg].reset();
+            } else if (i.flow!=Flow::sequential && i.flow!=Flow::conditional) { valid=false; break; }
+        }
+        if (valid && marker.registers[call.source]==constant(0x6d800001)) return true;
+    }
+    return false;
+}
 // A stack-loaded function pointer may cross helper calls that erase constant
 // proofs. Recover only a bounded set of addresses actually stored or passed by
 // this module. This is candidate discovery; the emitted transfer must guard the

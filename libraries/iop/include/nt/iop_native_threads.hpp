@@ -7,6 +7,7 @@
 #include <functional>
 #include <deque>
 #include <map>
+#include <string_view>
 
 namespace nt::iop {
 // Cooperative continuation scheduler with native stack ownership. Priority chooses
@@ -70,6 +71,23 @@ public:
     bool contains(std::uint32_t id) const { return threads_.contains(id); }
     const Cpu& state(std::uint32_t id) const { return threads_.at(id).cpu; }
     const Cpu* active_state() const { return current_ ? &threads_.at(*current_).cpu : nullptr; }
+    struct Snapshot {
+        std::uint32_t id,pc,return_address,stack_pointer,priority,wait_kind,wait_object,wakeups;
+        std::uint64_t executed;
+        std::string_view status;
+    };
+    std::vector<Snapshot> snapshot() const {
+        std::vector<Snapshot> result;
+        result.reserve(threads_.size());
+        for (const auto& [id,thread]:threads_) {
+            const auto status=thread.status==Status::finished ? "finished" : thread.status==Status::sleeping ? "sleeping" :
+                thread.status==Status::waiting ? "waiting" : thread.status==Status::delayed ? "delayed" : current_==id ? "running" : "ready";
+            result.push_back({id,thread.cpu.pc,thread.cpu.registers[31],thread.cpu.registers[29],thread.priority,
+                thread.status==Status::waiting ? static_cast<std::uint32_t>(thread.wait_kind) : 0U,
+                thread.wait_id,thread.wakeups,thread.cpu.executed,status});
+        }
+        return result;
+    }
     std::uint64_t executed() const { return executed_; }
     std::optional<std::uint32_t> current_waiter() const override {
         if (!current_ || threads_.at(*current_).cpu.interrupt_depth) return {};

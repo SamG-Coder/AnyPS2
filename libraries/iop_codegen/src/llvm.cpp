@@ -55,6 +55,35 @@ void membership(Writer& w,const std::string& name,const std::set<std::uint32_t>&
         w.text<<"page"<<page<<":\n  %member"<<page<<" = call i1 @"<<name<<"_"<<page<<"(i32 %address)\n  ret i1 %member"<<page<<'\n';
     w.text<<"}\n";
 }
+void native_return(Writer& w,const std::string& result,const std::string& target,
+                   const std::string& pending,const std::string& pending_value) {
+    const auto retired=w.select(w.binary("icmp eq",pending,"2"),"0",pending);
+    const auto load_target=w.pointer(retired);
+    w.text<<"  store i32 "<<pending_value<<", ptr "<<load_target<<", align 4\n";
+    w.store(0,"0"); w.store(2,result); w.store(32,target); w.store(35,"0");
+    const auto executed=w.value("add i64 "+w.value("load i64, ptr %executed, align 8")+", 1");
+    w.text<<"  store i64 "<<executed<<", ptr %executed, align 8\n  br label %loop\n";
+}
+void ascii_case(Writer& w,const std::string& label,const ir::Instruction& instruction) {
+    const auto delay=w.binary("icmp ne",w.load(34),"0");
+    w.text<<"  br i1 "<<delay<<", label %branch_fault, label %ascii"<<label<<"\nascii"<<label<<":\n";
+    const auto pending=w.load(35), pending_value=w.load(36);
+    const auto argument=w.select(w.binary("icmp eq",pending,"4"),pending_value,w.load(4));
+    const auto byte=w.binary("and",argument,"255");
+    // The public ABI takes char and defines ASCII classification. High bytes
+    // have no portable table entry; preserve an actionable unsupported call.
+    const auto supported=w.binary("icmp ult",byte,"128");
+    w.text<<"  br i1 "<<supported<<", label %ascii_convert"<<label<<", label %ascii_unsupported"<<label
+          <<"\nascii_unsupported"<<label<<":\n";
+    w.store(37,std::to_string(instruction.immediate));
+    w.text<<"  ret i32 9\nascii_convert"<<label<<":\n";
+    const bool upper=instruction.operation==ir::Operation::ascii_upper;
+    const auto index=w.binary("sub",byte,upper ? "97" : "65");
+    const auto letter=w.binary("icmp ult",index,"26");
+    const auto converted=w.select(letter,w.binary(upper ? "sub" : "add",byte,"32"),byte);
+    const auto target=w.select(w.binary("icmp eq",pending,"31"),pending_value,w.load(31));
+    native_return(w,converted,target,pending,pending_value);
+}
 void memory(Writer& w,const std::string& label,const ir::Instruction& instruction) {
     const auto operation=instruction.operation;
     const bool reverse=instruction.memory_convention==ir::MemoryConvention::source_first;
@@ -107,12 +136,7 @@ void memory(Writer& w,const std::string& label,const ir::Instruction& instructio
             <<".p0.p0.i32(ptr "<<pointer<<", ptr "<<from<<", i32 "<<count<<", i1 false)\n";
     }
     w.text<<"  br label %fill_commit"<<label<<"\nfill_commit"<<label<<":\n";
-    const auto retired=w.select(w.binary("icmp eq",pending,"2"),"0",pending);
-    const auto load_target=w.pointer(retired);
-    w.text<<"  store i32 "<<pending_value<<", ptr "<<load_target<<", align 4\n";
-    w.store(0,"0"); w.store(2,destination); w.store(32,target); w.store(35,"0");
-    const auto executed=w.value("add i64 "+w.value("load i64, ptr %executed, align 8")+", 1");
-    w.text<<"  store i64 "<<executed<<", ptr %executed, align 8\n  br label %loop\n";
+    native_return(w,destination,target,pending,pending_value);
 }
 void instruction(Writer& w,const ir::Instruction& i,bool has_successor,bool open_indirect=false) {
     using ir::Operation;
@@ -125,6 +149,7 @@ void instruction(Writer& w,const ir::Instruction& i,bool has_successor,bool open
     w.text<<"  store i64 "<<remaining<<", ptr %remaining, align 8\n";
     const auto pc=w.load(32);
     if (i.operation==Operation::memory_fill || i.operation==Operation::memory_copy || i.operation==Operation::memory_move) { memory(w,label,i); return; }
+    if (i.operation==Operation::ascii_upper || i.operation==Operation::ascii_lower) { ascii_case(w,label,i); return; }
     if (i.operation==Operation::native_import) {
         const auto delay=w.binary("icmp ne",w.load(34),"0");
         w.text<<"  br i1 "<<delay<<", label %branch_fault, label %import"<<label<<"\nimport"<<label<<":\n";

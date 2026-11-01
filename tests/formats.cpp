@@ -52,6 +52,15 @@ void test_elf() {
     put32(lifecycle,0xac,14); put32(lifecycle,0xb0,2); put32(lifecycle,0xb4,0x100004);
     put32(lifecycle,0xb8,0x104); put32(lifecycle,0xbc,4); put32(lifecycle,0xcc,4);
     put32(lifecycle,0x104,0x100000);
+    {
+        const auto sections=nt::elf::parse(lifecycle);
+        check(nt::elf::executable_address(sections,0x100000) &&
+              !nt::elf::executable_address(sections,0x100004) &&
+              !nt::elf::executable_address(sections,0x100002,4),
+              "Allocated lifecycle data inside executable LOAD was treated as code");
+        auto invalid=lifecycle; put32(invalid,24,0x100004);
+        rejects([&] { nt::elf::parse(invalid); });
+    }
     for (const auto type:{14U,15U,16U}) {
         put32(lifecycle,0xac,type);
         check(nt::elf::parse(lifecycle).lifecycle_entries==std::vector<std::uint32_t>{0x100000},"Lifecycle root lost");

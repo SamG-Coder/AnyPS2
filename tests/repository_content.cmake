@@ -10,6 +10,7 @@ function(check_content relative physical)
        AND NOT lower MATCHES "^cmake/(native_output|check_native_output|converter_zlib|llvm_objects|validate_native)\\.cmake$"
        AND NOT lower STREQUAL "docs/third-party/play-license.txt"
        AND NOT lower STREQUAL "docs/third-party/zlib-license.txt"
+       AND NOT lower STREQUAL "docs/third-party/hidapi-license.txt"
        AND NOT lower MATCHES "^(cmakelists\\.txt|readme\\.md|agents\\.md|disclaimer\\.md|\\.agent|\\.gitignore)$")
         message(FATAL_ERROR "Repository policy: unapproved path: ${relative}")
     endif()

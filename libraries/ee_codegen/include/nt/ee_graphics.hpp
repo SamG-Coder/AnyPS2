@@ -31,6 +31,7 @@ public:
         return Stop::budget;
     }
     const std::optional<DisplayMode>& mode() const { return mode_; }
+    bool half_height_output() const { return mode_ && mode_->interlace && mode_->frame; }
     static bool maps(std::uint32_t address) {
         return address==0x12000000 || address==0x12000020 ||
             (address>=0x12000070 && address<=0x120000a0 && address%16==0) ||

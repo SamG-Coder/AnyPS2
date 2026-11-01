@@ -9,6 +9,116 @@ extern "C" std::uint32_t nt_vu_graphics_end_count();
 extern "C" const std::uint8_t* nt_vu_graphics_end_image();
 extern "C" std::uint32_t nt_vu_graphics_end_size();
 
+namespace {
+void triangles(nt::graphics::VulkanRenderer& renderer) {
+    using nt::graphics::Packet;
+    using nt::graphics::RasterVertex;
+    const auto ad=[](Packet& p,unsigned reg,std::uint64_t value) {
+        p.push_back({std::uint32_t(value),std::uint32_t(value>>32),reg,0});
+    };
+    const auto finish=[](Packet& p) { p[0]={0x8000U|unsigned(p.size()-1),0x10000000,14,0}; };
+    const auto setup=[&](unsigned primitive) {
+        Packet p(1); ad(p,0x1a,1); ad(p,0,primitive); ad(p,0x4c,1ULL<<16);
+        ad(p,0x40,(3ULL<<16)|(3ULL<<48)); ad(p,0x46,1);
+        ad(p,0x42,104ULL|(128ULL<<32)); return p;
+    };
+    const auto vertex=[&](Packet& p,RasterVertex v,bool skip=false) {
+        ad(p,1,v.color|(std::uint64_t(std::bit_cast<std::uint32_t>(v.q))<<32));
+        ad(p,2,std::bit_cast<std::uint32_t>(v.s)|(std::uint64_t(std::bit_cast<std::uint32_t>(v.t))<<32));
+        ad(p,3,v.u|(std::uint64_t(v.v)<<16));
+        ad(p,skip ? 13 : 5,unsigned(v.x)|(std::uint64_t(v.y)<<16));
+    };
+    const auto pixel=[](const auto& drawing,unsigned x,unsigned y) {
+        return drawing.pixels()[nt::graphics::rgba_word(0,1,x,y)];
+    };
+    const RasterVertex a{0,0,0x80000010},b{64,0,0x80000010},c{0,64,0x80000010},d{64,64,0x80000010};
+    for (unsigned primitive:{3U,4U,5U}) {
+        nt::graphics::NativeDrawing drawing;
+        auto first=setup(primitive|64);
+        vertex(first,a); vertex(first,b); finish(first);
+        drawing.submit(renderer,std::array{first});
+        if (drawing.submitted_draws()) throw std::runtime_error("Incomplete triangle produced pixels");
+        Packet second(1);
+        if (primitive==3) {
+            vertex(second,c); vertex(second,b); vertex(second,d); vertex(second,c);
+        } else if (primitive==4) { vertex(second,c); vertex(second,d); }
+        else { vertex(second,d); vertex(second,c); }
+        finish(second); drawing.submit(renderer,std::array{second});
+        if (drawing.submitted_draws()!=2) throw std::runtime_error("Triangle assembly lost a primitive across packets");
+        for (unsigned y=0;y<4;++y) for (unsigned x=0;x<4;++x)
+            if (pixel(drawing,x,y)!=0x80000010) throw std::runtime_error("Triangle edge ownership left a gap or blended twice");
+    }
+    nt::graphics::NativeDrawing shaded;
+    auto p=setup(3|8);
+    vertex(p,{0,0,0x80000080}); vertex(p,{0,64,0x80800000}); vertex(p,{64,0,0x80008000});
+    finish(p); shaded.submit(renderer,std::array{p});
+    if (pixel(shaded,0,0)!=0x80000080 || pixel(shaded,1,1)!=0x80202040 || pixel(shaded,2,2))
+        throw std::runtime_error("Triangle winding, interpolated color or bottom/right exclusion differs");
+    nt::graphics::NativeDrawing suppressed;
+    p=setup(4); vertex(p,a); vertex(p,b); vertex(p,c,true); vertex(p,d); finish(p);
+    suppressed.submit(renderer,std::array{p});
+    if (suppressed.submitted_draws()!=1 || pixel(suppressed,0,0) || pixel(suppressed,3,3)!=d.color)
+        throw std::runtime_error("Suppressed triangle kick lost strip continuity");
+    // A later unsupported triangle must not publish any earlier draws or state.
+    auto good=setup(3); vertex(good,a); vertex(good,b); vertex(good,c); finish(good);
+    auto bad=setup(3|32); vertex(bad,a); vertex(bad,b); vertex(bad,c); finish(bad);
+    const auto before=suppressed.pixels(); bool rejected=false;
+    try { suppressed.submit(renderer,std::array{good,bad}); }
+    catch (const std::invalid_argument&) { rejected=true; }
+    if (!rejected || suppressed.pixels()!=before || suppressed.submitted_draws()!=1)
+        throw std::runtime_error("Unsupported triangle published a partial batch");
+    nt::graphics::NativeDrawing clipped;
+    p=setup(3); ad(p,0x18,16ULL|(16ULL<<32));
+    ad(p,0x40,1ULL|(2ULL<<16)|(1ULL<<32)|(2ULL<<48));
+    vertex(p,{0,0,1}); vertex(p,{112,0,2}); vertex(p,{0,112,0x80443322}); finish(p);
+    clipped.submit(renderer,std::array{p});
+    if (pixel(clipped,0,0) || pixel(clipped,1,1)!=0x80443322 || pixel(clipped,3,1))
+        throw std::runtime_error("Triangle scissor, offset or last-vertex flat color differs");
+    nt::graphics::NativeDrawing textured;
+    Packet upload(1);
+    ad(upload,0x50,(32ULL<<32)|(1ULL<<48)); ad(upload,0x51,0);
+    ad(upload,0x52,4ULL|(4ULL<<32)); ad(upload,0x53,0); finish(upload); upload[0][0]&=~0x8000U;
+    upload.push_back({0x8004,2U<<26,0,0});
+    for (unsigned y=0;y<4;++y) {
+        nt::graphics::Quadword row{};
+        for (unsigned x=0;x<4;++x) row[x]=0x80000000U|(x+16*y);
+        upload.push_back(row);
+    }
+    textured.submit(renderer,std::array{upload});
+    p=setup(4|16|256);
+    ad(p,6,32ULL|(1ULL<<14)|(2ULL<<26)|(2ULL<<30)|(1ULL<<34)|(1ULL<<35));
+    vertex(p,{0,0,0,0,0}); vertex(p,{64,0,0,64,0});
+    vertex(p,{0,64,0,0,64}); vertex(p,{64,64,0,64,64}); finish(p);
+    textured.submit(renderer,std::array{p});
+    for (unsigned y=0;y<4;++y) for (unsigned x=0;x<4;++x)
+        if (pixel(textured,x,y)!=(0x80000000U|(x+16*y)))
+            throw std::runtime_error("Fixed-UV triangle sampling differs across the shared edge");
+    const std::array<RasterVertex,4> perspective{{{0,0,0,0,0,0,0,1},{64,0,0,0,0,0.25f,0,0.25f},
+        {0,64,0,0,0,0,1,1},{64,64,0,0,0,0.25f,0.25f,0.25f}}};
+    p=setup(4|16);
+    for (const auto& v:perspective) vertex(p,v);
+    finish(p); textured.submit(renderer,std::array{p});
+    if (pixel(textured,2,1)!=0x80000010 || pixel(textured,3,3)!=0x80000031)
+        throw std::runtime_error("ST/Q triangle sampling omitted perspective division");
+    const auto perspective_pixels=textured.pixels();
+    p=setup(4|16); finish(p); p[0][0]&=~0x8000U;
+    p.push_back({0x8004,3U<<28,0x512,0});
+    for (const auto& v:perspective) {
+        p.push_back({std::bit_cast<std::uint32_t>(v.s),std::bit_cast<std::uint32_t>(v.t),std::bit_cast<std::uint32_t>(v.q),0});
+        p.push_back({0,0,0,0}); p.push_back({unsigned(v.x),unsigned(v.y),0,0});
+    }
+    textured.submit(renderer,std::array{p});
+    if (textured.pixels()!=perspective_pixels) throw std::runtime_error("Packed STQ did not forward Q to the vertex");
+    p=setup(4|16);
+    for (auto v:perspective) { v.q=0; vertex(p,v); }
+    finish(p); rejected=false;
+    try { textured.submit(renderer,std::array{p}); } catch (const std::runtime_error&) { rejected=true; }
+    if (!rejected || textured.pixels()!=perspective_pixels)
+        throw std::runtime_error("Zero Q published a partial draw");
+    if (renderer.validation_errors()) throw std::runtime_error("Triangle Vulkan validation error");
+}
+}
+
 int main() {
     try {
         nt::vu::Binding binding(nt::vu::Program(1,{nt_vu_graphics_end_blocks(),nt_vu_graphics_end_count()}),0,
@@ -237,7 +347,22 @@ int main() {
         try { nt::graphics::scanout(masked.pixels(),3,display_buffers,display_extents); }
         catch (const std::invalid_argument&) { rejected=true; }
         if (!rejected) throw std::runtime_error("Unsupported dual-circuit composition was hidden");
-        std::cout<<"Compiled VU to Vulkan sprite integration passed\n";
+        // Alternate visible rows and put unrelated data immediately after a
+        // half-height target. Frame-mode scanout must never display that data.
+        masked.submit(consumer.renderer,std::array{masked_packet(2,0xff112233),masked_packet(3,0xff445566)});
+        const std::array<std::uint64_t,2> field_buffers{(1U<<9)|(1ULL<<43),0};
+        const std::array<std::uint64_t,2> field_extents{(3ULL<<32)|(4ULL<<44),0};
+        const auto half=nt::graphics::scanout(masked.pixels(),1,field_buffers,field_extents,true);
+        if (!half || half->width!=4 || half->height!=5)
+            throw std::runtime_error("Interlaced output changed the requested display extent");
+        for (unsigned y=0;y<5;++y) for (unsigned x=0;x<4;++x)
+            if (half->pixels[y*4+x]!=(y/2==1 ? 0xff445566U : 0xff112233U))
+                throw std::runtime_error("Half-height scanout read past the source rows or lost the display origin");
+        const auto full=nt::graphics::scanout(masked.pixels(),1,field_buffers,field_extents);
+        if (!full || full->pixels[4]!=0xff445566 || full->pixels[12]!=0xff000000)
+            throw std::runtime_error("Full-height scanout unexpectedly duplicated source rows");
+        triangles(consumer.renderer);
+        std::cout<<"Compiled VU to Vulkan drawing integration passed\n";
         return 0;
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

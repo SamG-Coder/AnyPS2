@@ -69,15 +69,17 @@ Bytes Iso9660::read_sectors(std::uint32_t first,std::uint32_t count) {
     return read_at(std::uint64_t(first)*sector_size,std::uint64_t(count)*sector_size);
 }
 std::uint32_t Iso9660::appended_volume_start() {
+    if (appended_start_) return *appended_start_;
     if (size_%sector_size || !volume_sectors_ || volume_sectors_>sector_count())
         throw std::runtime_error("Invalid ISO volume size for layer discovery");
-    if (volume_sectors_==sector_count()) return 0;
+    if (volume_sectors_==sector_count()) { appended_start_=0; return 0; }
     const auto descriptor=read_sectors(volume_sectors_,1);
     if (descriptor[0]!=1 || std::string(descriptor.begin()+1,descriptor.begin()+6)!="CD001" || descriptor[6]!=1 ||
         le16(descriptor,128)!=sector_size || descriptor[130]!=8 || descriptor[131]!=0 ||
         !le32(descriptor,80) || le32(descriptor,80)!=be32(descriptor,84))
         throw std::runtime_error("Unrecognized appended ISO volume descriptor");
-    return volume_sectors_;
+    appended_start_=volume_sectors_;
+    return *appended_start_;
 }
 std::vector<Entry> Iso9660::entries(const Entry& directory) {
     if (!directory.directory) throw std::runtime_error("Expected a directory");

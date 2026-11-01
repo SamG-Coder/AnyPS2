@@ -1,4 +1,5 @@
 #include <nt/usb.hpp>
+#include "windows_hid.hpp"
 #include <algorithm>
 #include <cstring>
 #ifdef _WIN32
@@ -13,6 +14,28 @@
 #endif
 
 namespace nt::usb {
+bool describe_endpoint(const Device& device,std::size_t offset,Endpoint& result) {
+    if (!valid_descriptors(device.descriptors)) return false;
+    const auto& b=device.descriptors;
+    Endpoint owner; bool interface=false;
+    for (std::size_t at=18;at<b.size();at+=b[at]) {
+        if (b[at+1]==2) {
+            if (b[at]!=9) return false;
+            owner.configuration=b[at+5]; interface=false;
+        }
+        if (b[at+1]==4) {
+            if (b[at]<9) return false;
+            owner.interface_number=b[at+2]; owner.alternate=b[at+3]; owner.interface_class=b[at+5]; interface=true;
+        }
+        if (at==offset) {
+            if (!interface || b[at+1]!=5 || b[at]<7 || !(b[at+2]&15)) return false;
+            owner.address=b[at+2]; owner.attributes=b[at+3];
+            owner.packet_bytes=std::uint16_t(b[at+4]|(unsigned(b[at+5])<<8));
+            result=owner; return true;
+        }
+    }
+    return false;
+}
 bool valid_descriptors(std::span<const std::uint8_t> bytes) {
     if (bytes.size()<18 || bytes[0]!=18 || bytes[1]!=1 || !bytes[17]) return false;
     unsigned configurations=0;
@@ -60,11 +83,24 @@ public:
             std::memcmp(&connection->DeviceDescriptor,device.descriptors.data(),sizeof(USB_DEVICE_DESCRIPTOR)))
             return fail(ERROR_DEVICE_NOT_CONNECTED);
         descriptors_=device.descriptors;
+        source_=device;
         return true;
     }
     bool read_descriptor(std::uint16_t value,std::uint16_t index,std::uint16_t length,
                          std::vector<std::uint8_t>& output) override {
         error_=0;
+        if ((value>>8)==2 && !source_.hid_reports.empty()) {
+            unsigned configuration=0;
+            for (std::size_t at=18;at<descriptors_.size();) {
+                const auto size=unsigned(descriptors_[at+2])|(unsigned(descriptors_[at+3])<<8);
+                if (configuration++==(value&255)) {
+                    const auto count=std::min<unsigned>(length,size);
+                    output.assign(descriptors_.begin()+at,descriptors_.begin()+at+count); return true;
+                }
+                at+=size;
+            }
+            return fail(ERROR_INVALID_PARAMETER);
+        }
         unsigned capacity=length;
         // Windows requires room for a whole configuration even when the caller
         // requests only its prefix. Return the requested prefix after the read.
@@ -126,6 +162,15 @@ public:
         error_=0; return true;
     }
     std::uint32_t error() const override { return error_; }
+    bool read_report(std::uint8_t number,std::vector<std::uint8_t>& report) override {
+        const auto found=source_.hid_reports.find(number);
+        if (found==source_.hid_reports.end()) return fail(ERROR_NOT_SUPPORTED);
+        report=found->second; error_=0; return true;
+    }
+    bool set_report(std::uint8_t number,std::uint8_t type,std::uint8_t id,std::span<const std::uint8_t> bytes) override {
+        std::uint32_t error=0;
+        const auto result=set_windows_hid_report(source_,number,type,id,bytes,error); error_=error; return result;
+    }
 private:
     bool fail(DWORD value) { error_=value; return false; }
     Handle hub_;
@@ -133,9 +178,16 @@ private:
     DWORD error_=0;
     std::uint8_t configuration_=0;
     std::vector<std::uint8_t> descriptors_;
+    Device source_;
 };
 class WindowsHost final : public Host {
 public:
+    std::unique_ptr<InputPipe> open_input(const Device& device,const Endpoint& endpoint) override {
+        return open_windows_hid(device,endpoint,error_);
+    }
+    bool location(const Device& device,std::array<std::uint8_t,7>& path) override {
+        return windows_usb_location(device,path,error_);
+    }
     std::unique_ptr<ControlPipe> open_control(const Device& device) override {
         error_=0;
         const auto separator=device.key.rfind(L'#');
@@ -207,6 +259,7 @@ public:
                     device.descriptors.insert(device.descriptors.end(),descriptor.begin(),descriptor.end());
                 }
                 if (!valid_descriptors(device.descriptors)) return fail(ERROR_INVALID_DATA);
+                normalize_windows_hid(device);
                 total_bytes+=device.descriptors.size();
                 if (total_bytes>16*1024*1024) return fail(ERROR_NOT_ENOUGH_MEMORY);
                 snapshot.push_back(std::move(device));
@@ -235,7 +288,7 @@ private:
         output.assign(bytes.begin()+offset,bytes.begin()+offset+size);
         return true;
     }
-    DWORD error_=0;
+    std::uint32_t error_=0;
 };
 #else
 class WindowsHost final : public Host {

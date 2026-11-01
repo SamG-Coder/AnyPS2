@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <cmath>
 #include <stdexcept>
 #include <vector>
 
@@ -18,7 +19,9 @@ void check(VkResult result, const char* operation) {
     if (result != VK_SUCCESS) throw std::runtime_error(std::string(operation)+": Vulkan result "+std::to_string(result));
 }
 constexpr VkDeviceSize memory_bytes=4*1024*1024;
-constexpr VkDeviceSize buffer_bytes=memory_bytes*2+16*sizeof(std::uint32_t);
+constexpr VkDeviceSize triangle_offset=memory_bytes*2+16*sizeof(std::uint32_t);
+constexpr VkDeviceSize buffer_bytes=triangle_offset+3*sizeof(RasterVertex);
+static_assert(sizeof(RasterVertex)==32);
 const std::uint32_t shader_code[] =
 #include "sprite.inc"
 ;
@@ -144,7 +147,12 @@ struct VulkanRenderer::Impl {
         const float priority=1;
         VkDeviceQueueCreateInfo q{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}; q.queueFamilyIndex=family; q.queueCount=1; q.pQueuePriorities=&priority;
         const char* swap_extension=VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+        VkPhysicalDeviceFeatures available{};
+        vkGetPhysicalDeviceFeatures(physical,&available);
+        if (!available.shaderInt64) throw std::runtime_error("Native triangle coverage requires Vulkan shaderInt64");
+        VkPhysicalDeviceFeatures features{}; features.shaderInt64=VK_TRUE;
         VkDeviceCreateInfo dc{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO}; dc.queueCreateInfoCount=1; dc.pQueueCreateInfos=&q;
+        dc.pEnabledFeatures=&features;
         dc.enabledExtensionCount=surface?1:0; dc.ppEnabledExtensionNames=&swap_extension;
         check(vkCreateDevice(physical,&dc,nullptr,&device),"Create device"); vkGetDeviceQueue(device,family,0,&queue);
         constexpr auto transfers=VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -229,7 +237,7 @@ void validate_sprite(const Sprite& draw) {
         if (draw.flags&256) for (unsigned shift=0;shift<8;shift+=2)
             if (((draw.blend>>shift)&3)>2) throw std::runtime_error("Unsupported Vulkan blend selector");
     }
-    if ((draw.flags&1) && (!draw.dx || !draw.dy || !draw.texture_pitch || !draw.texture_width ||
+    if ((draw.flags&1) && ((!(draw.flags&triangle_flag) && (!draw.dx || !draw.dy)) || !draw.texture_pitch || !draw.texture_width ||
         !draw.texture_height || draw.right>draw.pitch*64 || ((draw.bottom-1)/32-draw.top/32)*draw.pitch+(draw.right-1)/64-draw.left/64>=512))
         throw std::runtime_error("Unsupported textured sprite dimensions or aliased framebuffer");
     if (draw.flags&1) {
@@ -255,9 +263,30 @@ void VulkanRenderer::sprite(std::span<std::uint32_t> memory,const Sprite& draw,s
 void VulkanRenderer::sprites(std::span<std::uint32_t> memory,std::span<const SpriteCommand> commands) {
     if (memory.size_bytes()!=memory_bytes || commands.size()>65536)
         throw std::runtime_error("Invalid Vulkan sprite batch or graphics storage");
-    std::uint64_t count=0;
+    std::uint64_t count=0,triangles=0;
     for (const auto& command:commands) {
         validate_sprite(command.draw);
+        if (command.draw.flags&triangle_flag) {
+            for (const auto& vertex:command.triangle)
+                if (vertex.x < -65535 || vertex.x>65535 || vertex.y < -65535 || vertex.y>65535 || vertex.u>16383 || vertex.v>16383)
+                    throw std::runtime_error("Invalid Vulkan triangle vertex");
+            const auto& v=command.triangle;
+            if (command.draw.flags&perspective_triangle_flag) {
+                for (const auto& vertex:v) {
+                    if (!std::isfinite(vertex.s) || !std::isfinite(vertex.t) || !std::isfinite(vertex.q) ||
+                        std::abs(vertex.q)<1e-20f || std::abs(vertex.q)>1e20f ||
+                        std::abs(vertex.s)>1e20f || std::abs(vertex.t)>1e20f ||
+                        std::signbit(vertex.q)!=std::signbit(v[0].q) ||
+                        std::abs(double(vertex.s)/vertex.q*command.draw.texture_width*16)>0x3fffffff ||
+                        std::abs(double(vertex.t)/vertex.q*command.draw.texture_height*16)>0x3fffffff)
+                        throw std::runtime_error("Unsupported native triangle ST/Q range or zero crossing");
+                }
+            }
+            const auto area=(std::int64_t(v[1].x)-v[0].x)*(std::int64_t(v[2].y)-v[0].y)-
+                (std::int64_t(v[1].y)-v[0].y)*(std::int64_t(v[2].x)-v[0].x);
+            if (area<=0) throw std::runtime_error("Vulkan triangle must have positive area");
+            triangles+=command.draw.left!=command.draw.right && command.draw.top!=command.draw.bottom;
+        }
         count+=command.draw.left!=command.draw.right && command.draw.top!=command.draw.bottom;
     }
     if (!count) return;
@@ -278,7 +307,7 @@ void VulkanRenderer::sprites(std::span<std::uint32_t> memory,std::span<const Spr
         if (draw.left==draw.right || draw.top==draw.bottom) continue;
         if (!first) {
             VkMemoryBarrier ordered{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-            ordered.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;
+            ordered.srcAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT;
             ordered.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_TRANSFER_READ_BIT|VK_ACCESS_TRANSFER_WRITE_BIT;
             vkCmdPipelineBarrier(v.command,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT,0,1,&ordered,0,nullptr,0,nullptr);
@@ -291,7 +320,8 @@ void VulkanRenderer::sprites(std::span<std::uint32_t> memory,std::span<const Spr
             vkCmdCopyBuffer(v.command,v.storage,v.storage,1,&copy);
         }
         if (draw.flags&64) vkCmdUpdateBuffer(v.command,v.storage,memory_bytes*2,64,command.palette.data());
-        if (draw.flags&(1|64)) {
+        if (draw.flags&triangle_flag) vkCmdUpdateBuffer(v.command,v.storage,triangle_offset,sizeof(command.triangle),command.triangle.data());
+        if (draw.flags&(1|64|triangle_flag)) {
             VkMemoryBarrier uploaded{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
             uploaded.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
             uploaded.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT;
@@ -310,7 +340,7 @@ void VulkanRenderer::sprites(std::span<std::uint32_t> memory,std::span<const Spr
     VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER}; barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT; barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
     vkCmdPipelineBarrier(v.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&barrier,0,nullptr,0,nullptr);
     v.submit(); std::memcpy(memory.data(),v.mapped,memory_bytes);
-    ++v.statistics.submissions; v.statistics.sprites+=count;
+    ++v.statistics.submissions; v.statistics.sprites+=count-triangles; v.statistics.triangles+=triangles;
     v.statistics.upload_bytes+=memory_bytes; v.statistics.readback_bytes+=memory_bytes;
 }
 void VulkanRenderer::present(std::span<const std::uint32_t> rgba,unsigned width,unsigned height) {

@@ -24,6 +24,9 @@ build artifacts for reproducibility; keep converted commercial content ignored.
 The standalone IOP converter is implemented for a bounded subset. EE/VU LLVM
 conversion and integration into game startup remain unfinished.
 **GT4 renders its opening warning through Vulkan, but has not reached the title screen or playable gameplay.**
+The current local startup also executes triangle rendering after that warning.
+Its next observed boundary is starting a sample voice through LIBSD `KON`;
+native sample-voice playback remains unimplemented.
 Runtime performance is still experimental; compiler measurements and tuning are described in [batch conversion](docs/batch-conversion.md).
 
 ## Pipeline
@@ -52,7 +55,7 @@ Requires CMake 3.24 or later, a C++20 compiler and a C compiler for the pinned
 zlib conversion dependency. Initial configuration downloads zlib 1.3.1 with a
 verified archive hash; generated game executables do not link this importer dependency. The tested platform is Windows
 x64 with Visual Studio's C++ workload. Install the Vulkan SDK (including `glslc`
-and validation layers) and a Vulkan-capable graphics driver. GS solid-sprite
+and validation layers) and a Vulkan-capable graphics driver with `shaderInt64`. GS solid-sprite
 drawing now uses Vulkan compute; there is no silent CPU rendering fallback.
 
 ```powershell
@@ -142,6 +145,15 @@ events are implemented. Native polling timers are
 connected to compare/overflow events; gated timing and reset-on-compare remain
 unsupported. Callback discovery supports simple
 wrappers and initialized tables; more dynamic cases remain incomplete.
+Callback discovery also follows direct tail jumps, conditional linking branches,
+and statically recoverable register calls, including their delay-slot arguments.
+Leaf functions returning recoverable code pointers contribute candidates when
+their results feed a call or an invoked callback argument. Allocated ELF data
+sections remain data even inside an executable load segment.
+Each EE conversion writes `call-sites.tsv`, separating encoded destinations,
+initial-data candidates, unresolved indirect calls, returns and native service
+boundaries. The report covers discovered code; it does not assert complete coverage
+of dynamically constructed pointers or code that has not yet been found.
 Visible boot and gameplay are not established.
 CFC2/CTC2 compile to native vector-service calls; the production vector owner is
 not connected, so executing these calls currently stops explicitly.
@@ -181,7 +193,8 @@ native boot records; the standalone probe starts with an empty boot context.
 Startup callbacks are queued during module entry execution and drained by priority;
 later registrations execute compiled callbacks immediately.
 Native sysclib character classification preserves fixed ASCII flags without host
-locale dependencies; undefined non-ASCII entries stop explicitly. Native prnt
+locale dependencies; case-conversion imports lower directly to LLVM arithmetic.
+Undefined non-ASCII entries stop explicitly. Native prnt
 shares the bounded formatter and delivers output through compiled callbacks,
 including flush/reset controls. Native strcmp/strlen/strncmp use bounded guest
 byte reads; strchr/index and strrchr/rindex share the same bounds and preserve
@@ -530,9 +543,16 @@ selection now reaches the same image at the configured 640 x 448 resolution.
 The executable opens a Vulkan window during execution and keeps the final image
 visible at a diagnostic stop, labelled in its title. The title also reports
 presented frames and presentation FPS; the frame counter freezes when execution
-stops and does not count repeated inspection redraws. Use `--headless` for automated
-runs and `--run-seconds N` for a bounded diagnostic duration. `--capture-stop`
-saves separate render-target and selected-display evidence. Native startup now
+stops and does not count repeated inspection redraws. Use `--close-on-stop` to show
+the live run and close its window at the diagnostic boundary, `--headless` to omit
+the window, and `--run-seconds N` for a bounded diagnostic duration. `--capture-stop`
+saves separate render-target and selected-display evidence plus a bounded tail
+of service calls. `--capture-graphics <new-private-directory>` records bounded
+packet submissions and changing display snapshots for diagnosing transient
+rendering faults; keep these game-derived files private. Interlaced frame mode
+reads a half-height framebuffer and duplicates its rows for the native window,
+preserving the requested display resolution. Temporal field blending remains
+unsupported. Native startup now
 completes the warning thread, uses statically compiled native memory aliases,
 hands off to the secondary executable image and completes a repeated native IOP
 reset. Further startup, service and control-flow gaps remain. The title screen
@@ -548,10 +568,26 @@ reservations across failed starts, and shares ISO-backed CD/DVD reads and deferr
 compiled callbacks between EE and IOP services. Optical drive timing is not modeled.
 Native sound initialization now applies stereo master/voice gains, pitch and mixer
 routing to an XAudio2 graph, clears bounded effect workspaces and validates callback
-registrations against compiled targets. GT4 passes this initialization and next
-requests a module absent from the current AOT bundle. Sample playback, volume
-sweeps, active reverb and sound-completion dispatch are not established by this
-milestone; unsupported operations stop explicitly.
+registrations against compiled targets. Sample-memory transfers perform native
+copies and deliver compiled completion callbacks. PCM block streams use XAudio2
+consumption and support double-buffer or compiled-callback refill. Room, studio,
+hall, space and pipe effects use native XAudio2 reverb presets with stereo depth
+and explicit history clearing. Their audible response differs from console DSP;
+variable echo/delay modes, sample voices and volume sweeps remain incomplete.
+USB services expose a Windows device snapshot, descriptor/control requests and
+asynchronous HID input with cancellation. HIDAPI translates Windows HID capability
+data into consistent report descriptors. Host access denial is reported as a failed
+pipe open; unsupported device classes still stop explicitly. These services do not
+establish that GT4 reaches its title screen.
+The native application maps the public power callback to window-close notification
+and the power-off request to process exit. It never shuts down the host computer;
+standalone hosts without that lifecycle binding report the service as unavailable.
+
+The current EE and IOP outputs are LLVM machine code linked with native libraries,
+but still use CPU-state ABI adapters and original-address dispatch at some boundaries.
+It is not yet a complete conversion to recovered native functions and ordinary
+function-pointer linkage. Conversion-time callback discovery and native linkage
+remain required work; there is no instruction interpreter or JIT fallback.
 
 Scalar, V2, masked V3 and V4 uploads in 32-, 16- and 8-bit formats,
 plus packed V4-5 data, can populate
@@ -577,10 +613,14 @@ or rejecting consumer leaves execution uncommitted. A native adapter now transla
 supported packed/address-data and register-list packets into Vulkan solid-sprite
 commands. RGBA32/RGB24 and PSMT4 host image uploads preserve ordering with draws, and fixed-UV
 sprites can sample those textures through Vulkan. PSMT4 indexed sprites support 16-entry RGBA32/RGB24 palettes with ordered and conditional loads.
-Sprites also support alpha tests and integer alpha blending.
-Perspective textures, other primitive types and display
-presentation through this path remain unfinished. Synthetic compiled VU-to-GPU
-tests pass; game rendering is not established.
+Sprites also support alpha tests and integer alpha blending. Triangle
+lists, strips and fans share those operations and texture sampling, with flat or interpolated vertex
+colour and integer top/left edge coverage. Vertex interpolation uses native
+barycentric arithmetic; internal GS interpolation precision is not reproduced.
+Triangles accept fixed UVs or finite ST/Q coordinates using native floating-point
+perspective division. Zero-crossing Q, fog, antialiasing and general depth
+operations remain unsupported. Synthetic compiled VU-to-GPU tests validate
+transport and pixels; see the compatibility status above for actual game progress.
 
 VIF1 DIRECT/DIRECTHL and direct GIF submissions share that same Vulkan adapter.
 They require complete bounded packets and serialized execution. Unsupported mixed

@@ -212,11 +212,13 @@ target_compile_definitions(iop-native PRIVATE ANYPS2_IOP_LLVM=1)
     std::ostringstream diagnostics;
     for (const auto& item:compiled) for (const auto& library:elf::iop_exports(item))
         if (library.name=="libsd") diagnostics<<"Native LIBSD public ABI: LLVM entry stubs call the Windows audio owner. "
-            "Module startup, voice initialization and quit are supported; other sound requests stop explicitly.\n";
+            "Initialization, sample storage, PCM block streams and consumption-driven callbacks are supported. "
+            "Unsupported voice playback and effect modes stop explicitly.\n";
     for (const auto& item:compiled) for (const auto& library:elf::iop_exports(item))
         if (library.name=="usbd") diagnostics<<"Native USBD public ABI: LLVM entry stubs call the Windows USB descriptor owner. "
             "Startup, driver registration/probing, descriptor queries, private data and unregistration are supported; "
-            "transfers and topology changes stop explicitly.\n";
+            "supported HID control and input transfers use native Windows handles. "
+            "Unsupported transfers and topology changes stop explicitly.\n";
     for (const auto& item:compiled) for (const auto& library:elf::iop_exports(item))
         if (library.name=="dev9") diagnostics<<"Native DEV9 public ABI: no expansion network/storage provider is installed. "
             "Initialization returns MODULE_NO_RESIDENT_END without registering exports. "

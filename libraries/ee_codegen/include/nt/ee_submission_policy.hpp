@@ -10,6 +10,7 @@ public:
         return address==0x1000e000 || address==0x1000e020 || address==0x1000f520 || address==0x1000f590;
     }
     bool enabled() const { return (control_&1) && !(enable_&0x10000); }
+    std::uint32_t completion_selection() const { return priority_&0x3ffU; }
     IoRead read(std::uint32_t address) const {
         if (address==0x1000e000) return {Stop::budget,control_};
         if (address==0x1000e020) return {Stop::budget,priority_};

@@ -1,10 +1,29 @@
 #include <nt/elf.hpp>
 #include <algorithm>
+#include <array>
 #include <stdexcept>
 
 namespace nt::elf {
 namespace {
-void lifecycle_entries(ByteView bytes,Executable& executable) {
+void import_note(ByteView bytes,Executable& executable) {
+    std::size_t at=0;
+    while (at<bytes.size()) {
+        require_range(bytes,at,12);
+        const auto name_size=le32(bytes,at),data_size=le32(bytes,at+4),type=le32(bytes,at+8);
+        const auto name_at=std::uint64_t(at)+12;
+        const auto data_at=name_at+((std::uint64_t(name_size)+3)&~3ULL);
+        const auto next=data_at+((std::uint64_t(data_size)+3)&~3ULL);
+        if (next>bytes.size()) throw std::runtime_error("Invalid ELF note extent");
+        constexpr std::array<std::uint8_t,7> name{'A','n','y','P','S','2',0};
+        if (name_size==name.size() && std::equal(name.begin(),name.end(),bytes.begin()+name_at) && type==1) {
+            if (data_size!=4 || le32(bytes,static_cast<std::size_t>(data_at))!=1 || executable.inferred_permissions)
+                throw std::runtime_error("Invalid AnyPS2 import permissions note");
+            executable.inferred_permissions=true;
+        }
+        at=static_cast<std::size_t>(next);
+    }
+}
+void read_sections(ByteView bytes,Executable& executable) {
     const auto table=le32(bytes,32);
     const auto stride=le16(bytes,46),count=le16(bytes,48),names_index=le16(bytes,50);
     if (!table && !count) return;
@@ -22,6 +41,17 @@ void lifecycle_entries(ByteView bytes,Executable& executable) {
         const auto at=std::size_t(table)+index*stride;
         const auto type=le32(bytes,at+4),flags=le32(bytes,at+8);
         if (!(flags&2)) continue; // Only allocated tables belong to the program.
+        const auto section_address=le32(bytes,at+12),section_offset=le32(bytes,at+16),section_size=le32(bytes,at+20);
+        if (section_size && !(flags&4)) {
+            const auto end=std::uint64_t(section_address)+section_size;
+            const auto mapped=std::any_of(executable.segments.begin(),executable.segments.end(),[&](const auto& segment) {
+                return section_address>=segment.address && end<=std::uint64_t(segment.address)+(type==8 ? segment.memory_size : segment.file_size) &&
+                    (type==8 || std::uint64_t(segment.offset)+section_address-segment.address==section_offset);
+            });
+            if (end>0x100000000ULL || !mapped) throw std::runtime_error("ELF allocated data section is not mapped");
+            if (type!=8) require_range(bytes,section_offset,section_size);
+            executable.non_executable_sections.push_back({section_address,section_size});
+        }
         bool legacy=false;
         if (type==1 && !names.empty()) {
             const auto name=le32(bytes,at);
@@ -56,6 +86,8 @@ void lifecycle_entries(ByteView bytes,Executable& executable) {
     }
     auto& entries=executable.lifecycle_entries;
     std::sort(entries.begin(),entries.end()); entries.erase(std::unique(entries.begin(),entries.end()),entries.end());
+    for (const auto entry:entries)
+        if (!executable_address(executable,entry)) throw std::runtime_error("ELF lifecycle entry is declared as data");
 }
 }
 Executable parse(ByteView b) {
@@ -72,6 +104,11 @@ Executable parse(ByteView b) {
     require_range(b, table, std::size_t(stride) * count);
     for (std::size_t i = 0; i < count; ++i) {
         const auto p = table + i * stride;
+        if (le32(b,p)==4) {
+            const auto offset=le32(b,p+4),size=le32(b,p+16);
+            require_range(b,offset,size);
+            import_note(b.subspan(offset,size),result);
+        }
         if (le32(b, p) != 1) continue;
         Segment s{le32(b, p + 4), le32(b, p + 8), le32(b, p + 16),
                   le32(b, p + 20), le32(b, p + 24), le32(b, p + 28)};
@@ -89,8 +126,18 @@ Executable parse(ByteView b) {
     };
     if (result.entry % 4 || !std::any_of(result.segments.begin(), result.segments.end(), contains_entry))
         throw std::runtime_error("Entry is not aligned, file-backed executable memory");
-    lifecycle_entries(b,result);
+    read_sections(b,result);
+    if (!executable_address(result,result.entry)) throw std::runtime_error("ELF entry is declared as data");
     return result;
+}
+bool executable_address(const Executable& executable,std::uint32_t address,unsigned bytes,bool allow_inferred) {
+    if (!bytes || std::uint64_t(address)+bytes>0x100000000ULL) return false;
+    for (const auto& range:executable.non_executable_sections)
+        if (address<std::uint64_t(range.address)+range.size && range.address<std::uint64_t(address)+bytes) return false;
+    return std::any_of(executable.segments.begin(),executable.segments.end(),[&](const auto& segment) {
+        return ((segment.flags&1) || (allow_inferred && executable.inferred_permissions)) && address>=segment.address &&
+            std::uint64_t(address)+bytes<=std::uint64_t(segment.address)+segment.file_size;
+    });
 }
 void describe(std::ostream& out, const Executable& executable) {
     out << "MIPS ELF32 entry " << hex32(executable.entry) << " flags " << hex32(executable.flags) << '\n';

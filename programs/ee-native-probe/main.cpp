@@ -1,4 +1,5 @@
 #include "capture.hpp"
+#include "graphics_capture.hpp"
 #include <nt/ee_services.hpp>
 #include <nt/ee_platform.hpp>
 #include <nt/ee_sif_command_peer.hpp>
@@ -65,6 +66,7 @@ struct VuCapture {
 struct NativeGpu {
     std::unique_ptr<nt::graphics::VulkanRenderer> renderer;
     nt::graphics::NativeDrawing drawing;
+    std::unique_ptr<probe::GraphicsCapture> capture;
     std::string error;
     std::chrono::steady_clock::duration render_time{};
     static bool submit(void* raw,std::span<const nt::graphics::NativeDrawing::Packet> packets) {
@@ -72,6 +74,7 @@ struct NativeGpu {
         const auto began=std::chrono::steady_clock::now();
         try {
             if (!self.renderer) self.renderer=std::make_unique<nt::graphics::VulkanRenderer>();
+            if (self.capture) self.capture->submit(packets);
             self.drawing.submit(*self.renderer,packets);
             self.render_time+=std::chrono::steady_clock::now()-began;
             return true;
@@ -90,6 +93,8 @@ struct NativeGpu {
     }
 };
 bool trace_services=false;
+probe::ServiceCapture* service_capture=nullptr;
+nt::ee::StartupServices* active_services=nullptr;
 #ifdef ANYPS2_NATIVE_IOP
 probe::IopReset* active_iop=nullptr;
 #endif
@@ -101,6 +106,14 @@ nt::ee::Stop execute(nt::runtime::State* state,nt::ee::Memory* memory,std::uint6
     }
 #endif
     const auto stop=nt_ee_generated_run(state,memory,budget);
+    if (service_capture && stop==nt::ee::Stop::syscall) {
+        const auto thread=active_services->current_thread();
+        probe::ServiceCapture::Record record{state->pc,static_cast<std::uint32_t>(state->gpr[3].lo),
+            thread ? thread->id : 0,state->cop0_status,memory->pending_interrupts,
+            memory->completions ? memory->completions->status() : 0,{}};
+        for (unsigned i=0;i<4;++i) record.arguments[i]=static_cast<std::uint32_t>(state->gpr[4+i].lo);
+        service_capture->observe(record);
+    }
     if (trace_services && stop==nt::ee::Stop::syscall) {
         std::cerr<<"service pc="<<nt::hex32(state->pc)<<" number="<<state->gpr[3].lo;
         for (unsigned i=4;i<8;++i) std::cerr<<" a"<<(i-4)<<"="<<nt::hex32(static_cast<std::uint32_t>(state->gpr[i].lo));
@@ -111,7 +124,7 @@ nt::ee::Stop execute(nt::runtime::State* state,nt::ee::Memory* memory,std::uint6
 }
 int main(int argc,char** argv) {
     if (argc<2) {
-        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--run-seconds N] [--headless | --display-stop] [--strict-performance | --native-thread-cycles | --native-pmu] [--disc <image.iso>] [--capture-vu <new-private-directory>] [--capture-stop <new-private-directory>]\n";
+        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--run-seconds N] [--headless | --display-stop | --close-on-stop] [--strict-performance | --native-thread-cycles | --native-pmu] [--disc <image.iso>] [--capture-vu <new-private-directory>] [--capture-stop <new-private-directory>] [--capture-graphics <new-private-directory>]\n";
 #ifdef ANYPS2_NATIVE_IOP
         std::cerr<<"Linked IOP investigation: --probe-iop-reset <module.data> (stops without acknowledging reset)\n";
         std::cerr<<"Explicit selected-bundle execution: --iop-reset-session <module.data> --disc <image.iso>\n";
@@ -121,8 +134,8 @@ int main(int argc,char** argv) {
     try {
         std::uint64_t budget=1000000;
         unsigned run_seconds=0;
-        std::filesystem::path disc,capture_directory,stop_directory;
-        bool has_budget=false,native_cycles=false,native_pmu=false,strict_performance=false,display_stopped=true;
+        std::filesystem::path disc,capture_directory,stop_directory,graphics_directory;
+        bool has_budget=false,native_cycles=false,native_pmu=false,strict_performance=false,show_window=true,hold_window=true;
 #ifdef ANYPS2_NATIVE_IOP
         std::filesystem::path iop_data;
         bool iop_session=false;
@@ -132,8 +145,9 @@ int main(int argc,char** argv) {
             if (text=="--native-thread-cycles") { native_cycles=true; continue; }
             if (text=="--native-pmu") { native_pmu=true; continue; }
             if (text=="--strict-performance") { strict_performance=true; continue; }
-            if (text=="--display-stop") { display_stopped=true; continue; }
-            if (text=="--headless") { display_stopped=false; continue; }
+            if (text=="--display-stop") { show_window=hold_window=true; continue; }
+            if (text=="--close-on-stop") { show_window=true; hold_window=false; continue; }
+            if (text=="--headless") { show_window=false; continue; }
             if (text=="--trace-services") { trace_services=true; continue; }
             if (text=="--run-seconds") {
                 if (run_seconds || index+1==argc) throw std::runtime_error("Expected one diagnostic duration");
@@ -150,6 +164,13 @@ int main(int argc,char** argv) {
                 iop_data=argv[++index]; continue;
             }
 #endif
+            if (text=="--capture-graphics") {
+                if (!graphics_directory.empty() || index+1==argc)
+                    throw std::runtime_error("Expected one private graphics capture directory");
+                graphics_directory=argv[++index];
+                if (std::filesystem::exists(graphics_directory)) throw std::runtime_error("Graphics capture directory already exists");
+                continue;
+            }
             if (text=="--capture-stop") {
                 if (!stop_directory.empty() || index+1==argc)
                     throw std::runtime_error("Expected one private stop capture directory");
@@ -230,6 +251,7 @@ int main(int argc,char** argv) {
             std::cout<<"metrics=native-thread-cycles units=host-cpu-cycles includes=native-services cache-events=unsupported\n";
         }
         NativeGpu gpu;
+        if (!graphics_directory.empty()) gpu.capture=std::make_unique<probe::GraphicsCapture>(graphics_directory);
         nt::ee::NativePlatform platform; platform.attach(memory);
         platform.debug_byte=[](void*,std::uint8_t byte) {
             std::cerr.put(static_cast<char>(byte));
@@ -270,7 +292,9 @@ int main(int argc,char** argv) {
         }
         platform.graphics.context=&gpu; platform.graphics.synchronize=NativeGpu::synchronize;
         platform.graphics.reset_drawing=[](void* context) {
-            static_cast<NativeGpu*>(context)->drawing.reset(); return nt::ee::Stop::budget;
+            auto& gpu=*static_cast<NativeGpu*>(context);
+            if (gpu.capture) gpu.capture->reset();
+            gpu.drawing.reset(); return nt::ee::Stop::budget;
         };
         nt::ee::NativeSifCommandPeer command_peer(platform.sif_link,memory,native_code_overlap,0x1000,&platform.sif_receive);
 #ifdef ANYPS2_NATIVE_IOP
@@ -292,27 +316,53 @@ int main(int argc,char** argv) {
         if (!command_peer.connect(platform.sif_outbound)) throw std::runtime_error("Cannot connect native command peer");
         auto state=nt::ee::NativePlatform::initial_state(ANYPS2_EE_ENTRY);
         nt::ee::StartupServices services(native_code_overlap,nt_ee_generated_contains,ANYPS2_EE_SYSCALL_TABLE);
+        probe::ServiceCapture service_observation;
+        if (!stop_directory.empty()) service_capture=&service_observation;
+        active_services=&services;
+        if (service_capture) {
+            platform.interrupts.observation_context=&platform;
+            platform.interrupts.observe_delivery=[](void* context,bool dma,unsigned line,const nt::runtime::State& state) {
+                auto& platform=*static_cast<nt::ee::NativePlatform*>(context);
+                const auto control=dma && line<3 ? platform.packet_submission.read(0x10008000+line*0x1000).value : 0;
+                service_capture->deliver({dma,line,state.pc,control});
+            };
+        }
         services.publish_image=[](nt::ee::Memory& m,std::uint32_t entry) { return nt_ee_generated_publish_image(&m,entry); };
 #ifdef ANYPS2_NATIVE_IOP
         if (iop_reset) services.idle_pump=[&] { return iop_reset->pump(); };
 #endif
         std::unique_ptr<probe::NativeWindow> window;
-        if (display_stopped) window=std::make_unique<probe::NativeWindow>();
+        if (show_window) window=std::make_unique<probe::NativeWindow>();
         const auto started=std::chrono::steady_clock::now();
         auto next_present=started;
-        bool timed_out=false,window_closed=false;
-        if (window || run_seconds) services.stop_requested=[&] {
+        bool timed_out=false,window_closed=false,application_exit=false;
+        services.stop_requested=[&] {
             const auto now=std::chrono::steady_clock::now();
             timed_out=run_seconds && now-started>=std::chrono::seconds(run_seconds);
             if (timed_out) return true;
-            if (window && now>=next_present) {
+            if (window && !window_closed && now>=next_present) {
                 next_present=now+std::chrono::milliseconds(16);
-                if (!window->poll()) { window_closed=true; return true; }
-                const auto& output=platform.graphics.output();
-                if (const auto frame=nt::graphics::scanout(gpu.drawing.pixels(),output.control,output.buffers,output.displays))
-                    window->present(*frame);
+                if (!window->poll()) {
+                    window_closed=true;
+                } else {
+                    const auto& output=platform.graphics.output();
+                    if (const auto frame=nt::graphics::scanout(gpu.drawing.pixels(),output.control,output.buffers,output.displays,platform.graphics.half_height_output())) {
+                        window->present(*frame);
+                        if (gpu.capture) gpu.capture->present(*frame,gpu.drawing.submitted_draws(),output.control,output.buffers,output.displays,platform.graphics.half_height_output());
+                    }
+                }
             }
-            return false;
+#ifdef ANYPS2_NATIVE_IOP
+            if (iop_reset) {
+                // Drain the real close callback even when the EE is no longer
+                // making IOP calls. A diagnostic boundary still stops normally.
+                if (window_closed) iop_reset->request_close();
+                if (window_closed && !iop_reset->exit_requested() && iop_reset->pump()!=nt::ee::Stop::budget) return true;
+                application_exit=iop_reset->exit_requested();
+                return application_exit;
+            }
+#endif
+            return window_closed;
         };
         const auto stop=nt::ee::run(execute,state,memory,budget,services);
         const auto execution_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
@@ -320,12 +370,12 @@ int main(int argc,char** argv) {
                  <<" render_seconds="<<std::chrono::duration<double>(gpu.render_time).count();
         if (gpu.renderer) {
             const auto& statistics=gpu.renderer->statistics();
-            std::cout<<" gpu_submissions="<<statistics.submissions<<" gpu_sprites="<<statistics.sprites
+            std::cout<<" gpu_submissions="<<statistics.submissions<<" gpu_sprites="<<statistics.sprites<<" gpu_triangles="<<statistics.triangles
                      <<" gpu_upload_bytes="<<statistics.upload_bytes<<" gpu_readback_bytes="<<statistics.readback_bytes;
         }
         std::cout<<'\n';
-        if (timed_out || window_closed)
-            std::cout<<"host_stop="<<(timed_out ? "diagnostic-deadline" : "window-closed")<<'\n';
+        if (timed_out || window_closed || application_exit)
+            std::cout<<"host_stop="<<(timed_out ? "diagnostic-deadline" : application_exit ? "application-exit" : "window-closed")<<'\n';
         if (const auto thread=services.current_thread())
             std::cout<<"ee_thread="<<thread->id<<" status="<<thread->status<<" wait_semaphore="<<thread->semaphore<<'\n';
         for (const auto& thread:services.thread_snapshot(state))
@@ -366,6 +416,17 @@ int main(int argc,char** argv) {
                      <<" native_usb_error="<<iop_reset->usb().error()
                      <<" native_dev9_unavailable="<<iop_reset->dev9().unavailable_initializations()
                      <<" native_audio_error="<<iop_reset->audio().error()<<'\n';
+            for (const auto& thread:iop_reset->thread_snapshot())
+                std::cout<<"iop_thread="<<thread.id<<" status="<<thread.status<<" pc="<<nt::hex32(thread.pc)
+                         <<" return="<<nt::hex32(thread.return_address)<<" stack="<<nt::hex32(thread.stack_pointer)
+                         <<" priority="<<thread.priority<<" wait_kind="<<thread.wait_kind<<" wait_object="<<nt::hex32(thread.wait_object)
+                         <<" wakeups="<<thread.wakeups<<" executed="<<thread.executed<<'\n';
+            if (const auto packet=iop_reset->pending_iop_packet();!packet.empty()) {
+                std::cout<<"iop_pending_packet_bytes="<<packet.size();
+                for (std::uint32_t at=0;at+4<=packet.size();at+=4)
+                    std::cout<<" word"<<at/4<<'='<<nt::hex32(nt::iop::load_native_word(packet,at));
+                std::cout<<'\n';
+            }
             if (const auto& transfer=iop_reset->rejected_transfer())
                 std::cout<<"sif_rejected_descriptor="<<transfer->index
                          <<" source="<<nt::hex32(transfer->source)<<" destination="<<nt::hex32(transfer->destination)
@@ -375,6 +436,7 @@ int main(int argc,char** argv) {
         if (!capture_directory.empty()) capture.save(capture_directory);
         if (!stop_directory.empty()) {
             probe::capture_stop(stop_directory,state,memory,stop);
+            service_observation.save(stop_directory);
 #ifdef ANYPS2_NATIVE_IOP
             if (iop_reset && iop_reset->invoked())
                 probe::capture_iop(stop_directory,iop_reset->data(),iop_reset->active_state());
@@ -387,12 +449,18 @@ int main(int argc,char** argv) {
                 probe::capture_image(stop_directory/"last-render-target.ppm",draw.right,draw.bottom,
                     [&](unsigned x,unsigned y) { return pixels[nt::graphics::rgba_word(draw.base,draw.pitch,x,y)]; });
                 const auto& output=platform.graphics.output();
-                const auto frame=nt::graphics::scanout(pixels,output.control,output.buffers,output.displays);
+                const auto frame=nt::graphics::scanout(pixels,output.control,output.buffers,output.displays,platform.graphics.half_height_output());
                 if (frame) probe::capture_image(stop_directory/"selected-display.ppm",frame->width,frame->height,
                     [&](unsigned x,unsigned y) { return frame->pixels[y*frame->width+x]; });
             }
         }
-        std::cout<<"graphics_draws="<<gpu.drawing.submitted_draws()<<'\n';
+        std::cout<<"graphics_draws="<<gpu.drawing.submitted_draws()<<" half_height_output="<<platform.graphics.half_height_output()<<'\n';
+        std::cout<<"native_completion_status="<<nt::hex32(platform.completions.status())
+                 <<" native_interrupt_pending="<<nt::hex32(platform.interrupts.read(0x1000f000).value)
+                 <<" native_interrupt_enabled="<<nt::hex32(platform.interrupts.read(0x1000f010).value)<<'\n';
+        for (unsigned channel=0;channel<3;++channel)
+            std::cout<<"packet_channel="<<channel<<" control="<<nt::hex32(platform.packet_submission.read(0x10008000+channel*0x1000).value)
+                     <<" consumer_pending="<<platform.packet_setup.pending(channel)<<'\n';
         std::cout<<"stop="<<static_cast<unsigned>(stop)<<" pc="<<nt::hex32(state.pc)
                  <<" executed="<<state.executed<<" v0="<<state.gpr[2].lo<<" syscall="<<state.gpr[3].lo;
         if (stop==nt::ee::Stop::memory_fault || stop==nt::ee::Stop::code_write || stop==nt::ee::Stop::unpublished_code || (stop==nt::ee::Stop::unsupported_system && memory.fault_address))
@@ -427,6 +495,17 @@ int main(int argc,char** argv) {
             std::cout<<" native_peer_command="<<nt::hex32(command_peer.last_command())<<" option="<<command_peer.last_option();
         if (cdvd && !cdvd->error().empty()) std::cerr<<"disc initialization: "<<cdvd->error()<<'\n';
         if (!gpu.error.empty()) std::cerr<<"graphics: "<<gpu.error<<'\n';
+        if (nt::ee::NativePacketSubmission::maps(memory.fault_address)) {
+            const auto base=memory.fault_address&~0xfffU;
+            const auto channel=(base-0x10008000)/0x1000;
+            std::cout<<" packet_channel="<<channel
+                     <<" packet_source="<<nt::hex32(platform.packet_submission.read(base+0x10).value)
+                     <<" packet_qwords="<<platform.packet_submission.read(base+0x20).value
+                     <<" packet_chain="<<nt::hex32(platform.packet_submission.read(base+0x30).value)
+                     <<" submissions_enabled="<<platform.packet_submission.policy.enabled()
+                     <<" packet_pending="<<platform.packet_setup.pending(channel)
+                     <<" rejected_vif_command="<<platform.packet_setup.rejected_command();
+        }
         if (trace_services) {
 #ifdef ANYPS2_NATIVE_VU
             std::cout<<" compiled_vu_unit="<<nt_vu_program_unit()<<" compiled_vu_ready="<<compiled_vu.ready();
@@ -434,15 +513,6 @@ int main(int argc,char** argv) {
 #ifdef ANYPS2_NATIVE_VU1
             std::cout<<" compiled_vu1_ready="<<compiled_vu1.ready();
 #endif
-            if (nt::ee::NativePacketSubmission::maps(memory.fault_address)) {
-                const auto base=memory.fault_address&~0xfffU;
-                std::cout<<" packet_channel="<<((base-0x10008000)/0x1000)
-                         <<" packet_source="<<nt::hex32(platform.packet_submission.read(base+0x10).value)
-                         <<" packet_qwords="<<platform.packet_submission.read(base+0x20).value
-                         <<" packet_chain="<<nt::hex32(platform.packet_submission.read(base+0x30).value)
-                         <<" submissions_enabled="<<platform.packet_submission.policy.enabled()
-                         <<" rejected_vif_command="<<platform.packet_setup.rejected_command();
-            }
             if (gpu.renderer) std::cout<<" graphics_resets="<<platform.graphics.resets()<<" gpu=\""<<gpu.renderer->device_name()<<"\"";
             if (cdvd) std::cout<<" cdvd_initialized="<<cdvd->initialized();
             if (files) {
@@ -456,15 +526,15 @@ int main(int argc,char** argv) {
                      <<" a1="<<nt::hex32(static_cast<std::uint32_t>(state.gpr[5].lo));
         }
         std::cout<<'\n';
-        if (window) {
+        if (window && !application_exit && !window_closed) {
             const auto& output=platform.graphics.output();
-            const auto frame=nt::graphics::scanout(gpu.drawing.pixels(),output.control,output.buffers,output.displays);
+            const auto frame=nt::graphics::scanout(gpu.drawing.pixels(),output.control,output.buffers,output.displays,platform.graphics.half_height_output());
             if (frame) {
                 std::cout<<"native_display="<<frame->width<<'x'<<frame->height<<" execution=stopped\n";
             }
             std::cout<<std::flush;
-            window->hold(frame);
+            if (hold_window) window->hold(frame);
         }
-        return stop==nt::ee::Stop::budget ? 4 : 3;
+        return application_exit ? 0 : stop==nt::ee::Stop::budget ? 4 : 3;
     } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

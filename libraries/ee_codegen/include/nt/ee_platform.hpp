@@ -11,7 +11,9 @@
 namespace nt::ee {
 class NativePlatform {
 public:
-    explicit NativePlatform(NativeTimers::Clock clock=nullptr) : graphics(clock),timers(clock) { timers.connect_events(); packet_submission.consumer={this,consume_packet}; }
+    explicit NativePlatform(NativeTimers::Clock clock=nullptr) : graphics(clock),timers(clock) {
+        timers.connect_events(); packet_submission.consumer={this,consume_packet,packet_pending};
+    }
     NativePlatform(const NativePlatform&)=delete;
     NativePlatform& operator=(const NativePlatform&)=delete;
     static runtime::State initial_state(std::uint32_t entry) {
@@ -35,17 +37,24 @@ public:
     NativeSifReceive sif_receive;
     NativeSifLink sif_link{sif_receive};
     NativeSifOutbound sif_outbound;
-    void attach(Memory& memory) { memory_=&memory; memory.vector_control=vector_owner.interface(); memory.vectors=&vector_owner.storage; memory.graphics=&graphics; memory.scratchpad=scratchpad_.data(); memory.scratchpad_bytes=scratchpad_.size(); memory.interrupts=&interrupts; memory.completions=&completions; memory.sif_link=&sif_link; memory.sif_outbound=&sif_outbound; memory.io={this,read,write,poll,read64,write64,write8}; }
+    void attach(Memory& memory) { memory_=&memory; memory.vector_control=vector_owner.interface(); memory.vectors=&vector_owner.storage; memory.graphics=&graphics; memory.scratchpad=scratchpad_.data(); memory.scratchpad_bytes=scratchpad_.size(); memory.interrupts=&interrupts; memory.completions=&completions; memory.sif_link=&sif_link; memory.sif_outbound=&sif_outbound; memory.io={this,read,write,poll,read64,write64,write8,test_completions}; }
 private:
+    static IoRead test_completions(void* context) {
+        const auto& self=*static_cast<NativePlatform*>(context);
+        return {Stop::budget,self.completions.contains(self.packet_submission.policy.completion_selection()) ? 1U : 0U};
+    }
     static Stop consume_packet(void* context,unsigned channel,std::span<const std::uint8_t> bytes) {
         auto& self=*static_cast<NativePlatform*>(context);
         return self.packet_setup.consume(channel,bytes,self.vector_owner.storage.active);
+    }
+    static bool packet_pending(void* context,unsigned channel) {
+        return static_cast<NativePlatform*>(context)->packet_setup.pending(channel);
     }
     Memory* memory_=nullptr;
     std::vector<std::uint8_t> scratchpad_=std::vector<std::uint8_t>(scratchpad_size,0);
     static void poll(void* context) {
         auto& self=*static_cast<NativePlatform*>(context);
-        auto events=self.timers.poll()|self.graphics.poll();
+        auto events=self.timers.poll()|self.graphics.poll()|(self.packet_setup.take_interrupts()<<4);
         while (events) {
             const auto line=static_cast<unsigned>(std::countr_zero(events));
             self.interrupts.raise(line); events&=events-1;
@@ -85,7 +94,17 @@ private:
         if (address==0x1000f180)
             return self.debug_byte ? self.debug_byte(self.debug_context,static_cast<std::uint8_t>(value)) : Stop::unsupported_system;
         if (NativeGraphics::maps(address)) return self.graphics.write(address,value);
-        if (NativePacketSetup::maps(address)) return self.packet_setup.write(address,value);
+        if (NativePacketSetup::maps(address)) {
+            const auto result=self.packet_setup.write(address,value);
+            if (result!=Stop::budget || (address!=0x10003810 && address!=0x10003c10)) return result;
+            const auto channel=(address-0x10003810)/0x400;
+            if (value&1) { self.packet_submission.cancel(channel); return Stop::budget; }
+            if (!(value&8)) return Stop::budget;
+            const auto resumed=self.packet_setup.resume(channel,self.vector_owner.storage.active);
+            if (resumed==Stop::budget && !self.packet_setup.pending(channel) && self.memory_)
+                self.packet_submission.complete(*self.memory_,channel);
+            return resumed;
+        }
         if (NativeSubmissionPolicy::maps(address)) return self.packet_submission.policy.write(address,value);
         if (NativePacketSubmission::maps(address)) return self.memory_ ? self.packet_submission.write(*self.memory_,address,value) : Stop::invalid_state;
         if (NativeSifReceive::maps(address)) return self.sif_receive.write(address,value);

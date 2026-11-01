@@ -19,6 +19,7 @@ public:
         return previous!=value;
     }
     std::uint32_t status() const { return pending_|(enabled_<<16); }
+    bool contains(std::uint32_t selected) const { return (pending_&selected)==selected; }
     void acknowledge(std::uint32_t value) {
         pending_&=~(value&0xffffU);
         enabled_^=value>>16;

@@ -89,9 +89,9 @@ int main() {
                 ++c.accepted; return true;
             };
             const auto before=owner.state;
-            const auto top=packets.read(0x10003cd0).value;
+            const auto top=packets.read(0x10003ce0).value;
             if (submit({0x04000009,0x170007ff})!=nt::ee::Stop::unsupported_vector || owner.state!=before ||
-                packets.read(0x10003cd0).value!=top || consumer.accepted)
+                packets.read(0x10003ce0).value!=top || consumer.accepted)
                 throw std::runtime_error("Rejected continuation committed state");
             consumer.accept=true;
             if (submit({0x04000009,0x170007ff})!=nt::ee::Stop::budget || owner.state.next_pair!=4 ||
@@ -362,12 +362,17 @@ int main() {
             launch_owner.state.integers[4]!=1 || packets.read(0x10003c30).value!=7)
             throw std::runtime_error("Packet launch did not execute compiled VU1 code");
         if (launch_owner.state.input_top!=32 || launch_owner.state.input_itop!=9 ||
-            launch_owner.state.input_valid!=3 || packets.read(0x10003cb0).value!=48 ||
+            launch_owner.state.input_valid!=3 || packets.read(0x10003cc0).value!=48 ||
             !(packets.read(0x10003c00).value&0x80))
             throw std::runtime_error("Native launch inputs or buffer selection failed");
+        if (packets.read(0x10003c60).value!=0 || packets.read(0x10003c80).value!=0 ||
+            packets.read(0x10003c90).value!=9 || packets.read(0x10003ca0).value!=32 ||
+            packets.read(0x10003cb0).value!=16 || packets.read(0x10003cd0).value!=9 ||
+            packets.read(0x10003ce0).value!=32)
+            throw std::runtime_error("VIF command metadata does not match the public NUM/CODE/ITOP layout");
         upload_packet.clear(); packet_word(0x14000000);
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
-            launch_owner.state.input_top!=48 || packets.read(0x10003cb0).value!=32 ||
+            launch_owner.state.input_top!=48 || packets.read(0x10003cc0).value!=32 ||
             (packets.read(0x10003c00).value&0x80))
             throw std::runtime_error("Second native launch did not alternate buffers");
         const auto completed_launch=launch_owner.state;

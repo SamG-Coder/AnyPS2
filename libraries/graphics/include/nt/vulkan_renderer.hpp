@@ -14,12 +14,22 @@ struct Sprite {
     std::uint32_t min_u=0,max_u=0,min_v=0,max_v=0;
     std::uint32_t test=0,blend=0;
 };
+inline constexpr std::uint32_t triangle_flag=1U<<14, shaded_triangle_flag=1U<<15;
+inline constexpr std::uint32_t perspective_triangle_flag=1U<<16;
+struct RasterVertex {
+    std::int32_t x=0,y=0;
+    std::uint32_t color=0;
+    std::uint32_t u=0,v=0;
+    float s=0,t=0,q=1;
+};
 struct SpriteCommand {
     Sprite draw;
     std::array<std::uint32_t,16> palette{};
+    std::array<RasterVertex,3> triangle{};
 };
 struct RenderStatistics {
     std::uint64_t submissions=0,sprites=0,upload_bytes=0,readback_bytes=0;
+    std::uint64_t triangles=0;
 };
 // Synchronous reference backend. Native window is an HWND on Windows.
 class VulkanRenderer {

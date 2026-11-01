@@ -28,7 +28,12 @@ public:
             (load_native_word(packet,0)>>8)!=payload.size()) return unavailable();
         const auto client=*ram_offset(load_native_word(packet,28),4,ram_.size());
         auto& request=pending_.at(client);
-        if (request.complete || load_native_word(packet,20)!=request.packet || load_native_word(packet,32)!=request.command ||
+        // Bind replies echo the request packet. Call completions use a peer's
+        // reusable reply record: its packet/id fields are not correlation data.
+        // The client owns exactly one pending call, whose live record must still
+        // match before any output, callback or waiting continuation is released.
+        const bool bind=request.command==0x80000009;
+        if (request.complete || (bind && load_native_word(packet,20)!=request.packet) || load_native_word(packet,32)!=request.command ||
             load_native_word(ram_,client)!=request.packet || load_native_word(ram_,client+4)!=request.id) return unavailable();
         if (payload.size()!=request.receive_size || (!payload.empty() &&
             load_native_word(packet,4)!=request.receive_address)) return unavailable();

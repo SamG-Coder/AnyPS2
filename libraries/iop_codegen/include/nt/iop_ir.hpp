@@ -19,7 +19,8 @@ enum class Operation {
     load_byte, load_half, load_word, load_byte_unsigned, load_half_unsigned,
     store_byte, store_half, store_word, breakpoint, syscall, jump_register, call_register,
     add_checked, subtract_checked, add_immediate_checked, memory_fill, memory_copy, memory_move, native_import,
-    load_word_left, load_word_right, store_word_left, store_word_right
+    load_word_left, load_word_right, store_word_left, store_word_right,
+    ascii_upper, ascii_lower
 };
 enum class Flow { sequential, direct, conditional, call, return_register, trap, service, indirect, indirect_call, native_return };
 enum class MemoryConvention { bytes, source_first, words };

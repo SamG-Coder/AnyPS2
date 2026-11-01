@@ -54,7 +54,8 @@ std::optional<Operation> native_import_operation(const elf::IopImport& import) {
         return Operation::native_import;
     if (import.library=="cdvdman" && (import.version>>8)==1 &&
         (import.ordinal==6 || import.ordinal==8 || (import.ordinal>=11 && import.ordinal<=14) ||
-         import.ordinal==22 || import.ordinal==24 || import.ordinal==28 || import.ordinal==37 || import.ordinal==39 || import.ordinal==83))
+         import.ordinal==22 || import.ordinal==24 || import.ordinal==28 || import.ordinal==37 || import.ordinal==39 ||
+         import.ordinal==74 || import.ordinal==78 || import.ordinal==83))
         return Operation::native_import;
     if (import.library=="secrman" && (import.version>>8)==1 && import.ordinal>=4 && import.ordinal<=6)
         return Operation::native_import;
@@ -65,6 +66,8 @@ std::optional<Operation> native_import_operation(const elf::IopImport& import) {
     case 12: case 40: return Operation::memory_copy;
     case 13: case 16: return Operation::memory_move;
     case 14: return Operation::memory_fill;
+    case 6: return Operation::ascii_upper;
+    case 7: return Operation::ascii_lower;
     default: return {};
     }
 }
@@ -352,9 +355,11 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
     const auto callback_stack_slot=[&](std::uint32_t service,std::uint32_t import_site)->std::optional<unsigned> {
         if (service==0x90010) return 28; // sceSifCallRpc end_function, argument eight.
         if (service==0x16000b) return 16; // sceUsbdTransferPipe callback, argument five.
+        if (service==0x150012) return 16; // sceSdBlockTrans refill function, argument five.
         if ((service>>16)==2)
             for (const auto& import:program.library_imports)
-                if (import.offset==import_site && import.library=="usbd" && (import.version>>8)==1 && import.ordinal==11)
+                if (import.offset==import_site && (import.version>>8)==1 &&
+                    ((import.library=="usbd" && import.ordinal==11) || (import.library=="libsd" && import.ordinal==18)))
                     return 16;
         return {};
     };
@@ -367,7 +372,7 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                     for (const auto target:*value->second) if (target) discover_callback(target,source,false);
             }
         }
-        if (service!=0xe000c && service!=0xe000d && service!=0x110025) return;
+        if (service!=0xe000c && service!=0xe000d && service!=0x110025 && service!=0x11004e) return;
         const auto count=service==0xe000c ? 3U : 1U;
         for (unsigned index=0;index<count;++index) if (input.registers[4+index])
             for (const auto target : *input.registers[4+index]) if (target) discover_callback(target,source,false);
@@ -721,7 +726,8 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
             std::vector<std::uint32_t> registry_sites;
             for (const auto& [pc,instruction]:program.instructions)
                 if (states.contains(pc) && !states.at(pc).registers[instruction.source] &&
-                    (loaded_callback_call(program,instruction) || returned_callback_call(program,instruction))) registry_sites.push_back(pc);
+                    (loaded_callback_call(program,instruction) || returned_callback_call(program,instruction) ||
+                     argument_callback_call(program,instruction))) registry_sites.push_back(pc);
             std::set<std::uint32_t> relocated(module.code_addresses.begin(),module.code_addresses.end());
             // Clients can register descriptors whose callback fields belong to
             // another compiled module. Import/export identity bounds this pool;
@@ -742,7 +748,11 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
                 });
                 if (connected) relocated.insert(client.code_addresses.begin(),client.code_addresses.end());
             }
-            const auto stored=stored_code_candidates(program,states,data_modules,false);
+            // A registry helper can receive a callback in an argument, save it
+            // across allocator calls, then write it into a heap node. The node
+            // store no longer has a constant state; retain the call-site
+            // candidates just as we retain relocated descriptor callbacks.
+            const auto stored=stored_code_candidates(program,states,data_modules);
             relocated.insert(stored.begin(),stored.end());
             // Library descriptors can also be spilled to a stack, but their
             // validated export metadata identifies them as data, not callbacks.

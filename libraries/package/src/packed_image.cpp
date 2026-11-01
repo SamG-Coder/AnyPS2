@@ -71,11 +71,14 @@ Bytes elf_image(const Image& image) {
         segments.push_back(segment);
     }
     if (!entry_present) throw std::runtime_error("Entry is not backed by executable input");
-    Bytes result(52+32*segments.size());
+    // PT_NOTE preserves the source format's lack of permissions. Consumers can
+    // follow actual code edges into any imported segment without declaring all
+    // of its data executable or protecting it against ordinary writes.
+    Bytes result(52+32*(segments.size()+1));
     const std::uint8_t identity[]{0x7f,'E','L','F',1,1,1};
     std::copy(std::begin(identity),std::end(identity),result.begin());
     put16(result,16,2); put16(result,18,8); put32(result,20,1); put32(result,24,image.entry);
-    put32(result,28,52); put16(result,40,52); put16(result,42,32); put16(result,44,static_cast<std::uint16_t>(segments.size()));
+    put32(result,28,52); put16(result,40,52); put16(result,42,32); put16(result,44,static_cast<std::uint16_t>(segments.size()+1));
     for (std::size_t n=0;n<segments.size();++n) {
         const auto& segment=segments[n]; const auto at=52+32*n;
         put32(result,at,1); put32(result,at+4,static_cast<std::uint32_t>(result.size()));
@@ -86,6 +89,15 @@ Bytes elf_image(const Image& image) {
         put32(result,at+24,entry_segment ? 7U : 6U); put32(result,at+28,4);
         result.insert(result.end(),segment.data.begin(),segment.data.end());
     }
+    while (result.size()%4) result.push_back(0);
+    const auto header=52+32*segments.size(),note=result.size();
+    put32(result,header,4); put32(result,header+4,static_cast<std::uint32_t>(note));
+    put32(result,header+16,24); put32(result,header+28,4);
+    result.resize(note+24,0);
+    put32(result,note,7); put32(result,note+4,4); put32(result,note+8,1);
+    constexpr std::uint8_t name[]{'A','n','y','P','S','2',0};
+    std::copy(std::begin(name),std::end(name),result.begin()+note+12);
+    put32(result,note+20,1);
     return result;
 }
 }

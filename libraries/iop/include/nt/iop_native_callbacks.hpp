@@ -9,6 +9,7 @@ struct NativeCallback {
     std::uint32_t address,argument;
     std::optional<std::uint32_t> second_argument;
     std::optional<std::uint32_t> global_pointer;
+    std::optional<std::uint32_t> third_argument,fourth_argument;
 };
 class NativeCallbackSource {
 public:

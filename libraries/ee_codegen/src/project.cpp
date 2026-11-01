@@ -48,6 +48,7 @@ struct Prepared {
     Bytes image;
     std::vector<LayoutDeclaration> layouts;
     std::vector<ExecutableImage> images;
+    std::vector<analysis::CallSite> calls;
     std::set<std::uint32_t> registered_calls;
     std::size_t wrapper_candidates=0;
     std::uint32_t syscall_table=0;
@@ -70,7 +71,7 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
         for (const auto& [first,last]:extents)
             if (segment.address<last && first<finish) throw std::runtime_error("EE project has overlapping ELF segments");
         extents.emplace_back(segment.address,finish); end=std::max(end,finish);
-        if (segment.flags&1) ranges.push_back({segment.address,segment.memory_size});
+        if ((segment.flags&1) && !executable.inferred_permissions) ranges.push_back({segment.address,segment.memory_size});
     }
     const auto initial_executable=executable;
     std::vector<CodePayload> payloads;
@@ -184,8 +185,13 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
         added|=registered_calls.size()!=previous_calls;
         if (!added) break;
     }
+    if (executable.inferred_permissions) for (const auto& [pc,instruction]:discovered.instructions) {
+        if (!ranges.empty() && std::uint64_t(ranges.back().address)+ranges.back().size==pc) ranges.back().size+=4;
+        else ranges.push_back({pc,4});
+    }
     Prepared result;
     result.executable=std::move(executable);
+    result.calls=analysis::call_sites(bytes,result.executable,discovered);
     for (const auto& record:analysis::layout_candidates(bytes,result.executable,discovered)) result.layouts.push_back(record.fields);
     result.discovered=std::move(discovered);
     result.ranges=std::move(ranges);
@@ -231,6 +237,7 @@ void project(const std::filesystem::path& input,const std::filesystem::path& des
                 if (!prepared.discovered.instructions.emplace(pc,instruction).second)
                     throw std::runtime_error("Executable image has an ambiguous compiled target");
             prepared.discovered.unresolved.insert(extra.discovered.unresolved.begin(),extra.discovered.unresolved.end());
+            prepared.calls.insert(prepared.calls.end(),extra.calls.begin(),extra.calls.end());
             for (auto range:extra.ranges) { range.image=id; prepared.ranges.push_back(range); }
             prepared.layouts.insert(prepared.layouts.end(),extra.layouts.begin(),extra.layouts.end());
             prepared.images.push_back(snapshot(source,extra.executable,id));
@@ -258,6 +265,20 @@ void project(const std::filesystem::path& input,const std::filesystem::path& des
     std::string module_manifest;
     for (const auto& name:modules) module_manifest+=name+'\n';
     save(output/"llvm-modules.txt",module_manifest);
+    std::ostringstream calls;
+    calls<<"pc\tkind\ttarget\tcoverage\n";
+    for (const auto& call:prepared.calls) {
+        calls<<hex32(call.pc)<<'\t'<<analysis::name(call.kind)<<'\t';
+        if (call.target) calls<<hex32(*call.target);
+        calls<<'\t';
+        if (call.target) calls<<(prepared.discovered.instructions.contains(*call.target) ?
+            (call.initial_data_candidate ? "compiled-initial-candidate" : "compiled") : "missing");
+        else if (call.kind==analysis::CallKind::service) calls<<"native-service-boundary";
+        else if (call.kind==analysis::CallKind::return_link || call.kind==analysis::CallKind::return_exception) calls<<"runtime-continuation";
+        else calls<<"unresolved-indirect";
+        calls<<'\n';
+    }
+    save(output/"call-sites.tsv",calls.str());
     const auto& executable=prepared.executable;
     const auto& image=prepared.image;
     const auto syscall_table=prepared.syscall_table;
@@ -337,6 +358,7 @@ target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codeg
     save(output/"conversion.txt","AnyPS2 EE LLVM entry-flow conversion\n"
          "Discovery includes leaf syscall-wrapper candidates and recognized startup continuations. Compiled wrappers do not implement missing services; runtime dispatch still validates them.\n"
          "Indirect destinations must already belong to the discovered code set; other targets stop.\n"
+         "call-sites.tsv inventories reached transfers; compiled initial candidates do not prove complete indirect coverage.\n"
          "Build with ps2-build, then run ps2-native <program.data> [operation-budget].\n"
          "Data contains private input material and must remain local. This is not game boot.\n");
     staged.publish();

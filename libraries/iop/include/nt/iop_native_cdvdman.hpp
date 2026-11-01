@@ -18,6 +18,18 @@ public:
     void attach(Volume volume,std::function<std::uint32_t()> media) {
         volume_=std::move(volume); media_=std::move(media);
     }
+    // The application owner must opt in and consume exit_requested(). This
+    // replaces console power control with process lifecycle, never host power.
+    void enable_application_exit() { application_exit_enabled_=true; }
+    bool exit_requested() const { return exit_requested_; }
+    bool request_close() {
+        if (!application_exit_enabled_) return false;
+        if (close_requested_ || exit_requested_) return true;
+        close_requested_=true;
+        if (power_callback_) power_pending_=power_callback_;
+        else exit_requested_=true;
+        return true;
+    }
     explicit NativeCdvdmanServices(Clock clock={}) : clock_(std::move(clock)) {
         if (!clock_) clock_=[] {
             return std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
@@ -28,6 +40,7 @@ public:
         // Console-specific iLink identity has no native PC provider. Binding
         // this known ABI lets unrelated compiled paths remain executable.
         if (request.selector==22) return {NativeServiceStatus::unavailable};
+        if (request.selector==74 || request.selector==78) return power_call(request,ram);
         if (request.selector!=24) return disc_call(request,ram);
         const auto pointer=request.arguments[0];
         const auto checked=output(ram,pointer,8);
@@ -54,11 +67,32 @@ public:
         return {NativeServiceStatus::returned,1};
     }
     std::optional<NativeCallback> take() override {
+        if (!pending_ && power_pending_) { pending_=power_pending_; power_pending_.reset(); }
         if (active_ || !pending_) return {};
         auto result=pending_; pending_.reset(); active_=true; return result;
     }
     void finish(std::uint32_t) override { active_=false; }
 private:
+    NativeServiceReply power_call(const NativeServiceRequest& request,std::span<std::uint8_t> ram) {
+        if (!application_exit_enabled_) return {NativeServiceStatus::unavailable};
+        const auto pointer=request.arguments[0];
+        if (request.selector==78) {
+            if (pointer) {
+                const auto target=ram_offset(pointer,4,ram.size());
+                if (!target || !nt_iop_native_instruction(*target)) return {NativeServiceStatus::unmapped_code,0,pointer};
+            }
+            const auto previous=power_callback_ ? power_callback_->address : 0U;
+            power_callback_.reset();
+            if (pointer) power_callback_=NativeCallback{pointer,request.arguments[1],{},request.global_pointer};
+            return {NativeServiceStatus::returned,previous};
+        }
+        if (!pointer) return {NativeServiceStatus::address_fault,0,pointer};
+        const auto checked=output(ram,pointer,4);
+        if (checked.status!=NativeServiceStatus::returned) return checked;
+        store_native_word(ram,*ram_offset(pointer,4,ram.size()),0);
+        exit_requested_=true;
+        return {NativeServiceStatus::returned,1};
+    }
     NativeServiceReply disc_call(const NativeServiceRequest& request,std::span<std::uint8_t> ram) {
         if (!volume_ || !media_) return {};
         const auto returned=[](std::uint32_t value) { return NativeServiceReply{NativeServiceStatus::returned,value}; };
@@ -134,11 +168,24 @@ private:
         const auto bytes=args[1]*2048;
         const auto checked=output(ram,args[2],bytes);
         if (checked.status!=NativeServiceStatus::returned) return checked;
-        if (args[0]>volume->sector_count() || args[1]>volume->sector_count()-args[0]) {
+        auto first=args[0];
+        if (media_()==2) {
+            std::uint32_t layer;
+            try { layer=volume->appended_volume_start(); }
+            catch (const std::runtime_error&) { return {}; }
+            // CDVDMAN callers address each volume with its 16-sector prefix.
+            // A joined DVD image starts the appended volume at its descriptor,
+            // so translate the public LSN into the file's sector offset.
+            if (layer && first>=layer) {
+                if (layer<16) return {};
+                first-=16;
+            }
+        }
+        if (first>volume->sector_count() || args[1]>volume->sector_count()-first) {
             error_=0x20; return {NativeServiceStatus::returned,0};
         }
         try {
-            const auto data=volume->read_sectors(args[0],args[1]);
+            const auto data=volume->read_sectors(first,args[1]);
             std::copy(data.begin(),data.end(),ram.begin()+*ram_offset(args[2],4,ram.size()));
             error_=0;
         } catch (const std::runtime_error&) { error_=0x30; }
@@ -157,6 +204,8 @@ private:
     std::function<std::uint32_t()> media_;
     std::uint32_t callback_=0,error_=0;
     std::optional<NativeCallback> pending_;
+    std::optional<NativeCallback> power_callback_,power_pending_;
+    bool application_exit_enabled_=false,close_requested_=false,exit_requested_=false;
     bool active_=false;
 };
 }

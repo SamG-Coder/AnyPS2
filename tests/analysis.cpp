@@ -13,6 +13,112 @@ void put(nt::Bytes& bytes, std::size_t offset, std::uint32_t word) {
 int main() {
     try {
         {
+            nt::Bytes image(48,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,16,16,5,4},{16,0x2000,32,32,6,4}}};
+            put(image,0,0x0c000800); put(image,8,12);
+            put(image,16,0x03e00008); put(image,20,0x2402002a);
+            put(image,32,0x0c000c00); // Unreferenced data must remain unexamined.
+            const auto declared=nt::analysis::discover(image,fixture,32,{},true);
+            check(declared.unresolved.contains(0x2000),"Ordinary ELF data was treated as code");
+            fixture.inferred_permissions=true;
+            check(!nt::elf::executable_address(fixture,0x2000) && nt::elf::executable_address(fixture,0x2000,4,true),
+                "Inferred permissions promoted arbitrary data-pointer candidates");
+            const auto imported=nt::analysis::discover(image,fixture,32,{},true);
+            check(imported.unresolved.empty() && imported.instructions.contains(0x2000) &&
+                  !imported.instructions.contains(0x2010),"Imported code permissions were not derived from flow");
+        }
+        {
+            nt::Bytes image(160,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,160,160,5,4}}};
+            put(image,0,0x0c000408); put(image,4,0x24051090); put(image,8,12);
+            put(image,32,0x0c000410); put(image,36,0x00a0302d); put(image,40,0x03e00008);
+            put(image,64,0xac860000); put(image,68,0x03e00008);
+            put(image,144,0x03e00008);
+            const auto entries=[&] { return nt::analysis::registered_code_pointers(image,fixture,
+                nt::analysis::discover(image,fixture,160,{},true)); };
+            check(entries().contains(0x1090),"Callback forwarded through a registration helper was not recovered");
+            put(image,36,0x8ca60000);
+            check(entries().empty(),"Loaded data was treated as the forwarded callback argument");
+        }
+        {
+            // A wrapper selects two callbacks and tail-calls their consumer.
+            // Restore the link before the jump and set an argument in its slot.
+            nt::Bytes image(160,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,160,160,5,4}}};
+            put(image,0,0x24051080); put(image,4,0xdfbf0000);
+            put(image,8,0x08000410); put(image,12,0x24061090);
+            put(image,64,0xe7b40020); put(image,68,0xafa50000);
+            put(image,72,0xafa60004); put(image,76,0x03e00008);
+            put(image,128,0x03e00008); put(image,144,0x03e00008);
+            const auto entries=[&] { return nt::analysis::registered_code_pointers(image,fixture,
+                nt::analysis::discover(image,fixture,160,{},true)); };
+            check(entries()==std::set<std::uint32_t>{0x1080,0x1090},"Tail-call callback arguments were not recovered");
+            for (const auto selector:{16U,17U,18U,19U}) {
+                put(image,8,(1U<<26)|(8U<<21)|(selector<<16)|13U);
+                check(entries()==std::set<std::uint32_t>{0x1080,0x1090},"Conditional-link callback arguments were lost");
+            }
+            // Initial-data and constant-register calls share discovery, including
+            // JALR with a nonstandard link register or no link register at all.
+            put(image,4,0x24191040);
+            for (const auto jump:{0x0320f809U,0x0320c809U,0x03200009U,0x03200008U}) {
+                put(image,8,jump);
+                const auto first=nt::analysis::discover(image,fixture,160,{},true);
+                const auto roots=nt::analysis::initial_indirect_entries(image,fixture,first);
+                const std::vector<std::uint32_t> seeds(roots.begin(),roots.end());
+                const auto expanded=nt::analysis::discover(image,fixture,160,seeds,true);
+                check(nt::analysis::registered_code_pointers(image,fixture,expanded)==std::set<std::uint32_t>{0x1080,0x1090},
+                    "Register call or tail-call callback arguments were lost");
+                const auto sites=nt::analysis::call_sites(image,fixture,expanded);
+                check(!sites.empty() && sites.front().pc==0x1008 && sites.front().target==0x1040 &&
+                    sites.front().initial_data_candidate,"Indirect call inventory lost target provenance");
+            }
+            put(image,8,0x08000410);
+            put(image,4,0xdfa50000);
+            check(entries()==std::set<std::uint32_t>{0x1090},"Restored argument retained a stale tail-call target");
+            put(image,12,0x24061091);
+            check(entries().empty(),"Unaligned tail-call callback was accepted");
+            put(image,12,0x24061090); put(image,64,0x08000410); put(image,68,0);
+            check(entries().empty(),"Recursive tail jump invented callback consumption");
+        }
+        {
+            nt::Bytes image(128,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,128,128,5,4}}};
+            put(image,0,0x0c000410); put(image,8,0x0040f809); put(image,16,12);
+            put(image,64,0x24021070); put(image,68,0x03e00008); put(image,112,0x03e00008);
+            const auto entries=[&] { return nt::analysis::initial_indirect_entries(image,fixture,
+                nt::analysis::discover(image,fixture,128,{},true)); };
+            check(entries()==std::set<std::uint32_t>{0x1070},"Returned callback was not discovered");
+            put(image,64,0); put(image,72,0x24021070);
+            check(entries()==std::set<std::uint32_t>{0x1070},"Return delay-slot callback was not discovered");
+            put(image,72,0x8ca20000);
+            check(entries().empty(),"Unknown returned pointer was guessed");
+            put(image,72,0x24021070); put(image,8,12);
+            check(entries().empty(),"Unconsumed return value was treated as executable code");
+        }
+        {
+            nt::Bytes image(64,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,64,64,5,4}}};
+            put(image,0,0x24031030); put(image,4,0xdfb00000); put(image,8,0xac830000); put(image,12,12);
+            put(image,48,0x03e00008);
+            const auto entries=[&] { return nt::analysis::stored_code_pointers(image,fixture,
+                nt::analysis::discover(image,fixture,64,{},true)); };
+            check(entries().contains(0x1030),"Unrelated register restore hid a stored callback");
+            fixture.non_executable_sections.push_back({0x1030,4});
+            check(entries().empty(),"Data-section address inside an executable LOAD became a callback");
+            const std::array<std::uint32_t,1> data_entry{0x1030};
+            bool rejected=false;
+            try { nt::analysis::discover(image,fixture,64,data_entry,true); }
+            catch (const std::runtime_error&) { rejected=true; }
+            check(rejected,"An explicit data-section address was accepted as an executable root");
+            fixture.non_executable_sections.clear();
+            put(image,4,0xdfa30000);
+            check(entries().empty(),"Restored callback register retained its prior constant");
+            put(image,4,0x7bb00000);
+            check(entries().contains(0x1030),"Unrelated quadword restore hid a stored callback");
+            put(image,4,0x7ba30000);
+            check(entries().empty(),"Quadword restore retained its prior callback constant");
+        }
+        {
             nt::Bytes image(128,0);
             nt::elf::Executable fixture{0x1000,0,{{0,0x1000,128,128,5,4}}};
             put(image,0,0x0c000408); put(image,4,0x24051070); put(image,8,12);
@@ -22,6 +128,13 @@ int main() {
             const auto entries=[&] { return nt::analysis::registered_code_pointers(image,fixture,
                 nt::analysis::discover(image,fixture,128,{},true)); };
             check(entries()==std::set<std::uint32_t>{0x1070},"Invoked argument callback was not recovered across a helper call");
+            for (const auto word:{0x46000000U,0x44840000U,0x44080000U}) {
+                put(image,40,word);
+                check(entries()==std::set<std::uint32_t>{0x1070},"Unrelated scalar floating-point work hid a callback");
+            }
+            put(image,40,0x44110000);
+            check(entries().empty(),"Floating-point read retained a stale callback register");
+            put(image,40,0);
             put(image,44,0x8c910000); put(image,48,0x0220f809);
             check(entries().empty(),"Invoked argument survived an unknown pointer overwrite");
         }

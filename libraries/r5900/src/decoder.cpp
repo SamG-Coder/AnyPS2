@@ -30,6 +30,9 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
         F(24,mtsab); F(25,mtsah);
         }
     } else if (opcode == 16) {
+        if (i.rs==8) {
+            switch (i.rt) { F(0,bc0f); F(1,bc0t); F(2,bc0fl); F(3,bc0tl); }
+        }
         if (w == 0x42000038) i.op = Op::ei;
         if (w == 0x42000039) i.op = Op::di;
         if (w == 0x42000001) i.op = Op::tlbr;
@@ -195,9 +198,9 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
     return i;
 }
 bool Instruction::branch() const {
-    return (op >= Op::bltzal && op <= Op::bgezall) || (op >= Op::j && op <= Op::bgezl) || (op >= Op::bc1f && op <= Op::bc1tl) || indirect();
+    return (op >= Op::bltzal && op <= Op::bgezall) || (op >= Op::j && op <= Op::bgezl) || (op >= Op::bc1f && op <= Op::bc1tl) || (op >= Op::bc0f && op <= Op::bc0tl) || indirect();
 }
-bool Instruction::likely() const { return op==Op::bltzall || op==Op::bgezall || (op >= Op::beql && op <= Op::bgezl) || op == Op::bc1fl || op == Op::bc1tl; }
+bool Instruction::likely() const { return op==Op::bltzall || op==Op::bgezall || (op >= Op::beql && op <= Op::bgezl) || op == Op::bc1fl || op == Op::bc1tl || op == Op::bc0fl || op == Op::bc0tl; }
 bool Instruction::indirect() const { return op == Op::jr || op == Op::jalr; }
 bool Instruction::terminal() const { return op == Op::unsupported || op == Op::breakpoint || op == Op::eret; }
 std::uint32_t Instruction::target() const {
@@ -244,6 +247,7 @@ std::string_view name(Op op) {
     N(mov_s); N(abs_s); N(neg_s); N(mul_s); N(div_s); N(add_s); N(sub_s); N(max_s); N(min_s); N(cvt_s_w);
     N(cvt_w_s);
     N(compare_s); N(bc1f); N(bc1t); N(bc1fl); N(bc1tl);
+    N(bc0f); N(bc0t); N(bc0fl); N(bc0tl);
     N(tlbr); N(tlbwi); N(tlbwr); N(tlbp);
     N(pcpyh); N(pcpyld); N(pcpyud); N(ei); N(di); N(mfc0); N(mtc0);
     N(eret); N(plzcw); N(cache);

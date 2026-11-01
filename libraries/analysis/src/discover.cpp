@@ -16,6 +16,7 @@ std::set<std::uint32_t> syscall_wrappers(ByteView bytes,const elf::Executable& e
         const auto first=(4U-(segment.address&3U))&3U;
         for (std::uint64_t offset=first;offset+16<=segment.file_size;offset+=4) {
             const auto pc=segment.address+static_cast<std::uint32_t>(offset);
+            if (!elf::executable_address(executable,pc,16)) continue;
             const auto at=static_cast<std::size_t>(segment.offset+offset);
             const auto setup=r5900::decode(pc,le32(bytes,at));
             if (setup.rs || setup.rt!=3 ||
@@ -31,9 +32,9 @@ std::set<std::uint32_t> syscall_wrappers(ByteView bytes,const elf::Executable& e
 Program discover(ByteView bytes, const elf::Executable& elf, std::size_t limit,
                  std::span<const std::uint32_t> additional_entries, bool stop_at_syscall) {
     const auto word_at = [&](std::uint32_t pc) -> std::optional<std::uint32_t> {
-        if (pc % 4) return {};
+        if (pc % 4 || !elf::executable_address(elf,pc,4,true)) return {};
         for (const auto& s : elf.segments)
-            if ((s.flags & 1) && pc >= s.address && std::uint64_t(pc) + 4 <= std::uint64_t(s.address) + s.file_size)
+            if (((s.flags & 1) || elf.inferred_permissions) && pc >= s.address && std::uint64_t(pc) + 4 <= std::uint64_t(s.address) + s.file_size)
                 return le32(bytes, std::size_t(s.offset) + pc - s.address);
         return {};
     };
@@ -54,7 +55,8 @@ Program discover(ByteView bytes, const elf::Executable& elf, std::size_t limit,
         if (!word) { result.unresolved.insert(pc); continue; }
         const auto instruction = r5900::decode(pc, *word);
         result.instructions.emplace(pc, instruction);
-        if (result.instructions.size() > limit) throw std::runtime_error("Analysis instruction limit exceeded");
+        if (result.instructions.size() > limit)
+            throw std::runtime_error("Analysis instruction limit exceeded ("+std::to_string(limit)+") at "+hex32(pc));
         if (delay || instruction.terminal()) continue;
         if (stop_at_syscall && instruction.op==r5900::Op::syscall) {
             // A leaf syscall wrapper can return through a dynamically registered
@@ -100,9 +102,7 @@ std::optional<std::uint32_t> initial_word(ByteView bytes,const elf::Executable& 
 std::optional<std::uint32_t> executable_pointer(const elf::Executable& elf,std::uint32_t value) {
     if (value>=0x80000000U && value<0xc0000000U) value&=0x1fffffffU;
     if (!value || value%4) return {};
-    for (const auto& segment:elf.segments)
-        if ((segment.flags&1) && value>=segment.address &&
-            std::uint64_t(value)+4<=std::uint64_t(segment.address)+segment.file_size) return value;
+    if (elf::executable_address(elf,value)) return value;
     return {};
 }
 // Track exact argument copies, not general data dependencies. A bounded callee
@@ -117,17 +117,42 @@ struct ArgumentUses {
     unsigned stored=0,called=0;
     std::map<unsigned,std::set<std::uint32_t>> callable_fields;
 };
+bool conditional_call(const r5900::Instruction& i) {
+    using r5900::Op;
+    return i.op==Op::bltzal || i.op==Op::bgezal || i.op==Op::bltzall || i.op==Op::bgezall;
+}
+unsigned link_register(const r5900::Instruction& i) {
+    if (i.op==r5900::Op::jal || conditional_call(i)) return 31;
+    return i.op==r5900::Op::jalr ? i.rd : 0;
+}
+bool call_transfer(const r5900::Instruction& i) {
+    using r5900::Op;
+    return i.op==Op::j || i.op==Op::jal || conditional_call(i) ||
+        (i.indirect() && !(i.rs==31 && !link_register(i)));
+}
+bool scalar_float_preserves_gpr(r5900::Op op) {
+    using r5900::Op;
+    if (op>=Op::mov_s && op<=Op::compare_s) return true;
+    switch (op) {
+    case Op::mtc1: case Op::ctc1: case Op::lwc1: case Op::swc1:
+    case Op::adda_s: case Op::suba_s: case Op::mula_s: case Op::sqrt_s:
+    case Op::rsqrt_s: case Op::madd_s: case Op::msub_s: case Op::madda_s: case Op::msuba_s: return true;
+    default: return false;
+    }
+}
 ArgumentUses argument_uses(const Program& program,std::uint32_t entry) {
     using r5900::Op;
     using Origins=std::array<ArgumentValue,32>;
     Origins initial{};
     // The EE ABI passes eight integer arguments in registers a0 through t3.
     for (unsigned reg=4;reg<12;++reg) initial[reg].origin=1U<<(reg-4);
-    std::deque<std::pair<std::uint32_t,Origins>> pending{{entry,initial}};
+    struct Cursor { std::uint32_t pc; Origins origins; unsigned call_depth; };
+    std::deque<Cursor> pending{{entry,initial,0}};
     std::set<std::pair<std::uint32_t,Origins>> visited;
     ArgumentUses uses;
-    unsigned budget=256;
+    unsigned budget=1024;
     const auto transfer=[&](const r5900::Instruction& i,Origins& origins) {
+        if (scalar_float_preserves_gpr(i.op)) return true;
         unsigned destination=0;
         ArgumentValue value;
         switch (i.op) {
@@ -154,14 +179,14 @@ ArgumentUses argument_uses(const Program& program,std::uint32_t entry) {
                 value=origins[i.rs]; value.offset+=static_cast<std::uint32_t>(i.immediate); value.loaded=true;
             }
             break;
-        case Op::lui: case Op::ld: case Op::lq:
+        case Op::lui: case Op::ld: case Op::lq: case Op::mfc1: case Op::cfc1:
         case Op::lb: case Op::lbu: case Op::lh: case Op::lhu:
         case Op::andi: case Op::xori: case Op::slti: case Op::sltiu:
             destination=i.rt; break;
         case Op::bit_and: case Op::bit_xor: case Op::bit_nor: case Op::subu:
         case Op::dsubu: case Op::slt: case Op::sltu: case Op::srl: case Op::sra:
         case Op::sllv: case Op::srlv: case Op::srav: case Op::mult: case Op::multu:
-        case Op::mflo: case Op::mfhi:
+        case Op::mflo: case Op::mfhi: case Op::movn: case Op::movz:
             destination=i.rd; break;
         default: return false;
         }
@@ -169,13 +194,13 @@ ArgumentUses argument_uses(const Program& program,std::uint32_t entry) {
         return true;
     };
     while (!pending.empty() && budget--) {
-        auto [pc,origins]=pending.front(); pending.pop_front();
+        auto [pc,origins,call_depth]=pending.front(); pending.pop_front();
         if (!visited.emplace(pc,origins).second || pc>0xfffffff7U) continue;
         const auto found=program.instructions.find(pc);
         if (found==program.instructions.end()) continue;
         const auto& i=found->second;
         if (!i.branch()) {
-            if (transfer(i,origins)) pending.emplace_back(pc+4,origins);
+            if (transfer(i,origins)) pending.push_back({pc+4,origins,call_depth});
             continue;
         }
         if (i.indirect() && origins[i.rs].loaded)
@@ -184,30 +209,38 @@ ArgumentUses argument_uses(const Program& program,std::uint32_t entry) {
             uses.called|=origins[i.rs].origin;
         // ABI-preserved copies may reach registration after a helper call.
         // This only proposes compilation roots; it never folds runtime values.
-        if (i.op==Op::jal || i.op==Op::jalr) {
-            origins[i.op==Op::jal ? 31 : i.rd]={};
+        if (const auto link=link_register(i)) {
+            origins[link]={};
+            const auto before_slot=origins;
             const auto slot=program.instructions.find(pc+4);
             if (slot==program.instructions.end() || !transfer(slot->second,origins)) continue;
+            // Registration wrappers often forward a callback to another helper.
+            // Follow bounded direct calls with the current argument origins;
+            // their effects are discovery evidence, never folded runtime values.
+            if (!i.indirect() && call_depth<4)
+                pending.push_back({i.target(),origins,call_depth+1});
+            if (conditional_call(i))
+                pending.push_back({pc+8,i.likely() ? before_slot : origins,call_depth});
             for (unsigned reg=1;reg<32;++reg)
                 if (!(reg>=16 && reg<=23) && reg!=28 && reg!=29 && reg!=30) origins[reg]={};
-            pending.emplace_back(pc+8,origins);
+            pending.push_back({pc+8,origins,call_depth});
             continue;
         }
-        if (i.op==Op::bltzal || i.op==Op::bgezal ||
-            i.op==Op::bltzall || i.op==Op::bgezall) continue;
         const auto before_slot=origins;
         const auto slot=program.instructions.find(pc+4);
         if (slot==program.instructions.end() || !transfer(slot->second,origins)) continue;
-        if (!i.indirect()) pending.emplace_back(i.target(),origins);
-        if (i.op!=Op::j && i.op!=Op::jr) pending.emplace_back(pc+8,i.likely() ? before_slot : origins);
+        if (!i.indirect()) pending.push_back({i.target(),origins,call_depth});
+        if (i.op!=Op::j && i.op!=Op::jr) pending.push_back({pc+8,i.likely() ? before_slot : origins,call_depth});
     }
     return uses;
 }
 // Bounded backward slicing is used only to propose code for compilation. A load
 // reads the initial ELF image, not a claim that writable data stays constant.
+std::optional<std::uint32_t> leaf_return_value(ByteView bytes,const elf::Executable& elf,
+    const Program& program,std::uint32_t entry,unsigned& fuel);
 std::optional<std::uint32_t> candidate(ByteView bytes,const elf::Executable& elf,const Program& program,
                                      std::uint32_t before,unsigned reg,unsigned& fuel,std::uint32_t call_site,bool layout_candidate=false,
-                                     std::uint32_t conditional_store=0) {
+                                     std::uint32_t conditional_store=0,bool follow_returns=false) {
     using r5900::Op;
     if (!reg) return 0;
     while (before>=4 && fuel) {
@@ -215,8 +248,17 @@ std::optional<std::uint32_t> candidate(ByteView bytes,const elf::Executable& elf
         const auto found=program.instructions.find(before);
         if (found==program.instructions.end()) return {};
         const auto& i=found->second;
-        if (i.op==Op::jal) {
-            if (before==call_site && reg!=31) continue;
+        if (scalar_float_preserves_gpr(i.op)) continue;
+        if (before==call_site && (call_transfer(i) || i.indirect())) {
+            if (reg==link_register(i)) return {};
+            continue;
+        }
+        if (link_register(i)) {
+            // Follow a returned constant only when a consumer is already being
+            // sliced. Scanning arbitrary return values would misclassify data
+            // addresses in mixed executable/data segments as functions.
+            if (follow_returns && reg==2 && i.op==Op::jal)
+                return leaf_return_value(bytes,elf,program,i.target(),fuel);
             // Saved registers are ABI candidates across calls, never proven values.
             if (reg>=16 && reg<=23) continue;
             return {};
@@ -242,7 +284,7 @@ std::optional<std::uint32_t> candidate(ByteView bytes,const elf::Executable& elf
         case Op::sw: case Op::sd: case Op::sq: case Op::sb: case Op::sh: continue;
         case Op::slti: case Op::sltiu:
         case Op::lui: case Op::addiu: case Op::daddiu: case Op::ori: case Op::lw: case Op::lwu:
-        case Op::lb: case Op::lbu: case Op::lh: case Op::lhu:
+        case Op::lb: case Op::lbu: case Op::lh: case Op::lhu: case Op::ld: case Op::lq: case Op::mfc1: case Op::cfc1:
             destination=i.rt; break;
         case Op::slt: case Op::sltu:
         case Op::addu: case Op::daddu: case Op::bit_or: case Op::sll:
@@ -250,9 +292,10 @@ std::optional<std::uint32_t> candidate(ByteView bytes,const elf::Executable& elf
         default: return {};
         }
         if (destination!=reg) continue;
+        if (i.op==Op::ld || i.op==Op::lq || i.op==Op::mfc1 || i.op==Op::cfc1) return {};
         if (i.op==Op::slti || i.op==Op::sltiu || i.op==Op::slt || i.op==Op::sltu) return {};
         if (i.op==Op::lui) return static_cast<std::uint32_t>(i.immediate)<<16;
-        const auto a=candidate(bytes,elf,program,before,i.rs,fuel,call_site,layout_candidate,conditional_store);
+        const auto a=candidate(bytes,elf,program,before,i.rs,fuel,call_site,layout_candidate,conditional_store,follow_returns);
         if (!a) return {};
         if (i.op==Op::addiu || i.op==Op::daddiu) return *a+static_cast<std::uint32_t>(i.immediate);
         if (i.op==Op::ori) return *a|static_cast<std::uint16_t>(i.immediate);
@@ -260,21 +303,85 @@ std::optional<std::uint32_t> candidate(ByteView bytes,const elf::Executable& elf
             const auto width=i.op==Op::lb || i.op==Op::lbu ? 1U : i.op==Op::lh || i.op==Op::lhu ? 2U : 4U;
             return initial_word(bytes,elf,*a+static_cast<std::uint32_t>(i.immediate),width,i.op==Op::lb || i.op==Op::lh);
         }
-        const auto b=candidate(bytes,elf,program,before,i.rt,fuel,call_site,layout_candidate,conditional_store);
+        const auto b=candidate(bytes,elf,program,before,i.rt,fuel,call_site,layout_candidate,conditional_store,follow_returns);
         if (!b) return {};
         if (i.op==Op::sll) return *b<<i.sa;
         return i.op==Op::bit_or ? *a|*b : *a+*b;
     }
     return {};
 }
+std::optional<std::uint32_t> leaf_return_value(ByteView bytes,const elf::Executable& elf,
+    const Program& program,std::uint32_t entry,unsigned& fuel) {
+    std::deque<std::uint32_t> pending{entry};
+    std::set<std::uint32_t> visited;
+    std::optional<std::uint32_t> result;
+    while (!pending.empty()) {
+        if (!fuel) return {};
+        --fuel;
+        const auto pc=pending.front(); pending.pop_front();
+        if (!visited.insert(pc).second) continue;
+        const auto found=program.instructions.find(pc);
+        if (found==program.instructions.end() || pc>0xfffffff7U) return {};
+        const auto& i=found->second;
+        if (i.indirect() && i.rs==31 && !link_register(i)) {
+            const auto value=candidate(bytes,elf,program,pc+8,2,fuel,pc);
+            if (!value || (result && *result!=*value)) return {};
+            result=value;
+        } else if (i.terminal() || i.op==r5900::Op::syscall || link_register(i) || i.indirect()) return {};
+        else if (i.branch()) {
+            pending.push_back(i.target());
+            if (i.op!=r5900::Op::j) pending.push_back(pc+8);
+        } else pending.push_back(pc+4);
+    }
+    return result;
+}
+std::optional<std::uint32_t> known_callee(ByteView bytes,const elf::Executable& elf,
+                                         const Program& program,const r5900::Instruction& call) {
+    if (!call_transfer(call)) return {};
+    if (!call.indirect()) return call.target();
+    unsigned fuel=128;
+    // The target is consumed before the delay slot or link-register write.
+    const auto value=candidate(bytes,elf,program,call.pc,call.rs,fuel,0xffffffffU,false,0,true);
+    return value ? executable_pointer(elf,*value) : std::nullopt;
+}
+}
+std::string_view name(CallKind kind) {
+    switch (kind) {
+    case CallKind::direct: return "direct-call";
+    case CallKind::conditional: return "conditional-call";
+    case CallKind::indirect: return "indirect-call";
+    case CallKind::direct_jump: return "direct-jump-or-tail-call";
+    case CallKind::indirect_jump: return "indirect-jump-or-tail-call";
+    case CallKind::return_link: return "return";
+    case CallKind::return_exception: return "exception-return";
+    case CallKind::service: return "syscall";
+    }
+    return "unknown";
+}
+std::vector<CallSite> call_sites(ByteView bytes,const elf::Executable& elf,const Program& program) {
+    std::vector<CallSite> result;
+    using r5900::Op;
+    for (const auto& [pc,i]:program.instructions) {
+        std::optional<CallKind> kind;
+        if (i.op==Op::syscall) kind=CallKind::service;
+        else if (i.op==Op::eret) kind=CallKind::return_exception;
+        else if (i.indirect() && i.rs==31 && !link_register(i)) kind=CallKind::return_link;
+        else if (conditional_call(i)) kind=CallKind::conditional;
+        else if (i.op==Op::jal) kind=CallKind::direct;
+        else if (i.op==Op::j) kind=CallKind::direct_jump;
+        else if (i.indirect()) kind=link_register(i) ? CallKind::indirect : CallKind::indirect_jump;
+        if (kind) result.push_back({pc,*kind,known_callee(bytes,elf,program,i),i.indirect() && call_transfer(i)});
+    }
+    return result;
 }
 std::vector<LayoutCandidate> layout_candidates(ByteView bytes,const elf::Executable& elf,const Program& program) {
     using r5900::Op;
     std::vector<LayoutCandidate> result;
     std::set<std::uint32_t> sources;
     for (const auto& [pc,call]:program.instructions) {
-        if (call.op!=Op::jal || pc<12) continue;
-        const auto setup=program.instructions.find(call.target()),trap=program.instructions.find(call.target()+4);
+        const auto target=known_callee(bytes,elf,program,call);
+        if (!target || pc<12 || *target>0xfffffffBU) continue;
+        const auto setup=program.instructions.find(*target),trap=program.instructions.find(*target+4);
         if (setup==program.instructions.end() || trap==program.instructions.end()) continue;
         const auto& service=setup->second;
         if (service.op!=Op::addiu || service.rs || service.rt!=3 || service.immediate!=0x56 || trap->second.op!=Op::syscall) continue;
@@ -316,9 +423,10 @@ std::set<std::uint32_t> syscall_callbacks(ByteView bytes,const elf::Executable& 
     using r5900::Op;
     std::set<std::uint32_t> result;
     for (const auto& [pc,call]:program.instructions) {
-        if (call.op!=Op::jal || pc>0xfffffff7U) continue;
-        const auto setup=program.instructions.find(call.target());
-        const auto boundary=program.instructions.find(call.target()+4);
+        const auto callee=known_callee(bytes,elf,program,call);
+        if (!callee || pc>0xfffffff7U || *callee>0xfffffffBU) continue;
+        const auto setup=program.instructions.find(*callee);
+        const auto boundary=program.instructions.find(*callee+4);
         if (setup==program.instructions.end() || boundary==program.instructions.end()) continue;
         const auto& i=setup->second;
         if (i.rs || i.rt!=3 || (i.op!=Op::addiu && i.op!=Op::daddiu && i.op!=Op::ori) ||
@@ -330,17 +438,14 @@ std::set<std::uint32_t> syscall_callbacks(ByteView bytes,const elf::Executable& 
         auto address=*target;
         if (address>=0x80000000U && address<0xc0000000U) address&=0x1fffffffU;
         if (address%4) continue;
-        for (const auto& segment:elf.segments)
-            if ((segment.flags&1) && address>=segment.address &&
-                std::uint64_t(address)+4<=std::uint64_t(segment.address)+segment.file_size)
-            {
-                result.insert(address);
-                if (registered_calls) {
-                    unsigned number_fuel=128;
-                    const auto number=candidate(bytes,elf,program,pc+8,4,number_fuel,pc);
-                    if (number && *number<256) registered_calls->insert(*number);
-                }
+        if (elf::executable_address(elf,address)) {
+            result.insert(address);
+            if (registered_calls) {
+                unsigned number_fuel=128;
+                const auto number=candidate(bytes,elf,program,pc+8,4,number_fuel,pc);
+                if (number && *number<256) registered_calls->insert(*number);
             }
+        }
     }
     return result;
 }
@@ -374,7 +479,7 @@ std::set<std::uint32_t> stored_code_pointers(ByteView bytes,const elf::Executabl
         unsigned fuel=128;
         // A call delay-slot store consumes the value before the callee runs.
         const auto prior=pc>=4 ? program.instructions.find(pc-4) : program.instructions.end();
-        const auto call_site=prior!=program.instructions.end() && prior->second.op==r5900::Op::jal ? pc-4 : 0xffffffffU;
+        const auto call_site=prior!=program.instructions.end() && call_transfer(prior->second) ? pc-4 : 0xffffffffU;
         const auto value=candidate(bytes,elf,program,pc,i.rt,fuel,call_site,false,pc);
         if (!value || !*value) continue;
         if (const auto address=executable_pointer(elf,*value)) result.insert(*address);
@@ -465,7 +570,7 @@ std::set<std::uint32_t> initial_indirect_entries(ByteView bytes,const elf::Execu
     for (const auto& [pc,call]:program.instructions) {
         if (!call.indirect() || !call.rs || (call.op==r5900::Op::jr && call.rs==31)) continue;
         unsigned fuel=128;
-        const auto value=candidate(bytes,elf,program,pc,call.rs,fuel,0xffffffffU);
+        const auto value=candidate(bytes,elf,program,pc,call.rs,fuel,0xffffffffU,false,0,true);
         if (value) if (const auto entry=executable_pointer(elf,*value)) result.insert(*entry);
     }
     return result;
@@ -512,7 +617,8 @@ std::set<std::uint32_t> object_table_entries(ByteView bytes,const elf::Executabl
             }
             if (i.op==Op::lw && i.rs==load.rt && i.rt) {
                 const auto call=program.instructions.find(i.pc+4);
-                if (call!=program.instructions.end() && call->second.op==Op::jalr && call->second.rs==i.rt) {
+                if (call!=program.instructions.end() && call->second.indirect() &&
+                    call->second.rs==i.rt && call_transfer(call->second)) {
                     slots.emplace(load.immediate,offset+std::uint32_t(i.immediate));
                     break;
                 }
@@ -545,12 +651,17 @@ std::set<std::uint32_t> registered_code_pointers(ByteView bytes,const elf::Execu
     std::set<std::uint32_t> result;
     std::map<std::uint32_t,ArgumentUses> summaries;
     for (const auto& [pc,call]:program.instructions) {
-        if (call.op!=r5900::Op::jal || pc>0xfffffff7U) continue;
-        auto found=summaries.find(call.target());
-        if (found==summaries.end()) found=summaries.emplace(call.target(),argument_uses(program,call.target())).first;
+        // A tail jump passes the same argument registers as a linking call.
+        // Recover both before lowering: an indirect callback may be saved by
+        // the destination even though this wrapper never creates a new link.
+        const auto callee=known_callee(bytes,elf,program,call);
+        if (!callee || pc>0xfffffff7U) continue;
+        auto found=summaries.find(*callee);
+        if (found==summaries.end()) found=summaries.emplace(*callee,argument_uses(program,*callee)).first;
         for (unsigned reg=4;reg<12;++reg) {
             unsigned fuel=128;
-            const auto value=candidate(bytes,elf,program,pc+8,reg,fuel,pc);
+            const bool called=(found->second.called&(1U<<(reg-4)))!=0;
+            const auto value=candidate(bytes,elf,program,pc+8,reg,fuel,pc,false,0,called);
             if (!value) continue;
             const auto address=executable_pointer(elf,*value);
             if (!address) continue;
@@ -601,9 +712,10 @@ std::set<std::uint32_t> thread_entries(ByteView bytes,const elf::Executable& elf
         if (root) if (const auto entry=executable_pointer(elf,*root)) result.insert(*entry);
     }
     for (const auto& [pc,call]:program.instructions) {
-        if (call.op!=Op::jal || pc>0xfffffff7U) continue;
-        const auto setup=program.instructions.find(call.target());
-        const auto boundary=program.instructions.find(call.target()+4);
+        const auto callee=known_callee(bytes,elf,program,call);
+        if (!callee || pc>0xfffffff7U || *callee>0xfffffffBU) continue;
+        const auto setup=program.instructions.find(*callee);
+        const auto boundary=program.instructions.find(*callee+4);
         if (setup==program.instructions.end() || boundary==program.instructions.end()) continue;
         const auto& instruction=setup->second;
         if (instruction.rs || instruction.rt!=3 || instruction.immediate!=0x20 ||
@@ -667,10 +779,7 @@ std::set<std::uint32_t> thread_entries(ByteView bytes,const elf::Executable& elf
         if (!entry) continue;
         const auto address=*entry>=0x80000000U && *entry<0xc0000000U ? *entry&0x1fffffffU : *entry;
         if (address%4) continue;
-        for (const auto& segment:elf.segments)
-            if ((segment.flags&1) && address>=segment.address &&
-                std::uint64_t(address)+4<=std::uint64_t(segment.address)+segment.file_size)
-                result.insert(address);
+        if (elf::executable_address(elf,address)) result.insert(address);
     }
     return result;
 }

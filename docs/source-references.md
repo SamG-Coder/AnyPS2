@@ -431,6 +431,11 @@ Native gains use XAudio2's documented
 and [volume and pitch units](https://learn.microsoft.com/en-us/windows/win32/xaudio2/xaudio2-volume-and-pitch-control).
 Volume sweeps, active effects and unimplemented playback requests remain explicit
 unsupported boundaries; configuring an inactive voice is not evidence of playback.
+Native PCM streaming uses the public LIBSD block-transfer interface and its
+`sceSdBlockTransHandler` signature. The callback supplies the next buffer and byte
+count through two output pointers; an empty pair terminates the native stream.
+The callback-mode flag is inferred from local call sites and remains separate
+from the public double-buffer mode. No game addresses enter the implementation.
 Startup planning uses the public import/export version fields and loadcore's
 major/minor version organization. Its minimum-minor and ordinal checks are a
 conservative static policy, not a complete implementation of loadcore's runtime
@@ -658,6 +663,11 @@ packet and callback declarations, exports.tab ordinals and public sifcmd.c table
 selection/removal contracts. The original native implementation uses validated
 RAM table access and the shared compiled callback scheduler. It does not copy
 firmware, packet payloads, upstream dispatch code or DMA/interrupt machinery.
+The default 32 system-command slots follow the same public module's startup
+contract. AnyPS2 owns these registrations as C++ data and dispatches them through
+its existing compiled callback scheduler. Explicit registration or removal
+overrides the corresponding native protocol handler; unrelated protocol services
+remain connected. A caller-supplied system table replaces the default registry.
 
 Native outbound commands use the same pinned public sifcmd declarations and
 _sceSifSendCmd argument/header/ordering contract. The bounded peer mailbox,
@@ -1689,6 +1699,11 @@ the unsupported primitive path.
   C++ importer. Only the unencrypted raw-deflate container is supported; no keys,
   game routines or game data are included. Filename and game identity are not
   used for parsing or execution selection. Opaque metadata is not authenticated.
+  Imported ELF files now carry an original AnyPS2 `PT_NOTE` (name `AnyPS2`,
+  type 1, four-byte version 1) recording the absence of source permissions.
+  Direct control flow may reach any file-backed segment in those files; only
+  discovered instructions receive code protection. Ordinary ELF permissions
+  remain authoritative, and unrelated packed data is not treated as code.
 
 - The pinned Play! `Source/ee/PS2OS.cpp` ExecPS2/SetupThread interfaces and
   PS2SDK public startup argument structures inform independent native image
@@ -1721,6 +1736,29 @@ C++ ownership replaces controller initialization and guest linked lists. No
 reference implementation or commercial code is copied. Unsupported transfers
 and topology changes stop; discovery never fabricates an empty host bus.
 Control pipes now retain a Windows hub handle and verify the attached device.
+Native HID endpoint ownership uses Microsoft's public
+[HID architecture](https://learn.microsoft.com/en-us/windows-hardware/drivers/hid/hid-architecture),
+[USB port driver keys](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/usbioctl/ns-usbioctl-_usb_node_connection_driverkey_name),
+SetupAPI/Configuration Manager device ancestry, and overlapped Win32 reads.
+Physical-device ancestry and interface number identify the endpoint; device IDs
+do not select game behavior. Exclusive host access produces a failed public
+pipe open, not a fabricated pipe or a successful empty transfer. The pinned
+PS2SDK `usbd_api.c` and `device.c` define failed-open and seven-byte location ABI.
+HIDAPI 0.15.0 is pinned at `dbff4ea89f55a572aeb0c53a7b32ea70853ec260`
+([upstream](https://github.com/libusb/hidapi/tree/dbff4ea89f55a572aeb0c53a7b32ea70853ec260)),
+using its BSD license in [hidapi-license.txt](third-party/hidapi-license.txt).
+Windows exposes parsed HID capabilities, not the original wire descriptor.
+HIDAPI reconstructs an equivalent report description from those capabilities;
+AnyPS2 publishes that description and its corresponding length consistently in
+the native USB snapshot. This is a native descriptor translation, not a claim
+to preserve the device's original descriptor encoding. Unsupported collections
+remain explicit; no generic report template or device-ID override is used.
+LIBSD sample transfers use the pinned public `libsd-common.h`, `voice.c` and
+`block.c` interfaces. Native transfer completion follows actual copies or
+XAudio2 consumption, with compiled callbacks. Microsoft's
+[source buffer lifetime](https://learn.microsoft.com/en-us/windows/win32/api/xaudio2/nf-xaudio2-ixaudio2sourcevoice-submitsourcebuffer)
+and [voice state](https://learn.microsoft.com/en-us/windows/win32/api/xaudio2/nf-xaudio2-ixaudio2sourcevoice-getstate)
+contracts govern audio ownership and completion. No console mixer is copied.
 Standard descriptor reads use the documented
 [USB_DESCRIPTOR_REQUEST](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/usbioctl/ns-usbioctl-_usb_descriptor_request)
 contract. Configuration selection adopts only a matching, currently active
@@ -1732,9 +1770,27 @@ continuations with owned stacks, rather than interrupt callbacks or inline calls
 The pinned PS2SDK sysclib public interfaces define bcopy source/destination order,
 word-copy byte-count truncation and string search/span signatures. Native LLVM
 copy intrinsics retain bounds, code-write protection and pointer aliases. The
+case-conversion imports take a byte and operate on ASCII letters. They lower
+directly to native comparisons and arithmetic; unsupported high-byte inputs
+stop explicitly without a locale-dependent conversion or a table lookup. The
 cdvdman ordinal 22 interface identifies console iLink identity; it is deliberately
 an unavailable native service, reported during conversion and stopped if called.
 No console identity or successful response is invented.
+
+The pinned PS2SDK CDVDMAN power callback interface stores a callback plus user
+data and returns the previous callback. AnyPS2 maps it to an opt-in application
+lifecycle: window close queues the compiled callback, and PowerOff requests exit
+from the native program. The application consumes that request and releases its
+native resources; no operating-system shutdown or console power model is used.
+Hosts that do not consume application-exit requests leave these imports unavailable.
+
+CDVDMAN DVD reads translate public second-layer logical sectors to raw ISO
+offsets. The pinned PS2SDK `sceCdLsnDualChg` contract removes the 16-sector volume
+prefix for reads starting on the second layer. PCSX2's pinned `CDVDisoReader.cpp`
+locates that layer's descriptor at the first volume's sector count. AnyPS2 derives
+and validates the boundary from the ISO, caches it for that open file, and keeps
+raw converter reads unchanged. Unknown appended layouts stop without a guessed
+offset; no game identity participates in the mapping.
 
 The pinned PS2SDK `xmodload.h` defines module list/status/search ordinals and the
 `ModuleStatus` data layout. Module entry results and starting/resident flags use
@@ -1771,3 +1827,97 @@ call, reply and busy-state contracts. Native clients retain packet ownership
 until the peer replies, deliver compiled callbacks with the caller's global
 pointer, and resume waiting native continuations after callback completion.
 Notification-free asynchronous calls remain an explicit unsupported boundary.
+The pinned EE `sifrpc.c` execution routine writes the client and command in a
+call-completion record; unlike bind replies, it does not echo the request's
+packet address or transaction ID. Native completion correlates the owned live
+client, validates output, and only then releases its callback/waiter. Unspecified
+scratch fields in the peer's reply are not treated as transaction identifiers.
+
+BC0F/BC0T and their likely forms use the selected-completion condition described
+by `COP0.cpp` and `Dmac.h` at the pinned PCSX2 revision. LLVM emits a call to the
+native completion interface followed by native conditional control flow. The
+condition observes completed submissions selected by the existing submission
+policy, independently of interrupt enables. It does not advance simulated DMA
+or synthesize completion; a missing provider remains an unsupported boundary.
+
+Sparse executable protection is emitted as bounded native comparison functions
+with direct calls, grouped by image lifetime. This original generator change
+shares checks across stores without a runtime address table. Imported packed
+segments retain writable data gaps; only discovered instructions are protected.
+
+Native packet interrupt boundaries follow `Vif_Transfer.cpp`, `Vif1_Dma.cpp`,
+`Vif.cpp` and `Vif.h` at the pinned PCSX2 revision: an unmasked command interrupt
+is delivered after that command, with INT and (except MARK) VIS exposed until
+stall cancellation. The native implementation retains an owned packet remainder
+and resumes it after the compiled handler acknowledges the boundary. Graphics
+fences finish prior work before notification; submission completion is withheld
+while data remains. It does not simulate FIFO occupancy, transfer cycles or bus
+arbitration. Reads of intermediate source positions are unsupported while a
+native batch is suspended. This is an independent implementation of the public
+behavior, not copied emulator execution code.
+The `Hw.h` and `Vif.h` public layouts at that revision distinguish NUM at
+offset 0x60, CODE at 0x80 and ITOPS/BASE/OFST/TOPS/ITOP/TOP at 0x90 through
+0xe0. The native adapter exposes completed command metadata at those offsets;
+compiled notification handlers must read the command that raised the event.
+
+USB-IF HID Device Class Definition 1.11, sections 6.2.2.7 and 8, defines report
+IDs and global Push/Pop state:
+https://www.usb.org/sites/default/files/hid1_11.pdf
+The original native descriptor composer joins Windows collections only when
+their input/output/feature report identities are disjoint, and restores globals
+between collections. Feature/output requests select the owning collection.
+Physical access denial is reported from CreateFileW; no partial endpoint or
+synthetic report is substituted. Fully accessible multi-collection input streams
+and overlapping report layouts still require an implementation.
+
+Native reverb uses the Windows SDK `XAudio2CreateReverb` and
+`ReverbConvertI3DL2ToNative` APIs and their built-in room presets:
+https://learn.microsoft.com/en-us/windows/win32/api/xaudio2fx/nf-xaudio2fx-xaudio2createreverb
+https://learn.microsoft.com/en-us/windows/win32/api/xaudio2fx/nf-xaudio2fx-reverbconverti3dl2tonative
+https://learn.microsoft.com/en-us/windows/win32/api/xaudio2/nf-xaudio2-ixaudio2voice-seteffectchain
+The pinned PS2SDK `libsd-common.h` and `libsd/src/effect.c` define the public
+mode numbers, signed stereo depth, workspace sizes and clear flag. Mode names
+map to native room, padded cell, living room, auditorium, concert hall, arena
+and stone corridor presets for room, studio 1/2/3, hall, space and pipe. This
+is a deliberate audible modernization, not sample-exact console reverb.
+Preset changes replace the native effect and clear its history; the clear
+operation also replaces it through XAudio2 rather than accessing an attached
+APO from another thread. Variable echo/delay modes remain unsupported. Original
+synthetic impulse tests process and clear each native effect offline; service
+tests execute LLVM-generated imports and verify routing and failure handling.
+
+The pinned PCSX2 `GSState.cpp` display circuit calculations document the
+half-height framebuffer read when both SMODE2 interlace and frame mode are set.
+The native scanout independently applies that source-row bound and duplicates
+each source row for progressive window presentation. It retains the configured
+display extent and buffer origin. This explicit line-pair reconstruction does
+not implement temporal field blending or dual-circuit composition.
+
+ELF section classification follows the System V generic ABI, ELF Object File
+Format 4.3 draft, section 3 (consulted 2026-11-01):
+https://gabi.xinuos.com/elf/03-sheader.html
+Allocated sections without SHF_EXECINSTR remain data even inside an executable
+LOAD segment. AnyPS2 validates their mapped extents before using them to reject
+false callback candidates. SHT_NOBITS uses the memory extent rather than file
+storage. This is an independent implementation of the file-format metadata.
+
+The pinned PCSX2 `GSState.cpp` vertex submission and software rasterizer are
+behavioral references for triangle lists, strips, fans, suppressed drawing kicks,
+last-vertex flat color and top/left edge inclusion. The native Vulkan triangle
+path independently assembles three vertices and evaluates integer edge functions
+on the GPU. It reuses native framebuffer, alpha-test and blend operations; no
+upstream rasterizer code is incorporated. Shaded color uses integer barycentric
+interpolation with truncation, without reproducing internal GS interpolation
+precision. Fixed UVs use the same integer interpolation and existing native
+texture sampler. ST/Q triangles retain address/data and packed GIF Q-latch
+ordering and use native floating-point interpolation before perspective division.
+This does not reproduce internal GS interpolation precision. Non-finite or extreme
+coordinates and triangles crossing zero Q are rejected before GPU submission.
+Fog, antialiasing and depth writes/tests beyond the existing always-pass case
+remain explicit unsupported boundaries.
+
+The pinned PS2SDK `freesd.c` address API selects the core from bit 0 and voice
+from bits 1-5, independently of bits 6-7. The native selector decoder preserves
+those aliases. Address writes discard the low four byte-address bits; the
+effect-end selector instead retains the inclusive end of a 128 KiB region.
+Compiled synthetic imports verify aliases, readback, alignment and bounds.

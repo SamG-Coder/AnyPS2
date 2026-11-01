@@ -32,6 +32,8 @@ struct NativeIo {
     IoRead64 (*read64)(void*,std::uint32_t)=nullptr;
     Stop (*write64)(void*,std::uint32_t,std::uint64_t)=nullptr;
     Stop (*write8)(void*,std::uint32_t,std::uint8_t)=nullptr;
+    // The selected native submissions have finished; no CPU or DMA simulation.
+    IoRead (*test_completions)(void*)=nullptr;
 };
 // Compile-time selected address-space requests; no instruction words reach a provider.
 // A provider must preserve its state on failure and implement mappings consistently

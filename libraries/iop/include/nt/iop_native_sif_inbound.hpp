@@ -16,6 +16,7 @@ public:
         commands_=&commands; session_=&session; link_=&link; rpc_=rpc; clients_=clients;
     }
     bool busy() const { return size_ || active_ || failed_.has_value() || (commands_ && commands_->busy()); }
+    std::span<const std::uint8_t> pending_packet() const { return std::span<const std::uint8_t>(packet_).first(size_); }
     NativeServiceReply submit(std::span<const std::uint8_t> packet,std::span<const std::uint8_t> payload={}) {
         if (!commands_ || !link_->ready() || busy() || packet.size()<16 || packet.size()>packet_.size() ||
             packet[0]!=packet.size() || (load_native_word(packet,0)>>8)!=payload.size() || payload.size()>0x100000) return {};
@@ -30,7 +31,7 @@ public:
         NativeServiceReply result;
         if (link_->ready()) {
             if (clients_ && clients_->owns_reply(packet)) result=clients_->receive(packet,payload_);
-            else if (bind_reply_ || (command==0x80000009 && rpc_ && !commands_->system_table_configured())) {
+            else if (bind_reply_ || (command==0x80000009 && rpc_ && commands_->uses_builtin_handler(command))) {
                 if (!bind_reply_) {
                     std::array<std::uint8_t,64> reply{};
                     result=rpc_->prepare_bind(packet,ram_,reply);
@@ -44,9 +45,9 @@ public:
                     }
                 }
             }
-            else if (command==0x8000000a && rpc_ && !commands_->system_table_configured())
+            else if (command==0x8000000a && rpc_ && commands_->uses_builtin_handler(command))
                 result=rpc_->receive_call(packet,payload_,ram_);
-            else if (command>=0x80000000 && command<=0x80000002 && !commands_->system_table_configured())
+            else if (command>=0x80000000 && command<=0x80000002 && commands_->uses_builtin_handler(command))
                 result=session_->receive_control(packet,ram_);
             else result=commands_->receive(packet,packet_buffer_,ram_);
         }

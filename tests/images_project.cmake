@@ -95,3 +95,35 @@ execute_process(COMMAND "${run}/invoked-callback-build/Release/ps2-native${EXE_S
 if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x0000100c.*v0=91")
     message(FATAL_ERROR "Callback invoked through a saved argument did not execute: ${out} ${err}")
 endif()
+
+checked("${CONVERTER}" "${run}/fixture.elf.forwarded-callback" "${run}/forwarded-callback")
+checked("${CMAKE_COMMAND}" -S "${run}/forwarded-callback" -B "${run}/forwarded-callback-build" -G "${GENERATOR}" ${platform} "-DANYPS2_ROOT=${ROOT}")
+checked("${CMAKE_COMMAND}" --build "${run}/forwarded-callback-build" --config Release --target ps2-native --parallel 2)
+execute_process(COMMAND "${run}/forwarded-callback-build/Release/ps2-native${EXE_SUFFIX}" "${run}/forwarded-callback/program.data" --headless
+    RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
+if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x0000100c.*v0=97")
+    message(FATAL_ERROR "Callback forwarded through registration helpers did not execute: ${out} ${err}")
+endif()
+
+checked("${CONVERTER}" "${run}/fixture.elf.tail-callbacks" "${run}/tail-callbacks")
+checked("${CMAKE_COMMAND}" -S "${run}/tail-callbacks" -B "${run}/tail-callbacks-build" -G "${GENERATOR}" ${platform} "-DANYPS2_ROOT=${ROOT}")
+checked("${CMAKE_COMMAND}" --build "${run}/tail-callbacks-build" --config Release --target ps2-native --parallel 2)
+execute_process(COMMAND "${run}/tail-callbacks-build/Release/ps2-native${EXE_SUFFIX}" "${run}/tail-callbacks/program.data" --headless
+    RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
+if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00001010.*v0=54")
+    message(FATAL_ERROR "Tail-call callbacks did not both execute: ${out} ${err}")
+endif()
+
+checked("${CONVERTER}" "${run}/fixture.elf.call-forms" "${run}/call-forms")
+checked("${CMAKE_COMMAND}" -S "${run}/call-forms" -B "${run}/call-forms-build" -G "${GENERATOR}" ${platform} "-DANYPS2_ROOT=${ROOT}")
+checked("${CMAKE_COMMAND}" --build "${run}/call-forms-build" --config Release --target ps2-native --parallel 2)
+execute_process(COMMAND "${run}/call-forms-build/Release/ps2-native${EXE_SUFFIX}" "${run}/call-forms/program.data" --headless
+    RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
+if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00001054.*v0=214")
+    message(FATAL_ERROR "Direct, register, conditional and returned callbacks did not execute: ${out} ${err}")
+endif()
+file(READ "${run}/call-forms/call-sites.tsv" call_sites)
+if(NOT call_sites MATCHES "conditional-call" OR NOT call_sites MATCHES "compiled-initial-candidate" OR
+   NOT call_sites MATCHES "unresolved-indirect")
+    message(FATAL_ERROR "Call inventory concealed dynamic target gaps: ${call_sites}")
+endif()

@@ -234,6 +234,15 @@ int main(int argc,char** argv) {
     for (const auto [offset,word] : std::array<std::pair<unsigned,std::uint32_t>,5>{{
         {0,0x00044080U},{4,0x011c4021U},{8,0xad040000U},{12,0x03e00008U},{16,0x2402ffffU}}})
         code.push_back(nt::r5900::decode(0x367000+offset,word));
+    // Original packet callback: record CODE, count calls, release the boundary.
+    {
+        unsigned pc=0x368000;
+        for (const auto word:{0x3c081000U,0x35083c00U,0x8d090080U,0xaf890000U,
+                             0x8f8a0004U,0x254a0001U,0xaf8a0004U,0x24090008U,
+                             0xad090010U,0x03e00008U,0x00001021U}) {
+            code.push_back(nt::r5900::decode(pc,word)); pc+=4;
+        }
+    }
     nt::ee_codegen::CodePayload payload{0x370000,{}};
     for (const auto word : {0x24020007U,0x03e00008U,0U}) {
         code.push_back(nt::r5900::decode(payload.address+static_cast<std::uint32_t>(payload.bytes.size()),word));
@@ -367,6 +376,20 @@ int main(int argc,char** argv) {
     code.push_back(nt::r5900::decode(0x472004,0x3508ffff));
     code.push_back(nt::r5900::decode(0x472008,12));
     owned[2]={0x472004,8,1}; images[0].segments.push_back(guarded);
+    for (unsigned selector=0;selector<4;++selector) {
+        const auto pc=0x480000U+selector*32;
+        const auto branch=nt::r5900::decode(pc,0x41000002U|(selector<<16));
+        if (!branch.branch() || branch.likely()!=(selector>=2) || branch.target()!=pc+12)
+            throw std::runtime_error("Completion branch decoding failed");
+        code.push_back(branch);
+        code.push_back(nt::r5900::decode(pc+4,0x8c8a0000)); // Potentially faulting delay load.
+        code.push_back(nt::r5900::decode(pc+8,12));
+        code.push_back(nt::r5900::decode(pc+12,12));
+    }
+    if (nt::r5900::decode(0x480000,0x41100002).op!=nt::r5900::Op::unsupported)
+        throw std::runtime_error("Reserved completion branch encoding was accepted");
+    for (unsigned n=0;n<80;++n)
+        code.push_back(nt::r5900::decode(0x490000+n*32,12));
     code.push_back(nt::r5900::decode(0xfffffffcU,12));
     auto malformed=images; malformed[1].segments[0].bytes[0]^=1;
     failed=false;
@@ -428,6 +451,45 @@ int main(int argc,char** argv) {
         for (unsigned n=0;n<std::size(visitor);++n) word(0x140+n*4,visitor[n]);
         word(0x160,0x03e00008); word(0x180,0x03e00008); word(0x184,0x2402005b);
         nt::write_file(std::string(argv[2])+".invoked-callback",elf);
+        // A wrapper forwards the callback in a delay slot to a second helper.
+        // Only the helper stores it; the caller later invokes the actual value.
+        elf.resize(0x224,0); word(68,0xe0); word(72,0xe0); word(88,0x220);
+        std::fill(elf.begin()+0x100,elf.end(),0);
+        word(0x100,0x0c000410); word(0x104,0x24051080); word(0x108,0x2403007b); word(0x10c,12);
+        const std::uint32_t forwarding[]{0x03e0802d,0x0c000428,0x00a0302d,
+            0x24042000,0x8c990000,0x0320f809,0,0x02000008,0};
+        for (unsigned n=0;n<std::size(forwarding);++n) word(0x140+n*4,forwarding[n]);
+        word(0x180,0x03e00008); word(0x184,0x24020061);
+        word(0x1a0,0x24042000); word(0x1a4,0xac860000); word(0x1a8,0x03e00008);
+        nt::write_file(std::string(argv[2])+".forwarded-callback",elf);
+        // Two local function pointers pass through a tail jump and are invoked
+        // from a stack record. Their results prove both targets were compiled.
+        std::fill(elf.begin()+0x100,elf.end(),0);
+        word(104,32);
+        word(0x100,0x241d2000); word(0x104,0x0c000410); word(0x10c,0x2403007b); word(0x110,12);
+        const std::uint32_t tail[]{0x240510c0,0x08000420,0x240610d0};
+        for (unsigned n=0;n<std::size(tail);++n) word(0x140+n*4,tail[n]);
+        const std::uint32_t invoke[]{0x03e0802d,0xafa50000,0xafa60004,0x8fb90000,0x0320f809,0,
+            0x0040882d,0x8fb90004,0x0320f809,0,0x00511021,0x02000008,0};
+        for (unsigned n=0;n<std::size(invoke);++n) word(0x180+n*4,invoke[n]);
+        word(0x1c0,0x03e00008); word(0x1c4,0x24020017);
+        word(0x1d0,0x03e00008); word(0x1d4,0x2402001f);
+        nt::write_file(std::string(argv[2])+".tail-callbacks",elf);
+        elf.resize(0x304,0); std::fill(elf.begin()+0x100,elf.end(),0);
+        word(68,0x1c0); word(72,0x1c0); word(88,0x300);
+        const std::uint32_t forms[]{0x241d2000,0x24051180,0x0c000430,0,0x00409021,
+            0x24051190,0x241910c0,0x0320f809,0,0x02429021,
+            0x240511a0,0x04130024,0,0x02429021,0x0c000440,0,
+            0x00402821,0x0c000430,0,0x02421021,0x2403007b,12};
+        for (unsigned n=0;n<std::size(forms);++n) word(0x100+n*4,forms[n]);
+        const std::uint32_t consume[]{0x03e08021,0x00a0c821,0x44800000,0x46000000,0x0320f809,0,0x02000008,0};
+        for (unsigned n=0;n<std::size(consume);++n) word(0x1c0+n*4,consume[n]);
+        word(0x200,0x03e00008); word(0x204,0x240211b0);
+        for (const auto [at,value]:std::array<std::pair<unsigned,unsigned>,4>{{
+                {0x280,23},{0x290,31},{0x2a0,47},{0x2b0,113}}}) {
+            word(at,0x03e00008); word(at+4,0x24020000|value);
+        }
+        nt::write_file(std::string(argv[2])+".call-forms",elf);
         elf=original;
         // Cross the code-module boundary using original synthetic straight-line
         // code. Both the final native function and its preceding module execute.

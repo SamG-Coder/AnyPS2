@@ -22,3 +22,13 @@ execute_process(COMMAND "${executable}" "${run}/project/program.data" --headless
 if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00002004 executed=1 v0=42")
     message(FATAL_ERROR "Packed synthetic executable did not run natively: ${out} ${err}")
 endif()
+
+checked("${UNPACKER}" "${run}/input.packed.cross" "${run}/cross.elf")
+checked("${CONVERTER}" "${run}/cross.elf" "${run}/cross")
+checked("${CMAKE_COMMAND}" -S "${run}/cross" -B "${run}/cross-build" -G "${GENERATOR}" ${platform} "-DANYPS2_ROOT=${ROOT}")
+checked("${CMAKE_COMMAND}" --build "${run}/cross-build" --config Release --target ps2-native --parallel 2)
+execute_process(COMMAND "${run}/cross-build/Release/ps2-native${EXE_SUFFIX}" "${run}/cross/program.data" --headless
+    RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
+if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00002018 executed=8 v0=42")
+    message(FATAL_ERROR "Packed code/data classification or cross-segment call failed: ${out} ${err}")
+endif()

@@ -8,9 +8,11 @@ struct Scanout {
     std::vector<std::uint32_t> pixels;
 };
 // Convert one enabled display circuit's 24/32-bit target to a native image.
-// Dual-circuit blending and field reconstruction require separate support.
+// Interlaced frame mode stores half as many source rows. Present each source
+// row twice on a progressive PC display; temporal field blending is separate.
+// Dual-circuit blending requires separate support.
 inline std::optional<Scanout> scanout(std::span<const std::uint32_t> memory,std::uint64_t control,
-    const std::array<std::uint64_t,2>& buffers,const std::array<std::uint64_t,2>& displays) {
+    const std::array<std::uint64_t,2>& buffers,const std::array<std::uint64_t,2>& displays,bool half_height=false) {
     const auto enabled=control&3;
     if (!enabled) return {};
     if (enabled==3 || memory.size()!=1024*1024) throw std::invalid_argument("Unsupported native display composition");
@@ -24,7 +26,7 @@ inline std::optional<Scanout> scanout(std::span<const std::uint32_t> memory,std:
     const unsigned x0=(buffer>>32)&2047,y0=(buffer>>43)&2047,base=(buffer&511)*32;
     Scanout frame{width,height,std::vector<std::uint32_t>(std::size_t(width)*height)};
     for (unsigned y=0;y<height;++y) for (unsigned x=0;x<width;++x)
-        frame.pixels[y*width+x]=memory[rgba_word(base,pitch,x0+x,y0+y)]|0xff000000U;
+        frame.pixels[y*width+x]=memory[rgba_word(base,pitch,x0+x,y0+(half_height ? y/2 : y))]|0xff000000U;
     return frame;
 }
 }

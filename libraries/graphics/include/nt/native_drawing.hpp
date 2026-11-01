@@ -3,7 +3,9 @@
 #include <nt/sprite_plan.hpp>
 #include <nt/image_upload.hpp>
 #include <nt/sprite_texture.hpp>
+#include <nt/triangle_plan.hpp>
 #include <nt/palette_plan.hpp>
+#include <bit>
 #include <variant>
 
 namespace nt::graphics {
@@ -32,7 +34,7 @@ public:
         };
         for (const auto& operation:draws) {
             if (const auto* draw=std::get_if<Draw>(&operation)) {
-                SpriteCommand command{draw->sprite};
+                SpriteCommand command{draw->sprite,{},draw->triangle};
                 std::copy_n(candidate.palette.begin()+draw->bank*16,16,command.palette.begin());
                 sprites.push_back(command);
             } else {
@@ -51,7 +53,7 @@ public:
     }
 private:
     using ImageWrites=std::vector<PixelWrite>;
-    struct Draw { Sprite sprite; unsigned bank; };
+    struct Draw { Sprite sprite; unsigned bank; std::array<RasterVertex,3> triangle{}; };
     using Operation=std::variant<Draw,ImageWrites,PaletteLoad>;
     struct Context {
         std::uint64_t frame=0,offset=0,scissor=0,test=0,depth=0,texture=0,filter=0,clamp=0,alpha=0;
@@ -63,8 +65,11 @@ private:
         unsigned primitive=0,attributes=0,color=0,x=0,y=0;
         unsigned scan_mask=0;
         std::uint32_t uv=0,first_uv=0,texa=0;
+        std::uint32_t s=0,t=0,q=0x3f800000,packed_q=0x3f800000;
         std::uint32_t fog_color=0;
         bool use_primitive=false,first=false;
+        std::array<RasterVertex,3> vertices{};
+        unsigned vertex_count=0;
         bool color_clamp=false,per_pixel_blend=false;
         std::uint64_t dither_matrix=0;
         bool dither_enabled=false;
@@ -82,8 +87,9 @@ private:
     }
     static void command(State& state,unsigned reg,std::uint64_t value,std::vector<Operation>& draws) {
         switch (reg) {
-        case 0: state.primitive=unsigned(value&2047); state.first=false; return;
-        case 1: state.color=std::uint32_t(value); return;
+        case 0: state.primitive=unsigned(value&2047); state.first=false; state.vertex_count=0; return;
+        case 1: state.color=std::uint32_t(value); state.q=std::uint32_t(value>>32); return;
+        case 2: state.s=std::uint32_t(value); state.t=std::uint32_t(value>>32); return;
         case 3: state.uv=std::uint32_t(value)&0x3fff3fffU; return;
         case 6: case 7:
             if (const auto load=plan_palette(value,state.palette_config,state.palette_bases)) draws.push_back(*load);
@@ -130,6 +136,28 @@ private:
         }
         const auto attributes=state.use_primitive ? state.primitive : state.attributes;
         const unsigned x=value&65535,y=(value>>16)&65535;
+        const auto primitive=state.primitive&7;
+        if (primitive>=3 && primitive<=5) {
+            state.vertices[state.vertex_count++]={int(x),int(y),state.color,state.uv&16383,(state.uv>>16)&16383,
+                std::bit_cast<float>(state.s),std::bit_cast<float>(state.t),std::bit_cast<float>(state.q)};
+            if (state.vertex_count<3) return;
+            const auto vertices=state.vertices;
+            state.vertex_count=primitive==3 ? 0 : 2;
+            if (primitive==4) state.vertices[0]=state.vertices[1];
+            if (primitive!=3) state.vertices[1]=state.vertices[2];
+            if (reg==12 || reg==13) return;
+            if (attributes&~0x35fU) throw std::invalid_argument("Unsupported native triangle attributes: "+std::to_string(attributes));
+            const auto& context=state.contexts[(attributes>>9)&1];
+            if (auto draw=plan_triangle(context.frame,context.offset,context.scissor,vertices,(attributes&8)!=0)) {
+                configure_draw(state,context,attributes,draw->draw);
+                if (attributes&16) {
+                    plan_texture(draw->draw,context.texture,context.filter,context.clamp,state.texa);
+                    if (!(attributes&256)) draw->draw.flags|=perspective_triangle_flag;
+                }
+                draws.push_back(Draw{draw->draw,unsigned((context.texture>>56)&15),draw->triangle});
+            }
+            return;
+        }
         if ((state.primitive&7)!=6 || (attributes&~0x35fU)) {
             if (reg==12 || reg==13) {
                 // Vertex writes with a suppressed kick initialize the latch;
@@ -143,27 +171,9 @@ private:
         state.first=false;
         if (reg==12 || reg==13) return;
         const auto& context=state.contexts[(attributes>>9)&1];
-        // Dithering affects 16-bit targets only. Their quantization and matrix
-        // application are not supported by the current 24/32-bit sprite path.
-        if (state.dither_enabled && ((context.frame>>24)&63)>1)
-            throw std::invalid_argument("Unsupported native dithered surface format");
-        if ((context.test&0x10000U) &&
-            (!(context.depth&(1ULL<<32)) || ((context.test>>17)&3)!=1))
-            throw std::invalid_argument("Unsupported native sprite depth test");
         auto draw=plan_sprite(context.frame,context.offset,context.scissor,state.x,state.y,x,y,state.color);
         if (draw) {
-            if (state.scan_mask&2) draw->flags|=4096|((state.scan_mask&1)*8192);
-            draw->test=std::uint32_t(context.test)&65535;
-            if (((context.frame>>24)&63)==1) draw->flags|=512;
-            if (attributes&64) {
-                for (unsigned shift=0;shift<8;shift+=2)
-                    if (((context.alpha>>shift)&3)>2) throw std::invalid_argument("Unsupported native blend selector");
-                draw->blend=std::uint32_t(context.alpha&255)|std::uint32_t((context.alpha>>24)&0xff00);
-                draw->flags|=256;
-                if (state.per_pixel_blend) draw->flags|=1024;
-                if (!state.color_clamp) draw->flags|=2048;
-            }
-            if (context.force_alpha) draw->flags|=32;
+            configure_draw(state,context,attributes,*draw);
             if (attributes&16) {
                 plan_sprite_texture(*draw,attributes,context.texture,context.filter,context.clamp,state.texa,context.offset,
                     state.x,state.y,x,y,state.first_uv,state.uv);
@@ -171,12 +181,32 @@ private:
             draws.push_back(Draw{*draw,unsigned((context.texture>>56)&15)});
         }
     }
+    static void configure_draw(const State& state,const Context& context,unsigned attributes,Sprite& draw) {
+        if (state.dither_enabled && ((context.frame>>24)&63)>1)
+            throw std::invalid_argument("Unsupported native dithered surface format");
+        if ((context.test&0x10000U) &&
+            (!(context.depth&(1ULL<<32)) || ((context.test>>17)&3)!=1))
+            throw std::invalid_argument("Unsupported native draw depth test");
+        if (state.scan_mask&2) draw.flags|=4096|((state.scan_mask&1)*8192);
+        draw.test=std::uint32_t(context.test)&65535;
+        if (((context.frame>>24)&63)==1) draw.flags|=512;
+        if (attributes&64) {
+            for (unsigned shift=0;shift<8;shift+=2)
+                if (((context.alpha>>shift)&3)>2) throw std::invalid_argument("Unsupported native blend selector");
+            draw.blend=std::uint32_t(context.alpha&255)|std::uint32_t((context.alpha>>24)&0xff00);
+            draw.flags|=256;
+            if (state.per_pixel_blend) draw.flags|=1024;
+            if (!state.color_clamp) draw.flags|=2048;
+        }
+        if (context.force_alpha) draw.flags|=32;
+    }
     static void parse(State& state,std::span<const Quadword> packet,std::vector<Operation>& draws) {
         std::size_t cursor=0;
         while (cursor<packet.size()) {
             const auto tag=packet[cursor++]; const auto low=half(tag,0),registers=half(tag,1);
             const auto format=(low>>58)&3,encoded=low>>60,nreg=encoded ? encoded : 16;
             const auto entries=(low&0x7fffU)*nreg;
+            if (entries) state.packed_q=0x3f800000;
             const auto count=format>=2 ? low&0x7fffU : format ? (entries+1)/2 : entries;
             if (count>packet.size()-cursor) throw std::invalid_argument("Truncated native graphics packet");
             if (!format && (low&(1ULL<<46))) command(state,0,(low>>47)&2047,draws);
@@ -194,7 +224,9 @@ private:
                 } else if (reg==14) command(state,q[2]&255,half(q,0),draws);
                 else if (reg==15) continue;
                 else if (reg==0) command(state,0,q[0]&2047,draws);
-                else if (reg==1) command(state,1,(q[0]&255)|((q[1]&255)<<8)|((q[2]&255)<<16)|((q[3]&255)<<24),draws);
+                else if (reg==1) command(state,1,(q[0]&255)|((q[1]&255)<<8)|((q[2]&255)<<16)|((q[3]&255)<<24)|
+                    (std::uint64_t(state.packed_q)<<32),draws);
+                else if (reg==2) { state.packed_q=q[2]; command(state,2,half(q,0),draws); }
                 else if (reg==3) command(state,3,(q[0]&16383)|((q[1]&16383)<<16),draws);
                 else if (reg==4 || reg==5 || reg==12 || reg==13) {
                     const auto target=reg>=12 || (q[3]&0x8000U) ? (reg&1)+12U : reg;

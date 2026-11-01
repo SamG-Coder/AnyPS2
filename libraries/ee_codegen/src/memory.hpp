@@ -42,6 +42,8 @@ inline std::uint32_t physical_address(std::uint32_t address) {
     return runtime::default_ram_address(address);
 }
 inline std::string code_overlap(Writer& w,const std::string& offset,const std::string& end,std::span<const CodeRange> code,const std::string& active_image="1") {
+    if (code.size()>16)
+        return w.value("call i1 @nt_ee_check_code_range(i64 "+offset+", i64 "+end+", i32 "+active_image+")");
     std::string overlap="false";
     for (const auto& range:code) {
         const auto begin=range.address;

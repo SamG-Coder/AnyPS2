@@ -3,12 +3,10 @@
 #include <stdexcept>
 
 namespace nt::graphics {
-inline void plan_sprite_texture(Sprite& draw,unsigned attributes,std::uint64_t texture,
-    std::uint64_t filter,std::uint64_t clamp,std::uint32_t texa,std::uint64_t offset,
-    unsigned first_x,unsigned first_y,unsigned last_x,unsigned last_y,std::uint32_t first_uv,std::uint32_t last_uv) {
+inline void plan_texture(Sprite& draw,std::uint64_t texture,
+    std::uint64_t filter,std::uint64_t clamp,std::uint32_t texa) {
     const unsigned format=(texture>>20)&63,function=(texture>>35)&3;
-    if (!(attributes&(1U<<8))) throw std::invalid_argument("Perspective sprite textures are unsupported");
-    if ((format>1 && format!=20) || function>1) throw std::invalid_argument("Unsupported sprite texture format or function");
+    if ((format>1 && format!=20) || function>1) throw std::invalid_argument("Unsupported texture format or function");
     const unsigned magnify=(filter>>5)&1,minify=(filter>>6)&7;
     if (((filter>>2)&7) || minify>1 || minify!=magnify) throw std::invalid_argument("Unsupported mipmap or mixed sprite filtering");
     if (magnify) draw.flags|=128;
@@ -28,6 +26,12 @@ inline void plan_sprite_texture(Sprite& draw,unsigned attributes,std::uint64_t t
     if ((draw.clamp_u==2 && draw.min_u>draw.max_u) || (draw.clamp_v==2 && draw.min_v>draw.max_v))
         throw std::invalid_argument("Reversed region-clamp bounds");
     draw.texa=texa;
+}
+inline void plan_sprite_texture(Sprite& draw,unsigned attributes,std::uint64_t texture,
+    std::uint64_t filter,std::uint64_t clamp,std::uint32_t texa,std::uint64_t offset,
+    unsigned first_x,unsigned first_y,unsigned last_x,unsigned last_y,std::uint32_t first_uv,std::uint32_t last_uv) {
+    if (!(attributes&(1U<<8))) throw std::invalid_argument("Perspective sprite textures are unsupported");
+    plan_texture(draw,texture,filter,clamp,texa);
     draw.x0=int(first_x)-int(offset&65535); draw.y0=int(first_y)-int((offset>>32)&65535);
     draw.dx=int(last_x)-int(first_x); draw.dy=int(last_y)-int(first_y);
     draw.u0=first_uv&16383; draw.v0=(first_uv>>16)&16383;

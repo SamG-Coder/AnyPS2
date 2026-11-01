@@ -7,8 +7,8 @@ struct Image { std::uint32_t entry; std::vector<Segment> segments; };
 // Opaque metadata is skipped, not authenticated. No filename/title selection.
 Image unpack(ByteView input);
 // Equal overlapping bytes are coalesced. Conflicting overlaps reject input.
-// Container has no section permissions: only the entry-containing segment is
-// initially executable. Other code segments require explicit conversion metadata;
-// discovery must report unresolved transfers rather than guessing data is code.
+// Container has no section permissions. An AnyPS2 PT_NOTE import record allows
+// static control-flow discovery in all file-backed segments. Only discovered
+// instructions become protected code; unreferenced data is not scanned as code.
 Bytes elf_image(const Image& image);
 }

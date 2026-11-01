@@ -23,11 +23,25 @@ int main(int argc,char** argv) {
         word(raw,0x2000); word(raw,8); word(raw,0x2402002a); word(raw,12);
         word(raw,0x2004); word(raw,4); word(raw,12);
         word(raw,0x3000); word(raw,4); word(raw,17);
-        auto packed=pack(raw); if (argc==2) nt::write_file(argv[1],packed);
+        auto packed=pack(raw);
+        if (argc==2) {
+            nt::write_file(argv[1],packed);
+            Bytes cross{0,0,0,0}; word(cross,2); word(cross,0x2000);
+            word(cross,0x2000); word(cross,28);
+            for (const auto instruction:{0x24083008U,0x24020029U,0xad020000U,0x0c000c00U,0U,0x2403007bU,12U})
+                word(cross,instruction);
+            word(cross,0x3000); word(cross,12);
+            for (const auto value:{0x03e00008U,0x24420001U,0xdeadbeefU}) word(cross,value);
+            nt::write_file(std::string(argv[1])+".cross",pack(cross));
+        }
         const auto image=nt::package::unpack(packed);
         const auto bytes=nt::package::elf_image(image); const auto elf=nt::elf::parse(bytes);
         check(elf.entry==0x2000 && elf.segments.size()==2 && elf.segments[0].file_size==8);
+        check(elf.inferred_permissions);
         check(nt::le32(bytes,elf.segments[0].offset)==0x2402002a && elf.segments[0].flags==7 && elf.segments[1].flags==6);
+        auto bad_note=bytes;
+        bad_note.back()=1;
+        rejected([&] { nt::elf::parse(bad_note); });
         auto conflict=image; conflict.segments[1].data[0]^=1;
         rejected([&] { nt::package::elf_image(conflict); });
         auto bad=packed; bad.push_back(0); rejected([&] { nt::package::unpack(bad); });

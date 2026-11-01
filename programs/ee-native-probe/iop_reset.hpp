@@ -59,6 +59,7 @@ public:
     nt::iop::NativeResult result() const { return result_; }
     std::span<const std::uint8_t> data() const { return state_->ram; }
     const nt::iop::Cpu* active_state() const { return state_->services->threads.active_state(); }
+    auto thread_snapshot() const { return state_->services->threads.snapshot(); }
     std::uint64_t executed() const { return retired_lifetimes_+state_->startup->executed(); }
     std::uint32_t generations() const { return generations_; }
     std::size_t returned() const { return state_->startup->returned().size(); }
@@ -71,6 +72,9 @@ public:
     const nt::iop::NativeDev9Services& dev9() const { return state_->services->dev9; }
     const nt::audio::Output& audio() const { return *state_->services->audio_output; }
     const auto& rejected_transfer() const { return state_->services->sif.rejected_transfer(); }
+    auto pending_iop_packet() const { return state_->services->inbound.pending_packet(); }
+    bool request_close() { return state_->services->cdvdman.request_close(); }
+    bool exit_requested() const { return state_->services->cdvdman.exit_requested(); }
     std::uint32_t cdvd_command() const { return state_->scmd ? state_->scmd->last_method() : 0; }
     std::uint32_t cdvd_media() const { return state_->cdvd ? state_->cdvd->media_mode() : 0; }
     std::uint32_t cdvd_argument() const { return state_->scmd ? state_->scmd->last_argument() : 0; }
@@ -133,6 +137,7 @@ private:
             nt_iop_generated_libraries(),nt_iop_generated_imports(),
             [](std::string_view) { return true; },disc,&destination_,0,delivery_);
         next->services->modload.attach_catalog(nt_iop_generated_source_hashes());
+        next->services->cdvdman.enable_application_exit();
         install_sealed(data,*next);
         next->startup=std::make_unique<nt::iop::NativeModuleStartup>(nt::iop::run_llvm,*next->services,next->ram,module_,nt_iop_generated_entries(),0x1ff000);
         next->incoming=std::make_unique<nt::ee::NativeIopCommands>(next->services->sif_control,next->services->inbound);

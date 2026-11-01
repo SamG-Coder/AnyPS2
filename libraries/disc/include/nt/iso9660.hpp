@@ -2,6 +2,7 @@
 #include <nt/binary.hpp>
 #include <fstream>
 #include <array>
+#include <optional>
 
 namespace nt::disc {
 class PathError : public std::runtime_error { public: using std::runtime_error::runtime_error; };
@@ -32,6 +33,7 @@ private:
     std::ifstream file_;
     std::uint64_t size_;
     std::uint32_t volume_sectors_=0;
+    std::optional<std::uint32_t> appended_start_;
     Entry root_{};
     std::string volume_;
 };

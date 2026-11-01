@@ -12,7 +12,9 @@
 
 namespace nt::ee_codegen {
 inline constexpr std::size_t function_instruction_limit=512;
-inline constexpr std::size_t program_instruction_limit=1048576;
+// Allow an eight-MiB executable while keeping discovery and emission bounded.
+// Individual native functions and compilation units retain their smaller caps.
+inline constexpr std::size_t program_instruction_limit=2*1024*1024;
 struct PayloadMapping { std::uint32_t source,destination,size; std::vector<std::uint32_t> entry_offsets; };
 struct CodePayload { std::uint32_t address; std::vector<std::uint8_t> bytes; };
 using LayoutDeclaration=std::array<std::uint32_t,4>;

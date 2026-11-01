@@ -10,7 +10,8 @@
 namespace nt::ee {
 struct NativeUploadView { unsigned destination; std::span<const std::uint8_t> bytes; };
 struct NativeLaunchView { unsigned entry,top,itop; bool continuation=false; };
-// Native packet configuration. Unsupported work is rejected as a whole batch.
+// Native packet configuration. Each segment ending at a callback boundary is
+// atomic; a suspended remainder is owned until the compiled handler releases it.
 class NativePacketSetup {
 public:
     graphics::BatchConsumer graphics;
@@ -44,19 +45,21 @@ public:
         if (!decode(address,channel,field)) return {Stop::unsupported_system};
         const auto& unit=units_[channel];
         switch (field) {
-        case 0: return {Stop::budget,(unit.stopped ? 0x100U : 0U)|(unit.broken ? 0x200U : 0U)|(unit.double_buffer ? 0x80U : 0U)};
+        case 0: return {Stop::budget,(unit.stopped ? 0x100U : 0U)|(unit.broken ? 0x200U : 0U)|
+            (unit.interrupt_stall ? 0x400U : 0U)|(unit.interrupt ? 0x800U : 0U)|(unit.double_buffer ? 0x80U : 0U)};
         case 2: return {Stop::budget,unit.error_mask};
         case 3: return {Stop::budget,unit.mark};
         case 4: return {Stop::budget,unit.cycle};
         case 5: return {Stop::budget,unit.mode};
-        case 6: return {Stop::budget,unit.code};
+        case 6: return {Stop::budget,0}; // No partially consumed UNPACK/MPG command.
         case 7: return {Stop::budget,unit.mask};
-        case 8: return {Stop::budget,unit.itops};
-        case 9: return {Stop::budget,unit.base};
-        case 10: return {Stop::budget,unit.offset};
-        case 11: return {Stop::budget,unit.tops};
-        case 12: return {Stop::budget,unit.itop};
-        case 13: return {Stop::budget,unit.top};
+        case 8: return {Stop::budget,unit.code};
+        case 9: return {Stop::budget,unit.itops};
+        case 10: return {Stop::budget,unit.base};
+        case 11: return {Stop::budget,unit.offset};
+        case 12: return {Stop::budget,unit.tops};
+        case 13: return {Stop::budget,unit.itop};
+        case 14: return {Stop::budget,unit.top};
         default: return {Stop::budget,field>=16 ? unit.row_column[field-16] : 0};
         }
     }
@@ -77,8 +80,11 @@ public:
         case 1:
             if (value&2) unit.broken=true;
             if (value&4) unit.stopped=true;
-            if (value&8) unit.broken=unit.stopped=false;
-            if (value&1) { unit.broken=unit.stopped=false; unit.error_mask=0; }
+            if (value&8) unit.broken=unit.stopped=unit.interrupt=unit.interrupt_stall=false;
+            if (value&1) {
+                unit.broken=unit.stopped=unit.interrupt=unit.interrupt_stall=false;
+                unit.error_mask=0; pending_[channel]={}; interrupt_events_&=~(1U<<channel);
+            }
             return Stop::budget;
         case 2: unit.error_mask=value&7; return Stop::budget;
         case 3: unit.mark=value&0xffff; return Stop::budget;
@@ -90,7 +96,37 @@ public:
         }
     }
     unsigned rejected_command() const { return rejected_command_; }
+    bool pending(unsigned channel) const { return channel<2 && !pending_[channel].bytes.empty(); }
+    unsigned take_interrupts() { const auto result=interrupt_events_; interrupt_events_=0; return result; }
     Stop consume(unsigned channel,std::span<const std::uint8_t> bytes,bool vector_active) {
+        std::size_t consumed=0;
+        if (channel>=2) return consume_segment(channel,bytes,vector_active,consumed);
+        if (pending(channel)) return Stop::unsupported_system;
+        if (bytes.size()>0x100000) return Stop::invalid_state;
+        // Retain source data independently of subsequent caller writes. No
+        // command is re-executed when an interrupt handler releases the suffix.
+        Pending candidate{{bytes.begin(),bytes.end()},0};
+        const auto result=consume_segment(channel,candidate.bytes,vector_active,consumed);
+        if (result!=Stop::budget) return result;
+        if (consumed<candidate.bytes.size()) {
+            candidate.offset=consumed; pending_[channel]=std::move(candidate);
+        }
+        return Stop::budget;
+    }
+    Stop resume(unsigned channel,bool vector_active) {
+        if (!pending(channel)) return Stop::budget;
+        if (units_[channel].stopped || units_[channel].broken || units_[channel].interrupt_stall)
+            return Stop::budget;
+        auto& packet=pending_[channel];
+        std::size_t consumed=0;
+        const auto result=consume_segment(channel,std::span(packet.bytes).subspan(packet.offset),vector_active,consumed);
+        if (result!=Stop::budget) return result;
+        packet.offset+=consumed;
+        if (packet.offset==packet.bytes.size()) packet={};
+        return Stop::budget;
+    }
+private:
+    Stop consume_segment(unsigned channel,std::span<const std::uint8_t> bytes,bool vector_active,std::size_t& consumed) {
         if (channel==2) {
             if (gif_paused_ || !graphics.submit) return Stop::unsupported_system;
             // Descriptor-only submissions carry no GIF data. They complete
@@ -106,7 +142,8 @@ public:
         }
         if (channel==1 && gif_stream_.pending()) return Stop::unsupported_system;
         if (channel>=2 || bytes.size()%4) return Stop::unsupported_system;
-        if (units_[channel].stopped || units_[channel].broken || vector_active) return Stop::unsupported_system;
+        if (units_[channel].stopped || units_[channel].broken || units_[channel].interrupt_stall || vector_active)
+            return Stop::unsupported_system;
         auto next=units_[channel];
         std::vector<NativeUploadView> uploads;
         std::vector<NativeVectorDataView> data;
@@ -114,6 +151,7 @@ public:
         std::vector<graphics::Packet> drawing;
         std::size_t drawing_bytes=0;
         bool launch=false,continuation=false;
+        bool notify=false;
         unsigned entry=0,launch_command=0,wait_command=0;
         std::size_t offset=0;
         const auto word=[&]() {
@@ -122,7 +160,7 @@ public:
         while (offset<bytes.size()) {
             const auto code=word(),command=(code>>24)&127U;
             rejected_command_=command;
-            if (code&0x80000000U) return Stop::unsupported_system;
+            const bool interrupt=(code&0x80000000U) && !(next.error_mask&1U);
             // Only padding may follow a launch in this atomic submission path.
             if (launch && command) return Stop::unsupported_system;
             switch (command) {
@@ -234,6 +272,10 @@ public:
             default: return Stop::unsupported_system;
             }
             next.code=code;
+            if (interrupt) {
+                notify=next.interrupt=true;
+                if (command!=7) { next.interrupt_stall=true; break; }
+            }
         }
         // Validation precedes the host wait. No current-batch effects have
         // occurred yet, and a retry cannot replay a previously submitted draw.
@@ -259,7 +301,8 @@ public:
             if (result!=Stop::budget) { rejected_command_=launch ? launch_command : 0x6c; return result; }
         }
         if (!drawing.empty() && !graphics.submit(graphics.context,drawing)) return Stop::unsupported_system;
-        units_[channel]=next; rejected_command_=0;
+        units_[channel]=next; consumed=offset; rejected_command_=0;
+        if (notify) interrupt_events_|=1U<<channel;
         return Stop::budget;
     }
 private:
@@ -267,16 +310,20 @@ private:
     static bool decode(std::uint32_t address,unsigned& channel,unsigned& field) {
         if (address<0x10003800 || address>=0x10004000 || address%16) return false;
         channel=(address-0x10003800)/0x400; field=(address&0x3ff)/16;
-        return field<24 && field!=15 && (channel || (field!=9 && field!=10 && field!=11 && field!=13 && field!=14));
+        return field<24 && field!=15 && (channel || (field!=10 && field!=11 && field!=12 && field!=14));
     }
     struct Unit {
         bool stopped=false,broken=false;
+        bool interrupt=false,interrupt_stall=false;
         bool double_buffer=false;
         unsigned base=0,offset=0,tops=0,top=0,itops=0,itop=0;
         std::uint32_t error_mask=0,mark=0,mode=0,mask=0,cycle=0,code=0;
         std::array<std::uint32_t,8> row_column{};
     };
+    struct Pending { std::vector<std::uint8_t> bytes; std::size_t offset=0; };
     std::array<Unit,2> units_{};
+    std::array<Pending,2> pending_{};
+    unsigned interrupt_events_=0;
     graphics::PacketStream gif_stream_;
     bool gif_paused_=false;
     std::uint32_t gif_mode_=0;

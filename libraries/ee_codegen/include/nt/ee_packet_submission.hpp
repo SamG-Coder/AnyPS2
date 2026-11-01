@@ -3,15 +3,18 @@
 #include <nt/ee_submission_policy.hpp>
 #include <nt/ee_packet_batch.hpp>
 #include <array>
+#include <optional>
 #include <span>
 
 namespace nt::ee {
-// A synchronous native packet consumer. Success means all bytes were consumed;
+// A native packet consumer. Success means all bytes were consumed or retained;
 // every other result must leave consumer state unchanged. The view is borrowed
-// only for this call. Descriptor batches have no transfer clock.
+// only for this call. A pending consumer owns its bytes until complete() or
+// cancel(). Descriptor batches have no transfer clock.
 struct NativePacketConsumer {
     void* context=nullptr;
     Stop (*consume)(void*,unsigned,std::span<const std::uint8_t>)=nullptr;
+    bool (*pending)(void*,unsigned)=nullptr;
 };
 class NativePacketSubmission {
 public:
@@ -21,11 +24,14 @@ public:
     IoRead read(std::uint32_t address) const {
         unsigned channel,field;
         if (!decode(address,channel,field)) return {Stop::unsupported_system};
+        // Native queue ownership is not an intermediate console bus position.
+        if (pending_[channel] && field>=1 && field<=5) return {Stop::unsupported_system};
         return {Stop::budget,channels_[channel][field]};
     }
     Stop write(Memory& memory,std::uint32_t address,std::uint32_t value) {
         unsigned channel,field;
         if (!decode(address,channel,field)) return Stop::unsupported_system;
+        if (pending_[channel]) return Stop::unsupported_system;
         auto& config=channels_[channel];
         if (field==8) return value ? Stop::unsupported_system : Stop::budget;
         if (field) {
@@ -57,9 +63,24 @@ public:
         }
         const auto result=consumer.consume(consumer.context,channel,payload);
         if (result!=Stop::budget) return result;
+        if (consumer.pending && consumer.pending(consumer.context,channel)) {
+            pending_[channel]=next; config[0]=value; return Stop::budget;
+        }
         next[0]&=~0x100U; next[2]=0; config=next;
         memory.completions->complete(channel); memory.completions->publish(memory);
         return Stop::budget;
+    }
+    void complete(Memory& memory,unsigned channel) {
+        if (channel>=pending_.size() || !pending_[channel]) return;
+        auto next=*pending_[channel]; next[0]&=~0x100U; next[2]=0;
+        channels_[channel]=next; pending_[channel].reset();
+        if (memory.completions) {
+            memory.completions->complete(channel); memory.completions->publish(memory);
+        }
+    }
+    void cancel(unsigned channel) {
+        if (channel>=pending_.size() || !pending_[channel]) return;
+        pending_[channel].reset(); channels_[channel][0]&=~0x100U; channels_[channel][2]=0;
     }
 private:
     static bool decode(std::uint32_t address,unsigned& channel,unsigned& field) {
@@ -68,5 +89,6 @@ private:
         return field<=5 || field==8;
     }
     std::array<std::array<std::uint32_t,9>,3> channels_{};
+    std::array<std::optional<std::array<std::uint32_t,9>>,3> pending_{};
 };
 }

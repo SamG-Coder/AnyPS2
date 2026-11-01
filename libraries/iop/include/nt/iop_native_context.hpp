@@ -54,7 +54,7 @@ public:
           audio_output(audio::make_output()),sound(libraries,*audio_output),
           usb_host(usb::make_host()),usb(libraries,heap,*usb_host),dev9(libraries),
           sif(destination),peer_(destination ? std::make_unique<NativeSifCommandEndpoint>(*destination,command_buffer,sif,std::move(delivery)) : nullptr),
-          commands(peer_.get()),inbound(ram,layout.packet_buffer),callbacks({&alarms,&sif,&inbound,&hard_timers,&vblank,&cdvdman,&rpc_clients}),
+          commands(peer_.get()),inbound(ram,layout.packet_buffer),callbacks({&alarms,&sif,&inbound,&hard_timers,&vblank,&cdvdman,&rpc_clients,&usb,&sound}),
           interrupts(layout.interrupt_stack,&callbacks),sif_control(interrupts,&sif),threads(interrupts,&heap),
           rpc_servers(peer_.get(),&threads),rpc_data(peer_.get()),rpc_clients(heap,threads,peer_.get(),[this] { return command_session.rpc_ready(); },ram),
           events(&threads),semaphores(&threads),mailboxes(&threads),fixed_pools(heap,&threads),
@@ -63,6 +63,7 @@ public:
           dmacman_(dmac_priority_),router(providers()),arena_(ram),packet_buffer_(layout.packet_buffer) {
         inbound.connect(commands,command_session,sif_control,&rpc_servers,&rpc_clients);
         usb.connect(threads);
+        sound.connect(heap);
         hard_timers.connect(interrupts);
         vblank.connect(events,ram);
         serial_.connect_disconnected_ports(interrupts);
@@ -79,12 +80,15 @@ public:
     // neither acknowledges the EE handshake nor declares RPC/reset completion.
     NativeServiceReply initialize_commands() {
         if (!peer_) return {NativeServiceStatus::unavailable};
-        if (sif_control.ready())
-            return {sif_control.sub_address()==packet_buffer_ ? NativeServiceStatus::returned : NativeServiceStatus::unavailable};
-        const auto initialized=sif_control.invoke({5,{},NativeServiceKind::sifman},arena_);
-        if (initialized.status!=NativeServiceStatus::returned || !sif_control.ready())
-            return {NativeServiceStatus::unavailable};
-        sif_control.invoke({27,{packet_buffer_,0,0,0},NativeServiceKind::sifman},arena_);
+        if (sif_control.ready()) {
+            if (sif_control.sub_address()!=packet_buffer_) return {NativeServiceStatus::unavailable};
+        } else {
+            const auto initialized=sif_control.invoke({5,{},NativeServiceKind::sifman},arena_);
+            if (initialized.status!=NativeServiceStatus::returned || !sif_control.ready())
+                return {NativeServiceStatus::unavailable};
+            sif_control.invoke({27,{packet_buffer_,0,0,0},NativeServiceKind::sifman},arena_);
+        }
+        commands.initialize_system_handlers();
         return {NativeServiceStatus::returned};
     }
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {

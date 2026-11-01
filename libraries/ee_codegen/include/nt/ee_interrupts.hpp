@@ -12,6 +12,8 @@ namespace nt::ee {
 class NativeInterrupts {
 public:
     static constexpr std::uint32_t return_gate=0xffffffe0U;
+    void* observation_context=nullptr;
+    void (*observe_delivery)(void*,bool,unsigned,const runtime::State&)=nullptr;
     void raise(unsigned line) { if (line<16) pending_|=1U<<line; }
     void raise_sbus(unsigned cause) {
         if (cause<16) { sbus_pending_|=1U<<cause; raise(1); }
@@ -119,6 +121,7 @@ public:
         if (!memory.data || stack>memory.size) { memory.fault_address=stack; return Stop::memory_fault; }
         if (!protection) return Stop::invalid_state;
         if (protection(stack-0x2a0,0x2a0)) { memory.fault_address=stack-0x2a0; return Stop::code_write; }
+        if (observe_delivery) observe_delivery(observation_context,dma,line,state);
         interrupted_=state; stack_=stack-0x2a0;
         state.cop0_epc=state.pc; state.cop0_status=(state.cop0_status|2U)&~1U;
         callbacks_=std::move(callbacks); callback_=0;

@@ -23,6 +23,13 @@ to advance a trace. Do not require, embed, or reconstruct a proprietary BIOS.
 - Recover functions and generate native service calls. Translate graphics,
   audio, input, file-I/O and synchronization behavior into native implementations;
   use Vulkan for graphics. Do not hide whole-machine emulation behind these APIs.
+- Connect recovered modules through native object symbols, linker relocations,
+  and explicit native exports/imports. Resolve known calls at conversion/link time;
+  use typed native function pointers for genuinely indirect calls and callbacks.
+  Compiling an original-address dispatcher or a CPU-state adapter does not by
+  itself satisfy this requirement. Existing adapters are migration work, not the
+  target ABI. Missing bindings must be reported, never replaced with a runtime
+  decoder or a success stub.
 - Modernize the implementation for native PC systems during conversion. Identify
   the purpose of console-specific operations and replace them with suitable PC
   APIs, data structures and execution models where behavior can be preserved.
