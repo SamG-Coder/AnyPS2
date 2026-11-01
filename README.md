@@ -29,6 +29,33 @@ Its next observed boundary is starting a sample voice through LIBSD `KON`;
 native sample-voice playback remains unimplemented.
 Runtime performance is still experimental; compiler measurements and tuning are described in [batch conversion](docs/batch-conversion.md).
 
+## EE correctness review and verification backlog
+
+The items below are **review targets, not confirmed defects or completed fixes**.
+They focus on native EE recompilation and pointer discovery. A successful
+conversion, LLVM build or synthetic test does not establish playable GT4.
+
+| Priority | Area | Required verification |
+| --- | --- | --- |
+| P1 | Cross-basic-block callback discovery | Check indirect-call targets whose pointer definitions cross branches, loops or function boundaries; extend bounded data-flow discovery if tests demonstrate missed targets. |
+| P1 | Indirect dispatch and coverage | Report unresolved runtime call targets; ensure generated code reads mutable pointers at execution time and never silently treats an unresolved target as compiled. |
+| P1 | Code versus payload | Confirm VU uploads, embedded tables and data in executable ELF segments are not mistaken for EE functions; keep unclassified references visible. |
+| P1 | Pointer invalidation | Test full/partial overwrites, aliasing and control-flow joins before treating stored pointers as callable. |
+| P2 | R5900 register effects | Audit `pointer_write()` and related analysis for writes, non-writes and unknown effects, including `swc1`; unrelated instructions must not unnecessarily terminate a pointer trace. |
+| P2 | Stack and ABI | Test stack/frame-pointer aliases, arguments beyond register arguments, stack adjustments, preserved/volatile registers and helper-call forwarding. |
+| P2 | Delay slots and branches | Verify callback argument tracking in branch and call delay slots, including conditional paths and branch-likely semantics. |
+| P3 | ELF and memory protection | Verify initialized data, writable regions, BSS, VU containers, address aliases and writes to compiled code are distinguished correctly. |
+| P3 | Native instruction semantics | Differentially test R5900 integer/MMI, signedness, shifts, overflow, memory access, branches and LLVM calling conventions against a behavior reference. |
+| P3 | Service boundaries | Verify VU/IOP and other unsupported native service operations stop explicitly instead of silently succeeding. |
+| P4 | Diagnostics and regression | Check `call-sites.tsv`, `pointer-references.tsv`, synthetic ELF fixtures, full test-suite regressions and reproducible GT4/smaller-game startup traces. |
+
+For each item: inspect the implementation, reproduce any suspected failure with
+a minimal fixture, fix only confirmed problems, run relevant tests, and record
+**FIXED**, **VERIFIED OK**, **UNRESOLVED** or **BLOCKED** with evidence.
+In particular, a `data-read-observed` reference is not proof that the same
+address is never called elsewhere. The existing bounded analyses intentionally
+prefer explicit gaps over inventing code targets.
+
 ## Pipeline
 
 ```text
