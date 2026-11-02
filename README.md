@@ -8,6 +8,20 @@ AnyPS2 is an experimental, BIOS-free C++20 toolchain for converting user-owned P
 
 > **Work in progress:** AnyPS2 is not a general-purpose PS2 game launcher. GT4 has rendered its opening warning through Vulkan and progressed into subsequent graphics/startup work, but it has **not reached the title screen or playable gameplay**.
 
+**One homebrew demo is working:** the locally adapted cube demo from
+[glampert/ps2-homebrew](https://github.com/glampert/ps2-homebrew) renders animated,
+checker-textured cubes and text through LLVM AOT and Vulkan. A 20-second run was
+verified at 640 x 448. Controller interaction is not yet verified; this is not a
+claim of playable commercial games. See [milestone evidence and project history](docs/project-history.md).
+
+## License and provenance
+
+Original AnyPS2 code is [MIT licensed](LICENSE). Third-party components retain
+[their own licenses and notices](docs/licensing.md). The repository distributes
+source and original synthetic tests, not games, BIOS/firmware, proprietary SDKs,
+extracted assets or converted commercial executables. Reference use is recorded
+in the [source provenance ledger](docs/source-references.md).
+
 ## How it works
 
 ```text
@@ -48,7 +62,12 @@ Native services aim to reproduce the *observable behavior* of console operations
 
 ### Gran Turismo 4 milestone
 
-GT4 has displayed its opening warning using Vulkan. An earlier generated build also reached triangle rendering and a LIBSD `KON` sample-voice start, for which native playback is still missing. After stricter code discovery exposed startup regressions, the latest regenerated build again renders the warning and starts fifteen threads, but still stops at a missing EE callback before that earlier boundary. See the [correctness review](docs/ee-correctness-review.md) for verified fixes and remaining gaps.
+GT4 has displayed its opening warning using Vulkan. Earlier builds also reached
+triangle rendering and a LIBSD sample-voice start. The latest integration rerun
+preserved the warning pixels but exposed an earlier missing-callback regression
+after discovery changes. That regression remains unresolved; the title screen and
+gameplay are not established. See the [correctness review](docs/ee-correctness-review.md)
+for the broader audit and remaining gaps.
 
 This is **real progress in the conversion pipeline**, but not proof of a complete boot, correct gameplay, or improved performance. Some subsystems are validated with synthetic programs and are not yet proven with GT4 itself.
 
@@ -108,6 +127,9 @@ and the limits of static verification.
 
 ## Technical documentation
 
+- [Project history and working demo](docs/project-history.md) — development path, evidence and limits
+- [Source references](docs/source-references.md) — pinned references and provenance
+- [Contributing](CONTRIBUTING.md) — contribution and publication rules
 - [EE native conversion](docs/ee-native.md) — R5900 conversion, LLVM generation, memory, call discovery and limits
 - [EE correctness review](docs/ee-correctness-review.md) — regression fixes, validation evidence and unresolved audit items
 - [Flow verification](docs/flow-verification.md) — check discovery closure and callback-binding gaps before a native build

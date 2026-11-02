@@ -12,7 +12,7 @@ function(check_content relative physical)
        AND NOT lower STREQUAL "docs/third-party/play-license.txt"
        AND NOT lower STREQUAL "docs/third-party/zlib-license.txt"
        AND NOT lower STREQUAL "docs/third-party/hidapi-license.txt"
-       AND NOT lower MATCHES "^(cmakelists\\.txt|readme\\.md|agents\\.md|disclaimer\\.md|\\.agent|\\.gitignore)$")
+       AND NOT lower MATCHES "^(cmakelists\\.txt|readme\\.md|license|contributing\\.md|agents\\.md|disclaimer\\.md|\\.agent|\\.gitignore)$")
         message(FATAL_ERROR "Repository policy: unapproved path: ${relative}")
     endif()
     if(lower MATCHES "(^|/)(generated|native-fixture)\\.cpp$" OR IS_SYMLINK "${physical}")
