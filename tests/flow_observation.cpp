@@ -65,7 +65,7 @@ int main(int argc,char** argv) {
             reject("outside the active file-backed EE code image");
         }
         nt::write_file(scratch/"ram.bin",nt::ByteView(ram).first(ram.size()-1)); reject("indirect transfer");
-        for (const auto address:{0x1010U,0x1014U,0x1100U,0x111cU}) {
+        for (const auto address:{0x1018U,0x101cU,0x1100U,0x111cU}) {
             auto changed=ram; changed[address]^=1; nt::write_file(scratch/"ram.bin",changed);
             reject("instruction bytes differ");
         }

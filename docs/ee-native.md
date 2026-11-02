@@ -2264,8 +2264,14 @@ Project generation streams checked LLVM output into a uniquely owned temporary
 directory and publishes the directory only after every artifact closes
 successfully. It refuses existing destinations. This avoids retaining the full
 LLVM text in memory and detecting output failure only after partial publication.
-Code is split into modules of at most 32 functions, each still bounded to 512
-instructions. A separate module owns dispatch and executable-image publication.
+Code is split into stable 64-KiB source-address ranges, with functions bounded to
+512 instructions. A branch owns its adjacent delay slot across a range boundary.
+Module names and part symbols use source locations so discovering earlier code
+does not renumber unrelated objects. A separate module owns dispatch,
+executable-image publication and shared code-write guards. Incremental rebuilds
+must preserve unchanged generated-file timestamps (for example, with CMake's
+`copy_if_different`). The observation regression checks source hashes, object
+hashes and object timestamps while rebuilding and executing successive versions.
 The generated CMake project lists the modules explicitly and compiles them into
 objects linked into the same native executable. Build parallelism controls the
 number of concurrent LLVM compiler processes. There is no runtime linker, LLVM

@@ -29,6 +29,19 @@ void run_ee_batch_tests();
 void run_ee_file_rpc_tests();
 int main() {
     try {
+        for (const bool taken:{false,true}) {
+            nt::runtime::State state; state.pc=0x4afffc; state.set(8,!taken); state.set(9,41);
+            check(run(&state,1)==nt::ee::Stop::budget && state.executed==1 && state.delay_slot==taken);
+            check(state.pc==(taken ? 0x4b0000U : 0x4b0004U));
+            check(run(&state,8)==nt::ee::Stop::syscall && !state.delay_slot);
+            check(state.pc==(taken ? 0x4b0008U : 0x4b0004U) && state.gpr[9].lo==(taken ? 42U : 41U));
+        }
+        {
+            nt::runtime::State state; state.pc=0x4bfffc;
+            check(run(&state,1)==nt::ee::Stop::budget && state.pc==0x4c0000 && state.delay_slot);
+            check(run(&state,8)==nt::ee::Stop::syscall && state.pc==0x4c0004 && state.executed==4 &&
+                state.gpr[2].lo==12 && state.gpr[31].lo==0x4c0004 && !state.delay_slot);
+        }
         for (unsigned n=0;n<80;++n) {
             const auto address=0x490000+n*32;
             for (const unsigned image:{0U,1U,2U,3U}) {

@@ -12,6 +12,9 @@
 
 namespace nt::ee_codegen {
 inline constexpr std::size_t function_instruction_limit=512;
+// Stable source-address ownership prevents unrelated LLVM units changing when
+// earlier code is discovered. A branch owns its adjacent scalar delay slot.
+inline constexpr std::uint32_t module_address_span=64*1024;
 // Allow an eight-MiB executable while keeping discovery and emission bounded.
 // Individual native functions and compilation units retain their smaller caps.
 inline constexpr std::size_t program_instruction_limit=2*1024*1024;
@@ -22,7 +25,8 @@ struct CodeRange { std::uint32_t address,size,image=0; }; // image 0 is permanen
 struct ExecutableImage { std::uint32_t entry,id; std::vector<CodePayload> segments; };
 // Emits a sorted, bounded set of compiled instructions. Additional ranges protect
 // executable ELF contents that have not yet been reached by discovery.
-// An optional stream factory splits code into numbered, bounded LLVM modules;
+// An optional stream factory splits code into bounded LLVM modules identified
+// by source-address range, not discovery order (indices can be sparse);
 // output then contains shared metadata and dispatch. Streams must remain valid
 // until emission returns. Without the factory, output contains the whole module.
 void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instructions,

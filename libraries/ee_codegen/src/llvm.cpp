@@ -69,8 +69,8 @@ bool supported(Op op) {
     }
 }
 
-void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> ranges,std::size_t index,std::span<const CodePayload> payloads,const NativeLayout& layout,bool external=false) {
-    w.out<<"define "<<(external ? "" : "internal ")<<"i32 @nt_ee_part_"<<index<<"(ptr %state, ptr %memory, i64 %budget) noinline {\nentry:\n"
+void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> ranges,std::span<const CodePayload> payloads,const NativeLayout& layout,bool external=false) {
+    w.out<<"define "<<(external ? "" : "internal ")<<"i32 @nt_ee_part_"<<instructions.front().pc<<"(ptr %state, ptr %memory, i64 %budget) noinline {\nentry:\n"
          <<"  %remaining = alloca i64\n  store i64 %budget, ptr %remaining\n  br label %dispatch\ndispatch:\n";
     const auto pc=w.load("i32",offsetof(runtime::State,pc));
     w.out<<"  switch i32 "<<pc<<", label %unmapped [\n";
@@ -429,8 +429,15 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
     ranges=std::move(merged);
     std::vector<std::span<const r5900::Instruction>> parts;
     for (std::size_t first=0;first<instructions.size();) {
-        auto count=std::min(function_instruction_limit,instructions.size()-first);
-        if (instructions[first+count-1].branch()) --count;
+        const auto unit=instructions[first].pc/module_address_span;
+        const auto boundary=(std::uint64_t(unit)+1)*module_address_span;
+        const auto finish=std::lower_bound(instructions.begin()+first,instructions.end(),boundary,
+            [](const auto& instruction,std::uint64_t end) { return instruction.pc<end; });
+        auto count=std::min(function_instruction_limit,static_cast<std::size_t>(finish-(instructions.begin()+first)));
+        // Never separate a branch from its delay slot. A branch in the final
+        // word of a unit may own one word across the nominal unit boundary.
+        // reject_unsupported() has already checked the adjacent scalar slot.
+        if (instructions[first+count-1].branch()) count=count==1 ? 2 : count-1;
         parts.push_back(instructions.subspan(first,count)); first+=count;
     }
     const auto layout=prepare_native_layout(layouts);
@@ -438,23 +445,28 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
     w.out<<"define i64 @nt_ee_generated_input_identity() {\nentry:\n  ret i64 "<<input_identity<<"\n}\n";
     emit_images(w,images);
     if (module_output) {
-        constexpr std::size_t functions_per_module=32;
-        for (std::size_t first=0;first<parts.size();first+=functions_per_module) {
-            auto& stream=module_output(first/functions_per_module);
+        for (std::size_t first=0;first<parts.size();) {
+            const auto unit_id=parts[first].front().pc/module_address_span;
+            auto end=first+1;
+            while (end<parts.size() && parts[end].front().pc/module_address_span==unit_id) ++end;
+            auto& stream=module_output(unit_id);
             Writer unit{stream};
+            // Keep code protection authoritative in the common module. A new
+            // compiled range must not duplicate guard changes in every object.
+            unit.shared_code_guard=true;
             emit_declarations(unit);
             unit.out<<"declare i1 @nt_ee_check_code_range(i64, i64, i32)\n";
             emit_payloads(unit,payloads);
-            const auto end=std::min(first+functions_per_module,parts.size());
             for (auto index=first;index<end;++index) {
-                emit_part(unit,parts[index],ranges,index,payloads,layout,true);
-                w.out<<"declare i32 @nt_ee_part_"<<index<<"(ptr, ptr, i64)\n";
+                emit_part(unit,parts[index],ranges,payloads,layout,true);
+                w.out<<"declare i32 @nt_ee_part_"<<parts[index].front().pc<<"(ptr, ptr, i64)\n";
             }
             if (!stream) throw std::runtime_error("Cannot finish EE LLVM module");
+            first=end;
         }
     } else {
         emit_payloads(w,payloads);
-        for (std::size_t index=0;index<parts.size();++index) emit_part(w,parts[index],ranges,index,payloads,layout);
+        for (const auto part:parts) emit_part(w,part,ranges,payloads,layout);
     }
     emit_dispatcher(w,parts);
     emit_contains(w,instructions);

@@ -187,7 +187,9 @@ if(BUILD_TESTING)
             "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}" "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/ee-project-tests"
             "-DGENERATOR=${CMAKE_GENERATOR}" "-DPLATFORM=${CMAKE_GENERATOR_PLATFORM}"
             "-DEXE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ee_project.cmake")
-        set_tests_properties(ee-llvm-project PROPERTIES TIMEOUT 120)
+        # This gate builds several independent native projects; retain bounded
+        # command timeouts without a 120-second aggregate cutoff on busy hosts.
+        set_tests_properties(ee-llvm-project PROPERTIES TIMEOUT 240)
         add_test(NAME ee-vector-container COMMAND "${CMAKE_COMMAND}"
             "-DFIXTURE=$<TARGET_FILE:emit-ee-fixture>" "-DCONVERTER=$<TARGET_FILE:ps2-recompile>"
             "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}" "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/vector-section-tests"

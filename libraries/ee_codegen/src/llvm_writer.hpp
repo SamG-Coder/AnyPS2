@@ -10,6 +10,7 @@ using r5900::Op;
 struct Writer {
     std::ostream& out;
     unsigned next=0;
+    bool shared_code_guard=false;
     std::string value(const std::string& expression) {
         const auto id="%v"+std::to_string(next++); out<<"  "<<id<<" = "<<expression<<"\n"; return id;
     }

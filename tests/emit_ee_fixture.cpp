@@ -4,12 +4,14 @@
 #include "vector_section_fixture.hpp"
 #include "object_callback_fixture.hpp"
 #include "flow_observation_fixture.hpp"
+#include "ee_partition_fixture.hpp"
 #include <fstream>
 #include <sstream>
 #include <vector>
 #include <stdexcept>
 int main(int argc,char** argv) {
     if (argc!=2 && argc!=3) return 1;
+    fixture::verify_incremental_ee_modules();
     // Original scalar program: word sign extension, 64-bit addition and syscall.
     const std::uint32_t words[]{0x3c088000,0x2509ffff,0x652a0001,0x350b0001,0x000b6102,0x000b68c3,0x010a702d,0x010b7827,0x24000001,0x0000000c,
         0x24080003,0x24090000,0x2508ffff,0x1500fffe,0x25290001,0x0c000414,0x240a0007,0x0000000c,
@@ -393,6 +395,16 @@ int main(int argc,char** argv) {
         throw std::runtime_error("Reserved completion branch encoding was accepted");
     for (unsigned n=0;n<80;++n)
         code.push_back(nt::r5900::decode(0x490000+n*32,12));
+    // Original branches whose delay slots straddle stable code-unit boundaries.
+    code.push_back(nt::r5900::decode(0x4afffc,0x51000002)); // BEQL t0,zero.
+    code.push_back(nt::r5900::decode(0x4b0000,0x25290001));
+    code.push_back(nt::r5900::decode(0x4b0004,12));
+    code.push_back(nt::r5900::decode(0x4b0008,12));
+    code.push_back(nt::r5900::decode(0x4bfffc,0x0c130004)); // JAL 0x4c0010.
+    code.push_back(nt::r5900::decode(0x4c0000,0x24020005));
+    code.push_back(nt::r5900::decode(0x4c0004,12));
+    code.push_back(nt::r5900::decode(0x4c0010,0x03e00008));
+    code.push_back(nt::r5900::decode(0x4c0014,0x24420007));
     code.push_back(nt::r5900::decode(0xfffffffcU,12));
     auto malformed=images; malformed[1].segments[0].bytes[0]^=1;
     failed=false;

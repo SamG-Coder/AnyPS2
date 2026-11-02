@@ -48,7 +48,7 @@ inline void emit_dispatcher(Writer& w,const std::vector<std::span<const r5900::I
         w.out<<"  br i1 "<<inside<<", label %call"<<first<<", label %unmapped\n";
     });
     for (std::size_t index=0;index<parts.size();++index) {
-        w.out<<"call"<<index<<":\n  %result"<<index<<" = call i32 @nt_ee_part_"<<index
+        w.out<<"call"<<index<<":\n  %result"<<index<<" = call i32 @nt_ee_part_"<<parts[index].front().pc
              <<"(ptr %state, ptr %memory, i64 "<<budget<<")\n  br label %returned\n";
     }
     w.out<<"returned:\n  %stop = phi i32 ";
