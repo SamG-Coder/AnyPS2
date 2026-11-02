@@ -6,6 +6,7 @@ namespace nt::ee {
 // console bus arbitration, stall control and MFIFO need dedicated translations.
 class NativeSubmissionPolicy {
 public:
+    void enable_native_queue() { control_=1; }
     static bool maps(std::uint32_t address) {
         return address==0x1000e000 || address==0x1000e020 || address==0x1000f520 || address==0x1000f590;
     }

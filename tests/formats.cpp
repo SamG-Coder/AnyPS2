@@ -97,6 +97,40 @@ void test_vector_section() {
     auto bad=bytes; std::fill(bad.begin()+0x2a0,bad.begin()+0x2b3,'x');
     rejects([&] { nt::elf::parse(bad); });
 }
+void test_function_symbols() {
+    auto image=make_elf(); image.resize(0x340,0);
+    put32(image,68,0x40); put32(image,72,0x80); put32(image,76,7);
+    put32(image,32,0x180); image[46]=40; image[48]=5;
+    const auto section=[&](unsigned index,unsigned type,unsigned flags,unsigned address,unsigned offset,unsigned size) {
+        const auto at=0x180+index*40;
+        put32(image,at+4,type); put32(image,at+8,flags); put32(image,at+12,address);
+        put32(image,at+16,offset); put32(image,at+20,size);
+    };
+    section(1,1,6,0x100000,0x100,0x20);
+    section(2,1,3,0x100020,0x120,0x20);
+    section(3,3,0,0,0x300,8);
+    section(4,2,0,0,0x280,64);
+    put32(image,0x238,3); put32(image,0x244,16);
+    const std::string names("\0entry\0",7); std::copy(names.begin(),names.end(),image.begin()+0x300);
+    const auto symbol=[&](unsigned index,unsigned address,unsigned size,unsigned type,unsigned section) {
+        const auto at=0x280+index*16;
+        put32(image,at,1); put32(image,at+4,address); put32(image,at+8,size);
+        image[at+12]=static_cast<std::uint8_t>(type); image[at+14]=static_cast<std::uint8_t>(section);
+    };
+    symbol(1,0x100008,8,2,1); // A local function, not reached from the ELF entry.
+    symbol(2,0x100010,4,1,1); // An object in .text is not a function.
+    symbol(3,0x100020,4,2,2); // The data section wins over a function annotation.
+    check(nt::elf::parse(image).function_entries==std::vector<std::uint32_t>{0x100008},"ELF symbol types or section permissions lost");
+    symbol(2,0x100008,0,0x22,1); // Weak alias with unspecified size.
+    check(nt::elf::parse(image).function_entries==std::vector<std::uint32_t>{0x100008},"Duplicate weak function roots were not coalesced");
+    symbol(2,0,0,0x22,0); // Undefined weak function.
+    for (const auto [at,value]:std::initializer_list<std::pair<unsigned,unsigned>>{
+            {0x294,0x100009},{0x298,0x40},{0x244,8},{0x238,5},{0x290,9},{0x230,0xfffffff0}}) {
+        auto invalid=image; put32(invalid,at,value); rejects([&] { nt::elf::parse(invalid); });
+    }
+    image[0x29e]=5;
+    rejects([&] { nt::elf::parse(image); });
+}
 void test_reboot_image() {
     const auto image=fixture::reboot_image();
     const auto files=nt::disc::parse_reboot_image(image);
@@ -313,6 +347,7 @@ int main() {
         ("anyps2-format-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".iso");
     try {
         test_elf();
+        test_function_symbols();
         test_vector_section();
         test_reboot_image();
         test_iop_module();

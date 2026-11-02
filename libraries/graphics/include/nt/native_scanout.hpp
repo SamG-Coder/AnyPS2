@@ -10,12 +10,36 @@ struct Scanout {
 // Convert one enabled display circuit's 24/32-bit target to a native image.
 // Interlaced frame mode stores half as many source rows. Present each source
 // row twice on a progressive PC display; temporal field blending is separate.
-// Dual-circuit blending requires separate support.
+// Aligned dual-circuit output supports constant-alpha composition, including
+// adjacent-row flicker filters. Dynamic-alpha and displaced outputs stop.
 inline std::optional<Scanout> scanout(std::span<const std::uint32_t> memory,std::uint64_t control,
-    const std::array<std::uint64_t,2>& buffers,const std::array<std::uint64_t,2>& displays,bool half_height=false) {
+    const std::array<std::uint64_t,2>& buffers,const std::array<std::uint64_t,2>& displays,bool half_height=false,
+    std::uint32_t background=0) {
     const auto enabled=control&3;
     if (!enabled) return {};
-    if (enabled==3 || memory.size()!=1024*1024) throw std::invalid_argument("Unsupported native display composition");
+    if (memory.size()!=1024*1024) throw std::invalid_argument("Invalid native display memory size");
+    if (enabled==3) {
+        if (!(control&32) || (std::uint32_t(displays[0])!=std::uint32_t(displays[1])))
+            throw std::invalid_argument("Unsupported native display composition");
+        const auto first=scanout(memory,1,buffers,displays,half_height);
+        const auto second=scanout(memory,2,buffers,displays,half_height);
+        const unsigned alpha=(control>>8)&255;
+        Scanout frame{std::max(first->width,second->width),std::max(first->height,second->height),{}};
+        frame.pixels.resize(std::size_t(frame.width)*frame.height);
+        for (unsigned y=0;y<frame.height;++y) for (unsigned x=0;x<frame.width;++x) {
+            auto color=background|0xff000000U;
+            if (!(control&128) && x<second->width && y<second->height) color=second->pixels[y*second->width+x];
+            if (x<first->width && y<first->height) {
+                const auto source=first->pixels[y*first->width+x];
+                std::uint32_t blended=0xff000000U;
+                for (unsigned shift=0;shift<24;shift+=8)
+                    blended|=((((source>>shift)&255)*alpha+((color>>shift)&255)*(255-alpha)+127)/255)<<shift;
+                color=blended;
+            }
+            frame.pixels[y*frame.width+x]=color;
+        }
+        return frame;
+    }
     const unsigned circuit=enabled==2 ? 1:0;
     const auto buffer=buffers[circuit],display=displays[circuit];
     const unsigned format=(buffer>>15)&31,pitch=(buffer>>9)&63;

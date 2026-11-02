@@ -7,6 +7,7 @@
 #endif
 #include <vulkan/vulkan.h>
 #include <algorithm>
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <cmath>
@@ -21,7 +22,8 @@ void check(VkResult result, const char* operation) {
 constexpr VkDeviceSize memory_bytes=4*1024*1024;
 constexpr VkDeviceSize triangle_offset=memory_bytes*2+16*sizeof(std::uint32_t);
 constexpr VkDeviceSize buffer_bytes=triangle_offset+3*sizeof(RasterVertex);
-static_assert(sizeof(RasterVertex)==32);
+static_assert(sizeof(RasterVertex)==36);
+static_assert(sizeof(Sprite)==128);
 const std::uint32_t shader_code[] =
 #include "sprite.inc"
 ;
@@ -231,11 +233,26 @@ void validate_sprite(const Sprite& draw) {
     if (draw.right>2048 || draw.bottom>2048 || draw.left>draw.right || draw.top>draw.bottom || !draw.pitch || draw.pitch>63 || draw.base>16383)
         throw std::runtime_error("Invalid Vulkan sprite bounds or GS memory");
     if (draw.left==draw.right || draw.top==draw.bottom) return;
-    if ((draw.flags&256) || (draw.test&0x4000)) {
+    if ((draw.flags&(256|depth_test_flag)) || (draw.test&0x4000)) {
         if (draw.right>draw.pitch*64 || ((draw.bottom-1)/32-draw.top/32)*draw.pitch+(draw.right-1)/64-draw.left/64>=512)
             throw std::runtime_error("Destination-dependent sprite requires non-aliased framebuffer");
         if (draw.flags&256) for (unsigned shift=0;shift<8;shift+=2)
             if (((draw.blend>>shift)&3)>2) throw std::runtime_error("Unsupported Vulkan blend selector");
+    }
+    if (draw.flags&depth_test_flag) {
+        if (draw.depth_base>16352 || draw.depth_base%32)
+            throw std::runtime_error("Invalid native depth surface");
+        if (draw.mask!=0xffffffffU && ((draw.test>>17)&3)!=0 &&
+            ((draw.flags&depth_write_flag) || ((draw.test>>17)&3)>=2)) {
+            std::array<bool,512> pages{};
+            for (unsigned y=draw.top/32;y<=(draw.bottom-1)/32;++y)
+                for (unsigned x=draw.left/64;x<=(draw.right-1)/64;++x)
+                    pages[(draw.base/32+y*draw.pitch+x)%512]=true;
+            for (unsigned y=draw.top/32;y<=(draw.bottom-1)/32;++y)
+                for (unsigned x=draw.left/64;x<=(draw.right-1)/64;++x)
+                    if (pages[(draw.depth_base/32+y*draw.pitch+x)%512])
+                        throw std::runtime_error("Overlapping native color and depth surfaces");
+        }
     }
     if ((draw.flags&1) && ((!(draw.flags&triangle_flag) && (!draw.dx || !draw.dy)) || !draw.texture_pitch || !draw.texture_width ||
         !draw.texture_height || draw.right>draw.pitch*64 || ((draw.bottom-1)/32-draw.top/32)*draw.pitch+(draw.right-1)/64-draw.left/64>=512))
@@ -271,6 +288,12 @@ void VulkanRenderer::sprites(std::span<std::uint32_t> memory,std::span<const Spr
                 if (vertex.x < -65535 || vertex.x>65535 || vertex.y < -65535 || vertex.y>65535 || vertex.u>16383 || vertex.v>16383)
                     throw std::runtime_error("Invalid Vulkan triangle vertex");
             const auto& v=command.triangle;
+            if (command.draw.flags&depth_test_flag) {
+                const auto [left,right]=std::minmax({v[0].x,v[1].x,v[2].x});
+                const auto [top,bottom]=std::minmax({v[0].y,v[1].y,v[2].y});
+                if (right-left>65535 || bottom-top>65535)
+                    throw std::runtime_error("Native depth interpolation exceeds coordinate bound");
+            }
             if (command.draw.flags&perspective_triangle_flag) {
                 for (const auto& vertex:v) {
                     if (!std::isfinite(vertex.s) || !std::isfinite(vertex.t) || !std::isfinite(vertex.q) ||

@@ -22,6 +22,38 @@ The test C++, entry assembly, link script, result protocol and expected values
 are original. They contain no commercial-game code, SDK routines or BIOS logic.
 No PS2SDK libraries or startup objects are linked into these initial tests.
 
+The external reference's interpreter/recompiler matrix uses the public
+`EmuCore/CPU/Recompiler` settings (`EnableEE`, `EnableIOP`, `EnableVU0`,
+`EnableVU1`) defined in the pinned PCSX2 `Pcsx2Config.cpp`. Those settings affect
+only the separately launched reference process, never AnyPS2's generated output.
+
+## Homebrew integration candidate
+
+`glampert/ps2-homebrew` was inspected at
+[`602441a6877a3136709d6320664340d52e3027a1`](https://github.com/glampert/ps2-homebrew/tree/602441a6877a3136709d6320664340d52e3027a1).
+Its framework and cube-demo source carries Guilherme R. Lampert's 2015 MIT
+notice. The ignored reference checkout retains the original notices and
+`LICENSE.txt`; no upstream implementation or demo asset is incorporated into
+AnyPS2. Fonts, audio, models and included documents require their own provenance
+review and must not be assumed to share the top-level source license.
+
+The cube demo creates its cube geometry and checker texture procedurally, and
+exercises rendering, controller input and timing. The local compatibility port
+builds all ten translation units and links a PS2 ELF with the toolchain above.
+It fixes declarations, obsolete cast assignments, current GNU assembler syntax,
+missing inline-assembly memory clobbers, and controller access after failed
+initialization. It remains PS2 source compiled to a PS2 input, not native game
+C++ output. LLVM conversion and native execution render the rotating cube grid
+and text through Vulkan; a bounded 20-second run ended only at its requested
+deadline. No ROM controller modules are supplied, and controller interaction
+is not established.
+The local build also recompiles the public SDK `graph.c` helper with targeted
+CSR write-one-to-clear acknowledgements. Its original read/OR/write acknowledges
+unrelated FINISH events when waiting for VSYNC, producing a race when native GPU
+work has already completed. The port writes only the intended sync flag; AnyPS2
+retains normal acknowledgement semantics and does not invent another FINISH.
+See [the testing ladder](ps2-test-programs.md#larger-homebrew-tests).
+
 ## Conversion format and rendering references
 
 ELF `.vutext` classification uses the section convention recorded in PS2SDK's
@@ -1922,7 +1954,8 @@ half-height framebuffer read when both SMODE2 interlace and frame mode are set.
 The native scanout independently applies that source-row bound and duplicates
 each source row for progressive window presentation. It retains the configured
 display extent and buffer origin. This explicit line-pair reconstruction does
-not implement temporal field blending or dual-circuit composition.
+not implement temporal field blending. Aligned constant-alpha dual-circuit
+composition is described below.
 
 ELF section classification follows the System V generic ABI, ELF Object File
 Format 4.3 draft, section 3 (consulted 2026-11-01):
@@ -1944,8 +1977,42 @@ texture sampler. ST/Q triangles retain address/data and packed GIF Q-latch
 ordering and use native floating-point interpolation before perspective division.
 This does not reproduce internal GS interpolation precision. Non-finite or extreme
 coordinates and triangles crossing zero Q are rejected before GPU submission.
-Fog, antialiasing and depth writes/tests beyond the existing always-pass case
-remain explicit unsupported boundaries.
+Fog and fixed-fragment triangles remain explicit unsupported boundaries.
+
+The same revision's `GSLocalMemory.h`, `GSRendererSW.cpp` and
+`GSDrawScanline.cpp` supply public depth-format, comparison, alpha-failure and
+coverage-write behavior. The original Vulkan implementation preserves 32/24-bit
+depth, unsigned never/always/greater-or-equal/greater comparisons, color/depth
+masks, and suppressed depth writes on partially covered edges. Color and depth
+surfaces that overlap are rejected. Native edge antialiasing uses a 4x4 sample
+grid and covered-sample centroid interpolation; it is a deliberate modernization,
+not reproduction of GS edge hardware or its interpolation precision. Sprite
+clears accept FIX because sprites have no edge-coverage interpolation. No
+upstream rasterizer implementation is incorporated.
+
+The pinned PS2SDK `graph_mode.c` adjacent-row flicker filter and the pinned
+PCSX2 `GSRegs.h` PMODE layout and Vulkan merge shader describe constant-alpha
+dual-display composition. AnyPS2 independently combines aligned circuits and
+background color; displaced circuits and dynamic alpha remain unsupported.
+
+The pinned PS2SDK `fileio-common.h`, `loadfile-common.h`, `sifrpc-common.h`,
+`ee/sbv/include/smod.h` and `iop/kernel/include/kerr.h` define bootstrap public
+interfaces. Native standalone startup exposes an empty module-list record,
+real host clock/console services and KE_NOFILE for absent ROM modules. This
+does not claim controller availability or create successful module-load stubs.
+`_SifSendCmd` leaves the old dsize field when no extra payload is sent; the
+native receiver validates the actual extra-payload destination and packet size.
+
+Defined ELF function roots follow the generic ABI symbol-table contract:
+https://gabi.xinuos.com/elf/05-symtab.html
+The opt-in function-symbol pass accepts defined STT_FUNC entries in validated
+executable sections, excludes undefined weak symbols and records its roots
+separately. Metadata coverage is not proof of complete pointer-flow discovery.
+
+The pinned PCSX2 `x86/microVU_Macro.inl` CTC2 status-register case documents
+replacement of sticky bits 6-11 while preserving current arithmetic flags 0-5.
+AnyPS2 implements that mask independently in the existing native VU owner;
+compiled transfers wait for ownership and never run an instruction decoder.
 
 The pinned PS2SDK `freesd.c` address API selects the core from bit 0 and voice
 from bits 1-5, independently of bits 6-7. The native selector decoder preserves

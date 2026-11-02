@@ -687,10 +687,60 @@ int main() {
         check(p.instructions.size() == 4 && !p.instructions.contains(0x1008) && !p.instructions.contains(0x1018), "Jump discovery followed unreachable fallthrough");
         put(bytes,0,0x10000003); // BEQ zero,zero,1010
         p = nt::analysis::discover(bytes,elf);
+        check(p.instructions.size()==4 && !p.instructions.contains(0x1008),
+              "Always-taken branch discovered unreachable data");
+        const std::array<std::uint32_t,1> data_entry{0x1008};
+        p=nt::analysis::discover(bytes,elf,32,data_entry);
+        check(p.instructions.contains(0x1008) && p.instructions.at(0x1008).op==nt::r5900::Op::unsupported,
+              "Pruned branch hid an independently reachable unsupported instruction");
+        put(bytes,0,0x11090003); // BEQ t0,t1,1010: both outcomes remain possible.
+        p = nt::analysis::discover(bytes,elf);
         check(p.instructions.contains(0x1008), "Conditional fallthrough was not discovered");
+        for (const unsigned opcode:{4U,20U}) for (const unsigned reg:{0U,8U}) {
+            nt::Bytes loop(8,0);
+            nt::elf::Executable end_of_code{0x1000,0,{{0,0x1000,8,8,5,4}}};
+            put(loop,0,(opcode<<26)|(reg<<21)|(reg<<16)|0xffffU);
+            put(loop,4,0x25080001); // ADDIU t0,t0,1 in the executed delay slot.
+            const auto discovered=nt::analysis::discover(loop,end_of_code);
+            check(discovered.instructions.size()==2 && discovered.unresolved.empty(),
+                  "BEQ/BEQL at the end of code invented a fallthrough target");
+            check(discovered.instructions.contains(0x1004) && !discovered.ordinary.contains(0x1004),
+                  "Always-taken branch lost delay-slot ownership");
+            put(loop,0,(opcode<<26)|(reg<<21)|(reg<<16)|3U); // Real target is outside the image.
+            const auto invalid_target=nt::analysis::discover(loop,end_of_code);
+            check(invalid_target.unresolved==std::set<std::uint32_t>{0x1010},
+                  "Always-taken branch lost its actual unmapped target");
+        }
         put(bytes,0,0x08000800); // J 2000 outside image
         p = nt::analysis::discover(bytes,elf);
         check(p.unresolved.contains(0x2000) && p.instructions.size() == 2, "Unmapped target lost");
+        {
+            nt::Bytes image(64,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,64,64,5,4}}};
+            put(image,0,0x3c020000); // LUI v0,0
+            put(image,4,0x24420000); // ADDIU v0,v0,0
+            put(image,8,0x10400003); // BEQ v0,zero,1018
+            put(image,16,0x0c000000); // Guarded call to an absent weak symbol.
+            put(image,24,0x03e00008);
+            auto guarded=nt::analysis::discover(image,fixture);
+            check(guarded.unresolved.empty() && !guarded.instructions.contains(0x1010),
+                  "Constant weak-symbol guard retained its unreachable null call");
+            const std::array<std::uint32_t,1> independent{0x1010};
+            guarded=nt::analysis::discover(image,fixture,64,independent);
+            check(guarded.unresolved.contains(0),"Constant guard hid an independently reachable null call");
+            put(image,0,0x8c020000); // An initial memory value cannot prove the runtime load.
+            guarded=nt::analysis::discover(image,fixture);
+            check(guarded.unresolved.contains(0),"Mutable memory was treated as a constant branch condition");
+            put(image,0,0x3c028000); // LUI v0,8000 -> ffffffff80000000.
+            put(image,4,0x6442ffff); // DADDIU -1 -> ffffffff7fffffff, not 000000007fffffff.
+            put(image,8,0x3c037fff);
+            put(image,12,0x3463ffff); // ORI v1,v1,ffff -> 000000007fffffff.
+            put(image,16,0x10430003); // BEQ v0,v1,1020; low words equal, full registers differ.
+            put(image,24,0x0c000000);
+            put(image,32,0x03e00008);
+            guarded=nt::analysis::discover(image,fixture);
+            check(guarded.unresolved.contains(0),"Low-word equality incorrectly pruned a 64-bit comparison");
+        }
         bool limited = false;
         try { nt::analysis::discover(bytes,elf,1); } catch (const std::runtime_error&) { limited = true; }
         check(limited, "Analysis budget was ignored");
@@ -896,6 +946,28 @@ int main() {
         {
             nt::Bytes image(0x100,0);
             nt::elf::Executable fixture{0x1000,0,{{0,0x1000,0x80,0x80,5,4},{0x80,0x2000,0x80,0x80,6,4}}};
+            // The base is hoisted before the range check, rather than rebuilt
+            // between the guard and dispatch. Only the bounded table is code.
+            put(image,0,0x24032000); put(image,4,0x2c850002);
+            put(image,8,0x10a00009); put(image,12,0);
+            put(image,16,0x00041080); put(image,20,0x00621021);
+            put(image,24,0x8c420000); put(image,28,0x00400008); put(image,48,12);
+            put(image,0x60,0x03e00008); put(image,0x70,0x03e00008);
+            put(image,0x80,0x1060); put(image,0x84,0x1070);
+            const auto roots=[&] {
+                return nt::analysis::bounded_switch_entries(image,fixture,nt::analysis::discover(image,fixture,128,{},true));
+            };
+            check(roots()==std::set<std::uint32_t>{0x1060,0x1070},"Hoisted switch base lost");
+            put(image,12,0x8c830000);
+            check(roots().empty(),"Overwritten hoisted switch base reused");
+            put(image,12,0x24840001);
+            check(roots().empty(),"Index overwritten after range guard accepted");
+            put(image,12,0); put(image,0x84,0x2000);
+            check(roots().empty(),"Hoisted switch treated data as executable");
+        }
+        {
+            nt::Bytes image(0x100,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,0x80,0x80,5,4},{0x80,0x2000,0x80,0x80,6,4}}};
             put(image,0,0x2c850002); put(image,4,0x10a0000a);
             put(image,8,0x3c020000); // Table high in the range-branch delay slot.
             put(image,12,0x00041880); put(image,16,0x24422000);
@@ -920,6 +992,38 @@ int main() {
             put(image,8,0); check(roots()==std::set<std::uint32_t>{0x1060,0x1070},"NOP delay slot hid switch table");
             put(image,0x84,0x1071);
             check(roots().empty(),"Split switch accepted a malformed entry");
+        }
+        {
+            nt::Bytes image(0x120,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,0x100,0x100,5,4},{0x100,0x2000,0x20,0x20,6,4}}};
+            put(image,0x00,0x27bdffe0); // Frame with a table address spilled before a branch.
+            put(image,0x04,0x24082000);
+            put(image,0x08,0xafa80010);
+            put(image,0x0c,0x03a04825); // Copied SP alias.
+            put(image,0x10,0x10000003);
+            put(image,0x20,0x2c850002);
+            put(image,0x24,0x10a00016);
+            put(image,0x2c,0x00041080);
+            put(image,0x30,0x8d230010); // Reload table base through the alias.
+            put(image,0x34,0x00621021);
+            put(image,0x38,0x8c420000);
+            put(image,0x3c,0x00400008);
+            for (const auto at:{0x80U,0x90U,0xa0U}) {
+                put(image,at,0x03e00008); put(image,at+4,0x27bd0020);
+            }
+            put(image,0x100,0x1080); put(image,0x104,0x1090);
+            const auto roots=[&] {
+                return nt::analysis::bounded_switch_entries(image,fixture,nt::analysis::discover(image,fixture,128,{},true));
+            };
+            check(roots()==std::set<std::uint32_t>{0x1080,0x1090},"Spilled switch table lost across a branch");
+            put(image,0x14,0xa1200011); // Overlapping byte write in the branch delay slot.
+            check(roots().empty(),"Partial overwrite resurrected a stale switch table");
+            put(image,0x14,0xad200010); // A full overwrite must not fall back to the initial spill.
+            check(roots().empty(),"Full overwrite resurrected a stale switch table");
+            put(image,0x14,0xad200014); // Adjacent data is independent.
+            check(roots()==std::set<std::uint32_t>{0x1080,0x1090},"Adjacent stack write hid a switch table");
+            put(image,0x104,0x2008);
+            check(roots().empty(),"Spilled table promoted a data target to executable code");
         }
         std::cout << "Control-flow discovery and address-boundary tests passed\n";
         return 0;

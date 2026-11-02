@@ -14,6 +14,9 @@ public:
     struct DisplayMode { std::uint32_t interlace,standard,frame; };
     struct Output { std::uint64_t control=0,background=0; std::array<std::uint64_t,2> buffers{},displays{}; };
     const Output& output() const { return output_; }
+    // Called only after the native renderer has completed a submitted FINISH
+    // fence. The existing interrupt owner delivers the resulting event.
+    void drawing_completed() { event(2); }
     void* context=nullptr;
     Stop (*synchronize)(void*)=nullptr;
     // Optional drawing owner. Rejection must preserve that owner's state.

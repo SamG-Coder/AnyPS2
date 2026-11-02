@@ -40,52 +40,74 @@ Program discover(ByteView bytes, const elf::Executable& elf, std::size_t limit,
                 return le32(bytes, std::size_t(s.offset) + pc - s.address);
         return {};
     };
-    Program result;
-    result.entries.insert(elf.entry);
-    result.entries.insert(elf.lifecycle_entries.begin(),elf.lifecycle_entries.end());
-    result.entries.insert(additional_entries.begin(),additional_entries.end());
-    // A delay slot is visited as an instruction but must not independently cause
-    // fallthrough from an unconditional jump. A separate ordinary visit can.
-    std::deque<std::pair<std::uint32_t, bool>> pending{{elf.entry, false}};
-    for (const auto pc:elf.lifecycle_entries) pending.emplace_back(pc,false);
-    for (auto pc : additional_entries) {
-        if (!word_at(pc)) throw std::runtime_error("Additional entry is not executable ELF memory");
-        pending.emplace_back(pc,false);
-    }
-    std::set<std::pair<std::uint32_t, bool>> visited;
-    while (!pending.empty()) {
-        const auto [pc, delay] = pending.front(); pending.pop_front();
-        if (!visited.emplace(pc, delay).second) continue;
-        const auto word = word_at(pc);
-        if (!word) { result.unresolved.insert(pc); continue; }
-        const auto instruction = r5900::decode(pc, *word);
-        result.instructions.emplace(pc, instruction);
-        if (!delay) result.ordinary.insert(pc);
-        if (result.instructions.size() > limit)
-            throw std::runtime_error("Analysis instruction limit exceeded ("+std::to_string(limit)+") at "+hex32(pc));
-        if (delay || instruction.terminal()) continue;
-        if (stop_at_syscall && instruction.op==r5900::Op::syscall) {
-            // A leaf syscall wrapper can return through a dynamically registered
-            // compiled handler even when its service number is not known here.
-            // Discover its return epilogue without assuming syscall success.
-            if (pc<=0xfffffff7U) {
-                const auto tail=word_at(pc+4),slot=word_at(pc+8);
-                if (tail && slot && *slot==0) {
-                    const auto next=r5900::decode(pc+4,*tail);
-                    if (next.op==r5900::Op::jr && next.rs==31) pending.emplace_back(pc+4,false);
+    const auto walk=[&](const std::set<std::uint32_t>& taken_branches) {
+        Program result;
+        result.entries.insert(elf.entry);
+        result.entries.insert(elf.lifecycle_entries.begin(),elf.lifecycle_entries.end());
+        result.entries.insert(additional_entries.begin(),additional_entries.end());
+        // A delay slot is visited as an instruction but must not independently cause
+        // fallthrough from an unconditional jump. A separate ordinary visit can.
+        std::deque<std::pair<std::uint32_t, bool>> pending{{elf.entry, false}};
+        for (const auto pc:elf.lifecycle_entries) pending.emplace_back(pc,false);
+        for (auto pc : additional_entries) {
+            if (!word_at(pc)) throw std::runtime_error("Additional entry is not executable ELF memory");
+            pending.emplace_back(pc,false);
+        }
+        std::set<std::pair<std::uint32_t, bool>> visited;
+        while (!pending.empty()) {
+            const auto [pc, delay] = pending.front(); pending.pop_front();
+            if (!visited.emplace(pc, delay).second) continue;
+            const auto word = word_at(pc);
+            if (!word) { result.unresolved.insert(pc); continue; }
+            const auto instruction = r5900::decode(pc, *word);
+            result.instructions.emplace(pc, instruction);
+            if (!delay) result.ordinary.insert(pc);
+            if (result.instructions.size() > limit)
+                throw std::runtime_error("Analysis instruction limit exceeded ("+std::to_string(limit)+") at "+hex32(pc));
+            if (delay || instruction.terminal()) continue;
+            if (stop_at_syscall && instruction.op==r5900::Op::syscall) {
+                // A leaf syscall wrapper can return through a dynamically registered
+                // compiled handler even when its service number is not known here.
+                // Discover its return epilogue without assuming syscall success.
+                if (pc<=0xfffffff7U) {
+                    const auto tail=word_at(pc+4),slot=word_at(pc+8);
+                    if (tail && slot && *slot==0) {
+                        const auto next=r5900::decode(pc+4,*tail);
+                        if (next.op==r5900::Op::jr && next.rs==31) pending.emplace_back(pc+4,false);
+                    }
                 }
+                continue;
             }
-            continue;
+            if (instruction.branch()) {
+                pending.emplace_back(pc + 4, true);
+                if (!instruction.indirect()) pending.emplace_back(instruction.target(), false);
+                if (instruction.op != r5900::Op::j && instruction.op != r5900::Op::jr &&
+                    !pointer_flow::always_taken(instruction) && !taken_branches.contains(pc))
+                    pending.emplace_back(pc + 8, false);
+            } else {
+                // A syscall is a runtime boundary, but analysis may inspect its continuation.
+                pending.emplace_back(pc + 4, false);
+            }
         }
-        if (instruction.branch()) {
-            pending.emplace_back(pc + 4, true);
-            if (!instruction.indirect()) pending.emplace_back(instruction.target(), false);
-            if (instruction.op != r5900::Op::j && instruction.op != r5900::Op::jr)
-                pending.emplace_back(pc + 8, false);
-        } else {
-            // A syscall is a runtime boundary, but analysis may inspect its continuation.
-            pending.emplace_back(pc + 4, false);
+        return result;
+    };
+    std::set<std::uint32_t> taken_branches;
+    auto result=walk(taken_branches);
+    // Prove a constant guard against the conservative graph before removing an
+    // edge. Memory contents never establish a constant register here. Calls,
+    // unknown writes and disagreeing incoming paths invalidate the proof.
+    for (unsigned pass=0;pass<4;++pass) {
+        const pointer_flow::Graph graph(result);
+        const auto previous=taken_branches.size();
+        for (const auto& [pc,i]:result.instructions) {
+            if ((i.op!=r5900::Op::beq && i.op!=r5900::Op::beql) ||
+                taken_branches.contains(pc) || pointer_flow::always_taken(i)) continue;
+            const auto left=pointer_flow::constant_gpr(result,graph,pc,i.rs);
+            const auto right=pointer_flow::constant_gpr(result,graph,pc,i.rt);
+            if (left && right && *left==*right) taken_branches.insert(pc);
         }
+        if (taken_branches.size()==previous) break;
+        result=walk(taken_branches);
     }
     return result;
 }
@@ -967,7 +989,7 @@ std::set<std::uint32_t> initialized_callback_stores(const Program& program,const
             continue;
         }
         if (i.indirect()) continue;
-        const bool always=(i.op==Op::beq || i.op==Op::beql) && i.rs==i.rt;
+        const bool always=pointer_flow::always_taken(i);
         const bool never=(i.op==Op::bne || i.op==Op::bnel) && i.rs==i.rt;
         if (i.op!=Op::j && i.op!=Op::jal && !always) {
             auto fallthrough=i.likely() ? before_slot : state;
@@ -1522,26 +1544,29 @@ std::optional<std::uint32_t> stack_argument(ByteView bytes,const elf::Executable
     return {};
 }
 std::set<std::uint32_t> frame_reference_values(ByteView bytes,const elf::Executable& elf,
-    const Program& program,const pointer_flow::Graph& graph,std::uint32_t call,unsigned reg,std::uint32_t displacement) {
+    const Program& program,const pointer_flow::Graph& graph,std::uint32_t call,unsigned reg,std::uint32_t displacement,
+    bool call_delay=true,unsigned limit=512) {
     using r5900::Op;
-    const auto slot=program.instructions.find(call+4);
-    if (slot==program.instructions.end()) return {};
-    const auto effect=pointer_flow::write(slot->second);
-    if (!effect) return {};
-    if (*effect==reg) {
-        const auto& i=slot->second;
-        if (i.op==Op::addiu || i.op==Op::daddiu) {
-            reg=i.rs; displacement+=std::uint32_t(i.immediate);
-        } else if ((i.op==Op::addu || i.op==Op::daddu || i.op==Op::bit_or) && (!i.rs || !i.rt))
-            reg=i.rs ? i.rs : i.rt;
-        else return {};
+    if (call_delay) {
+        const auto slot=program.instructions.find(call+4);
+        if (slot==program.instructions.end()) return {};
+        const auto effect=pointer_flow::write(slot->second);
+        if (!effect) return {};
+        if (*effect==reg) {
+            const auto& i=slot->second;
+            if (i.op==Op::addiu || i.op==Op::daddiu) {
+                reg=i.rs; displacement+=std::uint32_t(i.immediate);
+            } else if ((i.op==Op::addu || i.op==Op::daddu || i.op==Op::bit_or) && (!i.rs || !i.rt))
+                reg=i.rs ? i.rs : i.rt;
+            else return {};
+        }
     }
-    auto target=pointer_flow::frame_address(program,graph,call,reg);
+    auto target=pointer_flow::frame_address(program,graph,call,reg,limit);
     if (!target) return {};
     target->offset+=displacement;
     std::set<std::uint32_t> result,visited;
     std::deque<std::uint32_t> pending{call};
-    unsigned budget=512;
+    unsigned budget=limit;
     // Stop each path at its most recent overlapping store. A partial or unknown
     // replacement cannot resurrect an older callback value.
     const auto store=[&](std::uint32_t pc,std::uint32_t before) {
@@ -1550,7 +1575,7 @@ std::set<std::uint32_t> frame_reference_values(ByteView bytes,const elf::Executa
         const auto& i=found->second;
         const auto width=pointer_store_width(i.op);
         if (!width) return false;
-        auto address=pointer_flow::frame_address(program,graph,before,i.rs);
+        auto address=pointer_flow::frame_address(program,graph,before,i.rs,limit);
         if (!address || address->root!=target->root) return false;
         address->offset+=std::uint32_t(i.immediate);
         // Partial stores may affect any byte of the aligned word/doubleword.
@@ -1569,7 +1594,7 @@ std::set<std::uint32_t> frame_reference_values(ByteView bytes,const elf::Executa
         }
         return true;
     };
-    if (store(call+4,call)) return result;
+    if (call_delay && store(call+4,call)) return result;
     while (!pending.empty() && budget--) {
         const auto pc=pending.front(); pending.pop_front();
         if (!visited.insert(pc).second) continue;
@@ -1793,6 +1818,7 @@ std::vector<CallbackFlowGap> callback_flow_gaps(ByteView bytes,const elf::Execut
 std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executable& elf,const Program& program) {
     using r5900::Op;
     std::set<std::uint32_t> result;
+    const pointer_flow::Graph graph(program);
     for (const auto& [pc,jump]:program.instructions) {
         if (jump.op!=Op::jr || !jump.rs || pc<28) continue;
         std::array<const r5900::Instruction*,6> prior{};
@@ -1804,10 +1830,16 @@ std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executa
         }
         if (!complete) continue;
         const auto& load=*prior[0]; const auto& add=*prior[1];
+        const bool earlier_base=prior[2]->op==Op::sll;
         const bool separate_low=prior[2]->op==Op::addiu;
         const auto& high=*(separate_low ? prior[4] : prior[2]);
-        const auto& scale=*prior[3];
-        const auto* branch_instruction=prior[5];
+        const auto& scale=*(earlier_base ? prior[2] : prior[3]);
+        const auto* branch_instruction=earlier_base ? prior[4] : prior[5];
+        const auto table_register=add.rs==scale.rd ? add.rt : add.rs;
+        if (earlier_base) {
+            const auto written=pointer_write(*prior[3]);
+            if (!written || (*written && *written==scale.rt) || prior[3]->branch()) continue;
+        }
         if (separate_low && branch_instruction->op!=Op::beq) {
             // The table high half may follow an independent branch-delay move.
             // Reject delay slots that change the index before scaling it.
@@ -1846,26 +1878,42 @@ std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executa
         if (!comparison) continue;
         const auto& bound=*comparison;
         if (load.op!=Op::lw || load.rt!=jump.rs || add.op!=Op::addu || add.rd!=load.rs ||
-            high.op!=Op::lui || !high.rt || scale.op!=Op::sll || scale.sa!=2 || !scale.rd ||
-            high.rt==scale.rd ||
-            !((add.rs==high.rt && add.rt==scale.rd) || (add.rt==high.rt && add.rs==scale.rd)) ||
+            (!earlier_base && ((high.op!=Op::lui && high.op!=Op::lw && high.op!=Op::lwu) || !high.rt)) ||
+            scale.op!=Op::sll || scale.sa!=2 || !scale.rd ||
+            !table_register || table_register==scale.rd ||
+            !((add.rs==table_register && add.rt==scale.rd) || (add.rt==table_register && add.rs==scale.rd)) ||
+            (!earlier_base && table_register!=high.rt) ||
             bound.op!=Op::sltiu || bound.rs!=scale.rt || !bound.rt ||
             bound.immediate<=0 || bound.immediate>4096 || branch.op!=Op::beq ||
             !((branch.rs==bound.rt && !branch.rt) || (branch.rt==bound.rt && !branch.rs)) ||
             branch.target()<=pc) continue;
         // Candidate entries only: this is not a proof used to remove the guard
         // or to fold table contents. The compiled code retains both at runtime.
-        const auto base=(std::uint32_t(high.immediate)<<16)+std::uint32_t(load.immediate)+
-            (separate_low ? std::uint32_t(prior[2]->immediate) : 0U);
-        std::set<std::uint32_t> entries;
-        for (unsigned n=0;n<static_cast<unsigned>(bound.immediate);++n) {
-            if (std::uint64_t(base)+4*n>0xffffffffULL) { entries.clear(); break; }
-            const auto word=initial_word(bytes,elf,base+4*n);
-            const auto entry=word ? executable_pointer(elf,*word) : std::nullopt;
-            if (!entry) { entries.clear(); break; }
-            entries.insert(*entry);
+        std::set<std::uint32_t> bases;
+        if (earlier_base) {
+            // Hoisted table construction is a register data-flow fact, not a
+            // fixed instruction layout. Conflicting paths or clobbers fail it.
+            if (const auto value=pointer_flow::constant(program,graph,add.pc,table_register)) bases.insert(*value);
+        } else if (high.op==Op::lui) bases.insert(std::uint32_t(high.immediate)<<16);
+        else if (!separate_low) {
+            // A table address spilled before a branch/loop is still an input
+            // to this bounded indirect jump. Reuse frame/alias tracking and
+            // nearest-store invalidation; do not scan arbitrary data as code.
+            bases=frame_reference_values(bytes,elf,program,graph,high.pc,high.rs,
+                                         std::uint32_t(high.immediate),false,4096);
         }
-        result.insert(entries.begin(),entries.end());
+        for (auto base:bases) {
+            base+=std::uint32_t(load.immediate)+(separate_low ? std::uint32_t(prior[2]->immediate) : 0U);
+            std::set<std::uint32_t> entries;
+            for (unsigned n=0;n<static_cast<unsigned>(bound.immediate);++n) {
+                if (std::uint64_t(base)+4*n>0xffffffffULL) { entries.clear(); break; }
+                const auto word=initial_word(bytes,elf,base+4*n);
+                const auto entry=word ? executable_pointer(elf,*word) : std::nullopt;
+                if (!entry) { entries.clear(); break; }
+                entries.insert(*entry);
+            }
+            result.insert(entries.begin(),entries.end());
+        }
     }
     return result;
 }

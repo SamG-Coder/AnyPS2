@@ -16,7 +16,8 @@ inline std::optional<Sprite> plan_sprite(std::uint64_t frame,std::uint64_t offse
     const int top=std::max(ceil_pixel(int(std::min(y0,y1))-oy),int((scissor>>32)&2047));
     const int bottom=std::min(ceil_pixel(int(std::max(y0,y1))-oy),int((scissor>>48)&2047)+1);
     const auto mask=std::uint32_t(frame>>32)|(format==1 ? 0xff000000U : 0U);
-    if (left>=right || top>=bottom || mask==0xffffffffU) return {};
+    // A fully masked color buffer may still receive depth writes.
+    if (left>=right || top>=bottom) return {};
     return Sprite{unsigned(left),unsigned(top),unsigned(right),unsigned(bottom),unsigned(frame&511)*32,pitch,color,mask};
 }
 }

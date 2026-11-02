@@ -1511,6 +1511,15 @@ int main() {
             check(owner.write(1,false,0xffff1234)==nt::ee::VectorStatus::ready && owner.read(1,false).value==0x1234);
             check(owner.write(0,false,42)==nt::ee::VectorStatus::ready && owner.read(0,false).value==0);
             check(owner.write(31,false,0)==nt::ee::VectorStatus::unsupported && owner.read(31,false).status==nt::ee::VectorStatus::unsupported);
+            // Compiled CTC2/CFC2 preserve current arithmetic flags, replace the
+            // sticky history, and retry without mutation while VU work owns it.
+            owner.storage.status=0x345; owner.storage.active=true;
+            state={}; state.pc=0x460100; state.set(8,0xffffffff);
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::vector_pending &&
+                !state.executed && owner.storage.status==0x345);
+            owner.storage.active=false;
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall &&
+                state.executed==4 && state.gpr[9].lo==0xfc5 && state.gpr[10].lo==5 && owner.storage.status==5);
         }
         {
             struct Owner {
@@ -2319,7 +2328,9 @@ int main() {
             check(call(0x76,2)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0));
             check(ram[0x5000]==24 && ram[0x5014]==1 && platform.completions.ready()==0x20);
             state=nt::ee::NativePlatform::initial_state(0x121c); state.set(29,0x9000);
-            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.cop0_status==0x10c01 && platform.completions.ready()==0x20);
+            state.cop0_status|=0x10; // SDK startup has returned to user mode.
+            check(!(state.cop0_status&0x10000)); // A reply does not enable interrupts itself.
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.cop0_status==0x30c11 && platform.completions.ready()==0x20);
             state.pc=0x380000;
             check(nt::ee::run(nt_ee_generated_run,state,memory,5,services)==nt::ee::Stop::budget && !platform.interrupts.active());
             std::uint32_t log=0; std::memcpy(&log,ram.data()+0x6000,4); check(log==5 && state.pc==0x380000 && platform.sif_receive.accepting());
@@ -2433,6 +2444,14 @@ int main() {
             check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && platform.graphics.resets()==1 && backend.resets==1);
             state.pc=0x3d0018;
             check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.gpr[9].lo==0x4000);
+            // A VSYNC acknowledgement must not consume a completed draw fence.
+            platform.graphics.drawing_completed();
+            state.pc=0x3d0010; state.set(8,8);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+            state.pc=0x3d0018;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && (state.gpr[9].lo&2));
+            state.pc=0x3d0010; state.set(8,2);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
             state.pc=0x3d0010; state.set(4,0x12001010); state.set(8,0);
             check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
             state.pc=0x3d0018;
@@ -2546,6 +2565,7 @@ int main() {
                 return static_cast<unsigned>(state.gpr[8].lo);
             };
             check(write(0x10008020,1)==nt::ee::Stop::budget);
+            platform.packet_submission.consumer={};
             check(write(0x10008000,0x101)==nt::ee::Stop::unsupported_system && !platform.completions.status());
             platform.packet_submission.consumer={&sink,[](void* context,unsigned channel,std::span<const std::uint8_t> bytes) {
                 auto& sink=*static_cast<Sink*>(context); ++sink.calls;
@@ -2556,7 +2576,8 @@ int main() {
             }};
             check(write(0x10008000,0x101)==nt::ee::Stop::unsupported_system && read(0x10008020)==1 && !platform.completions.status());
             sink.result=nt::ee::Stop::budget;
-            check(read(0x1000e000)==0 && read(0x1000f520)==0x1201);
+            check(read(0x1000e000)==1 && read(0x1000f520)==0x1201);
+            check(write(0x1000e000,0)==nt::ee::Stop::budget);
             check(write(0x10008000,0x101)==nt::ee::Stop::unsupported_system && !platform.completions.status());
             check(write(0x1000e000,1)==nt::ee::Stop::budget);
             sink.result=nt::ee::Stop::unsupported_system;

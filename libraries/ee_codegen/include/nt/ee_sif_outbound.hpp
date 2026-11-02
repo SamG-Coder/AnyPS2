@@ -45,6 +45,7 @@ public:
         return {Stop::budget,++last_id_};
     }
     std::uint32_t status(std::uint32_t id) const { return id && id==last_id_ && active_ ? 1U : 0xffffffffU; }
+    std::span<const NativeSifPacket> pending_packets() const { return packets_; }
     Stop pump(Memory& memory) {
         if (!active_) return Stop::budget;
         if (!memory.completions) return Stop::unsupported_system;

@@ -1,6 +1,7 @@
 #include "disc_fixture.hpp"
 #include <nt/ee_file_rpc.hpp>
 #include <nt/ee_cdvd_rpc.hpp>
+#include <nt/ee_bootstrap_modules.hpp>
 #include <nt/ee_sif_command_peer.hpp>
 #include <nt/ee_platform.hpp>
 #include <nt/ee_services.hpp>
@@ -94,7 +95,30 @@ void run_ee_file_rpc_tests() {
     };
     submit(words({20,0,0x80000002,0,0x6000})); require(platform.sif_outbound.pump(memory)==Stop::budget);
     arm(); submit(words({16,0,0x80000002,1})); require(platform.sif_outbound.pump(memory)==Stop::budget); finish();
-    arm(); submit(words({36,0,0x80000009,0,7,9,11,13,files.id}));
+    {
+        nt::ee::NativeBootstrapModules modules;
+        peer.data_reader([&](std::uint32_t address,std::span<std::uint8_t> output) { return modules.snapshot(address,output); });
+        auto read=words({64U|(4U<<8),0,0x8000000c,0,7,9,11,13,0x800,0x5100,48}); read.resize(64);
+        // A reused SDK command can retain dsize despite no extra transfer.
+        const auto pending=submit(read);
+        require(platform.sif_outbound.pump(memory)==Stop::budget && platform.sif_outbound.status(pending)==1 && ram[0x5100]==0xcc);
+        arm(); require(platform.sif_outbound.pump(memory)==Stop::budget);
+        require(std::all_of(ram.begin()+0x5100,ram.begin()+0x5130,[](auto byte) { return byte==0; }) &&
+            nt::le32(ram,0x6010)==7 && nt::le32(ram,0x6014)==9 && nt::le32(ram,0x6020)==0x8000000c);
+        finish();
+        nt::Bytes outside(4,0xcc);
+        require(modules.snapshot(0x7ff,outside)==Stop::unsupported_system && outside==nt::Bytes(4,0xcc));
+        nt::Bytes load(512,0); const std::string rom="rom0:controller";
+        std::copy(rom.begin(),rom.end(),load.begin()+8);
+        require(modules.call(memory,nt_ee_generated_code_overlap,0,load,0x5100,8)==Stop::budget &&
+            nt::le32(ram,0x5100)==static_cast<std::uint32_t>(-203));
+        const auto unchanged=ram;
+        require(modules.call(memory,nt_ee_generated_code_overlap,0,load,0x1000,8)==Stop::code_write);
+        load[8]='x';
+        require(modules.call(memory,nt_ee_generated_code_overlap,0,load,0x5100,8)==Stop::unsupported_system && ram==unchanged);
+        peer.data_reader({});
+    }
+    arm(); submit(words({36U|(4U<<8),0,0x80000009,0,7,9,11,13,files.id}));
     require(platform.sif_outbound.pump(memory)==Stop::budget);
     require(nt::le32(ram,0x6024)==files.server && nt::le32(ram,0x6028)==files.buffer); finish();
     const auto request=[&](unsigned method,const nt::Bytes& args,unsigned destination=0x5004,unsigned size=4) {
@@ -140,13 +164,23 @@ void run_ee_file_rpc_tests() {
         require(call(0,words({mode}),16)==1 && cdvd.initialized()==(mode!=5));
         require(nt::le32(ram,0x5008)==0 && nt::le32(ram,0x500c)==0 && nt::le32(ram,0x5010)==0);
     }
-    nt::ee::NativeCdvdScmdRpc scmd(cdvd,0xa000,0xb000,[] {
+    const auto fixed_clock=[] {
         using namespace std::chrono;
         return sys_seconds{sys_days{year{2024}/February/28}+hours{15}+minutes{4}+seconds{59}};
-    });
+    };
+    nt::ee::NativeCdvdScmdRpc scmd(cdvd,0xa000,0xb000,fixed_clock);
     require(scmd.call(memory,nt_ee_generated_code_overlap,1,{},0x5004,16)==Stop::budget);
     const std::array<std::uint8_t,16> clock_result{1,0,0,0,0,0x59,0x04,0,0,0x29,0x02,0x24};
     require(std::equal(clock_result.begin(),clock_result.end(),ram.begin()+0x5004));
+    // Host time is available to standalone ELF programs without pretending a
+    // disc has been mounted or enabling media-dependent operations.
+    nt::ee::NativeCdvdInitRpc no_disc(std::filesystem::path{});
+    nt::ee::NativeCdvdScmdRpc standalone_clock(no_disc,0xc000,0xd000,fixed_clock);
+    require(standalone_clock.call(memory,nt_ee_generated_code_overlap,1,{},0x5004,16)==Stop::budget);
+    require(std::equal(clock_result.begin(),clock_result.end(),ram.begin()+0x5004));
+    const auto no_disc_bytes=ram;
+    require(standalone_clock.call(memory,nt_ee_generated_code_overlap,34,words({2}),0x5040,4)==Stop::unsupported_system);
+    require(!no_disc.initialized() && no_disc.media_mode()==0 && ram==no_disc_bytes);
     const auto before=ram;
     require(scmd.call(memory,nt_ee_generated_code_overlap,1,{},0x1000,16)==Stop::code_write);
     require(scmd.call(memory,nt_ee_generated_code_overlap,1,{},0xffff,16)==Stop::memory_fault);
@@ -230,4 +264,37 @@ void run_ee_file_rpc_tests() {
     arm(); submit(words({64U|(8U<<8),files.buffer,0x8000000a,0,17,19,23,29,1,4,0x5004,4,1,files.server,0,0}),words({3}));
     const auto unchanged=ram; const auto completed=files.statistics().requests;
     require(platform.sif_outbound.pump(memory)==Stop::invalid_state && ram==unchanged && !platform.completions.ready() && files.statistics().requests==completed);
+    {
+        nt::Bytes output;
+        unsigned output_fd=0,calls=0;
+        nt::ee::NativeFileRpc standalone(std::filesystem::path{},[&](std::uint32_t fd,nt::ByteView bytes) {
+            output_fd=fd; ++calls;
+            output.insert(output.end(),bytes.begin(),bytes.end());
+            return static_cast<std::int32_t>(bytes.size());
+        });
+        auto write=words({1,0x8000800d,5,3}); write.resize(32);
+        write[16]='a'; write[17]='b'; write[18]='c';
+        ram[0x8010]='d'; ram[0x8011]='e';
+        require(standalone.call(memory,nt_ee_generated_code_overlap,3,write,0x5004,4)==Stop::budget);
+        require(output==nt::Bytes({'a','b','c','d','e'}) && output_fd==1 && calls==1 && nt::le32(ram,0x5004)==5);
+        // Bytes in the request own the prefix, while the aligned remainder is
+        // read from actual native memory, including its uncached address alias.
+        const auto valid_write=write,snapshot=ram;
+        require(standalone.call(memory,nt_ee_generated_code_overlap,3,write,0x1000,4)==Stop::code_write);
+        fixture::put32(write,12,6);
+        require(standalone.call(memory,nt_ee_generated_code_overlap,3,write,0x5004,4)==Stop::invalid_state);
+        write=valid_write; fixture::put32(write,4,0xffff);
+        require(standalone.call(memory,nt_ee_generated_code_overlap,3,write,0x5004,4)==Stop::memory_fault);
+        require(calls==1 && ram==snapshot);
+        write=valid_write; fixture::put32(write,0,2); fixture::put32(write,8,0); fixture::put32(write,12,0);
+        require(standalone.call(memory,nt_ee_generated_code_overlap,3,write,0x5004,4)==Stop::budget);
+        require(output_fd==2 && calls==2 && nt::le32(ram,0x5004)==0 && output.size()==5);
+        require(standalone.call(memory,nt_ee_generated_code_overlap,0,open,0x5004,4)==Stop::budget);
+        require(nt::le32(ram,0x5004)==static_cast<std::uint32_t>(-19));
+        nt::ee::NativeFileRpc unavailable(std::filesystem::path{});
+        require(unavailable.call(memory,nt_ee_generated_code_overlap,3,valid_write,0x5004,4)==Stop::unsupported_system);
+        nt::ee::NativeFileRpc failing(std::filesystem::path{},[](std::uint32_t,nt::ByteView) { return -5; });
+        require(failing.call(memory,nt_ee_generated_code_overlap,3,valid_write,0x5004,4)==Stop::budget);
+        require(nt::le32(ram,0x5004)==static_cast<std::uint32_t>(-5));
+    }
 }

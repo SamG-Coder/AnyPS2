@@ -90,6 +90,50 @@ void read_sections(ByteView bytes,Executable& executable) {
     std::sort(entries.begin(),entries.end()); entries.erase(std::unique(entries.begin(),entries.end()),entries.end());
     for (const auto entry:entries)
         if (!executable_address(executable,entry)) throw std::runtime_error("ELF lifecycle entry is declared as data");
+    for (unsigned index=0;index<count;++index) {
+        const auto at=std::size_t(table)+index*stride;
+        const auto type=le32(bytes,at+4);
+        if (type!=2 && type!=11) continue; // SYMTAB and DYNSYM, not debug labels.
+        const auto offset=le32(bytes,at+16),size=le32(bytes,at+20);
+        const auto link=le32(bytes,at+24),entry_size=le32(bytes,at+36);
+        if (entry_size!=16 || size%16 || size/16>1024*1024 || link>=count ||
+            le32(bytes,std::size_t(table)+link*stride+4)!=3)
+            throw std::runtime_error("Invalid ELF symbol table layout");
+        require_range(bytes,offset,size);
+        const auto strings_at=std::size_t(table)+link*stride;
+        const auto strings_offset=le32(bytes,strings_at+16),strings_size=le32(bytes,strings_at+20);
+        require_range(bytes,strings_offset,strings_size);
+        for (std::uint32_t item=0;item<size;item+=16) {
+            const auto symbol=std::size_t(offset)+item;
+            if ((bytes[symbol+12]&15)!=2) continue; // STT_FUNC only.
+            const auto section=le16(bytes,symbol+14);
+            if (!section || section>=0xff00) continue; // Undefined and special symbols are not code roots.
+            if (section>=count) throw std::runtime_error("Invalid ELF function section index");
+            const auto name=le32(bytes,symbol);
+            if (name>=strings_size || std::find(bytes.begin()+strings_offset+name,
+                    bytes.begin()+strings_offset+strings_size,0)==bytes.begin()+strings_offset+strings_size)
+                throw std::runtime_error("Invalid ELF function name");
+            const auto declared=std::size_t(table)+section*stride;
+            if (le32(bytes,declared+4)!=1 || (le32(bytes,declared+8)&6)!=6) continue;
+            const auto address=le32(bytes,symbol+4),extent=std::max(4U,le32(bytes,symbol+8));
+            const auto section_address=le32(bytes,declared+12),section_size=le32(bytes,declared+20);
+            const auto section_offset=le32(bytes,declared+16);
+            if (address%4 || address<section_address ||
+                std::uint64_t(address)+extent>std::uint64_t(section_address)+section_size)
+                throw std::runtime_error("Invalid ELF function extent");
+            // VU functions stay separate even inside an executable LOAD.
+            if (!executable_address(executable,address,extent)) continue;
+            const auto mapped=std::any_of(executable.segments.begin(),executable.segments.end(),[&](const auto& segment) {
+                return address>=segment.address && std::uint64_t(address)+extent<=std::uint64_t(segment.address)+segment.file_size &&
+                    std::uint64_t(segment.offset)+address-segment.address==std::uint64_t(section_offset)+address-section_address;
+            });
+            if (!mapped) throw std::runtime_error("ELF function section is not mapped file data");
+            executable.function_entries.push_back(address);
+        }
+    }
+    auto& functions=executable.function_entries;
+    std::sort(functions.begin(),functions.end());
+    functions.erase(std::unique(functions.begin(),functions.end()),functions.end());
 }
 }
 Executable parse(ByteView b) {

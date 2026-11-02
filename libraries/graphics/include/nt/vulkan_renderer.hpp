@@ -13,14 +13,18 @@ struct Sprite {
     std::int32_t x0=0,y0=0,dx=0,dy=0,u0=0,v0=0,du=0,dv=0;
     std::uint32_t min_u=0,max_u=0,min_v=0,max_v=0;
     std::uint32_t test=0,blend=0;
+    std::uint32_t depth_base=0,depth=0;
 };
 inline constexpr std::uint32_t triangle_flag=1U<<14, shaded_triangle_flag=1U<<15;
 inline constexpr std::uint32_t perspective_triangle_flag=1U<<16;
+inline constexpr std::uint32_t depth_test_flag=1U<<17, depth_write_flag=1U<<18;
+inline constexpr std::uint32_t depth_24_flag=1U<<19, coverage_flag=1U<<20, alpha_blend_flag=1U<<21;
 struct RasterVertex {
     std::int32_t x=0,y=0;
     std::uint32_t color=0;
     std::uint32_t u=0,v=0;
     float s=0,t=0,q=1;
+    std::uint32_t z=0;
 };
 struct SpriteCommand {
     Sprite draw;

@@ -11,10 +11,11 @@ void validate_write(std::uint32_t address, std::uint32_t size) {
 }
 }
 Bytes Service::read_disc_file(const std::string& guest_path, std::uint64_t limit) {
-    try { return files_.read_file(guest_path,limit); }
+    if (!files_) throw runtime::MemoryFault("FILEIO: no disc is mounted");
+    try { return files_->read_file(guest_path,limit); }
     catch (const disc::PathError& error) { throw runtime::MemoryFault(error.what()); }
 }
-Reply Service::call(std::uint32_t method, ByteView args, std::uint32_t result_size) {
+Reply Service::call(std::uint32_t method, ByteView args, std::uint32_t result_size,ByteView source) {
     Reply reply;
     if (method == 255) {
         if (result_size != 4 && result_size != 8) throw runtime::MemoryFault("FILEIO: invalid version result size");
@@ -35,20 +36,20 @@ Reply Service::call(std::uint32_t method, ByteView args, std::uint32_t result_si
         const auto end = std::find(args.begin()+4,args.end(),0);
         if (end == args.end() || end - (args.begin()+4) >= 256) throw runtime::MemoryFault("FILEIO: unterminated path");
         std::string path(args.begin()+4,end);
-        result=files_.open(path,mode);
+        result=files_ ? files_->open(path,mode) : -19;
         if (result>=0) ++statistics_.opens;
     } else if (method == 1 || method == 2 || method == 4) {
         const auto fd = argument(0);
-        if (!files_.contains(fd)) result=-9;
-        else if (method==1) result=files_.close(fd);
+        if (!files_ || !files_->contains(fd)) result=-9;
+        else if (method==1) result=files_->close(fd);
         else if (method==4) {
-            result=files_.seek(fd,std::bit_cast<std::int32_t>(argument(1)),argument(2));
+            result=files_->seek(fd,std::bit_cast<std::int32_t>(argument(1)),argument(2));
         } else {
             const auto destination = argument(1), size = argument(2), fixup = argument(3);
             if (size > 0x100000) throw runtime::MemoryFault("FILEIO: read exceeds bounded transfer size");
             validate_write(destination,size);
             if (fixup) validate_write(fixup,16);
-            auto data=files_.read(fd,size);
+            auto data=files_->read(fd,size);
             const auto count=static_cast<std::uint32_t>(data.result);
             if (count) reply.writes.push_back({destination,std::move(data.bytes)});
             // HLE sends every requested byte, including unaligned edges. The guest
@@ -57,6 +58,13 @@ Reply Service::call(std::uint32_t method, ByteView args, std::uint32_t result_si
             result = static_cast<std::int32_t>(count);
             statistics_.bytes_read += count;
         }
+    } else if (method==3 && (argument(0)==1 || argument(0)==2)) {
+        if (!output_) throw runtime::MemoryFault("FILEIO: no native console output is bound");
+        if (source.size()!=argument(2) || source.size()>0x100000)
+            throw runtime::MemoryFault("FILEIO: invalid console write extent");
+        result=output_(argument(0),source);
+        if (result>static_cast<std::int32_t>(source.size()))
+            throw runtime::MemoryFault("FILEIO: native writer returned an invalid byte count");
     } else if (method == 3 || method == 6 || method == 7 || method == 8 || method == 13 || method == 14) result = -30;
     else throw runtime::MemoryFault("FILEIO: unsupported method " + std::to_string(method));
     reply.result.resize(4);

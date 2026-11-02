@@ -42,7 +42,7 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
 void project(const std::filesystem::path& input,const std::filesystem::path& output,
              std::span<const PayloadMapping> payloads = {},
              std::span<const std::filesystem::path> images = {},
-             std::span<const std::filesystem::path> observations = {});
+             std::span<const std::filesystem::path> observations = {}, bool function_symbols=false);
 struct FlowVerification {
     std::size_t instructions=0,passes=0,unmapped_targets=0,unresolved_indirect=0;
     std::size_t unclassified_references=0,record_binding_candidates=0,service_boundaries=0;
@@ -58,7 +58,7 @@ struct FlowVerification {
 FlowVerification verify_flow(const std::filesystem::path& input,const std::filesystem::path& output,
                              std::span<const PayloadMapping> payloads = {},
                              std::span<const std::filesystem::path> images = {},
-                             std::span<const std::filesystem::path> observations = {});
+                             std::span<const std::filesystem::path> observations = {}, bool function_symbols=false);
 // Unsupported operations and encodings in an already decoded instruction list.
 // Empty means this list can be lowered. No text is emitted.
 struct EeRejection {

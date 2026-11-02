@@ -10,6 +10,75 @@ extern "C" const std::uint8_t* nt_vu_graphics_end_image();
 extern "C" std::uint32_t nt_vu_graphics_end_size();
 
 namespace {
+void depth_and_coverage(nt::graphics::VulkanRenderer& renderer) {
+    using namespace nt::graphics;
+    const auto ad=[](Packet& p,unsigned reg,std::uint64_t value) {
+        p.push_back({std::uint32_t(value),std::uint32_t(value>>32),reg,0});
+    };
+    const auto finish=[](Packet& p) { p[0]={0x8000U|unsigned(p.size()-1),0x10000000,14,0}; };
+    const auto setup=[&](unsigned primitive,unsigned method,unsigned failure=0,bool alpha=false) {
+        Packet p(1); ad(p,0x1a,1); ad(p,0,primitive); ad(p,0x4c,1ULL<<16);
+        ad(p,0x40,(3ULL<<16)|(3ULL<<48)); ad(p,0x46,1); ad(p,0x4e,1);
+        ad(p,0x47,0x10000U|(method<<17)|(alpha ? 1U|(6U<<1)|(128U<<4)|(failure<<12) : 0));
+        ad(p,0x42,0x44); return p;
+    };
+    const auto sprite=[&](Packet& p,unsigned color,unsigned depth) {
+        ad(p,1,color); ad(p,5,std::uint64_t(depth)<<32);
+        ad(p,5,64ULL|(64ULL<<16)|(std::uint64_t(depth)<<32));
+    };
+    const auto pixel=[](const NativeDrawing& d) { return d.pixels()[rgba_word(0,1,1,1)]; };
+    const auto zpixel=[](const NativeDrawing& d) { return d.pixels()[rgba_word(32,1,1,1)^0x600]; };
+    for (unsigned method=0;method<4;++method) {
+        NativeDrawing d;
+        auto p=setup(6,1); sprite(p,0x80402010,20); finish(p); d.submit(renderer,std::array{p});
+        p=setup(6,method); sprite(p,0x80808080,10); finish(p); d.submit(renderer,std::array{p});
+        if (pixel(d)!=(method==1 ? 0x80808080U : 0x80402010U) || zpixel(d)!=(method==1 ? 10U : 20U))
+            throw std::runtime_error("Native depth comparison or write differs");
+        p=setup(6,method); sprite(p,0x80776655,20); finish(p); d.submit(renderer,std::array{p});
+        if (pixel(d)!=((method==1 || method==2) ? 0x80776655U : 0x80402010U))
+            throw std::runtime_error("Native depth equality differs");
+        p=setup(6,1); ad(p,0x4c,0xffffffff00010000ULL); sprite(p,0,30); finish(p); d.submit(renderer,std::array{p});
+        if (zpixel(d)!=30) throw std::runtime_error("Color-masked depth-only draw was discarded");
+    }
+    for (unsigned failure=0;failure<4;++failure) {
+        NativeDrawing d;
+        auto p=setup(6,1); sprite(p,0x80402010,10); finish(p); d.submit(renderer,std::array{p});
+        p=setup(6,2,failure,true); sprite(p,0x10776655,20); finish(p); d.submit(renderer,std::array{p});
+        const unsigned colors[]{0x80402010,0x10776655,0x80402010,0x80776655};
+        if (pixel(d)!=colors[failure] || zpixel(d)!=(failure==2 ? 20U : 10U))
+            throw std::runtime_error("Alpha-test failure did not preserve independent color/depth masks");
+    }
+    NativeDrawing packed;
+    auto p=setup(6,1); ad(p,1,0x80402010); finish(p); p[0][0]&=~0x8000U;
+    p.push_back({0x8002,0x10000000,5,0});
+    p.push_back({0,0,0xf1234567,0}); p.push_back({64,64,0xf1234567,0});
+    packed.submit(renderer,std::array{p});
+    if (zpixel(packed)!=0xf1234567) throw std::runtime_error("Packed XYZ lost unsigned 32-bit depth");
+    p=setup(6,1); ad(p,0x4e,1ULL|(1ULL<<24)); finish(p); p[0][0]&=~0x8000U;
+    p.push_back({0x8002,0x10000000,4,0});
+    p.push_back({0,0,0x1234560,0}); p.push_back({64,64,0x1234560,0});
+    packed.submit(renderer,std::array{p});
+    if (zpixel(packed)!=0xf1123456) throw std::runtime_error("Packed XYZF or 24-bit depth preservation differs");
+    const auto old=packed.pixels();
+    p=setup(6,1); ad(p,0x4e,0); sprite(p,1,1); finish(p);
+    bool rejected=false;
+    try { packed.submit(renderer,std::array{p}); } catch (const std::runtime_error&) { rejected=true; }
+    if (!rejected || packed.pixels()!=old) throw std::runtime_error("Aliased color/depth surfaces were published");
+    NativeDrawing triangle;
+    p=setup(3,1); ad(p,1,0x80402010);
+    ad(p,5,10ULL<<32); ad(p,5,64ULL|(30ULL<<32)); ad(p,5,(64ULL<<16)|(50ULL<<32)); finish(p);
+    triangle.submit(renderer,std::array{p});
+    if (zpixel(triangle)!=25) throw std::runtime_error("Triangle depth interpolation differs");
+    NativeDrawing aa;
+    p=setup(3|128,1); ad(p,1,0x80808080);
+    ad(p,5,10ULL<<32); ad(p,5,64ULL|(10ULL<<32)); ad(p,5,(64ULL<<16)|(10ULL<<32)); finish(p);
+    aa.submit(renderer,std::array{p});
+    const auto edge=aa.pixels()[rgba_word(0,1,2,1)];
+    if (pixel(aa)!=0x80808080 || zpixel(aa)!=10 || (edge>>24)==0 || (edge>>24)>=128 ||
+        aa.pixels()[rgba_word(32,1,2,1)^0x600]!=0)
+        throw std::runtime_error("Native edge coverage alpha or partial-coverage depth mask differs");
+}
+
 void triangles(nt::graphics::VulkanRenderer& renderer) {
     using nt::graphics::Packet;
     using nt::graphics::RasterVertex;
@@ -326,6 +395,28 @@ int main() {
         if (direct.consume(2,{},false)!=nt::ee::Stop::budget ||
             consumer.drawing.submitted_draws()!=empty_before)
             throw std::runtime_error("Empty GIF submission invented drawing work");
+        {
+            const nt::graphics::Packet finish{{0x8001,0x10000000,14,0},{0,0,0x61,0}};
+            const auto before=masked.completed_finishes();
+            masked.submit(consumer.renderer,std::array{finish});
+            if (masked.completed_finishes()!=before+1)
+                throw std::runtime_error("Native drawing finish fence was not completed");
+            auto malformed=finish; malformed[0][0]=0x8002; malformed.push_back({0,0,0x63,0});
+            rejected=false;
+            try { masked.submit(consumer.renderer,std::array{malformed}); }
+            catch (const std::invalid_argument&) { rejected=true; }
+            if (!rejected || masked.completed_finishes()!=before+1)
+                throw std::runtime_error("Rejected packet published a finish fence");
+            nt::ee::NativeGraphics graphics;
+            if (graphics.write(0x12001010,0x7d00)!=nt::ee::Stop::budget)
+                throw std::runtime_error("Native finish event could not be unmasked");
+            graphics.drawing_completed();
+            if (!(graphics.read(0x12001000).value&2) || graphics.poll()!=1)
+                throw std::runtime_error("Native finish event did not reach the interrupt owner");
+            graphics.write(0x12001000,2);
+            if (graphics.read(0x12001000).value&2)
+                throw std::runtime_error("Native finish event acknowledgement failed");
+        }
         const auto tex0=(1ULL<<14)|(2ULL<<26)|(2ULL<<30)|(1ULL<<34)|(1ULL<<35);
         const nt::graphics::Packet texture_update{{0x800a,0x10000000,14,0},
             {0x116,0,0,0},{(1U<<16)|8U,0,0x4c,0},
@@ -347,6 +438,24 @@ int main() {
         try { nt::graphics::scanout(masked.pixels(),3,display_buffers,display_extents); }
         catch (const std::invalid_argument&) { rejected=true; }
         if (!rejected) throw std::runtime_error("Unsupported dual-circuit composition was hidden");
+        {
+            std::vector<std::uint32_t> pixels(1024*1024);
+            pixels[nt::graphics::rgba_word(0,1,0,0)]=0xff0000ff;
+            pixels[nt::graphics::rgba_word(0,1,0,1)]=0xffff0000;
+            const std::array<std::uint64_t,2> buffers{1U<<9,(1U<<9)|(1ULL<<43)};
+            const std::array<std::uint64_t,2> extents{1ULL<<44,0};
+            const auto filtered=nt::graphics::scanout(pixels,35|(112U<<8),buffers,extents);
+            if (!filtered || filtered->width!=1 || filtered->height!=2 ||
+                filtered->pixels!=std::vector<std::uint32_t>{0xff8f0070,0xff700000})
+                throw std::runtime_error("Adjacent-row constant-alpha display composition differs");
+            const auto first=nt::graphics::scanout(pixels,35|(255U<<8),buffers,extents);
+            const auto second=nt::graphics::scanout(pixels,35,buffers,extents);
+            const auto background=nt::graphics::scanout(pixels,35|128,buffers,extents,false,0x00ff00);
+            if (first->pixels!=std::vector<std::uint32_t>{0xff0000ff,0xffff0000} ||
+                second->pixels!=std::vector<std::uint32_t>{0xffff0000,0xff000000} ||
+                background->pixels!=std::vector<std::uint32_t>{0xff00ff00,0xff00ff00})
+                throw std::runtime_error("Display blend endpoints or background differ");
+        }
         // Alternate visible rows and put unrelated data immediately after a
         // half-height target. Frame-mode scanout must never display that data.
         masked.submit(consumer.renderer,std::array{masked_packet(2,0xff112233),masked_packet(3,0xff445566)});
@@ -362,6 +471,7 @@ int main() {
         if (!full || full->pixels[4]!=0xff445566 || full->pixels[12]!=0xff000000)
             throw std::runtime_error("Full-height scanout unexpectedly duplicated source rows");
         triangles(consumer.renderer);
+        depth_and_coverage(consumer.renderer);
         std::cout<<"Compiled VU to Vulkan drawing integration passed\n";
         return 0;
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <string_view>
 #include <optional>
+#include <functional>
 #include <nt/sif_rpc_reply.hpp>
 #include <nt/ee_rpc_service.hpp>
 
@@ -25,6 +26,10 @@ struct NativeSifResetOwner {
 // port in the peer namespace, not a firmware address or executable module.
 class NativeSifCommandPeer {
 public:
+    // Read-only exports from the native peer owner. Unowned ranges must fail;
+    // this is not an allocation of a simulated IOP address space.
+    using DataReader=std::function<Stop(std::uint32_t,std::span<std::uint8_t>)>;
+    void data_reader(DataReader reader) { data_reader_=std::move(reader); }
     NativeSifCommandPeer(NativeSifLink& link,Memory& memory,CodeOverlap protection,std::uint32_t port,NativeSifReceive* receiver=nullptr)
         : link_(link),memory_(memory),protection_(protection),port_(port),receiver_(receiver) {}
     NativeSifCommandPeer(const NativeSifCommandPeer&)=delete;
@@ -76,7 +81,8 @@ public:
             for (auto* item:services_) if (item->server==word(packet.bytes,52)) service=item;
             if (!service) return {Stop::unsupported_system};
             const auto size=word(packet.bytes,36);
-            if (size>4096 || (header>>8)!=size || packets.size()!=(size ? 2U : 1U)) return {Stop::invalid_state};
+            if (size>4096 || (size ? (header>>8)!=size : word(packet.bytes,4)!=0) ||
+                packets.size()!=(size ? 2U : 1U)) return {Stop::invalid_state};
             std::span<const std::uint8_t> args;
             if (size) {
                 const auto& payload=packets.front();
@@ -96,7 +102,7 @@ public:
             if (called!=Stop::budget) return {called};
             return reply_to(response,receive_address);
         }
-        if (command!=0x80000009 || length<36 || option || (header>>8) || packets.size()!=1)
+        if (command!=0x80000009 || length<36 || option || word(packet.bytes,4) || packets.size()!=1)
             return {Stop::invalid_state};
         for (const auto* service:services_) if (service->id==word(packet.bytes,32)) {
             const auto response=nt::sif::bind_reply(word(packet.bytes,20),word(packet.bytes,28),service->server,service->buffer);
@@ -137,7 +143,33 @@ private:
         const auto command=word(packet.bytes,8),option=word(packet.bytes,12);
         last_command_=command; last_option_=option;
         if (command==0x8000000a) return dispatch_rpc(packets,receive_address_,rpc_ready_);
-        if ((header>>8) || packets.size()!=1) return {Stop::invalid_state};
+        if (command==0x8000000c) {
+            if (!rpc_ready_ || !data_reader_) return {Stop::unsupported_system};
+            if (length!=64 || option || word(packet.bytes,4) || packets.size()!=1) return {Stop::invalid_state};
+            const auto source=word(packet.bytes,32),destination=word(packet.bytes,36),size=word(packet.bytes,40);
+            if (size>0x100000) return {Stop::invalid_state};
+            if (!receiver_ || !memory_.completions || !receive_address_) return {Stop::unsupported_system};
+            if (!receiver_->accepting()) return {Stop::budget,0};
+            auto valid=receiver_->validate(memory_,protection_,receive_address_,64);
+            if (valid!=Stop::budget) return {valid};
+            valid=rpc_output(memory_,protection_,destination,size);
+            if (valid!=Stop::budget) return {valid};
+            const auto address=runtime::default_ram_address(destination);
+            if (size && address<receive_address_+64 && receive_address_<std::uint64_t(address)+size)
+                return {Stop::invalid_state};
+            std::vector<std::uint8_t> data(size);
+            valid=data_reader_(source,data);
+            if (valid!=Stop::budget) return {valid};
+            std::array<std::uint8_t,64> response{};
+            const std::array<std::uint32_t,9> fields{64,0,0x80000008U,0,
+                word(packet.bytes,16),word(packet.bytes,20),word(packet.bytes,24),word(packet.bytes,28),0x8000000cU};
+            std::memcpy(response.data(),fields.data(),sizeof(fields));
+            if (size) std::memcpy(memory_.data+address,data.data(),size);
+            return reply(response);
+        }
+        // SDK packet reuse preserves dsize when there is no extra transfer.
+        // The null destination and this command's schema own that distinction.
+        if (word(packet.bytes,4) || packets.size()!=1) return {Stop::invalid_state};
         if (command==0x80000003) return reset(packets,port_);
         if (command==0x80000002 && option==1) {
             // Publishing register zero acknowledges the available RPC dispatcher,
@@ -211,6 +243,7 @@ private:
     bool connected_=false,rpc_ready_=false;
     std::optional<std::uint32_t> unavailable_server_;
     NativeSifResetOwner reset_owner_;
+    DataReader data_reader_;
     bool handed_off_=false;
 };
 }

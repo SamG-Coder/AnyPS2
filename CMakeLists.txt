@@ -234,12 +234,20 @@ if(BUILD_TESTING)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_programs/test_runner.py")
             # The full corpus is an explicit gap audit. Callback and virtual-object
             # cases currently expose missing discovery and must not count as passes.
-            add_test(NAME ps2-source-scalar COMMAND "${Python3_EXECUTABLE}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_programs/run.py"
-                --ps2dev "${ANYPS2_TEST_PS2DEV}" ${ps2_host_arguments}
-                --converter "$<TARGET_FILE:ps2-recompile>" --generator "${CMAKE_GENERATOR}"
-                --output-root "${CMAKE_CURRENT_BINARY_DIR}/ps2-source-tests" --case scalar)
-            set_tests_properties(ps2-source-scalar PROPERTIES TIMEOUT 300)
+            function(add_ps2_source_test name)
+                add_test(NAME ps2-source-${name} COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_programs/run.py"
+                    --ps2dev "${ANYPS2_TEST_PS2DEV}" ${ps2_host_arguments}
+                    --converter "$<TARGET_FILE:ps2-recompile>" --generator "${CMAKE_GENERATOR}"
+                    --output-root "${CMAKE_CURRENT_BINARY_DIR}/ps2-source-tests" ${ARGN})
+                set_tests_properties(ps2-source-${name} PROPERTIES TIMEOUT 300)
+            endfunction()
+            add_ps2_source_test(scalar --case scalar)
+            add_ps2_source_test(direct_flow --case direct_flow)
+            add_ps2_source_test(scalar-size --case scalar --profile Os)
+            add_ps2_source_test(weak-callback --case weak_callback --profile O2)
+            add_ps2_source_test(switch-spill --case switch_spill --profile O2)
+            add_ps2_source_test(function-symbols --case callback_stack --profile O2 --function-symbols)
         endif()
         add_test(NAME ee-native-images COMMAND "${CMAKE_COMMAND}"
             -DFIXTURE=$<TARGET_FILE:emit-ee-fixture> -DCONVERTER=$<TARGET_FILE:ps2-recompile>

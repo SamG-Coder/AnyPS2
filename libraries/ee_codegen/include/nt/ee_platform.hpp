@@ -13,14 +13,18 @@ class NativePlatform {
 public:
     explicit NativePlatform(NativeTimers::Clock clock=nullptr) : graphics(clock),timers(clock) {
         timers.connect_events(); packet_submission.consumer={this,consume_packet,packet_pending};
+        // Application startup owns a usable native submission queue. Explicit
+        // guest suspension still gates it; completion requires real consumption.
+        packet_submission.policy.enable_native_queue();
     }
     NativePlatform(const NativePlatform&)=delete;
     NativePlatform& operator=(const NativePlatform&)=delete;
     static runtime::State initial_state(std::uint32_t entry) {
         runtime::State state; state.pc=entry;
         // Native application context: INTC/DMA classes and global delivery are
-        // available. EIE stays clear until compiled startup explicitly enables it.
-        state.cop0_status=0xc01;
+        // available. EDI permits application DI/EI after SDK startup enters user
+        // mode. EIE stays clear until compiled startup explicitly enables it.
+        state.cop0_status=0x20c01;
         return state;
     }
     // Optional synchronous host debug-byte sink. With no pending host writes,

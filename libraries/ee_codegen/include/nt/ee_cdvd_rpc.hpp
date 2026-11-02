@@ -75,7 +75,8 @@ public:
         if (method==34) return select_media_mode(memory,protection,args,destination,size);
         if (method!=1) return Stop::unsupported_system;
         if (!args.empty() || size!=16 || !clock_) return Stop::invalid_state;
-        if (!session_.initialized()) return Stop::unsupported_system;
+        // The RTC belongs to the host platform, not to mounted optical media.
+        // SDK libc startup queries it before opening a CD/DVD session.
         const auto valid=rpc_output(memory,protection,destination,size);
         if (valid!=Stop::budget) return valid;
         using namespace std::chrono;

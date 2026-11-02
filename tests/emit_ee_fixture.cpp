@@ -365,6 +365,8 @@ int main(int argc,char** argv) {
         code.push_back(nt::r5900::decode(0x460004+n*8,12));
     }
     // Original constant materialization fixtures, including signed wraparound.
+    for (unsigned n=0;const auto word:{0x48c88000U,0x48498000U,0x48c08000U,0x484a8000U,12U})
+        code.push_back(nt::r5900::decode(0x460100+n++*4,word));
     for (unsigned group=0;group<3;++group) for (unsigned value=0;value<3;++value) {
         const auto pc=0x470000U+(group*3+value)*16;
         const unsigned high[]{0x8000,0x7fff,0xffff};

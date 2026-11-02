@@ -55,6 +55,7 @@ struct Prepared {
     std::vector<analysis::CallbackFlowGap> flow_gaps;
     std::vector<Pass> passes;
     std::vector<observation::Edge> observations;
+    std::vector<std::pair<std::uint32_t,std::uint32_t>> function_roots;
     std::uint64_t input_identity=0;
     std::set<std::uint32_t> registered_calls;
     std::size_t wrapper_candidates=0;
@@ -87,7 +88,7 @@ std::vector<CodeRange> declared_code_ranges(const elf::Executable& executable) {
     return result;
 }
 Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings,bool diagnose_flow=false,
-                 std::span<const observation::Edge> observations={}) {
+                 std::span<const observation::Edge> observations={},bool function_symbols=false) {
     auto executable=elf::parse(bytes);
     auto ranges=declared_code_ranges(executable);
     std::vector<std::pair<std::uint32_t,std::uint32_t>> extents;
@@ -138,6 +139,7 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings,bool di
     if (std::uint64_t(syscall_table)+1024>0x2000000U)
         throw std::runtime_error("No native syscall metadata extent available");
     std::vector<std::uint32_t> continuations=payload_entries;
+    if (function_symbols) continuations.insert(continuations.end(),executable.function_entries.begin(),executable.function_entries.end());
     const auto wrappers=analysis::syscall_wrappers(bytes,executable);
     continuations.insert(continuations.end(),wrappers.begin(),wrappers.end());
     analysis::Program discovered;
@@ -244,6 +246,7 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings,bool di
         else ranges.push_back({pc,4});
     }
     Prepared result;
+    if (function_symbols) for (const auto entry:executable.function_entries) result.function_roots.emplace_back(1,entry);
     result.observations.assign(observations.begin(),observations.end());
     result.passes=std::move(passes);
     if (diagnose_flow) result.flow_gaps=analysis::callback_flow_gaps(bytes,executable,discovered,pointers);
@@ -264,7 +267,7 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings,bool di
 }
 Prepared prepare_project(const std::filesystem::path& input,std::span<const PayloadMapping> mappings,
                          std::span<const std::filesystem::path> images,bool diagnose_flow=false,
-                         std::span<const std::filesystem::path> observation_paths={}) {
+                         std::span<const std::filesystem::path> observation_paths={},bool function_symbols=false) {
     if (images.size()>31) throw std::invalid_argument("Too many secondary executable images");
     if (observation_paths.size()>64) throw std::invalid_argument("Too many native observations");
     const auto bytes=read_file(input);
@@ -275,6 +278,7 @@ Prepared prepare_project(const std::filesystem::path& input,std::span<const Payl
     std::ostringstream identity;
     std::vector<std::pair<std::size_t,std::uint64_t>> image_identities;
     identity<<"anyps2-ee-input-v1\n"<<bytes.size()<<' '<<fingerprint(bytes)<<'\n';
+    if (function_symbols) identity<<"function-symbols\n";
     for (const auto& mapping:mappings) {
         identity<<"payload "<<mapping.source<<' '<<mapping.destination<<' '<<mapping.size;
         for (const auto offset:mapping.entry_offsets) identity<<' '<<offset;
@@ -295,7 +299,7 @@ Prepared prepare_project(const std::filesystem::path& input,std::span<const Payl
         if (edge.image>images.size()+1) throw std::runtime_error("Native observation refers to an unknown executable image");
         observed[edge.image-1].push_back(std::move(edge));
     }
-    auto prepared=prepare(bytes,mappings,diagnose_flow,observed[0]);
+    auto prepared=prepare(bytes,mappings,diagnose_flow,observed[0],function_symbols);
     prepared.input_identity=input_identity;
     if (!images.empty()) {
         const auto snapshot=[](ByteView source,const elf::Executable& executable,std::uint32_t id) {
@@ -312,7 +316,8 @@ Prepared prepare_project(const std::filesystem::path& input,std::span<const Payl
             const auto id=static_cast<std::uint32_t>(prepared.images.size()+1);
             if (source.size()!=image_identities[id-2].first || fingerprint(source)!=image_identities[id-2].second)
                 throw std::runtime_error("Executable image changed during conversion; retry with stable input files");
-            auto extra=prepare(source,{},diagnose_flow,observed[id-1]);
+            auto extra=prepare(source,{},diagnose_flow,observed[id-1],function_symbols);
+            for (const auto& [image,entry]:extra.function_roots) prepared.function_roots.emplace_back(id,entry);
             for (const auto& section:extra.executable.segments) {
                 for (const auto& old:occupied)
                     if (std::uint64_t(section.address)<std::uint64_t(old.address)+old.memory_size &&
@@ -343,6 +348,10 @@ Prepared prepare_project(const std::filesystem::path& input,std::span<const Payl
     return prepared;
 }
 void write_discovery_reports(const std::filesystem::path& output,const Prepared& prepared,bool verification=false) {
+    std::ostringstream functions;
+    functions<<"image\tentry\tevidence\n";
+    for (const auto& [image,entry]:prepared.function_roots) functions<<image<<'\t'<<hex32(entry)<<"\tELF-STT_FUNC\n";
+    save(output/"function-roots.tsv",functions.str());
     save(output/"input-identity.txt","format=anyps2-ee-input-v1\ninput_identity="+std::to_string(prepared.input_identity)+"\n");
     std::ostringstream observed;
     observed<<"image\tsite\ttarget\tevidence\tcoverage\n";
@@ -387,8 +396,8 @@ void write_discovery_reports(const std::filesystem::path& output,const Prepared&
 }
 }
 void project(const std::filesystem::path& input,const std::filesystem::path& destination,std::span<const PayloadMapping> mappings,
-             std::span<const std::filesystem::path> images,std::span<const std::filesystem::path> observations) {
-    auto prepared=prepare_project(input,mappings,images,false,observations);
+             std::span<const std::filesystem::path> images,std::span<const std::filesystem::path> observations,bool function_symbols) {
+    auto prepared=prepare_project(input,mappings,images,false,observations,function_symbols);
     if (!prepared.discovered.unresolved.empty())
         throw std::runtime_error("EE discovery reached unmapped code at "+hex32(*prepared.discovered.unresolved.begin()));
     std::vector<r5900::Instruction> instructions;
@@ -491,6 +500,7 @@ target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codeg
          "Discovery includes leaf syscall-wrapper candidates and recognized startup continuations. Compiled wrappers do not implement missing services; runtime dispatch still validates them.\n"
          "Indirect destinations must already belong to the discovered code set; other targets stop.\n"
          "call-sites.tsv inventories reached transfers; compiled initial candidates do not prove complete indirect coverage.\n"
+         "function-roots.tsv separately records opt-in defined ELF function metadata; it is not pointer-flow completeness proof.\n"
          "observed-call-edges.tsv lists validated native-stop targets used in this offline conversion; their other possible targets remain unresolved.\n"
          "Build with ps2-build, then run ps2-native <program.data> [operation-budget].\n"
          "Data contains private input material and must remain local. This is not game boot.\n");
@@ -498,8 +508,8 @@ target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codeg
 }
 FlowVerification verify_flow(const std::filesystem::path& input,const std::filesystem::path& destination,
                              std::span<const PayloadMapping> mappings,std::span<const std::filesystem::path> images,
-                             std::span<const std::filesystem::path> observations) {
-    const auto prepared=prepare_project(input,mappings,images,true,observations);
+                             std::span<const std::filesystem::path> observations,bool function_symbols) {
+    const auto prepared=prepare_project(input,mappings,images,true,observations,function_symbols);
     FlowVerification result;
     result.instructions=prepared.discovered.instructions.size(); result.passes=prepared.passes.size();
     result.unmapped_targets=prepared.discovered.unresolved.size();

@@ -4,6 +4,11 @@
 #include <tuple>
 
 namespace nt::analysis::pointer_flow {
+// This needs no propagated register value: either comparison reads the same
+// register twice, so its taken edge is certain even for nonzero registers.
+inline bool always_taken(const r5900::Instruction& i) {
+    return (i.op==r5900::Op::beq || i.op==r5900::Op::beql) && i.rs==i.rt;
+}
 // The low word can carry a pointer. Conditional and partial writes invalidate it
 // too. No value semantics are inferred for operations listed only by effect.
 inline std::optional<unsigned> write(const r5900::Instruction& i) {
@@ -93,16 +98,16 @@ struct Graph {
                 i.terminal() || i.op==Op::syscall) continue;
             if (!i.branch()) { add({pc,pc+4}); continue; }
             const bool link=i.op==Op::jal || (i.op==Op::jalr && i.rd) || (i.op>=Op::bltzal && i.op<=Op::bgezall);
-            const bool always=(i.op==Op::beq || i.op==Op::beql) && i.rs==i.rt;
+            const bool always=always_taken(i);
             const bool never=(i.op==Op::bne || i.op==Op::bnel) && i.rs==i.rt;
             if (link) add({pc,pc+8,true,true});
             else if (!i.indirect() && !never) add({pc,i.target(),true});
             if (!always && i.op!=Op::j && i.op!=Op::jal && i.op!=Op::jr && i.op!=Op::jalr)
                 add({pc,pc+8,!i.likely()});
         }
-        // Discovery records both syntactic arms. Once a constant condition has
-        // pruned one edge, disconnected fallthrough instructions must not act
-        // as fresh roots in a backward slice.
+        // Independent entries can expose otherwise disconnected instructions.
+        // After pruning a constant edge, those instructions must not act as
+        // fresh roots in a backward slice unless reachable from an entry.
         if (!program.entries.empty()) {
             std::deque<std::uint32_t> pending(program.entries.begin(),program.entries.end());
             std::set<std::uint32_t> reached;
@@ -125,7 +130,7 @@ struct Graph {
 // same root and offset on every incoming path prevents unrelated frames from
 // being equated, while ABI-preserved aliases can survive intervening calls.
 inline std::optional<FrameAddress> frame_address(const Program& program,const Graph& graph,
-                                                std::uint32_t before,unsigned reg) {
+                                                std::uint32_t before,unsigned reg,unsigned budget=512) {
     using r5900::Op;
     struct State {
         std::uint32_t pc,offset; unsigned reg;
@@ -134,7 +139,6 @@ inline std::optional<FrameAddress> frame_address(const Program& program,const Gr
     std::deque<State> pending{{before,0,reg}};
     std::set<State> visited;
     std::optional<FrameAddress> result;
-    unsigned budget=512;
     const auto reverse=[&](std::uint32_t pc,State& state) {
         const auto found=program.instructions.find(pc);
         if (found==program.instructions.end()) return false;
@@ -172,11 +176,11 @@ inline std::optional<FrameAddress> frame_address(const Program& program,const Gr
 }
 // Recover one agreed scalar constant across predecessor blocks. Path states
 // stay separate; a clobbered or unknown incoming value makes the result unknown.
-inline std::optional<std::uint32_t> constant(const Program& program,const Graph& graph,
-                                            std::uint32_t before,unsigned reg) {
+inline std::optional<std::uint64_t> constant_gpr(const Program& program,const Graph& graph,
+                                                std::uint32_t before,unsigned reg) {
     using r5900::Op;
     struct Operation {
-        bool bit_or; std::uint32_t value;
+        Op op; std::uint64_t value;
         auto operator<=>(const Operation&) const=default;
     };
     struct State {
@@ -185,12 +189,20 @@ inline std::optional<std::uint32_t> constant(const Program& program,const Graph&
     };
     std::deque<State> pending{{before,reg,{}}};
     std::set<State> visited;
-    std::optional<std::uint32_t> result;
+    std::optional<std::uint64_t> result;
     bool unknown=false;
     unsigned budget=512;
-    const auto accept=[&](const State& state,std::uint32_t value) {
-        for (auto op=state.operations.rbegin();op!=state.operations.rend();++op)
-            value=op->bit_or ? value|op->value : value+op->value;
+    const auto word=[](std::uint64_t value) {
+        const auto low=value&0xffffffffULL;
+        return (low^0x80000000ULL)-0x80000000ULL;
+    };
+    const auto accept=[&](const State& state,std::uint64_t value) {
+        for (auto op=state.operations.rbegin();op!=state.operations.rend();++op) {
+            if (op->op==Op::ori) value|=op->value;
+            else if (op->op==Op::addiu) value=word(value+op->value);
+            else if (op->op==Op::sll) value=word(value);
+            else value+=op->value; // DADDIU wraps at 64 bits.
+        }
         if (result && *result!=value) unknown=true;
         result=value;
     };
@@ -201,15 +213,17 @@ inline std::optional<std::uint32_t> constant(const Program& program,const Graph&
         const auto effect=write(i);
         if (!effect || i.terminal()) { unknown=true; return false; }
         if (*effect!=state.reg) return true;
-        if (i.op==Op::lui) { accept(state,std::uint32_t(i.immediate)<<16); return false; }
+        if (i.op==Op::lui) { accept(state,word(std::uint32_t(i.immediate)<<16)); return false; }
         if (i.op==Op::addiu || i.op==Op::daddiu || i.op==Op::ori) {
-            if (i.immediate) state.operations.push_back({i.op==Op::ori,i.op==Op::ori ? std::uint16_t(i.immediate) : std::uint32_t(i.immediate)});
+            state.operations.push_back({i.op,i.op==Op::ori ? std::uint64_t(std::uint16_t(i.immediate)) :
+                std::uint64_t(std::int64_t(i.immediate))});
             state.reg=i.rs; return true;
         }
         if ((i.op==Op::addu || i.op==Op::daddu || i.op==Op::bit_or) && (!i.rs || !i.rt)) {
+            if (i.op==Op::addu) state.operations.push_back({Op::sll,0});
             state.reg=i.rs ? i.rs : i.rt; return true;
         }
-        if (i.op==Op::sll && !i.sa) { state.reg=i.rt; return true; }
+        if (i.op==Op::sll && !i.sa) { state.operations.push_back({Op::sll,0}); state.reg=i.rt; return true; }
         unknown=true; return false;
     };
     while (!pending.empty() && budget-- && !unknown) {
@@ -227,6 +241,11 @@ inline std::optional<std::uint32_t> constant(const Program& program,const Graph&
         }
     }
     return unknown || !pending.empty() ? std::nullopt : result;
+}
+inline std::optional<std::uint32_t> constant(const Program& program,const Graph& graph,
+                                            std::uint32_t before,unsigned reg) {
+    const auto value=constant_gpr(program,graph,before,reg);
+    return value ? std::optional{static_cast<std::uint32_t>(*value)} : std::nullopt;
 }
 // Prove one affine update on every forward path through a bounded loop body.
 // Nested loops, unknown writes and volatile values across calls are rejected.

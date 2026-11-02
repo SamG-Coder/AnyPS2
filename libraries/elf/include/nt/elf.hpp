@@ -20,6 +20,9 @@ struct Executable {
     // VU payload containers remain in the load image but are not EE functions.
     // Their upload framing and VU entry points still require separate conversion.
     std::vector<AddressRange> vector_sections;
+    // Defined STT_FUNC symbols validated against file-backed executable sections.
+    // Conversion may opt into these roots without promoting object/data symbols.
+    std::vector<std::uint32_t> function_entries;
 };
 Executable parse(ByteView bytes);
 bool executable_address(const Executable&,std::uint32_t address,unsigned bytes=4,bool allow_inferred=false);

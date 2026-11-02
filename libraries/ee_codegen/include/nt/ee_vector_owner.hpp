@@ -31,6 +31,12 @@ public:
             return VectorStatus::ready;
         }
         if (selector==17 || selector==29) return VectorStatus::ready;
+        if (selector==16) {
+            // Arithmetic owns the current flags; CTC2 replaces only the sticky
+            // history. Completed native arithmetic is already ordered here.
+            storage.status=(storage.status&63U)|(value&0xfc0U);
+            return VectorStatus::ready;
+        }
         if (selector==18) { storage.clip=value&0xffffffU; return VectorStatus::ready; }
         if (selector==20) { storage.random=(value&0x7fffffU)|0x3f800000U; return VectorStatus::ready; }
         if (selector==21) { storage.immediate=value; return VectorStatus::ready; }

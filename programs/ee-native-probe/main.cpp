@@ -6,6 +6,7 @@
 #include <nt/binary.hpp>
 #include <nt/ee_file_rpc.hpp>
 #include <nt/ee_cdvd_rpc.hpp>
+#include <nt/ee_bootstrap_modules.hpp>
 #include <nt/ee_performance.hpp>
 #include <nt/live_counters.hpp>
 #ifdef _WIN32
@@ -19,6 +20,7 @@
 #include <nt/vulkan_renderer.hpp>
 #include <nt/native_drawing.hpp>
 #include <charconv>
+#include <cstdio>
 #include <iostream>
 #include <fstream>
 #include <stdexcept>
@@ -68,6 +70,7 @@ struct NativeGpu {
     std::unique_ptr<nt::graphics::VulkanRenderer> renderer;
     nt::graphics::NativeDrawing drawing;
     std::unique_ptr<probe::GraphicsCapture> capture;
+    nt::ee::NativeGraphics* completion=nullptr;
     std::string error;
     std::chrono::steady_clock::duration render_time{};
     static bool submit(void* raw,std::span<const nt::graphics::NativeDrawing::Packet> packets) {
@@ -76,7 +79,9 @@ struct NativeGpu {
         try {
             if (!self.renderer) self.renderer=std::make_unique<nt::graphics::VulkanRenderer>();
             if (self.capture) self.capture->submit(packets);
+            const auto finished=self.drawing.completed_finishes();
             self.drawing.submit(*self.renderer,packets);
+            if (self.drawing.completed_finishes()!=finished && self.completion) self.completion->drawing_completed();
             self.render_time+=std::chrono::steady_clock::now()-began;
             return true;
         }
@@ -291,6 +296,7 @@ int main(int argc,char** argv) {
             platform.packet_setup.uncompiled_upload=VuCapture::observe;
             platform.packet_setup.uncompiled_packet=VuCapture::observe_packet;
         }
+        gpu.completion=&platform.graphics;
         platform.graphics.context=&gpu; platform.graphics.synchronize=NativeGpu::synchronize;
         platform.graphics.reset_drawing=[](void* context) {
             auto& gpu=*static_cast<NativeGpu*>(context);
@@ -298,6 +304,9 @@ int main(int argc,char** argv) {
             gpu.drawing.reset(); return nt::ee::Stop::budget;
         };
         nt::ee::NativeSifCommandPeer command_peer(platform.sif_link,memory,native_code_overlap,0x1000,&platform.sif_receive);
+        nt::ee::NativeBootstrapModules bootstrap_modules;
+        command_peer.data_reader([&](std::uint32_t source,std::span<std::uint8_t> output) { return bootstrap_modules.snapshot(source,output); });
+        if (!command_peer.register_service(bootstrap_modules)) throw std::runtime_error("Cannot register bootstrap module service");
 #ifdef ANYPS2_NATIVE_IOP
         std::unique_ptr<probe::IopReset> iop_reset;
         if (!iop_data.empty()) {
@@ -306,14 +315,17 @@ int main(int argc,char** argv) {
             active_iop=iop_reset.get();
         }
 #endif
-        std::unique_ptr<nt::ee::NativeFileRpc> files;
-        std::unique_ptr<nt::ee::NativeCdvdInitRpc> cdvd;
-        if (!disc.empty()) {
-            files=std::make_unique<nt::ee::NativeFileRpc>(disc);
-            cdvd=std::make_unique<nt::ee::NativeCdvdInitRpc>(disc);
-            if (!command_peer.register_service(*cdvd)) throw std::runtime_error("Cannot register native CD/DVD initialization");
-            if (!command_peer.register_service(*files)) throw std::runtime_error("Cannot register native disc service");
-        }
+        auto files=std::make_unique<nt::ee::NativeFileRpc>(disc,[](std::uint32_t fd,nt::ByteView data) {
+            auto* stream=fd==1 ? stdout : stderr;
+            const auto count=std::fwrite(data.data(),1,data.size(),stream);
+            if (std::fflush(stream)!=0) return std::int32_t{-5};
+            return static_cast<std::int32_t>(count);
+        });
+        auto cdvd=std::make_unique<nt::ee::NativeCdvdInitRpc>(disc);
+        nt::ee::NativeCdvdScmdRpc scmd(*cdvd,0x6000,0x7000);
+        if (!command_peer.register_service(*cdvd) || !command_peer.register_service(scmd))
+            throw std::runtime_error("Cannot register native CD/DVD and clock services");
+        if (!command_peer.register_service(*files)) throw std::runtime_error("Cannot register native file service");
         if (!command_peer.connect(platform.sif_outbound)) throw std::runtime_error("Cannot connect native command peer");
         auto state=nt::ee::NativePlatform::initial_state(ANYPS2_EE_ENTRY);
         nt::ee::StartupServices services(native_code_overlap,nt_ee_generated_contains,ANYPS2_EE_SYSCALL_TABLE);
@@ -347,7 +359,7 @@ int main(int argc,char** argv) {
                     window_closed=true;
                 } else {
                     const auto& output=platform.graphics.output();
-                    if (const auto frame=nt::graphics::scanout(gpu.drawing.pixels(),output.control,output.buffers,output.displays,platform.graphics.half_height_output())) {
+                    if (const auto frame=nt::graphics::scanout(gpu.drawing.pixels(),output.control,output.buffers,output.displays,platform.graphics.half_height_output(),std::uint32_t(output.background))) {
                         window->present(*frame);
                         if (gpu.capture) gpu.capture->present(*frame,gpu.drawing.submitted_draws(),output.control,output.buffers,output.displays,platform.graphics.half_height_output());
                     }
@@ -492,8 +504,13 @@ int main(int argc,char** argv) {
                      <<" uncompiled_handler="<<nt::hex32(static_cast<std::uint32_t>(state.gpr[5].lo));
         if (stop==nt::ee::Stop::unmapped_code && (state.gpr[3].lo==0x20 || state.gpr[3].lo==0x22))
             std::cout<<" uncompiled_thread_entry="<<nt::hex32(memory.fault_address);
-        if (stop==nt::ee::Stop::unsupported_system && command_peer.last_command())
+        if (stop!=nt::ee::Stop::budget && command_peer.last_command())
             std::cout<<" native_peer_command="<<nt::hex32(command_peer.last_command())<<" option="<<command_peer.last_option();
+        if (stop!=nt::ee::Stop::budget) for (const auto& packet:platform.sif_outbound.pending_packets()) {
+            std::cout<<" sif_destination="<<nt::hex32(packet.destination)<<" sif_bytes="<<packet.bytes.size();
+            if (packet.bytes.size()>=16) std::cout<<" sif_header="<<nt::hex32(nt::le32(packet.bytes,0))
+                <<" sif_command="<<nt::hex32(nt::le32(packet.bytes,8));
+        }
         if (cdvd && !cdvd->error().empty()) std::cerr<<"disc initialization: "<<cdvd->error()<<'\n';
         if (!gpu.error.empty()) std::cerr<<"graphics: "<<gpu.error<<'\n';
         if (nt::ee::NativePacketSubmission::maps(memory.fault_address)) {
@@ -529,7 +546,7 @@ int main(int argc,char** argv) {
         std::cout<<'\n';
         if (window && !application_exit && !window_closed) {
             const auto& output=platform.graphics.output();
-            const auto frame=nt::graphics::scanout(gpu.drawing.pixels(),output.control,output.buffers,output.displays,platform.graphics.half_height_output());
+            const auto frame=nt::graphics::scanout(gpu.drawing.pixels(),output.control,output.buffers,output.displays,platform.graphics.half_height_output(),std::uint32_t(output.background));
             if (frame) {
                 std::cout<<"native_display="<<frame->width<<'x'<<frame->height<<" execution=stopped\n";
             }
