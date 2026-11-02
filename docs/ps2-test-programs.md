@@ -167,9 +167,19 @@ acknowledges only its requested event, retaining independent draw completion.
 The PS2 ELF converts through LLVM AOT and renders the rotating checker-textured
 cube grid and text in a 640x448 Vulkan window. A 20-second visible run completed
 at its requested diagnostic deadline without an unsupported-operation stop;
-captures at different rotations verify changing scene pixels. Controller input
-remains unavailable without a native provider, and this does not establish GT4
-progress or hardware-exact rendering. Edge antialiasing uses native 4x4 coverage.
+captures at different rotations verify changing scene pixels. The native SDL
+controller provider subsequently completed a 120-second run, and the user
+confirmed physical DualSense camera input. The source port selects
+`ANYPS2_NATIVE_PAD` to bind native legacy-pad endpoints instead of loading ROM
+modules. The original camera uses inverted vertical look. This does not establish
+GT4 progress or hardware-exact rendering. Edge antialiasing uses native 4x4 coverage.
+
+Controller regressions are `pad-input` (subscription lifecycle, packet layout,
+aliases and memory protection) and `gamepad-host` (SDL virtual-device mapping and
+disconnection). The virtual device is test-only. Scalar camera arithmetic is
+covered by generated-code MADD/MSUB/MADDA/MSUBA underflow regressions in
+`ee-llvm-execution`. Native pad commands outside the implemented legacy subset
+remain explicit failures; vibration and pressure-sensitive buttons are not exposed.
 
 For symbol-bearing homebrew, conversion accepts `--function-symbols` to include
 defined ELF function entries and emits `function-roots.tsv`. This does not turn

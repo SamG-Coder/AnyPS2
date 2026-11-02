@@ -10,9 +10,9 @@ AnyPS2 is an experimental, BIOS-free C++20 toolchain for converting user-owned P
 
 **One homebrew demo is working:** the locally adapted cube demo from
 [glampert/ps2-homebrew](https://github.com/glampert/ps2-homebrew) renders animated,
-checker-textured cubes and text through LLVM AOT and Vulkan. A 20-second run was
-verified at 640 x 448. Controller interaction is not yet verified; this is not a
-claim of playable commercial games. See [milestone evidence and project history](docs/project-history.md).
+checker-textured cubes and text through LLVM AOT and Vulkan. A 120-second run was
+verified at 640 x 448, and the user confirmed camera control with a PS5 DualSense
+through the native SDL input provider. This is not a claim of playable commercial games. See [milestone evidence and project history](docs/project-history.md).
 
 ## License and provenance
 

@@ -38,9 +38,14 @@ and run with AnyPS2's native services and Vulkan renderer.
 
 The verified 20-second run displayed an animated grid of checker-textured cubes
 and text at 640 x 448, submitted 55,432 triangles, and stopped at the requested
-diagnostic deadline. This is a working animated demo, not a claim that all
-homebrew works. Controller interaction was not verified, so fully interactive
-playability remains unproven. Native edge coverage also differs from GS precision.
+diagnostic deadline. A subsequent controller-enabled run lasted 120 seconds,
+submitted 1,003,962 triangles, and ended only at its requested deadline. The user
+confirmed camera movement with a physical PS5 DualSense. Native SDL input feeds
+the public legacy pad RPC interface; the local source port binds those endpoints
+without requesting ROM modules. Vertical look preserves the original demo's
+inverted direction. This establishes an interactive homebrew demo, not general
+homebrew compatibility or commercial-game playability. Native edge coverage
+also differs from GS precision.
 
 The local port updates compiler/assembler compatibility, assembly memory clobbers,
 controller failure handling and a public SDK synchronization helper. It is not an

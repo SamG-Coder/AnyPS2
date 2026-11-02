@@ -323,7 +323,8 @@ void emit_declarations(Writer& w) {
     declare_packed_intrinsics(w.out);
     w.out<<"declare i64 @nt_ee_square_root_finite(i32)\n"
          <<"declare i64 @nt_ee_reciprocal_square_root_finite(i32, i32)\n"
-         <<"declare i64 @nt_ee_multiply_accumulate_finite(i32, i32, i32, i32)\n";
+         <<"declare i64 @nt_ee_multiply_accumulate_finite(i32, i32, i32, i32)\n"
+         <<"declare i64 @nt_ee_scalar_multiply_accumulate_finite(i32, i32, i32, i32)\n";
     w.out<<"declare i32 @nt_ee_vector_multiply_accumulate(ptr, i32, i32, i32, i32, i32, i32)\n"
          <<"declare i32 @nt_ee_vector_quotient(ptr, i32, i32, i32, i32, i32)\n"
          <<"declare i32 @nt_ee_vector_outer(ptr, i32, i32, i32, i32)\n"

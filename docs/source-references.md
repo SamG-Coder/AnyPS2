@@ -45,8 +45,10 @@ missing inline-assembly memory clobbers, and controller access after failed
 initialization. It remains PS2 source compiled to a PS2 input, not native game
 C++ output. LLVM conversion and native execution render the rotating cube grid
 and text through Vulkan; a bounded 20-second run ended only at its requested
-deadline. No ROM controller modules are supplied, and controller interaction
-is not established.
+deadline. A later native SDL controller integration ran for 120 seconds; the
+user confirmed DualSense camera movement. No ROM controller modules are supplied.
+The source port binds the implemented native pad endpoints directly; its camera
+logic is unchanged, including inverted vertical look.
 The local build also recompiles the public SDK `graph.c` helper with targeted
 CSR write-one-to-clear acknowledgements. Its original read/OR/write acknowledges
 unrelated FINISH events when waiting for VSYNC, producing a race when native GPU
@@ -2019,3 +2021,31 @@ from bits 1-5, independently of bits 6-7. The native selector decoder preserves
 those aliases. Address writes discard the low four byte-address bits; the
 effect-end selector instead retains the inclusive end of a 128 KiB region.
 Compiled synthetic imports verify aliases, readback, alignment and bounds.
+
+## Native controller input
+
+SDL at `bd9f6ca9ff0e9509f49980fc1b70837f54b6f244` is linked as a static,
+input-only native provider. Its zlib notice is retained in
+[SDL-license.txt](third-party/SDL-license.txt) and copied beside native builds.
+The archive SHA256 is
+`6d820fec9af8b0a9d1fe386dd9c41a401df0a564ea941570140391da765b36c3`.
+SDL owns device discovery and controller mappings; AnyPS2 independently adapts
+its standardized buttons and signed axes to the public legacy libpad RPC ABI.
+The protocol reference is PS2SDK `ee/rpc/pad/src/libpad.c` at the pinned revision
+above: old command identifiers, 64-byte double-buffer records and active-low
+button packets. No ROM module, firmware, or upstream pad implementation is copied.
+Unsupported commands stop explicitly. Digital buttons do not claim pressure
+sensitivity, and this initial adapter does not expose vibration actuators.
+
+The local homebrew input port binds the implemented native RPC endpoints directly
+instead of loading ROM controller modules. This is an explicit source adaptation
+compiled into a PS2 ELF and then LLVM AOT, not a successful ROM-load stub.
+
+The controller-enabled camera also reaches scalar MADD/MSUB product underflow.
+PCSX2's pinned `x86/iFPUd.cpp` (`FPU_MUL`, `recMaddsub`, `ToPS2FPU`) supplies
+an independent behavioral reference: round and flush the product before the
+addition, retain sticky underflow from that stage, and derive current underflow
+from the final addition. AnyPS2 reuses its own integer-significand arithmetic
+and adds a separate scalar ABI helper; the conservative VU contract is unchanged.
+No upstream implementation is copied. Exponent-255 and overflow cases remain
+explicitly unsupported; this is not a claim of hardware-exact multiplication.

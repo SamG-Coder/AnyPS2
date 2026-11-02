@@ -307,6 +307,26 @@ void scalar_and_control() {
         context=name; State state; state.pc=ee_batch::scalar_pc(name); state.fpr[2]=0x40400000; state.fpr[3]=0x40000000; state.fcr31=0xc000;
         check(execute(state)==Stop::syscall && state.accumulator==(context=="suba_s" ? 0x3f800000U : 0x40c00000U) && state.fcr31==0);
     }
+    for (const auto name : {"madd_s","msub_s","madda_s","msuba_s"}) {
+        context=name;
+        const bool to_acc=context=="madda_s" || context=="msuba_s";
+        for (const auto mode:{FE_TONEAREST,FE_DOWNWARD,FE_UPWARD,FE_TOWARDZERO}) {
+            const auto saved=std::fegetround(); std::fesetround(mode);
+            for (const auto acc:{0U,0x3f800000U,0xbf800000U}) {
+                State state; state.pc=ee_batch::scalar_pc(name);
+                state.accumulator=acc; state.fpr[2]=0x00800000; state.fpr[3]=0xbf000000; state.fpr[4]=123;
+                state.fcr31=0x0083c010;
+                check(execute(state)==Stop::syscall && state.executed==1 &&
+                      (to_acc ? state.accumulator : state.fpr[4])==acc && state.fcr31==0x00830018);
+                check(to_acc ? state.fpr[4]==123 : state.accumulator==acc);
+            }
+            std::fesetround(saved);
+        }
+        State failed; failed.pc=ee_batch::scalar_pc(name); failed.fpr[2]=0x7f800000;
+        failed.fpr[3]=0x3f800000; failed.accumulator=77; failed.fpr[4]=99; failed.fcr31=0x830000;
+        check(execute(failed)==Stop::unsupported_numeric && !failed.executed && failed.accumulator==77 &&
+              failed.fpr[4]==99 && failed.fcr31==0x830000);
+    }
     context="native memory initialization";
     for (const auto source : {0ULL,0x100000000ULL,1ULL,0xffffffffULL}) {
         State state; state.pc=ee_batch::scalar_pc("wired_write"); state.gpr[8].lo=source;

@@ -71,6 +71,16 @@ extern "C" std::uint64_t nt_ee_multiply_accumulate_finite(std::uint32_t accumula
     return pack(nt::numeric::multiply_accumulate_finite(accumulator,left,right,subtract!=0));
 }
 
+extern "C" std::uint64_t nt_ee_scalar_multiply_accumulate_finite(std::uint32_t accumulator,std::uint32_t left,
+                                                              std::uint32_t right,std::uint32_t subtract) {
+    const auto product=nt::numeric::multiply_finite(left,right);
+    if (!product.supported) return pack(product);
+    const auto result=nt::numeric::add_subtract_finite(accumulator,product.bits,subtract!=0);
+    // Bit 34 retains intermediate sticky underflow independently of the final
+    // result's current-underflow bit 32. Bit 33 still denotes unsupported input.
+    return pack(result)|(std::uint64_t(product.underflow)<<34);
+}
+
 extern "C" std::uint64_t nt_ee_reciprocal_square_root_finite(std::uint32_t left,std::uint32_t right) {
     // Preserve the finite-domain contract. Exceptional denominator semantics
     // require separate validation rather than a fabricated quotient.

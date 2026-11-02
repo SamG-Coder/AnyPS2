@@ -94,7 +94,9 @@ inline constexpr std::array scalar{
     Case{"cache_writeback_invalidate",0xbc980000}, Case{"cache_invalidate",0xbc9a0000}, Case{"cache_writeback",0xbc9c0000},
     Case{"wired_write",0x40883000}, Case{"wired_read",0x40093000},
     Case{"cache_tag",0xbc900000}, Case{"tag_read",0x4009e000}, Case{"cache_index_flush",0xbc940000},
-    Case{"cache_instruction_flush",0xbc870000}, Case{"cache_branch_flush",0xbc8c0000}
+    Case{"cache_instruction_flush",0xbc870000}, Case{"cache_branch_flush",0xbc8c0000},
+    Case{"madd_s",0x4603111c}, Case{"msub_s",0x4603111d},
+    Case{"madda_s",0x4603101e}, Case{"msuba_s",0x4603101f}
 };
 inline constexpr std::uint32_t scalar_base=0x310000;
 inline std::uint32_t scalar_pc(std::string_view name) {

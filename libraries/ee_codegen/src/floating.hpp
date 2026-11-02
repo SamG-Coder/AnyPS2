@@ -51,20 +51,22 @@ inline void emit_floating(Writer& w,const r5900::Instruction& i) {
         const auto left=w.load("i32",offsetof(runtime::State,fpr)+i.rd*sizeof(std::uint32_t));
         const auto right=w.load("i32",offsetof(runtime::State,fpr)+i.rt*sizeof(std::uint32_t));
         const bool accumulate=i.op==Op::madd_s || i.op==Op::msub_s || i.op==Op::madda_s || i.op==Op::msuba_s;
-        const auto sum=accumulate ? w.value("call i64 @nt_ee_multiply_accumulate_finite(i32 "+
+        const auto sum=accumulate ? w.value("call i64 @nt_ee_scalar_multiply_accumulate_finite(i32 "+
             w.load("i32",offsetof(runtime::State,accumulator))+", i32 "+left+", i32 "+right+", i32 "+
             (i.op==Op::msub_s || i.op==Op::msuba_s ? "1" : "0")+")") : w.value(i.op==Op::mul_s || i.op==Op::mula_s ? "call i64 @nt_ee_multiply_finite(i32 "+left+", i32 "+right+")" : "call i64 @nt_ee_add_finite(i32 "+left+", i32 "+right+", i32 "+(i.op==Op::sub_s || i.op==Op::suba_s ? "1" : "0")+")");
-        const auto unsupported=w.value("icmp uge i64 "+sum+", 8589934592");
+        const auto unsupported=w.value("icmp ne i64 "+w.binary("and","i64",sum,"8589934592")+", 0");
         const auto suffix=std::to_string(i.pc);
         w.out<<"  br i1 "<<unsupported<<", label %numeric_stop"<<suffix<<", label %numeric_result"<<suffix
            <<"\nnumeric_stop"<<suffix<<":\n  ret i32 6\nnumeric_result"<<suffix<<":\n";
-        const auto underflow=w.value("icmp uge i64 "+sum+", 4294967296");
+        const auto underflow=w.value("icmp ne i64 "+w.binary("and","i64",sum,"4294967296")+", 0");
         const auto flags=w.load("i32",offsetof(runtime::State,fcr31));
         const auto cleared=w.binary("and","i32",flags,"4294918143");
         const auto added=w.value("select i1 "+underflow+", i32 16392, i32 0");
+        const auto sticky=w.value("icmp ne i64 "+w.binary("and","i64",sum,"17179869184")+", 0");
+        const auto sticky_flag=w.value("select i1 "+sticky+", i32 8, i32 0");
         w.store("i32",w.narrow(sum),(i.op==Op::adda_s || i.op==Op::suba_s || i.op==Op::mula_s || i.op==Op::madda_s || i.op==Op::msuba_s) ? offsetof(runtime::State,accumulator) :
               offsetof(runtime::State,fpr)+i.sa*sizeof(std::uint32_t));
-        w.store("i32",w.binary("or","i32",cleared,added),offsetof(runtime::State,fcr31));
+        w.store("i32",w.binary("or","i32",w.binary("or","i32",cleared,added),sticky_flag),offsetof(runtime::State,fcr31));
         return;
     }
     case Op::mov_s: case Op::abs_s: case Op::neg_s: {

@@ -7,6 +7,7 @@
 #include <nt/ee_file_rpc.hpp>
 #include <nt/ee_cdvd_rpc.hpp>
 #include <nt/ee_bootstrap_modules.hpp>
+#include <nt/ee_pad_rpc.hpp>
 #include <nt/ee_performance.hpp>
 #include <nt/live_counters.hpp>
 #ifdef _WIN32
@@ -305,6 +306,13 @@ int main(int argc,char** argv) {
         };
         nt::ee::NativeSifCommandPeer command_peer(platform.sif_link,memory,native_code_overlap,0x1000,&platform.sif_receive);
         nt::ee::NativeBootstrapModules bootstrap_modules;
+        nt::input::Gamepads gamepads;
+        nt::ee::NativePadRpc pads([&](unsigned port) { return gamepads.sample(port); });
+        nt::ee::NativePadRpc::Auxiliary pad_auxiliary;
+        if (!command_peer.register_service(pads) || !command_peer.register_service(pad_auxiliary))
+            throw std::runtime_error("Cannot register native controller services");
+        for (unsigned port=0;port<2;++port)
+            if (gamepads.sample(port).connected) std::cout<<"native_controller port="<<port<<" name="<<gamepads.name(port)<<'\n';
         command_peer.data_reader([&](std::uint32_t source,std::span<std::uint8_t> output) { return bootstrap_modules.snapshot(source,output); });
         if (!command_peer.register_service(bootstrap_modules)) throw std::runtime_error("Cannot register bootstrap module service");
 #ifdef ANYPS2_NATIVE_IOP
@@ -348,11 +356,25 @@ int main(int argc,char** argv) {
         if (show_window) window=std::make_unique<probe::NativeWindow>();
         const auto started=std::chrono::steady_clock::now();
         auto next_present=started;
+        auto next_input=started;
+        nt::ee::Stop input_stop=nt::ee::Stop::budget;
+        std::array<std::uint16_t,2> last_buttons{};
+        std::uint64_t input_button_changes=0;
         bool timed_out=false,window_closed=false,application_exit=false;
         services.stop_requested=[&] {
             const auto now=std::chrono::steady_clock::now();
             timed_out=run_seconds && now-started>=std::chrono::seconds(run_seconds);
             if (timed_out) return true;
+            if (now>=next_input) {
+                next_input=now+std::chrono::milliseconds(4);
+                gamepads.update();
+                input_stop=pads.update(memory,native_code_overlap);
+                if (input_stop!=nt::ee::Stop::budget) return true;
+                for (unsigned port=0;port<2;++port) {
+                    const auto buttons=gamepads.sample(port).buttons;
+                    if (buttons!=last_buttons[port]) { ++input_button_changes; last_buttons[port]=buttons; }
+                }
+            }
             if (window && !window_closed && now>=next_present) {
                 next_present=now+std::chrono::milliseconds(16);
                 if (!window->poll()) {
@@ -377,7 +399,9 @@ int main(int argc,char** argv) {
 #endif
             return window_closed;
         };
-        const auto stop=nt::ee::run(execute,state,memory,budget,services);
+        auto stop=nt::ee::run(execute,state,memory,budget,services);
+        if (input_stop!=nt::ee::Stop::budget) stop=input_stop;
+        std::cout<<"native_controller_button_changes="<<input_button_changes<<'\n';
         const auto execution_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
         std::cout<<"execution_seconds="<<execution_seconds
                  <<" render_seconds="<<std::chrono::duration<double>(gpu.render_time).count();
