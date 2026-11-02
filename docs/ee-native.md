@@ -1831,6 +1831,9 @@ stops. Use an ignored directory under `work/` for commercial inputs. Existing
 directories are rejected before execution. `capture.txt` is written last and
 marks a completed observation; a failed write can leave an incomplete directory.
 These files can contain proprietary code and must never be committed.
+Generated projects also record a versioned conversion-input identity and active
+image in v2 captures. The converter can validate a stopped indirect edge as an
+optional offline input; see [flow verification](flow-verification.md#offline-native-call-observations).
 
 This is a diagnostic observation, not a resumable save state: native service,
 thread, Vulkan and VU state are not serialized. Emulator observations can guide

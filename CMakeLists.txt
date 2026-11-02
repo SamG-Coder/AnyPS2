@@ -211,6 +211,15 @@ if(BUILD_TESTING)
             "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/flow-verification-tests"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/flow_verification_project.cmake")
         set_tests_properties(ee-flow-verification PROPERTIES TIMEOUT 90)
+        add_executable(ee-observation-tests tests/flow_observation.cpp)
+        target_link_libraries(ee-observation-tests PRIVATE nt_ee_codegen)
+        add_test(NAME ee-flow-observations COMMAND "${CMAKE_COMMAND}"
+            "-DFIXTURE=$<TARGET_FILE:emit-ee-fixture>" "-DCONVERTER=$<TARGET_FILE:ps2-recompile>"
+            "-DCHECKER=$<TARGET_FILE:ee-observation-tests>"
+            "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}" "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/observation-tests"
+            "-DGENERATOR=${CMAKE_GENERATOR}" "-DPLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+            "-DEXE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/flow_observation_project.cmake")
+        set_tests_properties(ee-flow-observations PROPERTIES TIMEOUT 180)
         add_test(NAME ee-native-images COMMAND "${CMAKE_COMMAND}"
             -DFIXTURE=$<TARGET_FILE:emit-ee-fixture> -DCONVERTER=$<TARGET_FILE:ps2-recompile>
             -DSCRATCH=${CMAKE_BINARY_DIR}/image-project-tests -DROOT=${CMAKE_CURRENT_SOURCE_DIR}

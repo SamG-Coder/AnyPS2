@@ -35,6 +35,7 @@ extern "C" nt::ee::Stop nt_ee_generated_run(nt::runtime::State*,nt::ee::Memory*,
 extern "C" bool nt_ee_generated_active_code_overlap(std::uint32_t,std::uint32_t,std::uint32_t);
 extern "C" nt::ee::Stop nt_ee_generated_publish_image(nt::ee::Memory*,std::uint32_t);
 extern "C" bool nt_ee_generated_contains(std::uint32_t);
+extern "C" std::uint64_t nt_ee_generated_input_identity();
 namespace {
 nt::ee::Memory* active_program_memory=nullptr;
 bool native_code_overlap(std::uint32_t address,std::uint32_t bytes) {
@@ -435,7 +436,7 @@ int main(int argc,char** argv) {
 #endif
         if (!capture_directory.empty()) capture.save(capture_directory);
         if (!stop_directory.empty()) {
-            probe::capture_stop(stop_directory,state,memory,stop);
+            probe::capture_stop(stop_directory,state,memory,stop,nt_ee_generated_input_identity());
             service_observation.save(stop_directory);
 #ifdef ANYPS2_NATIVE_IOP
             if (iop_reset && iop_reset->invoked())

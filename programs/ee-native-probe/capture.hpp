@@ -78,7 +78,7 @@ void capture_image(const std::filesystem::path& path,unsigned width,unsigned hei
 // The manifest is written last so partial captures cannot appear complete.
 inline void capture_stop(const std::filesystem::path& directory,
                          const nt::runtime::State& state,
-                         const nt::ee::Memory& memory,nt::ee::Stop stop) {
+                         const nt::ee::Memory& memory,nt::ee::Stop stop,std::uint64_t input_identity=0) {
     if (!std::filesystem::create_directory(directory))
         throw std::runtime_error("Stop capture directory already exists");
     nt::write_file(directory/"ram.bin",{memory.data,static_cast<std::size_t>(memory.size)});
@@ -104,8 +104,9 @@ inline void capture_stop(const std::filesystem::path& directory,
     out.close();
     std::ofstream manifest(directory/"capture.txt");
     manifest.exceptions(std::ios::failbit|std::ios::badbit);
-    manifest<<"format=anyps2-stop-observation-v1\ncomplete=true\nresumable=false\nram_bytes="
-            <<memory.size<<"\nscratchpad_bytes="<<memory.scratchpad_bytes<<'\n';
+    manifest<<"format=anyps2-stop-observation-v2\ncomplete=true\nresumable=false\nram_bytes="
+            <<memory.size<<"\nscratchpad_bytes="<<memory.scratchpad_bytes
+            <<"\ninput_identity="<<input_identity<<"\nactive_image="<<memory.executable_image<<'\n';
     manifest.close();
 }
 }

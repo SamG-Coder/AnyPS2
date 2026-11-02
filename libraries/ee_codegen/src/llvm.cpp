@@ -356,7 +356,7 @@ void emit_payloads(Writer& w,std::span<const CodePayload> payloads) {
     }
 }
 void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> protected_code,std::span<const CodePayload> payloads,std::span<const LayoutDeclaration> layouts,std::span<const ExecutableImage> images,
-               const std::function<std::ostream&(std::size_t)>& module_output) {
+               const std::function<std::ostream&(std::size_t)>& module_output,std::uint64_t input_identity) {
     static_assert(std::is_standard_layout_v<runtime::State> && std::is_standard_layout_v<ee::Memory>);
     static_assert(sizeof(void*)==8 && std::endian::native==std::endian::little,
                   "EE LLVM currently requires a little-endian 64-bit host ABI");
@@ -435,6 +435,7 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
     }
     const auto layout=prepare_native_layout(layouts);
     Writer w{output};
+    w.out<<"define i64 @nt_ee_generated_input_identity() {\nentry:\n  ret i64 "<<input_identity<<"\n}\n";
     emit_images(w,images);
     if (module_output) {
         constexpr std::size_t functions_per_module=32;

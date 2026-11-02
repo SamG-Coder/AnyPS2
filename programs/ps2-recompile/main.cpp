@@ -6,12 +6,12 @@
 #include <stdexcept>
 int main(int argc,char** argv) {
     if (argc<3) {
-        std::cerr<<"Usage: ps2-recompile <boot.elf> <new-output-directory> [--verify-only] [--payloads mapping-file] [--image secondary.elf ...]\n"
+        std::cerr<<"Usage: ps2-recompile <boot.elf> <new-output-directory> [--verify-only] [--payloads mapping-file] [--image secondary.elf ...] [--observation native-stop-directory ...]\n"
                  <<"LLVM entry-flow conversion follows supported native syscall continuations.\n"; return 2;
     }
     try {
         std::vector<nt::ee_codegen::PayloadMapping> payloads;
-        std::vector<std::filesystem::path> images;
+        std::vector<std::filesystem::path> images,observations;
         bool payload_option=false,verify_only=false;
         for (int index=3;index<argc;++index) {
             const std::string_view option=argv[index];
@@ -24,7 +24,11 @@ int main(int argc,char** argv) {
                 if (images.size()==31) throw std::runtime_error("Too many secondary images");
                 images.emplace_back(argv[index]); continue;
             }
-            if (option!="--payloads" || payload_option) throw std::runtime_error("Expected --verify-only, one --payloads or repeated --image options");
+            if (option=="--observation") {
+                if (observations.size()==64) throw std::runtime_error("Too many native observations");
+                observations.emplace_back(argv[index]); continue;
+            }
+            if (option!="--payloads" || payload_option) throw std::runtime_error("Expected --verify-only, one --payloads or repeated --image/--observation options");
             payload_option=true;
             std::ifstream input(argv[index]);
             if (!input) throw std::runtime_error("Cannot open payload mapping file");
@@ -48,7 +52,7 @@ int main(int argc,char** argv) {
             }
         }
         if (verify_only) {
-            const auto result=nt::ee_codegen::verify_flow(argv[1],argv[2],payloads,images);
+            const auto result=nt::ee_codegen::verify_flow(argv[1],argv[2],payloads,images,observations);
             std::cout<<"Reached-flow verification: "<<(result.closed() ? "closed" : "incomplete")
                 <<"; unresolved indirect sites="<<result.unresolved_indirect
                 <<"; unclassified pointer references="<<result.unclassified_references
@@ -56,7 +60,7 @@ int main(int argc,char** argv) {
                 <<"Reports written. No LLVM emission, native compilation or game execution performed.\n";
             return result.closed() ? 0 : 2;
         }
-        nt::ee_codegen::project(argv[1],argv[2],payloads,images);
+        nt::ee_codegen::project(argv[1],argv[2],payloads,images,observations);
         std::cout<<"Generated EE LLVM project. Compile it with ps2-build. Game boot is not established.\n";
         return 0;
     } catch(const std::exception& error) { std::cerr<<"EE conversion: "<<error.what()<<'\n'; return 1; }

@@ -1,5 +1,6 @@
 #include <nt/ee_codegen.hpp>
 #include "native_layout.hpp"
+#include "flow_observation.hpp"
 #include <nt/analysis.hpp>
 #include <nt/ee_address.hpp>
 #include <nt/ee_syscalls.hpp>
@@ -53,6 +54,8 @@ struct Prepared {
     std::vector<analysis::PointerReference> pointers;
     std::vector<analysis::CallbackFlowGap> flow_gaps;
     std::vector<Pass> passes;
+    std::vector<observation::Edge> observations;
+    std::uint64_t input_identity=0;
     std::set<std::uint32_t> registered_calls;
     std::size_t wrapper_candidates=0;
     std::uint32_t syscall_table=0;
@@ -83,7 +86,8 @@ std::vector<CodeRange> declared_code_ranges(const elf::Executable& executable) {
     }
     return result;
 }
-Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings,bool diagnose_flow=false) {
+Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings,bool diagnose_flow=false,
+                 std::span<const observation::Edge> observations={}) {
     auto executable=elf::parse(bytes);
     auto ranges=declared_code_ranges(executable);
     std::vector<std::pair<std::uint32_t,std::uint32_t>> extents;
@@ -140,6 +144,7 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings,bool di
     std::vector<analysis::PointerReference> pointers;
     std::set<std::uint32_t> registered_calls;
     std::vector<Prepared::Pass> passes;
+    std::vector<bool> accepted(observations.size(),false);
     while (true) {
         const auto previous_roots=continuations.size();
         pointers.clear();
@@ -212,16 +217,34 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings,bool di
                 std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;
             continuations.push_back(address); added=true;
         }
+        // Observed edges augment conversion, never runtime dispatch. A source
+        // must already be reached by ordinary discovery or an earlier verified
+        // observation. A collection cannot bootstrap itself from arbitrary PCs.
+        for (std::size_t index=0;index<observations.size();++index) {
+            const auto& edge=observations[index];
+            if (accepted[index] || !discovered.instructions.contains(edge.site)) continue;
+            observation::validate_site(edge,executable,discovered);
+            accepted[index]=true;
+            if (!discovered.instructions.contains(edge.target) &&
+                std::find(continuations.begin(),continuations.end(),edge.target)==continuations.end()) {
+                continuations.push_back(edge.target); added=true;
+            }
+        }
         added|=registered_calls.size()!=previous_calls;
         passes.push_back({1,passes.size()+1,discovered.instructions.size(),
             continuations.size()-previous_roots,registered_calls.size()-previous_calls});
         if (!added) break;
+    }
+    for (std::size_t index=0;index<observations.size();++index) {
+        if (!accepted[index]) throw std::runtime_error("Observed source is not reached compiled flow at "+hex32(observations[index].site));
+        observation::validate_code(observations[index],discovered);
     }
     if (executable.inferred_permissions) for (const auto& [pc,instruction]:discovered.instructions) {
         if (!ranges.empty() && std::uint64_t(ranges.back().address)+ranges.back().size==pc) ranges.back().size+=4;
         else ranges.push_back({pc,4});
     }
     Prepared result;
+    result.observations.assign(observations.begin(),observations.end());
     result.passes=std::move(passes);
     if (diagnose_flow) result.flow_gaps=analysis::callback_flow_gaps(bytes,executable,discovered,pointers);
     result.executable=std::move(executable);
@@ -240,10 +263,40 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings,bool di
     return result;
 }
 Prepared prepare_project(const std::filesystem::path& input,std::span<const PayloadMapping> mappings,
-                         std::span<const std::filesystem::path> images,bool diagnose_flow=false) {
-    const auto bytes=read_file(input);
-    auto prepared=prepare(bytes,mappings,diagnose_flow);
+                         std::span<const std::filesystem::path> images,bool diagnose_flow=false,
+                         std::span<const std::filesystem::path> observation_paths={}) {
     if (images.size()>31) throw std::invalid_argument("Too many secondary executable images");
+    if (observation_paths.size()>64) throw std::invalid_argument("Too many native observations");
+    const auto bytes=read_file(input);
+    // Versioned, path-independent identity of the ordered conversion inputs.
+    // This detects stale observations; it is not a signature or authenticity
+    // guarantee. Observations themselves are excluded so subsequent offline
+    // builds can accumulate evidence for the same source images.
+    std::ostringstream identity;
+    std::vector<std::pair<std::size_t,std::uint64_t>> image_identities;
+    identity<<"anyps2-ee-input-v1\n"<<bytes.size()<<' '<<fingerprint(bytes)<<'\n';
+    for (const auto& mapping:mappings) {
+        identity<<"payload "<<mapping.source<<' '<<mapping.destination<<' '<<mapping.size;
+        for (const auto offset:mapping.entry_offsets) identity<<' '<<offset;
+        identity<<'\n';
+    }
+    for (const auto& path:images) {
+        const auto source=read_file(path);
+        const auto hash=fingerprint(source);
+        image_identities.emplace_back(source.size(),hash);
+        identity<<"image "<<source.size()<<' '<<hash<<'\n';
+    }
+    const auto text=identity.str();
+    const auto input_identity=fingerprint(ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));
+    std::array<std::vector<observation::Edge>,32> observed;
+    for (const auto& path:observation_paths) {
+        auto edge=observation::read(path);
+        if (edge.input_identity!=input_identity) throw std::runtime_error("Native observation input identity differs; regenerate and recapture this input");
+        if (edge.image>images.size()+1) throw std::runtime_error("Native observation refers to an unknown executable image");
+        observed[edge.image-1].push_back(std::move(edge));
+    }
+    auto prepared=prepare(bytes,mappings,diagnose_flow,observed[0]);
+    prepared.input_identity=input_identity;
     if (!images.empty()) {
         const auto snapshot=[](ByteView source,const elf::Executable& executable,std::uint32_t id) {
             ExecutableImage image{executable.entry,id,{}};
@@ -256,8 +309,10 @@ Prepared prepare_project(const std::filesystem::path& input,std::span<const Payl
         auto occupied=prepared.executable.segments;
         for (const auto& path:images) {
             const auto source=read_file(path);
-            auto extra=prepare(source,{},diagnose_flow);
             const auto id=static_cast<std::uint32_t>(prepared.images.size()+1);
+            if (source.size()!=image_identities[id-2].first || fingerprint(source)!=image_identities[id-2].second)
+                throw std::runtime_error("Executable image changed during conversion; retry with stable input files");
+            auto extra=prepare(source,{},diagnose_flow,observed[id-1]);
             for (const auto& section:extra.executable.segments) {
                 for (const auto& old:occupied)
                     if (std::uint64_t(section.address)<std::uint64_t(old.address)+old.memory_size &&
@@ -277,6 +332,7 @@ Prepared prepare_project(const std::filesystem::path& input,std::span<const Payl
             prepared.calls.insert(prepared.calls.end(),extra.calls.begin(),extra.calls.end());
             prepared.pointers.insert(prepared.pointers.end(),extra.pointers.begin(),extra.pointers.end());
             prepared.flow_gaps.insert(prepared.flow_gaps.end(),extra.flow_gaps.begin(),extra.flow_gaps.end());
+            prepared.observations.insert(prepared.observations.end(),extra.observations.begin(),extra.observations.end());
             for (auto pass:extra.passes) { pass.image=id; prepared.passes.push_back(pass); }
             for (auto range:extra.ranges) { range.image=id; prepared.ranges.push_back(range); }
             prepared.layouts.insert(prepared.layouts.end(),extra.layouts.begin(),extra.layouts.end());
@@ -287,6 +343,13 @@ Prepared prepare_project(const std::filesystem::path& input,std::span<const Payl
     return prepared;
 }
 void write_discovery_reports(const std::filesystem::path& output,const Prepared& prepared,bool verification=false) {
+    save(output/"input-identity.txt","format=anyps2-ee-input-v1\ninput_identity="+std::to_string(prepared.input_identity)+"\n");
+    std::ostringstream observed;
+    observed<<"image\tsite\ttarget\tevidence\tcoverage\n";
+    for (const auto& edge:prepared.observations)
+        observed<<edge.image<<'\t'<<hex32(edge.site)<<'\t'<<hex32(edge.target)
+            <<"\tvalidated-native-stop\t"<<(verification ? "discovered-observed-target" : "generated-observed-target")<<'\n';
+    save(output/"observed-call-edges.tsv",observed.str());
     std::ostringstream calls;
     calls<<"pc\tkind\ttarget\tcoverage\n";
     for (const auto& call:prepared.calls) {
@@ -323,8 +386,9 @@ void write_discovery_reports(const std::filesystem::path& output,const Prepared&
     save(output/"discovery-passes.tsv",passes.str());
 }
 }
-void project(const std::filesystem::path& input,const std::filesystem::path& destination,std::span<const PayloadMapping> mappings,std::span<const std::filesystem::path> images) {
-    auto prepared=prepare_project(input,mappings,images);
+void project(const std::filesystem::path& input,const std::filesystem::path& destination,std::span<const PayloadMapping> mappings,
+             std::span<const std::filesystem::path> images,std::span<const std::filesystem::path> observations) {
+    auto prepared=prepare_project(input,mappings,images,false,observations);
     if (!prepared.discovered.unresolved.empty())
         throw std::runtime_error("EE discovery reached unmapped code at "+hex32(*prepared.discovered.unresolved.begin()));
     std::vector<r5900::Instruction> instructions;
@@ -340,7 +404,7 @@ void project(const std::filesystem::path& input,const std::filesystem::path& des
         auto stream=std::make_unique<std::ofstream>(output/modules.back(),std::ios::binary);
         stream->exceptions(std::ios::badbit|std::ios::failbit);
         streams.push_back(std::move(stream)); return *streams.back();
-    });
+    },prepared.input_identity);
     llvm.close();
     for (auto& stream:streams) stream->close();
     std::string module_manifest;
@@ -427,13 +491,15 @@ target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codeg
          "Discovery includes leaf syscall-wrapper candidates and recognized startup continuations. Compiled wrappers do not implement missing services; runtime dispatch still validates them.\n"
          "Indirect destinations must already belong to the discovered code set; other targets stop.\n"
          "call-sites.tsv inventories reached transfers; compiled initial candidates do not prove complete indirect coverage.\n"
+         "observed-call-edges.tsv lists validated native-stop targets used in this offline conversion; their other possible targets remain unresolved.\n"
          "Build with ps2-build, then run ps2-native <program.data> [operation-budget].\n"
          "Data contains private input material and must remain local. This is not game boot.\n");
     staged.publish();
 }
 FlowVerification verify_flow(const std::filesystem::path& input,const std::filesystem::path& destination,
-                             std::span<const PayloadMapping> mappings,std::span<const std::filesystem::path> images) {
-    const auto prepared=prepare_project(input,mappings,images,true);
+                             std::span<const PayloadMapping> mappings,std::span<const std::filesystem::path> images,
+                             std::span<const std::filesystem::path> observations) {
+    const auto prepared=prepare_project(input,mappings,images,true,observations);
     FlowVerification result;
     result.instructions=prepared.discovered.instructions.size(); result.passes=prepared.passes.size();
     result.unmapped_targets=prepared.discovered.unresolved.size();
@@ -487,6 +553,7 @@ FlowVerification verify_flow(const std::filesystem::path& input,const std::files
         <<"\nunmapped_targets="<<result.unmapped_targets<<"\nunresolved_indirect="<<result.unresolved_indirect
         <<"\nunclassified_pointer_references="<<result.unclassified_references
         <<"\nunproven_record_bindings="<<result.record_binding_candidates<<"\nnative_service_boundaries="<<result.service_boundaries
+        <<"\nvalidated_observed_edges="<<prepared.observations.size()
         <<"\nlowering_supported="<<result.lowering_supported<<"\nlayout_supported="<<result.layout_supported
         <<"\nLLVM_emitted=0\nnative_compilation_performed=0\nruntime_executed=0\n"
         <<"Discovery closure means the implemented rules found no additional roots, not complete game coverage.\n"

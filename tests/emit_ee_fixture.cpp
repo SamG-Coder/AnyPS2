@@ -3,6 +3,7 @@
 #include "ee_batch_fixture.hpp"
 #include "vector_section_fixture.hpp"
 #include "object_callback_fixture.hpp"
+#include "flow_observation_fixture.hpp"
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -425,6 +426,7 @@ int main(int argc,char** argv) {
     if (functions<10) throw std::runtime_error("Large EE program was not partitioned");
     std::ofstream output(argv[1]); output<<text;
     if (argc==3) {
+        nt::write_file(std::string(argv[2])+".observation",fixture::flow_observation_elf());
         nt::write_file(std::string(argv[2])+".vector",fixture::vector_container_elf());
         auto object_callbacks=fixture::object_callback_elf();
         nt::write_file(std::string(argv[2])+".object-callbacks",object_callbacks);
