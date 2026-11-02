@@ -643,6 +643,27 @@ int main(int argc,char** argv) {
         nt::write_file(std::string(argv[2])+".copied-record-unrelated",elf);
         word(0x2a4,0xdca80000); word(0x2a8,0xfc880018); word(0x2ac,0x03e00008); word(0x2b0,0);
         nt::write_file(std::string(argv[2])+".copied-aligned-record",elf);
+        // Compilers also inline the same record copy; the source can use a
+        // preserved stack alias established before its fields are written.
+        std::fill(elf.begin()+0x200,elf.begin()+0x280,0);
+        const std::uint32_t inline_record[]{0x03e08021,0x27bdfff0,0x03a08821,0x240810e0,
+            0xafa80000,0x240810d0,0xafa80004,0x24042000,0x6a280007,0x6e280000,
+            0xb088001f,0xb4880018,0x0c000420,0,0x27bd0010,0x02000008,0};
+        for (unsigned n=0;n<std::size(inline_record);++n) word(0x200+n*4,inline_record[n]);
+        nt::write_file(std::string(argv[2])+".inline-callback-record",elf);
+        word(0x218,0xb3a00007);
+        nt::write_file(std::string(argv[2])+".inline-record-overwritten",elf);
+        word(0x218,0xaba00003);
+        nt::write_file(std::string(argv[2])+".inline-record-word-overwritten",elf);
+        word(0x218,0xafa80004);
+        word(0x22c,0xb4880014);
+        nt::write_file(std::string(argv[2])+".inline-record-partial",elf);
+        word(0x22c,0xb4880018); word(0x224,0x6e280004);
+        nt::write_file(std::string(argv[2])+".inline-record-source",elf);
+        word(0x220,0xde280000); word(0x224,0xfc880018); word(0x228,0); word(0x22c,0);
+        nt::write_file(std::string(argv[2])+".inline-aligned-record",elf);
+        word(0x224,0xfc880014);
+        nt::write_file(std::string(argv[2])+".inline-record-unrelated",elf);
         // A thread descriptor remains in s4 across a call and a retry edge.
         // Its entry is discovered only from the descriptor passed to CreateThread.
         elf=original;
@@ -765,6 +786,32 @@ int main(int argc,char** argv) {
             0xac860010,0x10000002,0,0xac9c0014,0xac870018,0x03e00008,0};
         for (unsigned n=0;n<std::size(split_record);++n) word(0x200+n*4,split_record[n]);
         nt::write_file(std::string(argv[2])+".gp-record-disjoint",elf);
+        // The registered function can itself invoke a callback in its opaque
+        // context. Follow that known function's field use back to registration.
+        std::fill(elf.begin()+0x100,elf.end(),0);
+        const std::uint32_t closure_main[]{0x241d2380,0x241c0006,0x24042083,0x24051230,
+            0x24062040,0x24071210,0x2408002a,0xacc80000,0x0c000420,0,
+            0x241c0009,0x24042000,0x0c000460,0,0x2403007b,12,0x03e00008,0};
+        for (unsigned n=0;n<std::size(closure_main);++n) word(0x100+n*4,closure_main[n]);
+        const std::uint32_t closure_setup[]{0x27bdfff0,0xffbf0008,0x3084fff0,
+            0x04830003,0xac850008,0x10000009,0,0xac86000c,0xac870010,
+            0x00803821,0x24042003,0x24051210,0x24061200,0x0c000440,0,
+            0xdfbf0008,0x03e00008,0x27bd0010};
+        for (unsigned n=0;n<std::size(closure_setup);++n) word(0x180+n*4,closure_setup[n]);
+        for (unsigned n=0;n<std::size(gp_setter);++n) word(0x200+n*4,gp_setter[n]);
+        for (unsigned n=0;n<std::size(gp_consumer);++n) word(0x280+n*4,gp_consumer[n]);
+        word(0x300,0x8ce20008); word(0x304,0x00400008); word(0x308,0x8ce7000c);
+        word(0x310,0x4c000000);
+        word(0x330,0x8ce20000); word(0x334,0x005c1021); word(0x338,0x03e00008);
+        nt::write_file(std::string(argv[2])+".registered-context-callback",elf);
+        word(0x1a4,0x240720c0);
+        nt::write_file(std::string(argv[2])+".registered-context-unrelated",elf);
+        word(0x1a4,0x00803821); word(0x190,0xac850014);
+        nt::write_file(std::string(argv[2])+".registered-context-field",elf);
+        word(0x190,0xac850008); word(0x1a0,0xa0800009);
+        nt::write_file(std::string(argv[2])+".registered-context-overwritten",elf);
+        word(0x1a0,0xac870010); word(0x18c,0x54000003);
+        nt::write_file(std::string(argv[2])+".registered-context-annulled",elf);
         elf=original;
         elf.resize(0x190,0); word(100,16); word(104,36);
         const std::uint32_t constructors[]{0x24102000,0x8e020000,0x8e190004,0x0320f809,0,
