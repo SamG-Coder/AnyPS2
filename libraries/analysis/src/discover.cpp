@@ -694,6 +694,57 @@ bool same_incoming_slot(const Program& program,const pointer_flow::Graph& graph,
     }
     return false;
 }
+struct CallResult { std::uint32_t pc,offset; };
+// Identify a returned object without assigning it a made-up address. Follow
+// copies and definite spill/reload pairs on a bounded, unambiguous predecessor
+// path. Unknown definitions and merged paths remain unresolved.
+std::optional<CallResult> call_result(const Program& program,const pointer_flow::Graph& graph,
+                                     std::uint32_t before,unsigned reg,unsigned& budget) {
+    using r5900::Op;
+    std::uint32_t displacement=0;
+    const auto reverse=[&](std::uint32_t pc) -> bool {
+        const auto found=program.instructions.find(pc);
+        if (found==program.instructions.end()) return false;
+        const auto& i=found->second;
+        const auto effect=pointer_write(i);
+        if (!effect) return false;
+        if (*effect!=reg) return true;
+        if (const auto copy=copied_register(i)) { reg=*copy; return reg!=0; }
+        if (i.op==Op::addiu || i.op==Op::daddiu) {
+            reg=i.rs; displacement+=std::uint32_t(i.immediate); return reg!=0;
+        }
+        return false;
+    };
+    while (budget && reg) {
+        --budget;
+        const auto edges=graph.previous.find(before);
+        if (edges==graph.previous.end() || edges->second.size()!=1) return {};
+        const auto& edge=edges->second.front();
+        if (edge.call && reg==2) return CallResult{edge.from,displacement};
+        if (edge.call && !pointer_flow::preserved(reg)) return {};
+        if (edge.delay && !reverse(edge.from+4)) return {};
+        const auto& i=program.instructions.at(edge.from);
+        if ((i.op==Op::lw || i.op==Op::lwu) && i.rt==reg) {
+            const PointerLoad load{i.pc,i.rs,std::uint32_t(i.immediate)};
+            for (auto at=i.pc;at>=4 && i.pc-at<256 && budget;) {
+                --budget; at-=4;
+                const auto prior=program.instructions.find(at);
+                if (prior==program.instructions.end() || prior->second.branch() ||
+                    prior->second.terminal() || prior->second.op==Op::syscall) break;
+                const auto& store=prior->second;
+                if (store.op!=Op::sw || !same_incoming_slot(program,graph,load,0xffffffffU,
+                    at+4,store.rs,std::uint32_t(store.immediate))) continue;
+                auto source=call_result(program,graph,at,store.rt,budget);
+                if (source) source->offset+=displacement;
+                return source;
+            }
+            return {};
+        }
+        if (!reverse(edge.from)) return {};
+        before=edge.from;
+    }
+    return {};
+}
 // A callback descriptor must be assembled on one control-flow path. Matching
 // offsets from different arms, or from a reused base register, is not evidence
 // of registration. Keep this local proof bounded and respect delay-slot edges.
@@ -770,6 +821,7 @@ struct CallConsumers {
     std::set<std::pair<std::uint32_t,std::uint32_t>> nested_fields;
     std::set<std::uint32_t> bound_fields;
     std::map<std::uint32_t,std::set<unsigned>> global_fields;
+    std::map<std::uint32_t,std::set<std::uint32_t>> returned_fields;
     BoundCalls bindings;
     pointer_flow::Graph graph;
     static const r5900::Instruction* definition(const Program& program,std::uint32_t before,unsigned reg) {
@@ -1040,6 +1092,64 @@ struct CallConsumers {
                 }
             }
         }
+        // A constructor may copy a function/context record into the object it
+        // returns. Relate the copy to that exact return value, then propagate
+        // the field through wrappers returning the same call result. Matching
+        // an offset alone does not establish a factory or an object identity.
+        const auto owners=[&](std::uint32_t pc) {
+            std::set<std::uint32_t> result,visited;
+            std::deque<std::uint32_t> pending{pc};
+            unsigned budget=2048;
+            while (!pending.empty() && budget--) {
+                const auto at=pending.front(); pending.pop_front();
+                if (!visited.insert(at).second) continue;
+                if (callers.contains(at)) { result.insert(at); continue; }
+                if (const auto edges=graph.previous.find(at);edges!=graph.previous.end())
+                    for (const auto& edge:edges->second) pending.push_back(edge.from);
+            }
+            return result;
+        };
+        std::map<std::uint32_t,std::set<std::uint32_t>> return_owners;
+        std::map<std::uint32_t,CallResult> forwarded_returns;
+        for (const auto& [pc,instruction]:program.instructions) {
+            if (instruction.op!=Op::jr || instruction.rs!=31 || pc>0xfffffff7U) continue;
+            const auto slot=program.instructions.find(pc+4);
+            if (slot==program.instructions.end()) continue;
+            const auto effect=pointer_write(slot->second);
+            if (!effect || *effect==2 || pointer_store_width(slot->second.op)) continue;
+            unsigned fuel=256;
+            if (const auto source=call_result(program,graph,pc,2,fuel))
+                forwarded_returns.emplace(pc,*source);
+            for (auto at=pc;at>=4 && pc-at<128;) {
+                at-=4;
+                const auto found=program.instructions.find(at);
+                if (found==program.instructions.end() || found->second.branch() || found->second.terminal()) break;
+                const auto& store=found->second;
+                const auto copy=record_copy(program,store);
+                if (!copy || !bound_fields.contains(copy->destination) ||
+                    !same_incoming_slot(program,graph,{pc,2,copy->destination},0xffffffffU,
+                        at+4,store.rs,copy->destination)) continue;
+                auto owner=return_owners.find(pc);
+                if (owner==return_owners.end()) owner=return_owners.emplace(pc,owners(pc)).first;
+                for (const auto entry:owner->second) returned_fields[entry].insert(copy->destination);
+            }
+        }
+        for (unsigned depth=0;depth<4;++depth) {
+            bool changed=false;
+            for (const auto& [pc,source]:forwarded_returns) {
+                const auto callee=callees.find(source.pc);
+                if (callee==callees.end()) continue;
+                const auto fields=returned_fields.find(callee->second);
+                if (fields==returned_fields.end()) continue;
+                auto owner=return_owners.find(pc);
+                if (owner==return_owners.end()) owner=return_owners.emplace(pc,owners(pc)).first;
+                // Copy before inserting: recursive wrappers can share a summary.
+                const auto inherited=fields->second;
+                for (const auto entry:owner->second) for (const auto field:inherited)
+                    changed|=returned_fields[entry].insert(field-source.offset).second;
+            }
+            if (!changed) break;
+        }
         // Summarize only functions which can reach one of these registrations.
         // The reverse graph includes direct calls, not just their continuations.
         std::set<std::uint32_t> relevant;
@@ -1146,6 +1256,13 @@ struct CallConsumers {
         if (!address) address=pointer_flow::constant(program,graph,after,base);
         if (address && slots.contains({false,physical(*address+offset)})) return true;
         if (!address && base==28 && slots.contains({true,offset})) return true;
+        fuel=256;
+        if (const auto source=call_result(program,graph,after,base,fuel)) {
+            const auto call=program.instructions.find(source->pc);
+            const auto callee=call!=program.instructions.end() ? known_callee(bytes,elf,program,call->second) : std::nullopt;
+            const auto fields=callee ? returned_fields.find(*callee) : returned_fields.end();
+            if (fields!=returned_fields.end() && fields->second.contains(source->offset+offset)) return true;
+        }
         for (const auto& entry:loads) {
             const auto& load=entry.load;
             if ((entry.call_site!=0xffffffffU || entry.copied_record) &&

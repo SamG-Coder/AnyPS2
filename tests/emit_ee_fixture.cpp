@@ -679,6 +679,18 @@ int main(int argc,char** argv) {
         nt::write_file(std::string(argv[2])+".inline-aligned-record",elf);
         word(0x224,0xfc880014);
         nt::write_file(std::string(argv[2])+".inline-record-unrelated",elf);
+        // Initialize a record in a factory, return it through a wrapper, then
+        // save/reload its pointer and replace the callback before invoking it.
+        std::fill(elf.begin()+0x200,elf.begin()+0x2c0,0);
+        const std::uint32_t returned_record[]{0x03e08021,0x27bdfff0,0xafa00000,0xafa00004,
+            0x24042000,0x03a02821,0x24060000,0x0c000458,0,0xafa20008,
+            0x240810e0,0x240910d0,0xac49001c,0x8fa30008,0xac680018,0x00602021,
+            0x0c000420,0,0x27bd0010,0x02000008,0};
+        for (unsigned n=0;n<std::size(returned_record);++n) word(0x200+n*4,returned_record[n]);
+        for (unsigned n=0;n<std::size(record_wrapper);++n) word(0x260+n*4,record_wrapper[n]);
+        const std::uint32_t record_factory[]{0x00861021,0xdca80000,0xfc480018,0x03e00008,0};
+        for (unsigned n=0;n<std::size(record_factory);++n) word(0x2a0+n*4,record_factory[n]);
+        nt::write_file(std::string(argv[2])+".returned-callback-record",elf);
         // A thread descriptor remains in s4 across a call and a retry edge.
         // Its entry is discovered only from the descriptor passed to CreateThread.
         elf=original;

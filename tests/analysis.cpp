@@ -13,6 +13,41 @@ void put(nt::Bytes& bytes, std::size_t offset, std::uint32_t word) {
 int main() {
     try {
         {
+            // A factory returns an object containing a copied callback record.
+            // The caller saves/reloads that object before replacing its function.
+            nt::Bytes image(512,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,512,512,5,4}}};
+            const std::uint32_t caller[]{0x0c000440,0,0xae020000,0x240811e0,0,
+                0x8e030000,0xac680018,0x0c000460,0x00602021,12};
+            const std::uint32_t wrapper[]{0x27bdfff0,0xffbf0008,0x0c000450,0,
+                0xdfbf0008,0x03e00008,0x27bd0010};
+            const std::uint32_t factory[]{0x00861021,0xdca80000,0xfc480018,0,
+                0x03e00008,0};
+            const std::uint32_t consumer[]{0x8c990018,0x03200008,0x8c84001c};
+            const auto install=[&](unsigned offset,const auto& code) {
+                for (unsigned n=0;n<std::size(code);++n) put(image,offset+n*4,code[n]);
+            };
+            install(0,caller); install(0x100,wrapper); install(0x140,factory); install(0x180,consumer);
+            put(image,0x1e0,0x03e00008);
+            const auto roots=[&] { return nt::analysis::stored_code_pointers(image,fixture,
+                nt::analysis::discover(image,fixture,512,{},true)); };
+            check(roots().contains(0x11e0),"Callback on a saved factory result was not recovered");
+            for (const auto overwrite:{0xa2000001U,0xae000000U,0xaa000003U}) {
+                put(image,16,overwrite);
+                check(roots().empty(),"Overwritten factory-result spill retained object identity");
+            }
+            put(image,16,0); put(image,24,0xac68001c);
+            check(roots().empty(),"The opaque field on a factory result became callable");
+            put(image,24,0xac680018); put(image,0x14c,0x24020000);
+            check(roots().empty(),"A different returned object inherited the copied record");
+            put(image,0x14c,0); put(image,0x148,0xac480018);
+            check(roots().empty(),"An incomplete record copy established a factory type");
+            put(image,0x148,0xfc480014);
+            check(roots().empty(),"An unrelated factory field became a callback record");
+            put(image,0x148,0xfc480018); put(image,0x110,0x24020000);
+            check(roots().empty(),"A wrapper clobber retained the callee return identity");
+        }
+        {
             // A pointer store alone does not establish a callback. A partial
             // overwrite must sever the local store-to-call relation.
             nt::Bytes image(128,0);
