@@ -222,6 +222,25 @@ if(BUILD_TESTING)
             "-DGENERATOR=${CMAKE_GENERATOR}" "-DPLATFORM=${CMAKE_GENERATOR_PLATFORM}"
             "-DEXE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/flow_observation_project.cmake")
         set_tests_properties(ee-flow-observations PROPERTIES TIMEOUT 180)
+        set(ANYPS2_TEST_PS2DEV "" CACHE PATH "Optional PS2DEV toolchain for original C++ PS2 tests")
+        set(ANYPS2_PS2_HOST_RUNTIME "" CACHE PATH "Optional MinGW32 DLL directory for the PS2 cross-compiler")
+        if(ANYPS2_TEST_PS2DEV)
+            find_package(Python3 REQUIRED COMPONENTS Interpreter)
+            set(ps2_host_arguments)
+            if(ANYPS2_PS2_HOST_RUNTIME)
+                list(APPEND ps2_host_arguments --host-runtime "${ANYPS2_PS2_HOST_RUNTIME}")
+            endif()
+            add_test(NAME ps2-source-protocol COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_programs/test_runner.py")
+            # The full corpus is an explicit gap audit. Callback and virtual-object
+            # cases currently expose missing discovery and must not count as passes.
+            add_test(NAME ps2-source-scalar COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_programs/run.py"
+                --ps2dev "${ANYPS2_TEST_PS2DEV}" ${ps2_host_arguments}
+                --converter "$<TARGET_FILE:ps2-recompile>" --generator "${CMAKE_GENERATOR}"
+                --output-root "${CMAKE_CURRENT_BINARY_DIR}/ps2-source-tests" --case scalar)
+            set_tests_properties(ps2-source-scalar PROPERTIES TIMEOUT 300)
+        endif()
         add_test(NAME ee-native-images COMMAND "${CMAKE_COMMAND}"
             -DFIXTURE=$<TARGET_FILE:emit-ee-fixture> -DCONVERTER=$<TARGET_FILE:ps2-recompile>
             -DSCRATCH=${CMAKE_BINARY_DIR}/image-project-tests -DROOT=${CMAKE_CURRENT_SOURCE_DIR}

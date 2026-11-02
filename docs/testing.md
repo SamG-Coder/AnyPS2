@@ -1,5 +1,10 @@
 # Testing AnyPS2
 
+The optional [original PS2 programs](ps2-test-programs.md) compile C++20 sources
+with PS2DEV at `-O0` and `-O2`, then run their normal LLVM conversions. A separate
+PCSX2 comparison is available. The batch audit exposes current callback and
+virtual-object discovery gaps; scalar/stack tests provide the initial passing gate.
+
 PADMAN service regressions exercise timer ownership, elapsed-time compare events,
 compiled interrupt callbacks, vblank registration/removal, thread status, IRX
 callback relocations and guarded indexed registry discovery. EE tests cover

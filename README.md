@@ -112,6 +112,7 @@ and the limits of static verification.
 - [EE correctness review](docs/ee-correctness-review.md) — regression fixes, validation evidence and unresolved audit items
 - [Flow verification](docs/flow-verification.md) — check discovery closure and callback-binding gaps before a native build
 - [Testing](docs/testing.md) — synthetic fixtures and opt-in local game validation
+- [Original PS2 test programs](docs/ps2-test-programs.md) — cross-compiled C++ cases and native/reference comparisons
 - [Batch conversion](docs/batch-conversion.md) — conversion workflow, LLVM build and performance measurements
 - [SIF implementation](docs/sif.md) — native EE/IOP communication work
 - [Usage and ownership disclaimer](DISCLAIMER.md) — game-file requirements

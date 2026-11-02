@@ -1,5 +1,29 @@
 # Source references and provenance
 
+## Original PS2 test toolchain
+
+- PS2DEV `v2.0.0`, commit `b1eb649a3765bf68500cfba9bb62433c526c90a8`:
+  https://github.com/ps2dev/ps2dev/tree/b1eb649a3765bf68500cfba9bb62433c526c90a8
+  The Windows release archive `ps2dev-windows-latest.tar.gz` has SHA256
+  `bab98ee210c62aa3bd98d9bdda2af3f92a628e6e3d63e4b52f243ae56e3eb4ce`.
+  Its GCC 15.2.0 cross-compiler builds original test inputs. It is a development
+  dependency, not an AnyPS2 output backend. GNU compiler/binutils and bundled
+  libraries retain their upstream licenses; no toolchain binary is redistributed.
+- Windows host dependencies come from the official MSYS2 MinGW32 repository:
+  https://repo.msys2.org/mingw/mingw32/
+  Local package downloads were checked against repository SHA256 records. Their
+  manifests and upstream notices remain with the ignored toolchain installation.
+- The previously pinned PCSX2 `PINE.cpp` public protocol supplies read-only
+  memory and version messages. The independent Python test adapter was validated
+  against PCSX2 `v2.8.2`; it does not copy or link emulator implementation.
+  Its role is differential testing, never native-runtime fallback.
+
+The test C++, entry assembly, link script, result protocol and expected values
+are original. They contain no commercial-game code, SDK routines or BIOS logic.
+No PS2SDK libraries or startup objects are linked into these initial tests.
+
+## Conversion format and rendering references
+
 ELF `.vutext` classification uses the section convention recorded in PS2SDK's
 [`tools/srxfixup/src/eefixconf.c`](https://github.com/ps2dev/ps2sdk/blob/2a18d15da1332665451a9bcf9a0d4df9029c9490/tools/srxfixup/src/eefixconf.c).
 These VU payload containers can share an executable LOAD with EE code. AnyPS2
