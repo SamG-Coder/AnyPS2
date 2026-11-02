@@ -691,6 +691,19 @@ int main(int argc,char** argv) {
         const std::uint32_t record_factory[]{0x00861021,0xdca80000,0xfc480018,0x03e00008,0};
         for (unsigned n=0;n<std::size(record_factory);++n) word(0x2a0+n*4,record_factory[n]);
         nt::write_file(std::string(argv[2])+".returned-callback-record",elf);
+        // Verification inventories gaps without promoting matching data layouts.
+        std::fill(elf.begin()+0x100,elf.end(),0);
+        word(0x100,0x2403007b); word(0x104,12);
+        nt::write_file(std::string(argv[2])+".flow-direct",elf);
+        const std::uint32_t flow_main[]{0x24042000,0x0c000440,0,0x24042040,
+            0x0c000420,0,0x2403007b,12};
+        for (unsigned n=0;n<std::size(flow_main);++n) word(0x100+n*4,flow_main[n]);
+        const std::uint32_t flow_consumer[]{0x8c990018,0x03200008,0x8c84001c};
+        const std::uint32_t flow_initializer[]{0x240810e0,0xac880018,0x240910d0,0xac89001c,0x03e00008,0};
+        for (unsigned n=0;n<std::size(flow_consumer);++n) word(0x180+n*4,flow_consumer[n]);
+        for (unsigned n=0;n<std::size(flow_initializer);++n) word(0x200+n*4,flow_initializer[n]);
+        word(0x1d0,0x4c000000); word(0x1e0,0x03e00008); word(0x1e4,0x2402002a);
+        nt::write_file(std::string(argv[2])+".flow-unlinked",elf);
         // A thread descriptor remains in s4 across a call and a retry edge.
         // Its entry is discovered only from the descriptor passed to CreateThread.
         elf=original;

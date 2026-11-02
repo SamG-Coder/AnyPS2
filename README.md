@@ -43,12 +43,12 @@ Native services aim to reproduce the *observable behavior* of console operations
 | VU / VIF / GIF | Bounded vector-code conversion, native vector services and supported packet paths; incomplete game integration and unsupported operations remain |
 | Graphics | Vulkan sprite, texture and triangle paths, including synthetic compiled VU-to-GPU tests; not a complete PS2 Graphics Synthesizer replacement |
 | Audio | Startup/service work exists, but native sample-voice playback is not yet implemented |
-| Code discovery | Direct/indirect call and callback analysis, with `call-sites.tsv` and `pointer-references.tsv` reports for unresolved coverage |
+| Code discovery | Direct/indirect call and callback analysis; verification mode reports remaining flow and callback-binding gaps before LLVM generation or compilation |
 | Game compatibility | **GT4 is not playable.** No general game-compatibility claim |
 
 ### Gran Turismo 4 milestone
 
-GT4 has displayed its opening warning using Vulkan. An earlier generated build also reached triangle rendering and a LIBSD `KON` sample-voice start, for which native playback is still missing. After stricter code discovery exposed startup regressions, the latest regenerated build again renders the warning and starts ten threads, but still stops at a missing EE callback before that earlier boundary. See the [correctness review](docs/ee-correctness-review.md) for verified fixes and remaining gaps.
+GT4 has displayed its opening warning using Vulkan. An earlier generated build also reached triangle rendering and a LIBSD `KON` sample-voice start, for which native playback is still missing. After stricter code discovery exposed startup regressions, the latest regenerated build again renders the warning and starts fifteen threads, but still stops at a missing EE callback before that earlier boundary. See the [correctness review](docs/ee-correctness-review.md) for verified fixes and remaining gaps.
 
 This is **real progress in the conversion pipeline**, but not proof of a complete boot, correct gameplay, or improved performance. Some subsystems are validated with synthetic programs and are not yet proven with GT4 itself.
 
@@ -94,10 +94,23 @@ For separate import, inspection and EE experimentation:
 
 Generated output directories must be new. Converted commercial game data is not distributed with the project.
 
+To check EE discovery before generating LLVM or starting a native build:
+
+```powershell
+.\build\Release\ps2-recompile.exe work\game\boot.elf work\flow-report --verify-only
+```
+
+Verification returns exit code `2` when flow remains unresolved. It writes the full
+gap inventory and likely callback-record relationships without promoting uncertain
+data pointers to code. Supply the same payload mappings and secondary images used
+for conversion. See [flow verification](docs/flow-verification.md) for the reports
+and the limits of static verification.
+
 ## Technical documentation
 
 - [EE native conversion](docs/ee-native.md) — R5900 conversion, LLVM generation, memory, call discovery and limits
 - [EE correctness review](docs/ee-correctness-review.md) — regression fixes, validation evidence and unresolved audit items
+- [Flow verification](docs/flow-verification.md) — check discovery closure and callback-binding gaps before a native build
 - [Testing](docs/testing.md) — synthetic fixtures and opt-in local game validation
 - [Batch conversion](docs/batch-conversion.md) — conversion workflow, LLVM build and performance measurements
 - [SIF implementation](docs/sif.md) — native EE/IOP communication work

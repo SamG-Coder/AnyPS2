@@ -51,6 +51,14 @@ struct PointerReference {
     std::uint32_t callee=0;
     unsigned argument_index=0;
 };
+struct CallbackFlowGap {
+    std::uint32_t site,target,field;
+    std::vector<std::uint32_t> consumers;
+};
+// Diagnostic candidates only: a matching function/context layout does not
+// prove that a store and consumer use the same object. Never adds code roots.
+std::vector<CallbackFlowGap> callback_flow_gaps(ByteView bytes,const elf::Executable&,const Program&,
+                                              std::span<const PointerReference> references);
 // Stores become roots only when a matching indirect-call consumer is found.
 // Other address references remain available as unresolved classification evidence.
 std::set<std::uint32_t> stored_code_pointers(ByteView bytes,const elf::Executable& executable,const Program& program,

@@ -41,6 +41,7 @@ private:
     std::filesystem::path destination_,path_;
 };
 struct Prepared {
+    struct Pass { unsigned image=1; std::size_t index,instructions,new_roots,new_registrations; };
     elf::Executable executable;
     analysis::Program discovered;
     std::vector<CodeRange> ranges;
@@ -50,6 +51,8 @@ struct Prepared {
     std::vector<ExecutableImage> images;
     std::vector<analysis::CallSite> calls;
     std::vector<analysis::PointerReference> pointers;
+    std::vector<analysis::CallbackFlowGap> flow_gaps;
+    std::vector<Pass> passes;
     std::set<std::uint32_t> registered_calls;
     std::size_t wrapper_candidates=0;
     std::uint32_t syscall_table=0;
@@ -80,7 +83,7 @@ std::vector<CodeRange> declared_code_ranges(const elf::Executable& executable) {
     }
     return result;
 }
-Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
+Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings,bool diagnose_flow=false) {
     auto executable=elf::parse(bytes);
     auto ranges=declared_code_ranges(executable);
     std::vector<std::pair<std::uint32_t,std::uint32_t>> extents;
@@ -136,7 +139,9 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
     analysis::Program discovered;
     std::vector<analysis::PointerReference> pointers;
     std::set<std::uint32_t> registered_calls;
+    std::vector<Prepared::Pass> passes;
     while (true) {
+        const auto previous_roots=continuations.size();
         pointers.clear();
         discovered=analysis::discover(bytes,executable,program_instruction_limit,continuations,true);
         bool added=false;
@@ -208,6 +213,8 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
             continuations.push_back(address); added=true;
         }
         added|=registered_calls.size()!=previous_calls;
+        passes.push_back({1,passes.size()+1,discovered.instructions.size(),
+            continuations.size()-previous_roots,registered_calls.size()-previous_calls});
         if (!added) break;
     }
     if (executable.inferred_permissions) for (const auto& [pc,instruction]:discovered.instructions) {
@@ -215,6 +222,8 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
         else ranges.push_back({pc,4});
     }
     Prepared result;
+    result.passes=std::move(passes);
+    if (diagnose_flow) result.flow_gaps=analysis::callback_flow_gaps(bytes,executable,discovered,pointers);
     result.executable=std::move(executable);
     result.calls=analysis::call_sites(bytes,result.executable,discovered);
     result.pointers=std::move(pointers);
@@ -230,10 +239,10 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings) {
         std::copy_n(bytes.begin()+segment.offset,segment.file_size,result.image.begin()+segment.address);
     return result;
 }
-}
-void project(const std::filesystem::path& input,const std::filesystem::path& destination,std::span<const PayloadMapping> mappings,std::span<const std::filesystem::path> images) {
+Prepared prepare_project(const std::filesystem::path& input,std::span<const PayloadMapping> mappings,
+                         std::span<const std::filesystem::path> images,bool diagnose_flow=false) {
     const auto bytes=read_file(input);
-    auto prepared=prepare(bytes,mappings);
+    auto prepared=prepare(bytes,mappings,diagnose_flow);
     if (images.size()>31) throw std::invalid_argument("Too many secondary executable images");
     if (!images.empty()) {
         const auto snapshot=[](ByteView source,const elf::Executable& executable,std::uint32_t id) {
@@ -247,7 +256,7 @@ void project(const std::filesystem::path& input,const std::filesystem::path& des
         auto occupied=prepared.executable.segments;
         for (const auto& path:images) {
             const auto source=read_file(path);
-            auto extra=prepare(source,{});
+            auto extra=prepare(source,{},diagnose_flow);
             const auto id=static_cast<std::uint32_t>(prepared.images.size()+1);
             for (const auto& section:extra.executable.segments) {
                 for (const auto& old:occupied)
@@ -267,12 +276,55 @@ void project(const std::filesystem::path& input,const std::filesystem::path& des
             prepared.discovered.entries.insert(extra.discovered.entries.begin(),extra.discovered.entries.end());
             prepared.calls.insert(prepared.calls.end(),extra.calls.begin(),extra.calls.end());
             prepared.pointers.insert(prepared.pointers.end(),extra.pointers.begin(),extra.pointers.end());
+            prepared.flow_gaps.insert(prepared.flow_gaps.end(),extra.flow_gaps.begin(),extra.flow_gaps.end());
+            for (auto pass:extra.passes) { pass.image=id; prepared.passes.push_back(pass); }
             for (auto range:extra.ranges) { range.image=id; prepared.ranges.push_back(range); }
             prepared.layouts.insert(prepared.layouts.end(),extra.layouts.begin(),extra.layouts.end());
             prepared.images.push_back(snapshot(source,extra.executable,id));
         }
         for (const auto& [pc,instruction]:prepared.discovered.instructions) prepared.discovered.unresolved.erase(pc);
     }
+    return prepared;
+}
+void write_discovery_reports(const std::filesystem::path& output,const Prepared& prepared,bool verification=false) {
+    std::ostringstream calls;
+    calls<<"pc\tkind\ttarget\tcoverage\n";
+    for (const auto& call:prepared.calls) {
+        calls<<hex32(call.pc)<<'\t'<<analysis::name(call.kind)<<'\t';
+        if (call.target) calls<<hex32(*call.target);
+        calls<<'\t';
+        if (call.target) {
+            if (!prepared.discovered.instructions.contains(*call.target)) calls<<"missing";
+            else if (verification) calls<<(call.initial_data_candidate ? "discovered-initial-candidate" : "discovered");
+            else calls<<(call.initial_data_candidate ? "compiled-initial-candidate" : "compiled");
+        }
+        else if (call.kind==analysis::CallKind::service) calls<<"native-service-boundary";
+        else if (call.kind==analysis::CallKind::return_link || call.kind==analysis::CallKind::return_exception) calls<<"runtime-continuation";
+        else calls<<"unresolved-indirect";
+        calls<<'\n';
+    }
+    save(output/"call-sites.tsv",calls.str());
+    std::ostringstream pointers;
+    pointers<<"site\ttarget\tsource\tuse\tcoverage\tcallee\targument_index\n";
+    for (const auto& reference:prepared.pointers) {
+        pointers<<hex32(reference.site)<<'\t'<<hex32(reference.target)<<'\t'
+                <<(reference.argument ? "argument" : "store")<<'\t'
+                <<(reference.callable ? "indirect-call-consumer" : reference.data_read ? "data-read-observed" : "unclassified")<<'\t'
+                <<(prepared.discovered.instructions.contains(reference.target) ? "discovered-EE-code" : "not-established-as-EE-code")<<'\t';
+        if (reference.argument) pointers<<hex32(reference.callee)<<'\t'<<reference.argument_index;
+        else pointers<<"-\t-";
+        pointers<<'\n';
+    }
+    save(output/"pointer-references.tsv",pointers.str());
+    std::ostringstream passes;
+    passes<<"image\tpass\tdiscovered_instructions\tnew_roots\tnew_registrations\n";
+    for (const auto& pass:prepared.passes)
+        passes<<pass.image<<'\t'<<pass.index<<'\t'<<pass.instructions<<'\t'<<pass.new_roots<<'\t'<<pass.new_registrations<<'\n';
+    save(output/"discovery-passes.tsv",passes.str());
+}
+}
+void project(const std::filesystem::path& input,const std::filesystem::path& destination,std::span<const PayloadMapping> mappings,std::span<const std::filesystem::path> images) {
+    auto prepared=prepare_project(input,mappings,images);
     if (!prepared.discovered.unresolved.empty())
         throw std::runtime_error("EE discovery reached unmapped code at "+hex32(*prepared.discovered.unresolved.begin()));
     std::vector<r5900::Instruction> instructions;
@@ -294,32 +346,7 @@ void project(const std::filesystem::path& input,const std::filesystem::path& des
     std::string module_manifest;
     for (const auto& name:modules) module_manifest+=name+'\n';
     save(output/"llvm-modules.txt",module_manifest);
-    std::ostringstream calls;
-    calls<<"pc\tkind\ttarget\tcoverage\n";
-    for (const auto& call:prepared.calls) {
-        calls<<hex32(call.pc)<<'\t'<<analysis::name(call.kind)<<'\t';
-        if (call.target) calls<<hex32(*call.target);
-        calls<<'\t';
-        if (call.target) calls<<(prepared.discovered.instructions.contains(*call.target) ?
-            (call.initial_data_candidate ? "compiled-initial-candidate" : "compiled") : "missing");
-        else if (call.kind==analysis::CallKind::service) calls<<"native-service-boundary";
-        else if (call.kind==analysis::CallKind::return_link || call.kind==analysis::CallKind::return_exception) calls<<"runtime-continuation";
-        else calls<<"unresolved-indirect";
-        calls<<'\n';
-    }
-    save(output/"call-sites.tsv",calls.str());
-    std::ostringstream pointers;
-    pointers<<"site\ttarget\tsource\tuse\tcoverage\tcallee\targument_index\n";
-    for (const auto& reference:prepared.pointers) {
-        pointers<<hex32(reference.site)<<'\t'<<hex32(reference.target)<<'\t'
-                <<(reference.argument ? "argument" : "store")<<'\t'
-                <<(reference.callable ? "indirect-call-consumer" : reference.data_read ? "data-read-observed" : "unclassified")<<'\t'
-                <<(prepared.discovered.instructions.contains(reference.target) ? "discovered-EE-code" : "not-established-as-EE-code")<<'\t';
-        if (reference.argument) pointers<<hex32(reference.callee)<<'\t'<<reference.argument_index;
-        else pointers<<"-\t-";
-        pointers<<'\n';
-    }
-    save(output/"pointer-references.tsv",pointers.str());
+    write_discovery_reports(output,prepared);
     const auto& executable=prepared.executable;
     const auto& image=prepared.image;
     const auto syscall_table=prepared.syscall_table;
@@ -403,6 +430,71 @@ target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codeg
          "Build with ps2-build, then run ps2-native <program.data> [operation-budget].\n"
          "Data contains private input material and must remain local. This is not game boot.\n");
     staged.publish();
+}
+FlowVerification verify_flow(const std::filesystem::path& input,const std::filesystem::path& destination,
+                             std::span<const PayloadMapping> mappings,std::span<const std::filesystem::path> images) {
+    const auto prepared=prepare_project(input,mappings,images,true);
+    FlowVerification result;
+    result.instructions=prepared.discovered.instructions.size(); result.passes=prepared.passes.size();
+    result.unmapped_targets=prepared.discovered.unresolved.size();
+    result.record_binding_candidates=prepared.flow_gaps.size();
+    StagedProject staged(destination);
+    const auto& output=staged.path();
+    write_discovery_reports(output,prepared,true);
+    std::ostringstream gaps;
+    gaps<<"kind\tsite\ttarget\tevidence\n";
+    for (const auto target:prepared.discovered.unresolved)
+        gaps<<"unmapped-target\t-\t"<<hex32(target)<<"\treached control flow has no mapped instruction\n";
+    for (const auto& call:prepared.calls) {
+        if (call.kind==analysis::CallKind::service) { ++result.service_boundaries; continue; }
+        if (call.target || call.kind==analysis::CallKind::return_link || call.kind==analysis::CallKind::return_exception) continue;
+        ++result.unresolved_indirect;
+        gaps<<"unresolved-indirect\t"<<hex32(call.pc)<<"\t-\truntime target set is not proven complete\n";
+    }
+    for (const auto& reference:prepared.pointers) {
+        if (reference.callable || prepared.discovered.instructions.contains(reference.target)) continue;
+        ++result.unclassified_references;
+        gaps<<"unclassified-pointer\t"<<hex32(reference.site)<<'\t'<<hex32(reference.target)<<'\t'
+            <<(reference.argument ? "argument passed to " : "stored address; ");
+        if (reference.argument) gaps<<hex32(reference.callee)<<" argument "<<reference.argument_index<<"; ";
+        gaps<<(reference.data_read ? "data use observed, callable use not established" : "callable use not established")<<'\n';
+    }
+    save(output/"flow-gaps.tsv",gaps.str());
+    std::ostringstream bindings;
+    bindings<<"store\ttarget\tfield\tstatus\tconsumer_sites\n";
+    for (const auto& gap:prepared.flow_gaps) {
+        bindings<<hex32(gap.site)<<'\t'<<hex32(gap.target)<<'\t'<<hex32(gap.field)<<"\tunproven-object-identity\t";
+        for (std::size_t n=0;n<gap.consumers.size();++n) {
+            if (n) bindings<<',';
+            bindings<<hex32(gap.consumers[n]);
+        }
+        bindings<<'\n';
+    }
+    save(output/"callback-flow-gaps.tsv",bindings.str());
+    std::vector<r5900::Instruction> instructions;
+    instructions.reserve(prepared.discovered.instructions.size());
+    for (const auto& [pc,instruction]:prepared.discovered.instructions) instructions.push_back(instruction);
+    const auto rejection=reject_unsupported(instructions);
+    result.lowering_supported=!instructions.empty() && rejection.empty();
+    save(output/"lowering-diagnostics.txt",rejection.text());
+    std::string layout_error;
+    try { (void)prepare_native_layout(prepared.layouts); result.layout_supported=true; }
+    catch (const std::exception& error) { layout_error=error.what(); }
+    save(output/"layout-diagnostics.txt",layout_error);
+    std::ostringstream summary;
+    summary<<"known_flow="<<(result.closed() ? "closed" : "incomplete")<<'\n'
+        <<"discovered_instructions="<<result.instructions<<"\ndiscovery_passes="<<result.passes
+        <<"\nunmapped_targets="<<result.unmapped_targets<<"\nunresolved_indirect="<<result.unresolved_indirect
+        <<"\nunclassified_pointer_references="<<result.unclassified_references
+        <<"\nunproven_record_bindings="<<result.record_binding_candidates<<"\nnative_service_boundaries="<<result.service_boundaries
+        <<"\nlowering_supported="<<result.lowering_supported<<"\nlayout_supported="<<result.layout_supported
+        <<"\nLLVM_emitted=0\nnative_compilation_performed=0\nruntime_executed=0\n"
+        <<"Discovery closure means the implemented rules found no additional roots, not complete game coverage.\n"
+        <<"Callback layout matches are diagnostics only and never promote a pointer to executable code.\n"
+        <<"Unknown dynamic content, native service behavior, rendering and gameplay require separate validation.\n";
+    save(output/"flow-verification.txt",summary.str());
+    staged.publish();
+    return result;
 }
 EeAssessment assess(ByteView bytes,std::span<const PayloadMapping> mappings) {
     EeAssessment result;

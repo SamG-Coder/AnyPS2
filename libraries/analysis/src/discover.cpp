@@ -820,6 +820,7 @@ struct CallConsumers {
     std::vector<Table> tables;
     std::set<std::pair<std::uint32_t,std::uint32_t>> nested_fields;
     std::set<std::uint32_t> bound_fields;
+    std::map<std::uint32_t,std::set<std::uint32_t>> bound_consumers;
     std::map<std::uint32_t,std::set<unsigned>> global_fields;
     std::map<std::uint32_t,std::set<std::uint32_t>> returned_fields;
     BoundCalls bindings;
@@ -933,6 +934,7 @@ struct CallConsumers {
                         if (global) global_fields[offset].insert(global_arguments.begin(),global_arguments.end());
                         before=origin->pc;
                     }
+                    if (bound) bound_consumers[offset].insert(pc);
                 }
                 auto parent=i; parent.pc=load.pc; parent.rs=load.base;
                 for (const auto& outer:called_loads(program,graph,parent))
@@ -1545,6 +1547,33 @@ std::set<std::uint32_t> stored_code_pointers(ByteView bytes,const elf::Executabl
             if (callable) result.insert(*address);
             if (references) references->push_back({pc,*address,false,callable,false});
         }
+    }
+    return result;
+}
+std::vector<CallbackFlowGap> callback_flow_gaps(ByteView bytes,const elf::Executable& elf,const Program& program,
+                                              std::span<const PointerReference> references) {
+    const CallConsumers consumers(bytes,elf,program);
+    std::vector<CallbackFlowGap> result;
+    std::set<std::pair<std::uint32_t,std::uint32_t>> seen;
+    for (const auto& reference:references) {
+        if (reference.argument || reference.callable || program.instructions.contains(reference.target) ||
+            !seen.emplace(reference.site,reference.target).second) continue;
+        const auto found=program.instructions.find(reference.site);
+        if (found==program.instructions.end() || found->second.op!=r5900::Op::sw) continue;
+        auto before=reference.site,field=std::uint32_t(found->second.immediate);
+        unsigned base=found->second.rs;
+        for (unsigned step=0;step<8;++step) {
+            const auto* origin=CallConsumers::definition(program,before,base);
+            if (!origin) break;
+            if (origin->op==r5900::Op::addiu || origin->op==r5900::Op::daddiu) {
+                field+=std::uint32_t(origin->immediate); base=origin->rs;
+            } else if (const auto copy=copied_register(*origin)) base=*copy;
+            else break;
+            before=origin->pc;
+        }
+        const auto sites=consumers.bound_consumers.find(field);
+        if (sites!=consumers.bound_consumers.end())
+            result.push_back({reference.site,reference.target,field,{sites->second.begin(),sites->second.end()}});
     }
     return result;
 }
