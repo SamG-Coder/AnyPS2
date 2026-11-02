@@ -643,6 +643,21 @@ int main(int argc,char** argv) {
         nt::write_file(std::string(argv[2])+".copied-record-unrelated",elf);
         word(0x2a4,0xdca80000); word(0x2a8,0xfc880018); word(0x2ac,0x03e00008); word(0x2b0,0);
         nt::write_file(std::string(argv[2])+".copied-aligned-record",elf);
+        // The callback reaches the stack before a callee clobbers v0. A later
+        // wrapper must recover that stored value, not the callee's return value.
+        std::fill(elf.begin()+0x200,elf.begin()+0x280,0);
+        const std::uint32_t call_slot_record[]{0x03e08021,0x27bdfff0,0x03a08821,0x240210e0,
+            0x0c000460,0xafa20000,0x240810d0,0xafa80004,0x0c000460,0,
+            0x24042000,0x02202821,0x0c000454,0x24060000,0x24042000,0x0c000420,0,
+            0x27bd0010,0x02000008,0};
+        for (unsigned n=0;n<std::size(call_slot_record);++n) word(0x200+n*4,call_slot_record[n]);
+        const std::uint32_t record_wrapper[]{0x27bdfff0,0xffbf0008,0x0c000468,0,
+            0xdfbf0008,0x03e00008,0x27bd0010};
+        for (unsigned n=0;n<std::size(record_wrapper);++n) word(0x250+n*4,record_wrapper[n]);
+        word(0x284,0x24020000);
+        nt::write_file(std::string(argv[2])+".call-slot-record",elf);
+        word(0x224,0xafa00000);
+        nt::write_file(std::string(argv[2])+".call-slot-overwritten",elf);
         // Compilers also inline the same record copy; the source can use a
         // preserved stack alias established before its fields are written.
         std::fill(elf.begin()+0x200,elf.begin()+0x280,0);

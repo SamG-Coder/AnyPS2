@@ -1226,9 +1226,13 @@ std::set<std::uint32_t> frame_reference_values(ByteView bytes,const elf::Executa
         const auto delta=std::int32_t(address->offset-target->offset);
         if (std::int64_t(delta)+width<=0 || delta>=4) return false;
         if (!delta && i.op==Op::sw) {
+            // A delay-slot store observes registers before the callee runs.
+            // The link register itself has already changed and is not an
+            // ordinary before-call value.
+            if (before!=pc) if (const auto link=link_register(program.instructions.at(before));link && link==i.rt) return true;
             unsigned fuel=128;
-            auto value=candidate(bytes,elf,program,pc,i.rt,fuel,0xffffffffU);
-            if (!value) value=pointer_flow::constant(program,graph,pc,i.rt);
+            auto value=candidate(bytes,elf,program,pc,i.rt,fuel,before!=pc ? before : 0xffffffffU);
+            if (!value) value=pointer_flow::constant(program,graph,before,i.rt);
             if (value) result.insert(*value);
         }
         return true;
