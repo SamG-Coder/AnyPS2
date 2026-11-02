@@ -685,6 +685,86 @@ int main(int argc,char** argv) {
         nt::write_file(std::string(argv[2])+".countdown-callbacks",elf);
         word(0x198,0x2631fffe); // One arm changes the count differently: no proved bound.
         nt::write_file(std::string(argv[2])+".countdown-unproved",elf);
+        // A constructor registers a callback stored in an object. A forwarding
+        // helper copies that field and its owning object into an indexed slot.
+        // The consumer loads the context before loading/calling the function.
+        elf=original;
+        elf.resize(0x608,0); std::fill(elf.begin()+0x100,elf.end(),0);
+        word(68,0x500); word(72,0x500); word(88,0x600); word(100,8); word(104,0x400);
+        const std::uint32_t object_main[]{0x241d2380,0x24042000,0x24052100,0x0c000440,0,
+            0x24042100,0x24050001,0x0c000460,0,0x2403007b,12,0x03e00008,0};
+        for (unsigned n=0;n<std::size(object_main);++n) word(0x100+n*4,object_main[n]);
+        const std::uint32_t object_constructor[]{0x27bdfff0,0xffbf0008,0x00808021,
+            0x24081200,0xae080014,0x24081210,0xae080018,0x24080001,0xae08000c,
+            0x2408002a,0xae08001c,0,0x00a02021,0x0c000458,0x02002821,
+            0xdfbf0008,0x03e00008,0x27bd0010};
+        for (unsigned n=0;n<std::size(object_constructor);++n) word(0x200+n*4,object_constructor[n]);
+        const std::uint32_t object_forwarder[]{0x00a03821,0,0x8ca60014,0x8ca8000c,
+            0x000840c0,0x00882821,0x08000470,0x24a50020};
+        for (unsigned n=0;n<std::size(object_forwarder);++n) word(0x260+n*4,object_forwarder[n]);
+        const std::uint32_t object_consumer[]{0x000540c0,0x00884021,0x25080020,
+            0x8d040004,0x8d190000,0x03200008,0};
+        for (unsigned n=0;n<std::size(object_consumer);++n) word(0x280+n*4,object_consumer[n]);
+        const std::uint32_t object_setter[]{0xaca70004,0x03e00008,0xaca60000};
+        for (unsigned n=0;n<std::size(object_setter);++n) word(0x2c0+n*4,object_setter[n]);
+        word(0x300,0x03e00008); word(0x304,0x8c82001c); word(0x310,0x4c000000);
+        nt::write_file(std::string(argv[2])+".object-field-registration",elf);
+        word(0x22c,0xa2000015);
+        nt::write_file(std::string(argv[2])+".object-field-overwritten",elf);
+        word(0x22c,0xae000014);
+        nt::write_file(std::string(argv[2])+".object-field-cleared",elf);
+        word(0x228,0x02008821); word(0x22c,0xa2200015);
+        nt::write_file(std::string(argv[2])+".object-field-alias-overwritten",elf);
+        word(0x228,0xae08001c);
+        word(0x22c,0); word(0x2c0,0xaca70008);
+        nt::write_file(std::string(argv[2])+".object-field-unrelated",elf);
+        word(0x2c0,0xaca70004); word(0x264,0xaca00014);
+        nt::write_file(std::string(argv[2])+".object-field-callee-cleared",elf);
+        word(0x264,0); word(0x260,0x00803821);
+        nt::write_file(std::string(argv[2])+".object-field-unrelated-context",elf);
+        word(0x260,0x00a03821); word(0x264,0x8ca8000c); word(0x26c,0xaca00014);
+        nt::write_file(std::string(argv[2])+".object-field-loaded-before-clear",elf);
+        // The same registry also accepts a callback argument directly, and its
+        // consumer checks for null before loading the adjacent context.
+        word(0x22c,0x24061200); word(0x264,0); word(0x268,0); word(0x26c,0x8ca8000c);
+        const std::uint32_t guarded_consumer[]{0x000540c0,0x00884021,0x25080020,
+            0x8d190000,0x53200007,0,0x8d040004,0x03200008,0};
+        for (unsigned n=0;n<std::size(guarded_consumer);++n) word(0x280+n*4,guarded_consumer[n]);
+        word(0x2b0,0x03e00008); word(0x2b4,0);
+        nt::write_file(std::string(argv[2])+".object-argument-registration",elf);
+        word(0x2c0,0xaca70008);
+        nt::write_file(std::string(argv[2])+".object-argument-unrelated",elf);
+        // A handle-selected callback record saves the registering GP alongside
+        // the function and user data. Invocation restores GP and passes the
+        // user data as a later argument, not necessarily a0.
+        std::fill(elf.begin()+0x100,elf.end(),0);
+        const std::uint32_t gp_main[]{0x241d2380,0x241c0006,0x24042003,0x24051210,
+            0x24061200,0x24072040,0x2408002a,0xace80000,0x0c000440,0,
+            0x241c0009,0x24042000,0x0c000460,0,0x2403007b,12,0x03e00008,0};
+        for (unsigned n=0;n<std::size(gp_main);++n) word(0x100+n*4,gp_main[n]);
+        const std::uint32_t gp_setter[]{0x3084fff0,0xac850020,0x10c00003,0xac860010,
+            0xac9c0014,0xac870018,0x03e00008,0};
+        for (unsigned n=0;n<std::size(gp_setter);++n) word(0x200+n*4,gp_setter[n]);
+        const std::uint32_t gp_consumer[]{0x03e08021,0x8c9c0014,0x8c990010,
+            0x0320f809,0x8c870018,0x02000008,0};
+        for (unsigned n=0;n<std::size(gp_consumer);++n) word(0x280+n*4,gp_consumer[n]);
+        word(0x300,0x8ce20000); word(0x304,0x005c1021); word(0x308,0x03e00008);
+        word(0x310,0x4c000000);
+        nt::write_file(std::string(argv[2])+".gp-callback-record",elf);
+        word(0x210,0xac9c0024);
+        nt::write_file(std::string(argv[2])+".gp-record-unrelated",elf);
+        word(0x210,0xac9c0014); word(0x214,0xac87001c);
+        nt::write_file(std::string(argv[2])+".gp-record-context",elf);
+        word(0x214,0xa0800011); word(0x218,0xac870018); word(0x21c,0x03e00008); word(0x220,0);
+        nt::write_file(std::string(argv[2])+".gp-record-overwritten",elf);
+        word(0x210,0x24840040); word(0x214,0xac9c0014);
+        nt::write_file(std::string(argv[2])+".gp-record-base-reused",elf);
+        // No path stores both the function and GP: merging branch summaries
+        // must not manufacture a callback registration.
+        const std::uint32_t split_record[]{0x3084fff0,0x10a00004,0,
+            0xac860010,0x10000002,0,0xac9c0014,0xac870018,0x03e00008,0};
+        for (unsigned n=0;n<std::size(split_record);++n) word(0x200+n*4,split_record[n]);
+        nt::write_file(std::string(argv[2])+".gp-record-disjoint",elf);
         elf=original;
         elf.resize(0x190,0); word(100,16); word(104,36);
         const std::uint32_t constructors[]{0x24102000,0x8e020000,0x8e190004,0x0320f809,0,

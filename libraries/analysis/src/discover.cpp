@@ -118,6 +118,7 @@ struct ArgumentValue {
     std::uint32_t offset=0;
     bool loaded=false;
     unsigned width=0;
+    bool entry_value=true;
     auto operator<=>(const ArgumentValue&) const=default;
 };
 struct ArgumentUses {
@@ -130,6 +131,7 @@ struct ArgumentUses {
         auto operator<=>(const Store&) const=default;
     };
     std::set<Store> stores;
+    std::set<Store> global_stores;
     struct ReferencedStore {
         unsigned source,base;
         std::uint32_t source_offset,offset;
@@ -137,7 +139,10 @@ struct ArgumentUses {
     };
     std::vector<ReferencedStore> referenced_stores;
     std::map<unsigned,std::set<std::uint32_t>> callable_fields;
+    std::map<unsigned,std::set<std::uint32_t>> registered_fields;
 };
+struct BoundArguments { unsigned function,context; };
+using BoundCalls=std::map<std::uint32_t,std::vector<BoundArguments>>;
 bool conditional_call(const r5900::Instruction& i) {
     using r5900::Op;
     return i.op==Op::bltzal || i.op==Op::bgezal || i.op==Op::bltzall || i.op==Op::bgezall;
@@ -193,10 +198,11 @@ bool overwrites_word(std::uint32_t store,unsigned width,std::uint32_t word) {
     // Unsigned differences also handle a store spanning the address wrap.
     return word-store<width || store-word<4;
 }
-ArgumentUses argument_uses(const Program& program,std::uint32_t entry) {
+ArgumentUses argument_uses(const Program& program,std::uint32_t entry,const BoundCalls* bindings=nullptr) {
     using r5900::Op;
     using Origins=std::array<ArgumentValue,32>;
     using Stack=std::map<std::int32_t,ArgumentValue>;
+    using Writes=std::set<std::tuple<unsigned,std::uint32_t,unsigned>>;
     constexpr unsigned stack_origin=1U<<31;
     Origins initial{};
     // The EE ABI passes eight integer arguments in registers a0 through t3.
@@ -204,18 +210,38 @@ ArgumentUses argument_uses(const Program& program,std::uint32_t entry) {
     initial[29].origin=stack_origin;
     Stack incoming;
     for (unsigned n=0;n<16;++n) incoming[static_cast<std::int32_t>(n*4)]={1U<<(8+n)};
-    struct Cursor { std::uint32_t pc; Origins origins; Stack stack; unsigned call_depth; };
-    std::deque<Cursor> pending{{entry,initial,incoming,0}};
-    std::set<std::tuple<std::uint32_t,Origins,Stack>> visited;
+    struct Cursor { std::uint32_t pc; Origins origins; Stack stack; Writes writes; unsigned call_depth; };
+    std::deque<Cursor> pending{{entry,initial,incoming,{},0}};
+    std::set<std::tuple<std::uint32_t,Origins,Stack,Writes>> visited;
     ArgumentUses uses;
     unsigned budget=1024;
-    const auto transfer=[&](const r5900::Instruction& i,Origins& origins,Stack& stack) {
+    const auto binding=[&](std::uint32_t pc,const Origins& origins) {
+        if (!bindings) return;
+        const auto found=bindings->find(pc);
+        if (found==bindings->end()) return;
+        for (const auto& arguments:found->second) {
+            const auto& function=origins[arguments.function];
+            const auto& context=origins[arguments.context];
+            // The loaded member and its owning object are registered together.
+            // An unrelated context does not establish a callable object field.
+            if (function.loaded && function.width==4 && function.entry_value && function.origin &&
+                context.origin==function.origin && !context.loaded && !context.offset)
+                uses.registered_fields[function.origin].insert(function.offset);
+            if (!function.loaded && !function.offset && function.origin && context.origin &&
+                !context.loaded && !context.offset && context.origin!=function.origin)
+                uses.called|=function.origin;
+        }
+    };
+    const auto transfer=[&](const r5900::Instruction& i,Origins& origins,Stack& stack,Writes& writes) {
         if (scalar_float_preserves_gpr(i.op) && i.op!=Op::swc1) return true;
         unsigned destination=0;
+        bool loaded_field=false;
         ArgumentValue value;
         const auto& base=origins[i.rs];
         const bool stack_access=base.origin==stack_origin && !base.loaded;
         const auto offset=base.offset+static_cast<std::uint32_t>(i.immediate);
+        if (bindings && base.origin && !base.loaded && !stack_access)
+            if (const auto width=pointer_store_width(i.op)) writes.emplace(base.origin,offset,width);
         const auto pair=[&](Op left,Op right,unsigned extent) {
             const auto previous=program.instructions.find(i.pc-4);
             if (previous==program.instructions.end()) return false;
@@ -230,6 +256,7 @@ ArgumentUses argument_uses(const Program& program,std::uint32_t entry) {
             if (i.rs!=i.rt && pair(Op::ldl,Op::ldr,8) && base.origin && !base.loaded) {
                 value=base; value.offset=offset-(i.op==Op::ldl ? 7U : 0U);
                 value.loaded=true; value.width=8; uses.data_read|=base.origin;
+                loaded_field=true;
             }
             break;
         case Op::sdl: case Op::sdr: {
@@ -251,6 +278,8 @@ ArgumentUses argument_uses(const Program& program,std::uint32_t entry) {
                 if (!base.loaded && source.origin)
                     uses.stores.insert({source.origin,base.origin,offset,i.pc,i.rs});
             }
+            if (i.op==Op::sw && i.rt==28 && !base.loaded)
+                uses.global_stores.insert({0,base.origin,offset,i.pc,i.rs});
             if (stack_access) {
                 const auto at=static_cast<std::int32_t>(offset);
                 const auto width=pointer_store_width(i.op);
@@ -283,6 +312,7 @@ ArgumentUses argument_uses(const Program& program,std::uint32_t entry) {
                 uses.data_read|=base.origin;
                 value=base; value.offset=offset; value.loaded=true;
                 value.width=i.op==Op::lq ? 16U : i.op==Op::ld ? 8U : 4U;
+                loaded_field=true;
             }
             break;
         case Op::lb: case Op::lbu: case Op::lh: case Op::lhu:
@@ -298,17 +328,20 @@ ArgumentUses argument_uses(const Program& program,std::uint32_t entry) {
             destination=i.rd; break;
         default: return false;
         }
+        if (loaded_field) for (const auto& [origin,at,width]:writes)
+            if (origin==value.origin && (value.offset-at<width || at-value.offset<value.width))
+                value.entry_value=false;
         if (destination) origins[destination]=value;
         return true;
     };
     while (!pending.empty() && budget--) {
-        auto [pc,origins,stack,call_depth]=std::move(pending.front()); pending.pop_front();
-        if (!visited.emplace(pc,origins,stack).second || pc>0xfffffff7U) continue;
+        auto [pc,origins,stack,writes,call_depth]=std::move(pending.front()); pending.pop_front();
+        if (!visited.emplace(pc,origins,stack,writes).second || pc>0xfffffff7U) continue;
         const auto found=program.instructions.find(pc);
         if (found==program.instructions.end()) continue;
         const auto& i=found->second;
         if (!i.branch()) {
-            if (transfer(i,origins,stack)) pending.push_back({pc+4,origins,stack,call_depth});
+            if (transfer(i,origins,stack,writes)) pending.push_back({pc+4,origins,stack,writes,call_depth});
             continue;
         }
         if (i.indirect() && origins[i.rs].loaded)
@@ -321,30 +354,36 @@ ArgumentUses argument_uses(const Program& program,std::uint32_t entry) {
             origins[link]={};
             const auto before_slot=origins;
             const auto stack_before_slot=stack;
+            const auto writes_before_slot=writes;
             const auto slot=program.instructions.find(pc+4);
-            if (slot==program.instructions.end() || !transfer(slot->second,origins,stack)) continue;
+            if (slot==program.instructions.end() || !transfer(slot->second,origins,stack,writes)) continue;
+            binding(pc,origins);
             // Registration wrappers often forward a callback to another helper.
             // Follow bounded direct calls with the current argument origins;
             // their effects are discovery evidence, never folded runtime values.
             if (!i.indirect() && call_depth<4)
-                pending.push_back({i.target(),origins,stack,call_depth+1});
+                pending.push_back({i.target(),origins,stack,writes,call_depth+1});
             if (conditional_call(i))
-                pending.push_back({pc+8,i.likely() ? before_slot : origins,i.likely()?stack_before_slot:stack,call_depth});
+                pending.push_back({pc+8,i.likely() ? before_slot : origins,i.likely()?stack_before_slot:stack,
+                    i.likely()?writes_before_slot:writes,call_depth});
             for (unsigned reg=1;reg<32;++reg)
                 if (!(reg>=16 && reg<=23) && reg!=28 && reg!=29 && reg!=30) origins[reg]={};
             // Retain stack values as possible compilation candidates across a
             // call, not immutable memory. Runtime loads still read the slot.
-            pending.push_back({pc+8,origins,stack,call_depth});
+            pending.push_back({pc+8,origins,stack,writes,call_depth});
             continue;
         }
         const auto before_slot=origins;
         const auto stack_before_slot=stack;
+        const auto writes_before_slot=writes;
         const auto slot=program.instructions.find(pc+4);
-        if (slot==program.instructions.end() || !transfer(slot->second,origins,stack)) continue;
+        if (slot==program.instructions.end() || !transfer(slot->second,origins,stack,writes)) continue;
+        binding(pc,origins);
         if (i.indirect() && i.rs==31 && !origins[2].loaded && !origins[2].offset) uses.returned|=origins[2].origin;
-        if (!i.indirect()) pending.push_back({i.target(),origins,stack,call_depth});
+        if (!i.indirect()) pending.push_back({i.target(),origins,stack,writes,call_depth});
         if (i.op!=Op::j && i.op!=Op::jr)
-            pending.push_back({pc+8,i.likely() ? before_slot : origins,i.likely()?stack_before_slot:stack,call_depth});
+            pending.push_back({pc+8,i.likely() ? before_slot : origins,i.likely()?stack_before_slot:stack,
+                i.likely()?writes_before_slot:writes,call_depth});
     }
     return uses;
 }
@@ -514,7 +553,8 @@ std::vector<PointerLoad> called_loads(const Program& program,const pointer_flow:
     }
     return result;
 }
-bool same_local_slot(const Program& program,const PointerLoad& load,std::uint32_t after,unsigned base,std::uint32_t offset) {
+bool same_local_slot(const Program& program,const PointerLoad& load,std::uint32_t after,unsigned base,std::uint32_t offset,
+                     std::uint32_t transfer=0xffffffffU) {
     using r5900::Op;
     auto before=load.pc;
     auto reg=load.base;
@@ -524,7 +564,12 @@ bool same_local_slot(const Program& program,const PointerLoad& load,std::uint32_
         const auto found=program.instructions.find(before);
         if (found==program.instructions.end()) return false;
         const auto& i=found->second;
-        if (i.branch() || i.terminal() || i.op==Op::syscall) return false;
+        if (i.branch()) {
+            const auto effect=pointer_write(i);
+            if (before==transfer && effect && *effect!=reg) continue;
+            return false;
+        }
+        if (i.terminal() || i.op==Op::syscall) return false;
         // A definite overwrite severs the earlier store-to-call relation.
         if (const auto width=pointer_store_width(i.op);width && i.rs==reg &&
             overwrites_word(static_cast<std::uint32_t>(i.immediate),width,displacement)) return false;
@@ -538,8 +583,144 @@ bool same_local_slot(const Program& program,const PointerLoad& load,std::uint32_
     }
     return before==after && reg==base && displacement==offset;
 }
+// Compare local affine register aliases without assuming unknown expressions
+// are equal. Used only to reject definite writes along a candidate path.
+std::optional<std::uint32_t> local_alias_delta(const Program& program,std::uint32_t before,unsigned left,unsigned right) {
+    std::uint32_t left_offset=0,right_offset=0;
+    const auto reverse=[](const r5900::Instruction& i,unsigned& reg,std::uint32_t& offset) {
+        if (const auto copy=copied_register(i)) { reg=*copy; return true; }
+        if (i.op==r5900::Op::addiu || i.op==r5900::Op::daddiu) {
+            reg=i.rs; offset+=std::uint32_t(i.immediate); return true;
+        }
+        return false;
+    };
+    for (unsigned step=0;step<64;++step) {
+        if (left==right) return left_offset-right_offset;
+        if (before<4) break;
+        before-=4;
+        const auto found=program.instructions.find(before);
+        if (found==program.instructions.end()) break;
+        const auto& i=found->second;
+        if (i.branch() || i.terminal() || i.op==r5900::Op::syscall) break;
+        const auto effect=pointer_write(i);
+        if (!effect) break;
+        if (*effect==left && !reverse(i,left,left_offset)) break;
+        if (*effect==right && !reverse(i,right,right_offset)) break;
+    }
+    return {};
+}
+bool same_incoming_slot(const Program& program,const pointer_flow::Graph& graph,const PointerLoad& load,
+                        std::uint32_t call_site,std::uint32_t after,unsigned base,std::uint32_t offset) {
+    struct State {
+        std::uint32_t pc,offset; unsigned reg;
+        auto operator<=>(const State&) const=default;
+    };
+    std::deque<State> pending{{load.pc,load.offset,load.base}};
+    std::set<State> visited;
+    unsigned budget=512;
+    const auto reverse=[&](std::uint32_t pc,State& state) {
+        const auto found=program.instructions.find(pc);
+        if (found==program.instructions.end()) return false;
+        const auto& i=found->second;
+        if (const auto width=pointer_store_width(i.op)) {
+            const auto delta=local_alias_delta(program,pc,i.rs,state.reg);
+            if (delta && overwrites_word(*delta+std::uint32_t(i.immediate),width,state.offset)) return false;
+        }
+        const auto effect=pointer_write(i);
+        if (!effect || i.terminal() || i.op==r5900::Op::syscall) return false;
+        if (*effect!=state.reg) return true;
+        if (const auto copy=copied_register(i)) { state.reg=*copy; return state.reg!=0; }
+        if (i.op==r5900::Op::addiu || i.op==r5900::Op::daddiu) {
+            state.reg=i.rs; state.offset+=std::uint32_t(i.immediate); return state.reg!=0;
+        }
+        return false;
+    };
+    while (!pending.empty() && budget--) {
+        auto state=pending.front(); pending.pop_front();
+        if (!visited.insert(state).second) continue;
+        if (state.pc==after) {
+            const auto delta=local_alias_delta(program,after,state.reg,base);
+            if (delta && *delta+state.offset==offset) return true;
+            continue;
+        }
+        const auto found=graph.previous.find(state.pc);
+        if (found==graph.previous.end()) continue;
+        for (const auto& edge:found->second) {
+            auto prior=state;
+            // The sink consumes arguments after its slot but before its callee.
+            if (edge.call && edge.from!=call_site && !pointer_flow::preserved(prior.reg)) continue;
+            if (edge.delay && !reverse(edge.from+4,prior)) continue;
+            if (!reverse(edge.from,prior)) continue;
+            prior.pc=edge.from; pending.push_back(prior);
+        }
+    }
+    return false;
+}
+// A callback descriptor must be assembled on one control-flow path. Matching
+// offsets from different arms, or from a reused base register, is not evidence
+// of registration. Keep this local proof bounded and respect delay-slot edges.
+bool stores_one_record(const Program& program,const pointer_flow::Graph& graph,
+                       const ArgumentUses::Store& function,const ArgumentUses::Store& global,
+                       const ArgumentUses::Store& context) {
+    const std::array fields{function,global,context};
+    const auto reg=function.base_register;
+    auto first=function.pc,last=function.pc;
+    for (const auto& field:fields) {
+        if (field.base!=function.base || field.base_register!=reg) return false;
+        first=std::min(first,field.pc); last=std::max(last,field.pc);
+    }
+    if (last-first>256 || !reg) return false;
+    using State=std::pair<std::uint32_t,unsigned>;
+    std::deque<State> pending;
+    if (graph.next.contains(first)) pending.emplace_back(first,0);
+    if (first>=4) {
+        const auto previous=graph.next.find(first-4);
+        if (previous!=graph.next.end() && std::any_of(previous->second.begin(),previous->second.end(),
+            [](const auto& edge) { return edge.delay; })) pending.emplace_back(first-4,0);
+    }
+    const auto step=[&](std::uint32_t pc,unsigned& mask) {
+        const auto found=program.instructions.find(pc);
+        if (found==program.instructions.end()) return false;
+        const auto& i=found->second;
+        for (unsigned n=0;n<fields.size();++n) if (pc==fields[n].pc) {
+            mask|=1U<<n; return true;
+        }
+        const auto effect=pointer_write(i);
+        if (!effect || (mask && *effect==reg)) return false;
+        if (mask) if (const auto width=pointer_store_width(i.op)) {
+            const auto delta=local_alias_delta(program,pc,i.rs,reg);
+            if (delta) for (unsigned n=0;n<fields.size();++n)
+                if ((mask&(1U<<n)) && overwrites_word(*delta+std::uint32_t(i.immediate),width,
+                    std::uint32_t(program.instructions.at(fields[n].pc).immediate)))
+                    return false;
+        }
+        return true;
+    };
+    std::set<State> visited;
+    unsigned budget=256;
+    while (!pending.empty() && budget--) {
+        const auto [pc,seen]=pending.front(); pending.pop_front();
+        if (!visited.emplace(pc,seen).second) continue;
+        const auto edges=graph.next.find(pc);
+        if (edges==graph.next.end()) continue;
+        for (const auto& edge:edges->second) {
+            auto mask=seen;
+            if (!step(pc,mask) || (edge.delay && !step(pc+4,mask))) continue;
+            if (mask==7) return true;
+            // An intervening callee could overwrite the record even when the
+            // address register is ABI-preserved. Do not infer its memory effects.
+            if (edge.call || edge.to<=pc || edge.to>last) continue;
+            pending.emplace_back(edge.to,mask);
+        }
+    }
+    return false;
+}
 struct CallConsumers {
-    struct Slot { PointerLoad load; std::optional<std::pair<bool,std::uint32_t>> address; };
+    struct Slot {
+        PointerLoad load;
+        std::optional<std::pair<bool,std::uint32_t>> address;
+        std::uint32_t call_site=0xffffffffU;
+    };
     struct Table {
         std::uint32_t base,count,stride,field,load_pc;
         std::optional<std::uint32_t> pointer_slot;
@@ -549,6 +730,8 @@ struct CallConsumers {
     std::vector<Table> tables;
     std::set<std::pair<std::uint32_t,std::uint32_t>> nested_fields;
     std::set<std::uint32_t> bound_fields;
+    std::set<std::uint32_t> global_fields;
+    BoundCalls bindings;
     pointer_flow::Graph graph;
     static const r5900::Instruction* definition(const Program& program,std::uint32_t before,unsigned reg) {
         for (unsigned n=0;before>=4 && n<48;++n) {
@@ -566,7 +749,29 @@ struct CallConsumers {
         }
         return nullptr;
     }
+    static std::optional<std::pair<std::uint32_t,std::uint32_t>> indexed_layout(
+            const Program& program,std::uint32_t before,unsigned reg,std::uint32_t offset=0) {
+        using r5900::Op;
+        for (unsigned step=0;step<8;++step) {
+            const auto* i=definition(program,before,reg);
+            if (!i) return {};
+            if (i->op==Op::addiu || i->op==Op::daddiu) {
+                offset+=std::uint32_t(i->immediate); reg=i->rs; before=i->pc;
+            } else if (const auto copy=copied_register(*i)) { reg=*copy; before=i->pc; }
+            else if (i->op==Op::addu || i->op==Op::daddu) {
+                for (const auto index:{i->rs,i->rt}) {
+                    const auto* scale=definition(program,i->pc,index);
+                    if (scale && scale->op==Op::sll && scale->sa>=2 && scale->sa<=8)
+                        return {{1U<<scale->sa,offset}};
+                }
+                return {};
+            } else return {};
+        }
+        return {};
+    }
     CallConsumers(ByteView bytes,const elf::Executable& elf,const Program& program) : graph(program) {
+        using r5900::Op;
+        std::set<std::pair<std::uint32_t,std::uint32_t>> bound_layouts;
         for (const auto& [pc,i]:program.instructions) {
             if (!i.indirect() || !call_transfer(i)) continue;
             for (const auto& load:called_loads(program,graph,i)) {
@@ -578,10 +783,51 @@ struct CallConsumers {
                 if (address) slots.insert(*address);
                 loads.push_back({load,address});
                 const auto slot=program.instructions.find(pc+4);
-                if (slot!=program.instructions.end() && slot->second.op==r5900::Op::lw &&
-                    slot->second.rt==4 && slot->second.rs==load.base &&
-                    std::uint32_t(slot->second.immediate)==load.offset+4) {
-                    bound_fields.insert(load.offset);
+                const auto argument_loads=[&](unsigned reg) {
+                    std::vector<PointerLoad> result;
+                    auto argument=i; argument.rs=reg;
+                    if (slot!=program.instructions.end()) {
+                        const auto effect=pointer_write(slot->second);
+                        if (effect && *effect==reg) {
+                            if (slot->second.op==Op::lw || slot->second.op==Op::lwu)
+                                result.push_back({pc+4,slot->second.rs,std::uint32_t(slot->second.immediate)});
+                            else if (const auto copy=copied_register(slot->second)) {
+                                argument.rs=*copy; result=called_loads(program,graph,argument);
+                            }
+                        } else if (effect) result=called_loads(program,graph,argument);
+                    }
+                    return result;
+                };
+                const auto same_record_field=[&](const PointerLoad& context,std::uint32_t displacement) {
+                    if (context.pc>load.pc) {
+                        if (same_local_slot(program,context,load.pc+4,load.base,load.offset+displacement,pc)) return true;
+                        auto incoming=context;
+                        if (incoming.pc==pc+4) incoming.pc=pc;
+                        return incoming.pc-load.pc<=128 &&
+                            same_incoming_slot(program,graph,incoming,pc,load.pc+4,load.base,load.offset+displacement);
+                    }
+                    return same_local_slot(program,load,context.pc+4,context.base,context.offset-displacement) ||
+                        (load.pc-context.pc<=128 &&
+                         same_incoming_slot(program,graph,load,pc,context.pc+4,context.base,context.offset-displacement));
+                };
+                const auto has_field=[&](unsigned reg,std::uint32_t displacement) {
+                    const auto values=argument_loads(reg);
+                    return std::any_of(values.begin(),values.end(),[&](const auto& context) {
+                        return same_record_field(context,displacement);
+                    });
+                };
+                const bool bound=has_field(4,4);
+                bool global=false;
+                if (has_field(28,4)) {
+                    for (unsigned reg=4;reg<12 && !global;++reg) global=has_field(reg,8);
+                    if (global) global_fields.insert(load.offset);
+                }
+                if (bound || global) {
+                    if (bound) {
+                        if (const auto layout=indexed_layout(program,load.pc,load.base,load.offset))
+                            bound_layouts.insert(*layout);
+                        bound_fields.insert(load.offset);
+                    }
                     auto before=load.pc,offset=load.offset;
                     unsigned base_register=load.base;
                     for (unsigned step=0;step<8;++step) {
@@ -591,7 +837,9 @@ struct CallConsumers {
                             offset+=std::uint32_t(origin->immediate); base_register=origin->rs;
                         } else if (const auto copy=copied_register(*origin)) base_register=*copy;
                         else break;
-                        bound_fields.insert(offset); before=origin->pc;
+                        if (bound) bound_fields.insert(offset);
+                        if (global) global_fields.insert(offset);
+                        before=origin->pc;
                     }
                 }
                 auto parent=i; parent.pc=load.pc; parent.rs=load.base;
@@ -604,7 +852,6 @@ struct CallConsumers {
         // record stride, and a count comparison whose failure skips the load.
         // Only the called field becomes executable evidence, never the payload
         // and context fields next to it.
-        using r5900::Op;
         const auto definition=[&](std::uint32_t before,unsigned reg) { return CallConsumers::definition(program,before,reg); };
         const auto scalar=[&](std::uint32_t pc,unsigned reg) {
             unsigned fuel=128;
@@ -699,6 +946,68 @@ struct CallConsumers {
                 }
             }
         }
+        // A helper can move an object's callback into an indexed function/context
+        // record. Require the setter's pair, the observed consumer layout and
+        // the caller's matching destination before propagating the member use.
+        std::map<std::uint32_t,ArgumentUses> summaries;
+        std::map<std::uint32_t,std::uint32_t> callees;
+        std::map<std::uint32_t,std::vector<std::uint32_t>> callers;
+        const auto argument_register=[](unsigned origin) -> std::optional<unsigned> {
+            if (!origin || (origin&(origin-1)) || origin>=256) return {};
+            unsigned index=0;
+            while ((1U<<index)!=origin) ++index;
+            return index+4;
+        };
+        for (const auto& [pc,call]:program.instructions) {
+            const auto callee=known_callee(bytes,elf,program,call);
+            if (!callee || pc>0xfffffff7U) continue;
+            callees.emplace(pc,*callee); callers[*callee].push_back(pc);
+            std::array<std::optional<std::pair<std::uint32_t,std::uint32_t>>,8> layouts;
+            bool indexed=false;
+            for (unsigned index=0;index<8;++index) {
+                layouts[index]=indexed_layout(program,pc+8,index+4);
+                indexed|=layouts[index].has_value();
+            }
+            if (!indexed) continue;
+            auto found=summaries.find(*callee);
+            if (found==summaries.end()) found=summaries.emplace(*callee,argument_uses(program,*callee)).first;
+            const auto& uses=found->second;
+            for (const auto& function:uses.stores) {
+                const auto destination=argument_register(function.base),source=argument_register(function.source);
+                if (!destination || !source) continue;
+                const auto& layout=layouts[*destination-4];
+                if (!layout || !bound_layouts.contains({layout->first,layout->second+function.offset})) continue;
+                for (const auto& context:uses.stores) {
+                    const auto owner=argument_register(context.source);
+                    if (owner && context.base==function.base && context.offset==function.offset+4 && *owner!=*source)
+                        bindings[pc].push_back({*source,*owner});
+                }
+            }
+        }
+        // Summarize only functions which can reach one of these registrations.
+        // The reverse graph includes direct calls, not just their continuations.
+        std::set<std::uint32_t> relevant;
+        std::deque<std::uint32_t> pending;
+        for (const auto& [pc,arguments]:bindings) pending.push_back(pc);
+        while (!pending.empty()) {
+            const auto pc=pending.front(); pending.pop_front();
+            if (!relevant.insert(pc).second) continue;
+            if (const auto found=graph.previous.find(pc);found!=graph.previous.end())
+                for (const auto& edge:found->second) pending.push_back(edge.from);
+            if (const auto found=callers.find(pc);found!=callers.end())
+                pending.insert(pending.end(),found->second.begin(),found->second.end());
+        }
+        summaries.clear();
+        for (const auto& [pc,callee]:callees) {
+            if (!relevant.contains(callee) || !link_register(program.instructions.at(pc))) continue;
+            auto found=summaries.find(callee);
+            if (found==summaries.end()) found=summaries.emplace(callee,argument_uses(program,callee,&bindings)).first;
+            for (const auto& [origin,fields]:found->second.registered_fields) {
+                const auto reg=argument_register(origin);
+                if (!reg) continue;
+                for (const auto field:fields) loads.push_back({{pc+8,*reg,field},{},pc});
+            }
+        }
     }
     static std::uint32_t physical(std::uint32_t address) {
         return address>=0x80000000U && address<0xc0000000U ? address&0x1fffffffU : address;
@@ -745,7 +1054,10 @@ struct CallConsumers {
         if (!address && base==28 && slots.contains({true,offset})) return true;
         for (const auto& entry:loads) {
             const auto& load=entry.load;
+            if (entry.call_site!=0xffffffffU && std::max(load.pc,after)-std::min(load.pc,after)<=4096 &&
+                same_incoming_slot(program,graph,load,entry.call_site,after,base,offset)) return true;
             if (load.pc>=after && std::uint64_t(load.pc)<=std::uint64_t(after)+512 &&
+                entry.call_site==0xffffffffU &&
                 same_local_slot(program,load,after,base,offset)) return true;
         }
         if (address) for (const auto& table:tables) {
@@ -1193,7 +1505,7 @@ std::set<std::uint32_t> registered_code_pointers(ByteView bytes,const elf::Execu
         const auto callee=known_callee(bytes,elf,program,call);
         if (!callee || pc>0xfffffff7U) continue;
         auto found=summaries.find(*callee);
-        if (found==summaries.end()) found=summaries.emplace(*callee,argument_uses(program,*callee)).first;
+        if (found==summaries.end()) found=summaries.emplace(*callee,argument_uses(program,*callee,&consumers.bindings)).first;
         const auto& uses=found->second;
         const auto argument=[&](unsigned index,bool called=false) {
             unsigned fuel=128;
@@ -1228,6 +1540,14 @@ std::set<std::uint32_t> registered_code_pointers(ByteView bytes,const elf::Execu
             if (!address) continue;
             for (const auto& store:uses.stores) {
                 if (!(store.source&bit)) continue;
+                // A saved-GP callback ABI binds the function, GP and opaque
+                // argument together. Only match a layout observed at an actual
+                // indirect invocation, with all three writes on one path.
+                if (!callable && consumers.global_fields.contains(store.offset))
+                    for (const auto& global:uses.global_stores) if (global.offset==store.offset+4)
+                        for (const auto& context:uses.stores)
+                            if (context.source!=store.source && context.offset==store.offset+8 &&
+                                stores_one_record(program,consumers.graph,store,global,context)) callable=true;
                 const auto instruction=program.instructions.find(store.pc);
                 if (instruction!=program.instructions.end() && consumers.indexed_store(bytes,elf,program,instruction->second))
                     callable=true;

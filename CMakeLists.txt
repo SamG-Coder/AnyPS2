@@ -199,7 +199,7 @@ if(BUILD_TESTING)
             "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}" "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/pointer-flow-tests"
             "-DGENERATOR=${CMAKE_GENERATOR}" "-DPLATFORM=${CMAKE_GENERATOR_PLATFORM}"
             "-DEXE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/pointer_flow_project.cmake")
-        set_tests_properties(ee-pointer-flow PROPERTIES TIMEOUT 180)
+        set_tests_properties(ee-pointer-flow PROPERTIES TIMEOUT 240)
         add_test(NAME ee-native-images COMMAND "${CMAKE_COMMAND}"
             -DFIXTURE=$<TARGET_FILE:emit-ee-fixture> -DCONVERTER=$<TARGET_FILE:ps2-recompile>
             -DSCRATCH=${CMAKE_BINARY_DIR}/image-project-tests -DROOT=${CMAKE_CURRENT_SOURCE_DIR}
