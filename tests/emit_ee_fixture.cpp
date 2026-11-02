@@ -2,6 +2,7 @@
 #include "disc_fixture.hpp"
 #include "ee_batch_fixture.hpp"
 #include "vector_section_fixture.hpp"
+#include "object_callback_fixture.hpp"
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -425,6 +426,11 @@ int main(int argc,char** argv) {
     std::ofstream output(argv[1]); output<<text;
     if (argc==3) {
         nt::write_file(std::string(argv[2])+".vector",fixture::vector_container_elf());
+        auto object_callbacks=fixture::object_callback_elf();
+        nt::write_file(std::string(argv[2])+".object-callbacks",object_callbacks);
+        fixture::put32(object_callbacks,0x114,0x24081270);
+        fixture::put32(object_callbacks,0x118,0xac880018);
+        nt::write_file(std::string(argv[2])+".object-callbacks-mutable",object_callbacks);
         auto mixed_memory=fixture::vector_container_elf();
         const std::uint32_t initialize[]{0x24080005,0xac081060,0x24080007,0xac081080,
             0x8c021060,0x8c081080,0x00481021,0xac001000,0x2403007b,12};

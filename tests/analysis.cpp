@@ -1,5 +1,6 @@
 #include <nt/analysis.hpp>
 #include <nt/metrics.hpp>
+#include "object_callback_fixture.hpp"
 #include <iostream>
 #include <array>
 #include <stdexcept>
@@ -12,6 +13,70 @@ void put(nt::Bytes& bytes, std::size_t offset, std::uint32_t word) {
 }
 int main() {
     try {
+        {
+            auto image=fixture::object_callback_elf();
+            const auto executable=nt::elf::parse(image);
+            const auto roots=[&] {
+                const auto first=nt::analysis::discover(image,executable,2000,{},true);
+                const auto methods=nt::analysis::object_table_entries(image,executable,first);
+                const std::vector entries(methods.begin(),methods.end());
+                return nt::analysis::stored_code_pointers(image,executable,
+                    nt::analysis::discover(image,executable,2000,entries,true));
+            };
+            const std::set<std::uint32_t> both{0x1260,0x1270},second{0x1270};
+            check(roots()==both,"Virtual methods did not establish initialized object callbacks");
+            for (unsigned offset=0x1c4;offset>=0x190;offset-=4) put(image,offset+4,nt::le32(image,offset));
+            put(image,0x190,0x24050007);
+            check(roots()==both,"Scheduled scalar work hid a virtual callback consumer");
+            image=fixture::object_callback_elf();
+            for (const auto overwrite:{0xa0800019U,0xa480001aU,0xac800018U,0xfc800018U,0xb080001bU}) {
+                put(image,0x298,overwrite);
+                check(roots()==second,"An overwritten object callback was resurrected");
+            }
+            image=fixture::object_callback_elf();
+            put(image,0x298,0x00802821); put(image,0x29c,0xaca00018);
+            check(roots()==second,"A copied object pointer hid a callback overwrite");
+            image=fixture::object_callback_elf();
+            put(image,0x2a0,0x0800047c); put(image,0x2f0,0xac800018);
+            check(roots()==second,"A tail helper clearing a callback was ignored");
+            image=fixture::object_callback_elf();
+            const std::uint32_t linked_helper[]{0x27bdfff0,0xffbf0008,
+                0x24081260,0xac880018,0x24091270,0xac890020,
+                0x0c00047c,0,0xdfbf0008,0x03e00008,0x27bd0010};
+            for (unsigned n=0;n<std::size(linked_helper);++n) put(image,0x280+n*4,linked_helper[n]);
+            check(roots()==both,"A direct helper return lost intact callback definitions");
+            put(image,0x2f0,0xac800018);
+            check(roots()==second,"A linking helper's callback overwrite was ignored");
+            image=fixture::object_callback_elf();
+            put(image,0x298,0xac800028);
+            check(roots().empty(),"An overwritten vptr retained the old method layout");
+            image=fixture::object_callback_elf();
+            put(image,0x284,0xaca80018); put(image,0x28c,0xaca90020);
+            check(roots().empty(),"A different object inherited constructor callback fields");
+            image=fixture::object_callback_elf();
+            put(image,0x19c,0x00a02021); put(image,0x1b8,0x00a02021);
+            check(roots().empty(),"Virtual dispatch with a different this pointer established fields");
+            image=fixture::object_callback_elf();
+            put(image,0x604,0x1240); put(image,0x60c,0x1240); put(image,0x340,0x03e00008);
+            check(roots().empty(),"An unrelated virtual table established callback fields");
+            image=fixture::object_callback_elf();
+            put(image,0x300,0xac800018); put(image,0x304,0x8c990018);
+            put(image,0x308,0x03200008); put(image,0x30c,0x8c84001c);
+            check(roots()==second,"A method clearing its input field established an incoming callback");
+            image=fixture::object_callback_elf();
+            put(image,0x600,8); put(image,0x608,8);
+            put(image,0x300,0x8c990010); put(image,0x320,0x8c990018);
+            check(roots()==both,"Positive this adjustment did not normalize callback fields");
+            put(image,0x600,0xfff8); put(image,0x608,0xfff8);
+            put(image,0x300,0x8c990020); put(image,0x320,0x8c990028);
+            check(roots()==both,"Signed negative this adjustment did not normalize callback fields");
+            image=fixture::object_callback_elf();
+            std::fill(image.begin()+0x280,image.begin()+0x2b0,0);
+            const std::uint32_t split[]{0x10a00005,0,0x24081260,0xac880018,
+                0xac800028,0,0x03e00008,0};
+            for (unsigned n=0;n<std::size(split);++n) put(image,0x280+n*4,split[n]);
+            check(roots().empty(),"Disjoint live-vptr and callback paths were combined");
+        }
         {
             // A factory returns an object containing a copied callback record.
             // The caller saves/reloads that object before replacing its function.

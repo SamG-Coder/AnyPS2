@@ -2224,6 +2224,23 @@ stores invalidate a local slot relationship. Global-slot matching and values
 retained across calls are conservative candidates, not immutable-value proofs;
 the generated program still loads the actual value.
 
+Object construction supplies another bounded relationship. An observed virtual
+call identifies a table slot and the object passed to its method, including a
+signed halfword `this` adjustment when that adjustment is loaded by the caller.
+For a constant table installed in that object's field, a leaf-method summary
+identifies incoming members used as indirect call targets. Initialization follows
+direct helper calls and returns, pointer copies, stack spills and branch delay
+slots, keeping each path's member definitions separate. Only definitions still
+present at a return with the installed table intact supply callback candidates.
+Overlapping member writes, replacement of the table, unknown store destinations
+and unsupported effects end the corresponding relationship. Analysis budgets and
+unproved object types remain explicit coverage limits. No runtime pointer is
+folded or replaced by this analysis.
+
+The object-callback native regression invokes two initialized members, then a
+second executable changes one member before invocation and observes the changed
+result. Unrelated executable-looking context data remains uncompiled.
+
 Each EE project writes `pointer-references.tsv` with the source site, target,
 observed use, discovery status and, for arguments, the callee and zero-based
 argument index. `indirect-call-consumer` supplies code evidence;
