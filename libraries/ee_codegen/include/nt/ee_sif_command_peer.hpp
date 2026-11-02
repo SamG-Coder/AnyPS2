@@ -29,7 +29,9 @@ public:
     // Read-only exports from the native peer owner. Unowned ranges must fail;
     // this is not an allocation of a simulated IOP address space.
     using DataReader=std::function<Stop(std::uint32_t,std::span<std::uint8_t>)>;
+    using DataUpload=std::function<IoRead(std::span<const NativeSifPacket>)>;
     void data_reader(DataReader reader) { data_reader_=std::move(reader); }
+    void data_upload(DataUpload upload) { data_upload_=std::move(upload); }
     NativeSifCommandPeer(NativeSifLink& link,Memory& memory,CodeOverlap protection,std::uint32_t port,NativeSifReceive* receiver=nullptr)
         : link_(link),memory_(memory),protection_(protection),port_(port),receiver_(receiver) {}
     NativeSifCommandPeer(const NativeSifCommandPeer&)=delete;
@@ -135,7 +137,9 @@ private:
                 return reset(packets,link_.peer_address());
             return reset_owner_.commands.accept(reset_owner_.commands.context,packets);
         }
-        if (!connected_ || packets.empty() || packets.size()>2) return {Stop::unsupported_system};
+        if (!connected_ || packets.empty()) return {Stop::unsupported_system};
+        if (data_upload_ && packets.back().destination!=port_) return data_upload_(packets);
+        if (packets.size()>2) return {Stop::unsupported_system};
         const auto& packet=packets.back();
         if (packet.destination!=port_ || packet.bytes.size()<16) return {Stop::invalid_state};
         const auto header=word(packet.bytes,0),length=header&255;
@@ -244,6 +248,7 @@ private:
     std::optional<std::uint32_t> unavailable_server_;
     NativeSifResetOwner reset_owner_;
     DataReader data_reader_;
+    DataUpload data_upload_;
     bool handed_off_=false;
 };
 }

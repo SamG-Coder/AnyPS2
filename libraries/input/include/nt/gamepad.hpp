@@ -10,6 +10,7 @@ struct PadSnapshot {
     bool connected=false;
     std::uint16_t buttons=0;
     std::array<std::uint8_t,4> axes{128,128,128,128}; // RX, RY, LX, LY
+    bool rumble=false;
     bool operator==(const PadSnapshot&) const=default;
 };
 constexpr std::uint8_t pad_axis(std::int16_t value) {
@@ -24,6 +25,7 @@ public:
     void update();
     PadSnapshot sample(unsigned port) const;
     std::string name(unsigned port) const;
+    bool rumble(unsigned port,std::uint16_t low_frequency,std::uint16_t high_frequency);
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

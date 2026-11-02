@@ -29,7 +29,7 @@ migration work. Their presence is not concealed by the native executable suffix;
 the intended ABI uses recovered functions and explicit native module bindings.
 Unknown instructions, services and indirect targets must remain explicit failures.
 
-## One working homebrew demo
+## Working homebrew demos
 
 The locally adapted **glampert/ps2-homebrew cubes demo**, pinned to
 [`602441a6877a3136709d6320664340d52e3027a1`](https://github.com/glampert/ps2-homebrew/tree/602441a6877a3136709d6320664340d52e3027a1),
@@ -54,6 +54,27 @@ binary and screenshots remain outside Git. The upstream project includes materia
 with different provenance; its top-level source license is not a blanket asset license.
 See [source references](source-references.md#homebrew-integration-candidate) and
 [homebrew testing](ps2-test-programs.md#larger-homebrew-tests).
+
+The same pinned checkout's **Console/Input** demo was subsequently compiled from
+PS2 source to LLVM AOT and run in its own native Vulkan window. The user confirmed
+that face buttons and D-pad display their names and that L1/R1 start vibration,
+with L2/R2 stopping it. A captured window independently shows the button labels.
+SDL supplies actual host capabilities and vibration; unsupported pressure sensors
+are not advertised. Synthetic tests cover motor-byte alignment, channel amplitudes,
+failed host requests, stop commands and disconnected devices. The source, converted
+binary and captures remain ignored local artifacts.
+
+**Audio/Sound** is the third adapted homebrew milestone. Its EE code compiles
+through LLVM AOT, renders through Vulkan and uploads a mono ADPCM sample to a
+native audsrv provider backed by XAudio2. A visible 66-second run recorded one
+sample upload, one playback start and 526,766 source frames consumed by the
+native audio engine, with no audio error or unsupported-operation stop. The user
+confirmed audible playback after correcting the Windows output-device setting,
+then compared it with the same sample in PCSX2 and reported "About the same."
+That is a listening comparison, not a waveform-equivalence claim. Synthetic
+regressions verify upload ownership, decode/loop limits and lifecycle; a real
+device test verifies sample consumption and cleanup. This milestone does not
+resolve GT4 audio, general streaming, stereo APCM or all sample-loop formats.
 
 ## References and attribution
 

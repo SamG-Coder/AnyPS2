@@ -8,11 +8,15 @@ AnyPS2 is an experimental, BIOS-free C++20 toolchain for converting user-owned P
 
 > **Work in progress:** AnyPS2 is not a general-purpose PS2 game launcher. GT4 has rendered its opening warning through Vulkan and progressed into subsequent graphics/startup work, but it has **not reached the title screen or playable gameplay**.
 
-**One homebrew demo is working:** the locally adapted cube demo from
-[glampert/ps2-homebrew](https://github.com/glampert/ps2-homebrew) renders animated,
-checker-textured cubes and text through LLVM AOT and Vulkan. A 120-second run was
-verified at 640 x 448, and the user confirmed camera control with a PS5 DualSense
-through the native SDL input provider. This is not a claim of playable commercial games. See [milestone evidence and project history](docs/project-history.md).
+**Three homebrew demos are working:** locally adapted demos from
+[glampert/ps2-homebrew](https://github.com/glampert/ps2-homebrew) run through LLVM
+AOT and Vulkan. **Cubes** renders its animated 640 x 448 scene with user-verified
+DualSense camera control. **Console/Input** displays button presses and has
+user-verified native vibration start/stop. **Audio/Sound** renders and plays its
+ADPCM sample through native XAudio2; the user compared playback with PCSX2 and
+reported that it sounds about the same. These are adapted homebrew milestones,
+not a claim of playable commercial games. See
+[milestone evidence and project history](docs/project-history.md).
 
 ## License and provenance
 
@@ -56,7 +60,7 @@ Native services aim to reproduce the *observable behavior* of console operations
 | IOP | Standalone LLVM conversion for supported IRX code and a growing set of native kernel, file, thread, RPC and device services; full integration remains incomplete |
 | VU / VIF / GIF | Bounded vector-code conversion, native vector services and supported packet paths; incomplete game integration and unsupported operations remain |
 | Graphics | Vulkan sprite, texture and triangle paths, including synthetic compiled VU-to-GPU tests; not a complete PS2 Graphics Synthesizer replacement |
-| Audio | Startup/service work exists, but native sample-voice playback is not yet implemented |
+| Audio | Native audsrv mono ADPCM sample playback, volume and looping through XAudio2; broader LIBSD/game audio and streaming remain incomplete |
 | Code discovery | Direct/indirect call and callback analysis; verification mode reports remaining flow and callback-binding gaps before LLVM generation or compilation |
 | Game compatibility | **GT4 is not playable.** No general game-compatibility claim |
 

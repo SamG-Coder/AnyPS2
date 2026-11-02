@@ -8,6 +8,7 @@
 #include <nt/ee_cdvd_rpc.hpp>
 #include <nt/ee_bootstrap_modules.hpp>
 #include <nt/ee_pad_rpc.hpp>
+#include <nt/ee_audsrv_rpc.hpp>
 #include <nt/ee_performance.hpp>
 #include <nt/live_counters.hpp>
 #ifdef _WIN32
@@ -306,8 +307,15 @@ int main(int argc,char** argv) {
         };
         nt::ee::NativeSifCommandPeer command_peer(platform.sif_link,memory,native_code_overlap,0x1000,&platform.sif_receive);
         nt::ee::NativeBootstrapModules bootstrap_modules;
+        nt::ee::NativeTransferBuffers upload_buffers;
+        auto sample_output=nt::audio::make_output();
+        nt::ee::NativeAudioRpc sample_audio(upload_buffers,*sample_output);
+        if (!command_peer.register_service(upload_buffers) || !command_peer.register_service(sample_audio))
+            throw std::runtime_error("Cannot register native sample audio services");
+        command_peer.data_upload([&](std::span<const nt::ee::NativeSifPacket> packets) { return upload_buffers.upload(packets); });
         nt::input::Gamepads gamepads;
-        nt::ee::NativePadRpc pads([&](unsigned port) { return gamepads.sample(port); });
+        nt::ee::NativePadRpc pads([&](unsigned port) { return gamepads.sample(port); },
+            [&](unsigned port,std::uint16_t low,std::uint16_t high) { return gamepads.rumble(port,low,high); });
         nt::ee::NativePadRpc::Auxiliary pad_auxiliary;
         if (!command_peer.register_service(pads) || !command_peer.register_service(pad_auxiliary))
             throw std::runtime_error("Cannot register native controller services");
@@ -401,6 +409,12 @@ int main(int argc,char** argv) {
         };
         auto stop=nt::ee::run(execute,state,memory,budget,services);
         if (input_stop!=nt::ee::Stop::budget) stop=input_stop;
+        nt::audio::StreamState sample_state;
+        const auto sample_state_ok=sample_audio.playback_state(sample_state);
+        std::cout<<"native_sample_uploads="<<sample_audio.uploads()<<" plays="<<sample_audio.plays()
+                 <<" consumed_frames="<<sample_state.frames<<" queued="<<sample_state.queued
+                 <<" state_valid="<<sample_state_ok<<" last_method="<<sample_audio.last_method()
+                 <<" error="<<sample_output->error()<<'\n';
         std::cout<<"native_controller_button_changes="<<input_button_changes<<'\n';
         const auto execution_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
         std::cout<<"execution_seconds="<<execution_seconds

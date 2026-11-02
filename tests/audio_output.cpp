@@ -94,10 +94,38 @@ int main() {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         } while (std::chrono::steady_clock::now()<deadline);
         if (state.queued || state.frames<4800 || !output->stop_stream(0)) throw std::runtime_error("Native PCM did not finish consumption");
+        // Silence exercises real device consumption without making test noise.
+        std::vector<std::int16_t> mono(480);
+        if (!output->configure_voice(24,{{0,0},{},1}) || !output->submit_sample(24,mono,0,480))
+            throw std::runtime_error("Native looping sample submission failed");
+        mono.assign(480,123); // The engine must own its own copy.
+        const auto sample_deadline=std::chrono::steady_clock::now()+std::chrono::seconds(3);
+        do {
+            if (!output->sample_state(24,state)) throw std::runtime_error("Native voice state unavailable");
+            if (state.frames>=2400) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        } while (std::chrono::steady_clock::now()<sample_deadline);
+        if (!state.queued || state.frames<2400 || output->submit_sample(24,mono,0,0) || !output->stop_voice(24) ||
+            !output->sample_state(24,state) || state.queued || state.frames)
+            throw std::runtime_error("Native sample loop, busy rejection or stop ownership failed");
+        mono.assign(480,0);
+        if (output->submit_sample(24,mono,470,20) || !output->submit_sample(24,mono,0,0))
+            throw std::runtime_error("Native sample replay or loop bounds failed");
+        if (!output->stop_voice(24)) throw std::runtime_error("Native sample cleanup failed");
         output->close();
         if (output->ready() || output->voices()) throw std::runtime_error("Native audio resources survived close");
         if (!output->open() || !output->initialize(false)) throw std::runtime_error("Native audio output did not reopen");
         output->close();
+#ifdef _WIN32
+        if (FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED))) throw std::runtime_error("Test STA setup failed");
+        const bool sta_audio=output->open() && output->initialize(false);
+        output->close();
+        APTTYPE apartment; APTTYPEQUALIFIER qualifier;
+        const auto apartment_status=CoGetApartmentType(&apartment,&qualifier);
+        CoUninitialize();
+        if (!sta_audio || FAILED(apartment_status) || (apartment!=APTTYPE_STA && apartment!=APTTYPE_MAINSTA))
+            throw std::runtime_error("Audio must coexist with and preserve the caller's STA apartment");
+#endif
         std::cout<<"Native audio device, stereo buses, reverb impulse tails/reset, 48 voice controls, PCM consumption and cleanup verified.\n";
         return 0;
     } catch (const std::exception& error) {

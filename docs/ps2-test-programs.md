@@ -179,7 +179,38 @@ aliases and memory protection) and `gamepad-host` (SDL virtual-device mapping an
 disconnection). The virtual device is test-only. Scalar camera arithmetic is
 covered by generated-code MADD/MSUB/MADDA/MSUBA underflow regressions in
 `ee-llvm-execution`. Native pad commands outside the implemented legacy subset
-remain explicit failures; vibration and pressure-sensitive buttons are not exposed.
+remain explicit failures. Native vibration follows actual SDL capability and
+host success/failure; pressure-sensitive buttons are not exposed. The converted Console/Input
+demo displays real controller button reports; the user verified buttons and
+vibration on a DualSense: L1/R1 start the small/large motor,
+and L2/R2 stop them. These are latched commands: releasing L1/R1 does not
+stop vibration. Fully squeeze both triggers to stop both channels; closing the
+native window also cancels vibration. Simultaneous start/stop buttons are processed
+in the original source order, with each stop after its matching start.
+Create maps to Select and Options maps to Start. Face-button
+pressure values remain zero because the provider does not advertise pressure
+sensors. The original source calls its vibration channels small/big; their
+physical feel depends on the PC controller.
+
+The **Audio/Sound** demo also builds to a PS2 ELF, converts through LLVM and
+runs in a native Vulkan window. The local `ANYPS2_NATIVE_AUDIO` port replaces
+ROM/module loading with binding to the native audsrv provider. Its public EE
+client still performs allocation, upload, RPC completion and playback calls.
+The wrapper accepts any nonnegative channel returned by the modern SDK. The
+provider owns transfer buffers and decoded mono APCM version 1 samples; XAudio2
+owns the queued PCM and reports actual consumption. Unsupported formats and
+history-dependent loop starts stop explicitly. Native resampling is used rather
+than console interpolation, so this is not a bit-exact audio claim.
+
+`sample-audio` covers original synthetic samples, malformed/unsupported data,
+atomic uploads, memory protection, sample lifetime and playback state.
+The opt-in `native-audio-device` test measures real silent sample consumption,
+looping, stopping/replay and coexistence with an existing COM STA apartment.
+`native-sif-link` covers the affected communication path. In the local demo run,
+the user confirmed audible playback and reported it sounds about the same as
+the PCSX2 reference. The reference build loads the public audsrv module, using
+the public SDK module-buffer loader patch required by that older environment;
+the native output does not use this patch, BIOS or emulator.
 
 For symbol-bearing homebrew, conversion accepts `--function-symbols` to include
 defined ELF function entries and emits `function-roots.tsv`. This does not turn

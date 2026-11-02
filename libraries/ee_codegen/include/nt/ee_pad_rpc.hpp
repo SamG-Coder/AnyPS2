@@ -12,8 +12,9 @@ namespace nt::ee {
 class NativePadRpc final : public NativeRpcService {
 public:
     using Sampler=std::function<input::PadSnapshot(unsigned)>;
-    explicit NativePadRpc(Sampler sampler)
-        : NativeRpcService(0x8000010fU,0xa000,0xb000),sample_(std::move(sampler)) {}
+    using Rumbler=std::function<bool(unsigned,std::uint16_t,std::uint16_t)>;
+    explicit NativePadRpc(Sampler sampler,Rumbler rumbler={})
+        : NativeRpcService(0x8000010fU,0xa000,0xb000),sample_(std::move(sampler)),rumble_(std::move(rumbler)) {}
     Stop update(Memory& memory,CodeOverlap protection) {
         // Validate every buffer before publishing a multi-port snapshot.
         for (const auto& port:ports_) if (port.address) {
@@ -78,11 +79,36 @@ public:
         case 0x80000108: // Standard buttons only: no pressure sensor capability.
             if (!port.address) return Stop::invalid_state;
             put(12,snapshot.connected ? 0xffff : 0); break;
-        case 0x80000102: // No actuator interface is exposed by this provider.
+        case 0x80000102: // Actuator enumeration, based on real host capabilities.
             if (!port.address) return Stop::invalid_state;
-            put(20,0); break;
+            if (le32(args,12)!=0xffffffffU || le32(args,16)!=0) return Stop::unsupported_system;
+            put(20,snapshot.connected && snapshot.rumble && rumble_ ? 2 : 0); break;
+        case 0x80000107: { // Map packet bytes to small binary / large variable motors.
+            if (!port.address) return Stop::invalid_state;
+            std::array<std::uint8_t,6> alignment{};
+            unsigned seen=0;
+            for (unsigned i=0;i<alignment.size();++i) {
+                const auto value=args[12+i];
+                if (value!=0xff && (value>1 || (seen&(1U<<value)))) return Stop::invalid_state;
+                if (value!=0xff) seen|=1U<<value;
+                alignment[i]=value;
+            }
+            if (snapshot.connected && snapshot.rumble && rumble_) { port.alignment=alignment; put(20,1); }
+            break;
+        }
+        case 0x80000106: {
+            if (!port.address) return Stop::invalid_state;
+            std::uint16_t small=0,large=0;
+            for (unsigned i=0;i<port.alignment.size();++i) {
+                if (port.alignment[i]==0) small=args[12+i] ? 65535 : 0;
+                if (port.alignment[i]==1) large=std::uint16_t(args[12+i])*257U;
+            }
+            if (snapshot.connected && snapshot.rumble && rumble_) put(20,rumble_(index,large,small) ? 1 : 0);
+            break;
+        }
         case 0x8000010d:
             if (!port.address) return Stop::invalid_state;
+            if (snapshot.connected && snapshot.rumble && rumble_ && !rumble_(index,0,0)) { put(12,0); break; }
             port={}; put(12,1); break;
         default: return Stop::unsupported_system;
         }
@@ -99,9 +125,14 @@ public:
         }
     };
 private:
-    struct Port { std::uint32_t address=0,frame=0; bool analog=false; };
+    struct Port {
+        std::uint32_t address=0,frame=0;
+        bool analog=false;
+        std::array<std::uint8_t,6> alignment{0xff,0xff,0xff,0xff,0xff,0xff};
+    };
     std::array<Port,2> ports_{};
     Sampler sample_;
+    Rumbler rumble_;
     void publish(Memory& memory,unsigned index) {
         auto& port=ports_[index];
         const auto sample=sample_(index);

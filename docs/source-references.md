@@ -2035,7 +2035,12 @@ The protocol reference is PS2SDK `ee/rpc/pad/src/libpad.c` at the pinned revisio
 above: old command identifiers, 64-byte double-buffer records and active-low
 button packets. No ROM module, firmware, or upstream pad implementation is copied.
 Unsupported commands stop explicitly. Digital buttons do not claim pressure
-sensitivity, and this initial adapter does not expose vibration actuators.
+sensitivity. Vibration capability comes from SDL gamepad properties, and the
+legacy actuator alignment/direct commands map to `SDL_RumbleGamepad`. Small
+binary vibration uses the high-frequency channel; large variable vibration uses
+the low-frequency channel. Host API failures remain unsuccessful replies. Native
+300 ms leases are refreshed while the application runs and cancelled on close;
+disconnection clears motor ownership before another device can take the slot.
 
 The local homebrew input port binds the implemented native RPC endpoints directly
 instead of loading ROM controller modules. This is an explicit source adaptation
@@ -2049,3 +2054,21 @@ from the final addition. AnyPS2 reuses its own integer-significand arithmetic
 and adds a separate scalar ABI helper; the conservative VU contract is unchanged.
 No upstream implementation is copied. Exponent-255 and overflow cases remain
 explicitly unsupported; this is not a claim of hardware-exact multiplication.
+
+## Native audsrv sample playback
+
+The original native provider uses the public PS2SDK audsrv RPC contracts and
+APCM container fields at revision `2a18d15da1332665451a9bcf9a0d4df9029c9490`:
+[`audsrv_rpc.c`](https://github.com/ps2dev/ps2sdk/blob/2a18d15da1332665451a9bcf9a0d4df9029c9490/ee/rpc/audsrv/src/audsrv_rpc.c),
+[`iopheap.c`](https://github.com/ps2dev/ps2sdk/blob/2a18d15da1332665451a9bcf9a0d4df9029c9490/ee/kernel/src/iopheap.c),
+and `tools/adpenc/src/adpcm.c`. The audsrv implementation is LGPL-2.0; it is an
+interface reference, not copied into the native provider. The local demo links
+the public EE client and retains its upstream notices under ignored output.
+
+ADPCM predictor coefficients, sample saturation and loop-flag semantics were
+checked against PCSX2 `pcsx2/SPU2/Mixer.cpp` at
+`1f67c53b6723fcd6a90041a5b296f0e34a6a3222` (GPL-3.0+). No implementation was
+copied. The original bounded decoder supports mono APCM version 1; unsupported
+formats and loops requiring continued predictor history are rejected explicitly.
+Decoded samples use the existing XAudio2 backend with native resampling, not
+console interpolation or an SPU register model.

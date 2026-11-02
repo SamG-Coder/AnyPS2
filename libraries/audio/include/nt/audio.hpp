@@ -35,6 +35,10 @@ public:
     virtual bool submit_stream(unsigned core,std::span<const std::int16_t> samples)=0;
     virtual bool stream_state(unsigned core,StreamState& state)=0;
     virtual bool stop_stream(unsigned core)=0;
+    // Owned mono PCM at the voice's 48 kHz base rate. A nonzero loop length
+    // repeats that region; state is measured by the native audio engine.
+    virtual bool submit_sample(unsigned,std::span<const std::int16_t>,std::uint32_t,std::uint32_t) { return false; }
+    virtual bool sample_state(unsigned,StreamState&) { return false; }
     virtual bool stop_voice(unsigned voice)=0;
     virtual void close()=0;
     virtual bool ready() const=0;

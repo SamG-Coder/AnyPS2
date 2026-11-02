@@ -18,6 +18,9 @@ public:
     bool open() override {
         if (ready()) return true;
         auto result=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
+        // Window/input hosts can already own an STA. Acquire a balanced
+        // reference in that apartment instead of trying to change its model.
+        if (result==RPC_E_CHANGED_MODE) result=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
         if (FAILED(result)) { error_=static_cast<std::uint32_t>(result); return false; }
         com_=true;
         result=XAudio2Create(&engine_,0,XAUDIO2_DEFAULT_PROCESSOR);
@@ -62,7 +65,7 @@ public:
             const auto result=engine_->CreateSourceVoice(&pending.streams[core],&stereo,0,1.0f,nullptr,&sends.list);
             if (FAILED(result)) { error_=static_cast<std::uint32_t>(result); return false; }
         }
-        graph_.clear(); graph_.swap(pending); core_mix_={}; error_=0;
+        graph_.clear(); graph_.swap(pending); core_mix_={}; voice_mix_={}; error_=0;
         return true;
     }
     bool configure_voice(unsigned index,const VoiceMix& mix) override {
@@ -74,6 +77,7 @@ public:
         if (SUCCEEDED(result)) result=voice->SetOutputMatrix(graph_.wet[index/24],1,2,wet);
         // A zero source rate is stationary, not XAudio2's minimum rate.
         if (SUCCEEDED(result)) result=mix.rate==0 ? voice->Stop() : voice->SetFrequencyRatio(mix.rate);
+        if (SUCCEEDED(result)) voice_mix_[index]=mix;
         error_=static_cast<std::uint32_t>(result);
         return SUCCEEDED(result);
     }
@@ -140,11 +144,36 @@ public:
         if (SUCCEEDED(result)) result=configure_stream(core,core_mix_[core]);
         error_=static_cast<std::uint32_t>(result); return SUCCEEDED(result);
     }
+    bool submit_sample(unsigned index,std::span<const std::int16_t> samples,std::uint32_t loop_begin,std::uint32_t loop_length) override {
+        if (index>=48 || !graph_.voices[index] || samples.empty() || samples.size()>4*1024*1024 ||
+            std::uint64_t(loop_begin)+loop_length>samples.size() || (!loop_length && loop_begin)) return false;
+        StreamState state;
+        if (!sample_state(index,state) || state.queued) return false;
+        auto& storage=graph_.voice_pcm[index]; storage.assign(samples.begin(),samples.end());
+        XAUDIO2_BUFFER buffer{};
+        buffer.AudioBytes=static_cast<UINT32>(storage.size()*sizeof(std::int16_t));
+        buffer.pAudioData=reinterpret_cast<const BYTE*>(storage.data());
+        buffer.LoopBegin=loop_begin; buffer.LoopLength=loop_length;
+        buffer.LoopCount=loop_length ? XAUDIO2_LOOP_INFINITE : 0;
+        auto result=graph_.voices[index]->SubmitSourceBuffer(&buffer);
+        if (SUCCEEDED(result) && voice_mix_[index].rate!=0) result=graph_.voices[index]->Start();
+        error_=static_cast<std::uint32_t>(result); return SUCCEEDED(result);
+    }
+    bool sample_state(unsigned index,StreamState& state) override {
+        if (index>=48 || !graph_.voices[index]) return false;
+        XAUDIO2_VOICE_STATE current{}; graph_.voices[index]->GetState(&current);
+        state={current.SamplesPlayed,current.BuffersQueued!=0}; return true;
+    }
     bool stop_voice(unsigned index) override {
         if (index>=48 || !graph_.voices[index]) return false;
-        auto result=graph_.voices[index]->Stop();
-        if (SUCCEEDED(result)) result=graph_.voices[index]->FlushSourceBuffers();
-        error_=static_cast<std::uint32_t>(result); return SUCCEEDED(result);
+        // Wait for the engine before releasing/replacing its sample storage.
+        graph_.voices[index]->DestroyVoice(); graph_.voices[index]=nullptr;
+        graph_.voice_pcm[index].clear();
+        const WAVEFORMATEX format{WAVE_FORMAT_PCM,1,48000,96000,2,16,0};
+        const auto sends=destinations(graph_.mix[index/24],graph_.wet[index/24]);
+        const auto result=engine_->CreateSourceVoice(&graph_.voices[index],&format,0,4.0f,nullptr,&sends.list);
+        error_=static_cast<std::uint32_t>(result);
+        return SUCCEEDED(result) && configure_voice(index,voice_mix_[index]);
     }
     void close() override {
         graph_.clear();
@@ -188,12 +217,14 @@ private:
         std::array<IXAudio2SubmixVoice*,2> mix{},wet{};
         std::array<IXAudio2SourceVoice*,2> streams{};
         std::array<std::vector<std::int16_t>,2> pcm;
+        std::array<std::vector<std::int16_t>,48> voice_pcm;
         ~Graph() { clear(); }
-        void swap(Graph& other) { voices.swap(other.voices); mix.swap(other.mix); wet.swap(other.wet); streams.swap(other.streams); pcm.swap(other.pcm); }
+        void swap(Graph& other) { voices.swap(other.voices); mix.swap(other.mix); wet.swap(other.wet); streams.swap(other.streams); pcm.swap(other.pcm); voice_pcm.swap(other.voice_pcm); }
         void clear() {
             for (auto& stream:streams) if (stream) { stream->DestroyVoice(); stream=nullptr; }
             for (auto& samples:pcm) samples.clear();
             for (auto& voice:voices) if (voice) { voice->DestroyVoice(); voice=nullptr; }
+            for (auto& samples:voice_pcm) samples.clear();
             for (unsigned core=0;core<2;++core) {
                 if (wet[core]) { wet[core]->DestroyVoice(); wet[core]=nullptr; }
                 if (mix[core]) { mix[core]->DestroyVoice(); mix[core]=nullptr; }
@@ -204,6 +235,7 @@ private:
     IXAudio2MasteringVoice* master_=nullptr;
     Graph graph_;
     std::array<CoreMix,2> core_mix_{};
+    std::array<VoiceMix,48> voice_mix_{};
     bool com_=false;
     std::uint32_t error_=0;
 };

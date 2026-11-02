@@ -8,8 +8,11 @@ struct Gamepads::Impl {
     std::array<SDL_Gamepad*,2> pads{};
     std::array<PadSnapshot,2> snapshots{};
     std::chrono::steady_clock::time_point next_scan{};
+    struct Motors { std::uint16_t low=0,high=0; };
+    std::array<Motors,2> motors{};
+    std::chrono::steady_clock::time_point next_rumble{};
     ~Impl() {
-        for (auto* pad:pads) if (pad) SDL_CloseGamepad(pad);
+        for (auto* pad:pads) if (pad) { SDL_RumbleGamepad(pad,0,0,0); SDL_CloseGamepad(pad); }
         SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
     }
 };
@@ -26,8 +29,8 @@ Gamepads::~Gamepads()=default;
 void Gamepads::update() {
     SDL_PumpEvents();
     SDL_UpdateGamepads();
-    for (auto*& pad:impl_->pads) if (pad && !SDL_GamepadConnected(pad)) {
-        SDL_CloseGamepad(pad); pad=nullptr;
+    for (unsigned port=0;port<2;++port) if (auto*& pad=impl_->pads[port]; pad && !SDL_GamepadConnected(pad)) {
+        SDL_CloseGamepad(pad); pad=nullptr; impl_->motors[port]={};
     }
     const auto now=std::chrono::steady_clock::now();
     if (now>=impl_->next_scan) {
@@ -53,6 +56,7 @@ void Gamepads::update() {
         if (auto* pad=impl_->pads[port]) {
             state.connected=SDL_GamepadConnected(pad);
             if (state.connected) {
+                state.rumble=SDL_GetBooleanProperty(SDL_GetGamepadProperties(pad),SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN,false);
                 for (unsigned i=0;i<buttons.size();++i)
                     if (buttons[i]!=SDL_GAMEPAD_BUTTON_INVALID && SDL_GetGamepadButton(pad,buttons[i])) state.buttons|=std::uint16_t(1U<<i);
                 if (SDL_GetGamepadAxis(pad,SDL_GAMEPAD_AXIS_LEFT_TRIGGER)>16384) state.buttons|=1U<<8;
@@ -61,6 +65,20 @@ void Gamepads::update() {
             }
         }
         impl_->snapshots[port]=state;
+        if (!state.connected) impl_->motors[port]={};
+    }
+    // A bounded lease prevents a hung/terminated client from leaving a motor
+    // running indefinitely. Refresh only commands previously accepted by SDL.
+    if (now>=impl_->next_rumble) {
+        impl_->next_rumble=now+std::chrono::milliseconds(100);
+        for (unsigned port=0;port<2;++port) {
+            const auto motors=impl_->motors[port];
+            if (impl_->snapshots[port].connected && (motors.low || motors.high) &&
+                !SDL_RumbleGamepad(impl_->pads[port],motors.low,motors.high,300)) {
+                impl_->motors[port]={};
+                throw std::runtime_error(std::string("Native controller rumble refresh failed: ")+SDL_GetError());
+            }
+        }
     }
 }
 PadSnapshot Gamepads::sample(unsigned port) const { return port<2 ? impl_->snapshots[port] : PadSnapshot{}; }
@@ -68,5 +86,11 @@ std::string Gamepads::name(unsigned port) const {
     if (port>=2 || !impl_->pads[port]) return {};
     const auto* name=SDL_GetGamepadName(impl_->pads[port]);
     return name ? name : "Unnamed controller";
+}
+bool Gamepads::rumble(unsigned port,std::uint16_t low,std::uint16_t high) {
+    if (port>=2 || !impl_->snapshots[port].connected || !impl_->snapshots[port].rumble) return false;
+    if (!SDL_RumbleGamepad(impl_->pads[port],low,high,(low || high) ? 300 : 0)) return false;
+    impl_->motors[port]={low,high};
+    return true;
 }
 }

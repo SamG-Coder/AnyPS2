@@ -16,7 +16,14 @@ int main(int argc,char**) {
         std::vector<std::uint8_t> ram(0x10000,0xcc);
         nt::ee::Memory memory{}; memory.data=ram.data(); memory.size=ram.size();
         nt::input::PadSnapshot snapshot;
-        nt::ee::NativePadRpc service([&](unsigned port) { return port==0 ? snapshot : nt::input::PadSnapshot{}; });
+        std::array<std::uint16_t,2> motors{};
+        bool motor_success=true;
+        nt::ee::NativePadRpc service([&](unsigned port) { return port==0 ? snapshot : nt::input::PadSnapshot{}; },
+            [&](unsigned port,std::uint16_t low,std::uint16_t high) {
+                check(port==0,"Unexpected motor port");
+                if (motor_success) motors={low,high};
+                return motor_success;
+            });
         std::array<std::uint8_t,128> args{};
         auto put=[&](unsigned offset,std::uint32_t value) { std::memcpy(args.data()+offset,&value,4); };
         auto call=[&](std::uint32_t command) { put(0,command); return service.call(memory,protected_code,1,args,0x3000,128); };
@@ -34,10 +41,23 @@ int main(int argc,char**) {
         check(service.update(memory,protected_code)==Stop::budget && ram[0x2005]==0 && ram[0x2045]==0,"Complete client busy state");
         check(ram[0x2009]==0x73 && nt::le32(ram,0x2028)==8 && ram[0x200c]==0 && ram[0x200d]==255 && ram[0x200e]==32 && ram[0x200f]==224,"Analog report order");
         check(std::equal(ram.begin()+0x2000,ram.begin()+0x2040,ram.begin()+0x2040),"Consistent double buffer");
+        snapshot.rumble=true;
+        put(12,0xffffffff); put(16,0);
+        check(call(0x80000102)==Stop::budget && nt::le32(ram,0x3014)==2,"Enumerate supported motors");
+        args[12]=1; args[13]=0; std::fill(args.begin()+14,args.begin()+18,0xff);
+        check(call(0x80000107)==Stop::budget && nt::le32(ram,0x3014)==1,"Configure swapped motor alignment");
+        args[12]=128; args[13]=1;
+        check(call(0x80000106)==Stop::budget && nt::le32(ram,0x3014)==1 && motors==std::array<std::uint16_t,2>{32896,65535},"Map rumble amplitudes");
+        motor_success=false; args[12]=0; args[13]=0;
+        check(call(0x80000106)==Stop::budget && nt::le32(ram,0x3014)==0 && motors[0]==32896,"Host failure is not success");
+        motor_success=true;
+        check(call(0x80000106)==Stop::budget && motors==std::array<std::uint16_t,2>{0,0},"Stop motors");
+        args[12]=0; args[13]=0;
+        check(call(0x80000107)==Stop::invalid_state,"Reject duplicate motor mappings");
         snapshot={};
         check(service.update(memory,protected_code)==Stop::budget && ram[0x2004]==0 && ram[0x200a]==255 && nt::le32(ram,0x2028)==0,"Disconnect clears held input");
         const auto before=ram;
-        check(call(0x80000107)==Stop::unsupported_system && ram==before,"Unsupported vibration must not succeed");
+        check(call(0x80000109)==Stop::unsupported_system && ram==before,"Unsupported pressure mode must not succeed");
         put(4,1); put(16,0x1000);
         check(call(0x80000100)==Stop::code_write && ram==before,"Open protects compiled code");
         put(16,0xffc0);
