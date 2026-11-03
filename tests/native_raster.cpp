@@ -1,10 +1,11 @@
 #include "indexed_textures.hpp"
 #include <nt/vulkan_renderer.hpp>
-#include <nt/native_drawing.hpp>
+#include <nt/native_drawing_worker.hpp>
 #include <chrono>
 #include <iostream>
 #include <stdexcept>
 #include <string_view>
+#include <thread>
 using namespace nt::graphics;
 int main(int argc,char** argv) {
     try {
@@ -326,6 +327,25 @@ int main(int argc,char** argv) {
             ++checks;
         }
         SpriteCommand quad{{2,2,18,18,0,1,0x80406080,0}};
+        {
+            // Consecutive compatible resources, then palette/extent/target
+            // changes and framebuffer feedback within the same draw call.
+            actual.assign(actual.size(),0x80203040); expected=actual;
+            SpriteCommand textured{{0,0,8,8,0,1,0x80808080,0}};
+            auto& d=textured.draw;
+            d.texture_base=256; d.texture_pitch=2;
+            d.texture_width=d.texture_height=16; d.flags=1|4|8|64;
+            d.dx=d.dy=128; d.du=d.dv=128;
+            textured.palette.fill(0x80604020);
+            auto recolored=textured; recolored.palette.fill(0x80102070);
+            auto taller=recolored; taller.draw.top=32; taller.draw.bottom=40;
+            auto target=textured; target.draw.base=128;
+            compare(std::array{textured,textured,recolored,recolored,taller,taller,target,target,textured});
+            auto feedback=textured;
+            feedback.draw.flags=1|4|8; feedback.draw.texture_base=0; feedback.draw.texture_pitch=1;
+            feedback.draw.u0=16; // Read the preceding draw's neighboring pixel.
+            compare(std::array{feedback,feedback,feedback});
+        }
         compare(std::array{clear,quad});
         quad.draw.mask=0xff00ff00; compare(std::array{clear,quad}); quad.draw.mask=0;
         quad.draw.flags=256|alpha_blend_flag; quad.draw.blend=0x44;
@@ -568,12 +588,13 @@ int main(int argc,char** argv) {
             NativeDrawing asynchronous(true,NativeDrawing::Completion::deferred);
             auto batch=packet; batch[0][0]=0x8008;
             batch.push_back({0,0,0x61,0});
+            NativeDrawingWorker worker(asynchronous,native);
             for (unsigned i=0;i<32;++i) {
                 batch[5][0]=0x80000000U+i;
-                asynchronous.submit(native,std::array{batch});
-                if (asynchronous.completed_finishes()>i+1)
-                    throw std::runtime_error("FINISH published before its submission");
+                worker.submit(std::span(&batch,1));
+                batch[5][0]=0x8000ffffU; // Reuse producer storage immediately.
             }
+            worker.wait();
             native.synchronize(); asynchronous.poll_completions(native);
             if (asynchronous.completed_finishes()!=32 || asynchronous.pixels()[0]!=0x8000001fU)
                 throw std::runtime_error("Deferred FINISH lost completion or draw ordering");
@@ -587,7 +608,13 @@ int main(int argc,char** argv) {
                 token=native.enqueue_finish();
                 if (native.completed_submission()>token) throw std::runtime_error("Invalid queue completion token");
             }
-            native.synchronize(); native.read(actual);
+            // FINISH must make progress with only nonblocking completion polls;
+            // no synchronize/read call may be needed to drive the recording owner.
+            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+            while (native.completed_submission()<token && std::chrono::steady_clock::now()<deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            if (native.completed_submission()<token) throw std::runtime_error("Native render worker did not retire FINISH");
+            native.read(actual);
             if (native.completed_submission()<token || actual[0]!=0x80000053U)
                 throw std::runtime_error("Deferred texture upload slots were reused before retirement");
         }
@@ -633,6 +660,18 @@ int main(int argc,char** argv) {
             native.write(std::span(&edit,1)); draw_tiles(); native.read(actual);
             if (actual[rgba_word(0,1,149%64,149/64)]!=edit.value)
                 throw std::runtime_error("Retained texture ignored source edit");
+        }
+        {
+            NativeDrawing rejected(true);
+            NativeDrawingWorker worker(rejected,native);
+            const Packet malformed{{0x8001,0x10000000,14,0},{0,0,0x63,0}};
+            worker.submit(std::span(&malformed,1));
+            bool failed=false;
+            try { worker.wait(); } catch (const std::invalid_argument&) { failed=true; }
+            if (!failed || rejected.submitted_draws()) throw std::runtime_error("Drawing worker hid an unsupported packet");
+            failed=false;
+            try { (void)worker.poll(); } catch (const std::invalid_argument&) { failed=true; }
+            if (!failed) throw std::runtime_error("Failed drawing worker reported success");
         }
         indexed8_textures(native,true);
         if (native.validation_errors()) throw std::runtime_error(native.validation_message());

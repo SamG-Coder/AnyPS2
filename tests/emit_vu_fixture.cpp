@@ -46,7 +46,8 @@ int main(int argc,char** argv) {
     };
     bytes.clear();
     pair(0x80000335,(15U<<21)|(2U<<16)|(1U<<11)|(3U<<6)|42); // MUL VF3.
-    pair(0x80000335,0x40000000|(15U<<21)|(2U<<16)|(1U<<11)|(4U<<6)|41); // MADD VF4, E.
+    pair(0x80000335,(15U<<21)|(2U<<16)|(1U<<11)|(4U<<6)|41); // MADD VF4.
+    pair(0x80000335,0x40000000|(15U<<21)|(2U<<16)|(1U<<11)|(5U<<6)|45); // MSUB VF5, E.
     pair(0x80000335);
     save_block(".range","nt_vu_range",0);
     bytes.clear();
@@ -293,7 +294,12 @@ int main(int argc,char** argv) {
     pair((28U<<25)|(6U<<16),0x400002ff); pair(0x80000335);
     pair((28U<<25)|(2U<<16),0x400002ff); pair(0x80000335); // Early-read alternative.
     std::ostringstream clip_module;
-    const std::array<unsigned,2> clip_entries{0,18};
+    std::vector<unsigned> clip_entries{0,18};
+    for (const unsigned count:{2U,3U,4U,5U,31U,32U,33U,64U}) {
+        clip_entries.push_back(static_cast<unsigned>(bytes.size()/8));
+        for (unsigned i=0;i<count;++i)
+            pair(i+2==count ? (32U<<25)|((1U-count)&2047U) : 0x8000033c);
+    }
     nt::vu::emit_program_llvm(clip_module,nt::vu::frame(bytes,1,0),1,clip_entries,"nt_vu_clip");
     const auto clip_text=clip_module.str();
     nt::write_file(std::string(argv[1])+".clip",nt::ByteView(reinterpret_cast<const std::uint8_t*>(clip_text.data()),clip_text.size()));

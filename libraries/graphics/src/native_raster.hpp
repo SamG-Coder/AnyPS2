@@ -24,6 +24,8 @@ public:
     Scanout capture(const DisplayPlan& plan);
     const RenderStatistics& statistics() const;
     void verify_texture_kernels(bool enable);
+    // Per-command host timing is opt-in; counters remain available without it.
+    void profile_commands(bool enable);
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

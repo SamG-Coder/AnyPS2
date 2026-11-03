@@ -438,6 +438,7 @@ std::string VulkanRenderer::validation_message() const {
     std::lock_guard lock(impl_->validation_mutex);
     return impl_->first_validation_error;
 }
+void VulkanRenderer::profile_commands(bool enable) { if (impl_->native) impl_->native->profile_commands(enable); }
 const RenderStatistics& VulkanRenderer::statistics() const { return impl_->native ? impl_->native->statistics() : impl_->statistics; }
 void VulkanRenderer::verify_texture_kernels(bool enable) {
     if (impl_->native) impl_->native->verify_texture_kernels(enable);

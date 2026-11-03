@@ -80,7 +80,7 @@ public:
     }
     Stop write(std::uint32_t address,std::uint32_t value) {
         if (address%16) return Stop::unsupported_system;
-        if (working()) return Stop::native_wait;
+        if (address<0x10003800 && working()) return Stop::native_wait;
         if (address==0x10003000) {
             if (value&1) { gif_paused_=false; gif_mode_=0; gif_stream_={}; }
             else gif_paused_=(value&8)!=0;
@@ -89,6 +89,7 @@ public:
         if (address==0x10003010) { gif_mode_=value&5; return Stop::budget; }
         unsigned channel,field;
         if (!decode(address,channel,field)) return Stop::unsupported_system;
+        if (deferred_[channel]) return Stop::native_wait;
         auto& unit=units_[channel];
         switch (field) {
         case 0:
@@ -130,7 +131,9 @@ public:
     unsigned take_interrupts() { const auto result=interrupt_events_; interrupt_events_=0; return result; }
     Stop consume(unsigned channel,std::span<const std::uint8_t> bytes,bool vector_active,std::span<const NativePacketOrigin> origins={}) {
         std::size_t consumed=0;
-        if (working()) return Stop::native_wait;
+        // VU0 and VU1 have independent native ownership. Only the shared GIF
+        // path waits for either outstanding submission.
+        if (channel<2 ? bool(deferred_[channel]) : working()) return Stop::native_wait;
         if (channel>=2) return consume_segment(channel,bytes,vector_active,consumed);
         if (pending(channel)) return Stop::unsupported_system;
         if (bytes.size()>NativePacketBatch::maximum_bytes) return Stop::invalid_state;

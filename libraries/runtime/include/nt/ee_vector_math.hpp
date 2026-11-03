@@ -5,26 +5,31 @@
 namespace nt::numeric {
 using Vector=std::array<std::uint32_t,4>;
 struct VectorResult { Vector value; std::uint32_t mac,status; bool supported=true; };
-inline std::uint32_t vector_lane_flags(std::uint32_t bits,bool underflow,unsigned lane) {
+inline std::uint32_t vector_lane_flags(std::uint32_t bits,bool underflow,bool overflow,unsigned lane) {
     const auto bit=1U<<(3-lane);
     return (!(bits&0x7fffffff) ? bit : 0U)|((bits>>31) ? bit<<4 : 0U)|(underflow ? bit<<8 : 0U)|
-           (((bits>>23)&255)==255 ? bit<<12 : 0U);
+           (overflow ? bit<<12 : 0U);
 }
 inline std::uint32_t vector_status_flags(std::uint32_t mac,std::uint32_t previous) {
-    const auto current=((mac&15) ? 1U : 0U)|((mac&0xf0) ? 2U : 0U)|((mac&0xf00) ? 4U : 0U)|((mac&0xf000) ? 8U : 0U);
+    // Reduce each four-lane flag group to one bit in parallel. Adding seven to
+    // its low three bits sets the high bit exactly when those bits are nonzero;
+    // OR retains an already-set high bit. No carry crosses a nibble boundary.
+    const auto nonzero=(((mac&0x7777U)+0x7777U)|mac)&0x8888U;
+    // Gather bits 3,7,11,15 into bits 0..3. The four shifted contributions
+    // selected by this multiplication do not overlap or introduce carries.
+    const auto current=((nonzero*0x249U)>>12)&15U;
     return (previous&0xff0)|current|(current<<6);
 }
 
 // The VU and scalar units share the finite encoded range, but not the
-// accumulator overflow policy. Keep unsupported intermediate cases explicit.
+// accumulator overflow policy. A product overflow takes precedence over the
+// accumulator; it cannot be cancelled by adding a finite opposing value.
 inline FiniteFloatResult vector_multiply_accumulate(std::uint32_t accumulator,std::uint32_t left,
                                                     std::uint32_t right,bool subtract) {
     const auto product=multiply_finite(left,right,true);
-    const auto product_flags=vector_status_flags(vector_lane_flags(product.bits,product.underflow,0),0)&15U;
+    const auto product_flags=vector_status_flags(vector_lane_flags(product.bits,product.underflow,product.overflow,0),0)&15U;
     const auto signed_product=product.bits^(subtract ? 0x80000000U : 0U);
     if (product.overflow) {
-        if ((accumulator&0x7f800000U) && ((accumulator^signed_product)&0x80000000U))
-            return {0,false,false};
         return {signed_product,false,true,true,product_flags};
     }
     auto result=add_subtract_finite(accumulator,product.bits,subtract,true);
@@ -44,7 +49,7 @@ NT_FORCE_INLINE VectorResult binary_vector(Vector original,Vector left,Vector ri
         if (!value.supported) { result.supported=false; return result; }
         result.value[lane]=value.bits;
         result.status|=value.product_flags<<6;
-        result.mac|=vector_lane_flags(value.bits,value.underflow,lane);
+        result.mac|=vector_lane_flags(value.bits,value.underflow,value.overflow,lane);
     }
     result.status=vector_status_flags(result.mac,result.status);
     return result;

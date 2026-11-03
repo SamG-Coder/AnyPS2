@@ -1,5 +1,6 @@
 #include <nt/ee_vu_launch.hpp>
-#include <nt/native_drawing.hpp>
+#include <nt/native_drawing_worker.hpp>
+#include <thread>
 #include <nt/native_scanout.hpp>
 #include <nt/ee_graphics.hpp>
 #include <iostream>
@@ -235,6 +236,29 @@ int main() {
                 throw std::runtime_error("Compiled VU packet did not produce expected GPU pixels");
         if (consumer.drawing.pixels()[4] || consumer.renderer.validation_errors())
             throw std::runtime_error("Unexpected coverage or Vulkan validation failure");
+        {
+            nt::graphics::NativeDrawingWorker worker(consumer.drawing,consumer.renderer);
+            auto asynchronous=std::make_unique<nt::ee::NativeVuLaunch>(binding);
+            asynchronous->enable_async(); asynchronous->state=launch.state;
+            asynchronous->state.integers[0]=0;
+            asynchronous->graphics={&worker,[](void* raw,std::span<const nt::vu::GraphicsPacket> packets) {
+                static_cast<nt::graphics::NativeDrawingWorker*>(raw)->submit(packets); return true;
+            }};
+            if (asynchronous->submit(1,{},&request)!=nt::ee::Stop::budget)
+                throw std::runtime_error("Compiled asynchronous graphics was not accepted");
+            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+            while (asynchronous->pending()) {
+                if (asynchronous->poll()!=nt::ee::Stop::budget || std::chrono::steady_clock::now()>deadline)
+                    throw std::runtime_error("Compiled asynchronous graphics did not complete");
+                std::this_thread::yield();
+            }
+            worker.wait();
+            for (unsigned pixel=0;pixel<4;++pixel)
+                if (consumer.drawing.pixels()[pixel]!=0x80402010)
+                    throw std::runtime_error("Asynchronous compiled VU/drawing pipeline changed pixels");
+            if (consumer.drawing.pixels()[4] || consumer.renderer.validation_errors())
+                throw std::runtime_error("Asynchronous compiled graphics coverage or validation failed");
+        }
         nt::ee::NativePacketSetup direct;
         direct.graphics=launch.graphics;
         std::vector<std::uint8_t> transport;

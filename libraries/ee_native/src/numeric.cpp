@@ -76,7 +76,7 @@ extern "C" std::uint64_t nt_ee_square_root_finite(std::uint32_t value) {
 }
 
 extern "C" std::uint32_t nt_ee_vector_lane_flags(std::uint64_t packed,std::uint32_t lane) {
-    return lane<4 ? nt::numeric::vector_lane_flags(static_cast<std::uint32_t>(packed),((packed>>32)&1)!=0,lane) : 0;
+    return lane<4 ? nt::numeric::vector_lane_flags(static_cast<std::uint32_t>(packed),((packed>>32)&1)!=0,((packed>>35)&1)!=0,lane) : 0;
 }
 extern "C" std::uint32_t nt_ee_vector_status_flags(std::uint32_t mac,std::uint32_t previous) {
     return nt::numeric::vector_status_flags(mac,previous);

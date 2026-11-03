@@ -80,7 +80,7 @@ public:
         std::fill(ready_.begin(),ready_.end(),false);
         active_.reset();
     }
-    RunResult launch(State& state,unsigned entry,std::uint64_t budget) {
+    RunResult launch(State& state,unsigned entry,std::uint64_t budget,ExecutionProfile* profile=nullptr) {
         const auto selected=select(entry);
         if (!selected) return {ready() ? RunStatus::unmapped_block : RunStatus::unbound_program,0};
         if (state.graphics_pending) return {RunStatus::graphics_pending,0};
@@ -89,10 +89,10 @@ public:
         active_=selected;
         state.graphics_completes=0;
         state.next_pair=entry;
-        return (*catalog_)[*active_].program.run(state,budget);
+        return (*catalog_)[*active_].program.run(state,budget,profile);
     }
-    RunResult resume(State& state,std::uint64_t budget) const {
-        return active_ && ready(*active_) ? (*catalog_)[*active_].program.run(state,budget) : RunResult{RunStatus::unbound_program,0};
+    RunResult resume(State& state,std::uint64_t budget,ExecutionProfile* profile=nullptr) const {
+        return active_ && ready(*active_) ? (*catalog_)[*active_].program.run(state,budget,profile) : RunResult{RunStatus::unbound_program,0};
     }
 private:
     struct Image {

@@ -78,6 +78,8 @@ public:
     const RenderStatistics& statistics() const;
     // Diagnostic readback and exact comparison. Disabled during normal play.
     void verify_texture_kernels(bool enable);
+    // Per-command host timing is opt-in; counters remain available without it.
+    void profile_commands(bool enable);
     // GPU display resolve and direct GPU-to-swapchain transfer. Only a changed
     // image flag is read by the host; scanout_readback is an explicit diagnostic.
     bool present_display(DisplayPlan plan);

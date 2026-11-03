@@ -29,6 +29,11 @@ exports/imports. Indirect calls use the actual runtime pointer and require a com
 binding. Existing register-state and original-address adapters are migration work,
 not the final native ABI. Native execution is not evidence that this migration is complete.
 
+The native VU working state aligns vector lanes, the accumulator and data rows
+to 16 bytes. Generated LLVM derives offsets and access alignment from that C++
+layout. Artifact export version 3 requires regenerating older VU modules before
+linking; native layout changes do not alter program-visible PS2 addresses.
+
 Discovery is bounded and conservative. Executable-segment membership alone does
 not establish that bytes are instructions: tables, constants and VU payloads can
 occupy those segments. Unresolved callbacks remain coverage gaps. See
@@ -61,6 +66,13 @@ behavior; it is not a complete GS replacement. Reference rendering is a separate
 validation path, not a fallback for an unsupported production draw.
 
 Textures and render targets stay GPU resident where their dependencies permit.
+Asynchronous VU1 submissions publish ordered graphics from completed launches
+while later compiled launches continue. A later failure stops execution and does
+not report submission completion; already accepted graphics remain submitted.
+A native drawing worker accepts one bounded, owned packet batch at a time.
+The execution owner rejoins it before reading graphics state or presenting output.
+Worker failures surface through the native service boundary; recording a batch
+does not itself signal FINISH, which still follows the actual GPU fences.
 FINISH and display operations track actual submitted work. Presentation resources
 can be rebuilt when the display dimensions change without discarding game surfaces.
 The window reports rendered display updates; presentation frequency alone is not

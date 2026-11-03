@@ -16,8 +16,11 @@ void checked(VkResult r,const char* operation) {
 }
 struct Measure {
     std::uint64_t& total;
-    std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
-    ~Measure() { total+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count(); }
+    bool enabled;
+    std::chrono::steady_clock::time_point start;
+    Measure(std::uint64_t& total,bool enabled):total(total),enabled(enabled),
+        start(enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
+    ~Measure() { if (enabled) total+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count(); }
 };
 constexpr unsigned store_words=1024*1024;
 constexpr VkDeviceSize staging_bytes=64*1024*1024;
@@ -59,6 +62,9 @@ Region region(unsigned base,unsigned pitch,unsigned width,unsigned height,unsign
     const unsigned page=indexed ? ((height-1)/(indexed==2 ? 64 : 128))*(pitch/2)+(width-1)/128 : ((height-1)/32)*pitch+(width-1)/64;
     return {base*64,std::min(store_words,(page+1)*2048)};
 }
+unsigned texture_extent(unsigned size,unsigned mode,unsigned lo,unsigned hi) {
+    return mode==2 ? hi+1 : mode==3 ? (lo|hi)+1 : size;
+}
 }
 struct NativeRaster::Impl {
     VkPhysicalDevice physical; VkDevice device; VkQueue queue;
@@ -91,6 +97,7 @@ struct NativeRaster::Impl {
     VkDeviceSize staging_used=0;
     std::uint64_t revision=1,last_present=0;
     RenderStatistics stats;
+    bool profiling=false;
     std::vector<std::uint32_t> source=std::vector<std::uint32_t>(store_words);
     VkBuffer readback{};
     VkDeviceMemory readback_memory{};
@@ -215,7 +222,7 @@ void NativeRaster::Impl::collect(unsigned index,bool wait) {
     auto& entry=slots[index];
     if (!entry.serial || entry.measured) return;
     if (wait) {
-        Measure timing(stats.wait_ns);
+        Measure timing(stats.wait_ns,profiling);
         checked(vkWaitForFences(device,1,&entry.fence,VK_TRUE,UINT64_MAX),"Wait native graphics");
     } else {
         const auto status=vkGetFenceStatus(device,entry.fence);
@@ -247,7 +254,7 @@ void NativeRaster::Impl::flush(VkSemaphore acquired,VkSemaphore rendered,bool wa
         VkSubmitInfo s{VK_STRUCTURE_TYPE_SUBMIT_INFO}; s.commandBufferCount=1; s.pCommandBuffers=&command;
         VkPipelineStageFlags stage=VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         if (acquired) { s.waitSemaphoreCount=1; s.pWaitSemaphores=&acquired; s.pWaitDstStageMask=&stage; s.signalSemaphoreCount=1; s.pSignalSemaphores=&rendered; }
-        { Measure timing(stats.wait_ns); checked(vkQueueSubmit(queue,1,&s,entry.fence),"Submit native graphics"); }
+        { Measure timing(stats.wait_ns,profiling); checked(vkQueueSubmit(queue,1,&s,entry.fence),"Submit native graphics"); }
         entry.serial=++submitted; entry.measured=false;
         if (wait) collect(slot,true);
         recording=false; staging_used=0; records_used=0; ++stats.submissions;
@@ -434,7 +441,7 @@ std::unique_ptr<NativeRaster::Impl::Image> NativeRaster::Impl::image(unsigned wi
     vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&b); return i;
 }
 void NativeRaster::Impl::upload_image(Image& image,std::span<const std::uint32_t> pixels) {
-    Measure timing(stats.upload_ns); ++stats.uploads;
+    Measure timing(stats.upload_ns,profiling); ++stats.uploads;
     if (pixels.size()!=std::size_t(image.width)*image.height || pixels.size_bytes()>staging_bytes) throw std::runtime_error("Invalid native image upload");
     // Append uploads to unused host-visible storage. Recorded transfers keep
     // their bytes until the submission fence completes; no per-texture stall.
@@ -448,7 +455,7 @@ void NativeRaster::Impl::upload_image(Image& image,std::span<const std::uint32_t
 }
 void NativeRaster::Impl::export_image(Image& image) {
     if (!image.dirty || image.scratch) return;
-    Measure timing(stats.surface_export_ns);
+    Measure timing(stats.surface_export_ns,profiling);
     order();
     VkBufferImageCopy copy{}; copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; copy.imageExtent={image.width,image.height,1};
     vkCmdCopyImageToBuffer(command,image.image,VK_IMAGE_LAYOUT_GENERAL,readback,1,&copy); flush();
@@ -478,7 +485,7 @@ void NativeRaster::Impl::clear_views() {
     checked(vkResetDescriptorPool(device,descriptor_pool,0),"Reset native resource descriptors");
 }
 NativeRaster::Impl::Image& NativeRaster::Impl::surface(unsigned base,unsigned pitch,unsigned height,bool depth,bool scratch,bool display) {
-    Measure timing(stats.surface_lookup_ns);
+    Measure timing(stats.surface_lookup_ns,profiling);
     const auto key=std::tuple(scratch ? 0x10000U : base|(display ? 0x20000U : 0U),pitch,depth); const unsigned width=pitch*64;
     height=(height+31)&~31U;
     if (!pitch || width>4032 || !height || height>2048) throw std::runtime_error("Invalid native render surface dimensions");
@@ -500,7 +507,7 @@ NativeRaster::Impl::Image& NativeRaster::Impl::surface(unsigned base,unsigned pi
         synchronize_source(slot->region); slot->valid=false; break;
     }
     if (!slot->valid) {
-        Measure timing(stats.surface_import_ns);
+        Measure timing(stats.surface_import_ns,profiling);
         std::vector<std::uint32_t> pixels(std::size_t(width)*slot->height);
         if (!scratch) for (unsigned y=0;y<slot->height;++y) for (unsigned x=0;x<width;++x)
             pixels[std::size_t(y)*width+x]=source[rgba_word(base,pitch,x,y)^(depth ? 0x600 : 0)];
@@ -559,7 +566,7 @@ void NativeRaster::Impl::initialize_texture_decoder() {
     stats.llvm_texture_kernels=true;
 }
 void NativeRaster::Impl::decode_texture(Image& image,const SpriteCommand& draw,Region source_region) {
-    Measure timing(stats.texture_decode_ns);
+    Measure timing(stats.texture_decode_ns,profiling);
     const auto count=std::uint64_t(image.width)*image.height;
     if (!count || count>store_words || !source_region.length || source_region.length>store_words)
         throw std::runtime_error("Invalid LLVM texture conversion extent");
@@ -619,11 +626,10 @@ void NativeRaster::Impl::decode_texture(Image& image,const SpriteCommand& draw,R
 }
 #endif
 NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& command) {
-    Measure timing(stats.texture_lookup_ns);
+    Measure timing(stats.texture_lookup_ns,profiling);
     const auto& d=command.draw;
-    const auto extent=[](unsigned size,unsigned mode,unsigned lo,unsigned hi){ return mode==2 ? hi+1 : mode==3 ? (lo|hi)+1 : size; };
-    unsigned width=(d.flags&1) ? extent(d.texture_width,d.clamp_u,d.min_u,d.max_u) : 1;
-    unsigned height=(d.flags&1) ? extent(d.texture_height,d.clamp_v,d.min_v,d.max_v) : 1;
+    unsigned width=(d.flags&1) ? texture_extent(d.texture_width,d.clamp_u,d.min_u,d.max_u) : 1;
+    unsigned height=(d.flags&1) ? texture_extent(d.texture_height,d.clamp_v,d.min_v,d.max_v) : 1;
     if ((d.flags&1) && !(d.flags&64)) {
         const auto found=surfaces.find({d.texture_base,d.texture_pitch,false});
         if (found!=surfaces.end() && found->second && found->second->valid &&
@@ -682,7 +688,7 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
         }
 #endif
         std::vector<std::uint32_t> pixels(std::size_t(width)*height);
-        { Measure timing(stats.texture_decode_ns);
+        { Measure timing(stats.texture_decode_ns,profiling);
         if (d.flags&1) for (unsigned y=0;y<height;++y) for (unsigned x=0;x<width;++x) {
             std::uint32_t value;
             if (d.flags&indexed8_flag) { const auto byte=indexed_byte(d.texture_base,d.texture_pitch,x,y); value=command.palette[(source[byte/4]>>((byte%4)*8))&255]; }
@@ -700,7 +706,7 @@ VkDescriptorSet NativeRaster::Impl::allocate_set(VkDescriptorSetLayout set_layou
     VkDescriptorSet set{}; checked(vkAllocateDescriptorSets(device,&a,&set),"Allocate native resource set"); return set;
 }
 VkDescriptorSet NativeRaster::Impl::bind_target(Image& color,Image& depth,Image& texture,const Sprite& draw) {
-    Measure timing(stats.target_bind_ns);
+    Measure timing(stats.target_bind_ns,profiling);
     if (sets.size()>=8192) clear_views();
     auto& fb=framebuffers[{&color,&depth}];
     const unsigned height=std::min(color.height,depth.height);
@@ -745,6 +751,7 @@ NativeRaster::NativeRaster(VkPhysicalDevice p,VkDevice d,VkQueue q,unsigned fami
 }
 NativeRaster::~NativeRaster()=default;
 const RenderStatistics& NativeRaster::statistics() const { return impl_->stats; }
+void NativeRaster::profile_commands(bool enable) { impl_->profiling=enable; }
 void NativeRaster::verify_texture_kernels(bool enable) {
 #ifdef ANYPS2_LLVM_TEXTURES
     impl_->verify_decodes=enable;
@@ -779,7 +786,7 @@ void NativeRaster::read_words(std::span<const unsigned> addresses,std::span<std:
 }
 void NativeRaster::write(std::span<const PixelWrite> writes) {
     for (auto w:writes) if (w.address>=store_words || (w.value&~w.mask)) throw std::runtime_error("Invalid native resource write");
-    auto& r=*impl_; Measure timing(r.stats.write_ns);
+    auto& r=*impl_; Measure timing(r.stats.write_ns,r.profiling);
     for (auto& [k,s]:r.surfaces) if (s && s->dirty && std::any_of(writes.begin(),writes.end(),[&](auto w){return s->region.contains(w.address);})) r.synchronize_source(s->region);
     unsigned first=store_words,last=0;
     for (auto w:writes) {
@@ -795,13 +802,28 @@ void NativeRaster::write(std::span<const PixelWrite> writes) {
     }
 }
 void NativeRaster::draw(std::span<const SpriteCommand> commands) {
-    VulkanRenderer::validate(commands); auto& r=*impl_; Measure timing(r.stats.draw_ns);
+    VulkanRenderer::validate(commands); auto& r=*impl_; Measure timing(r.stats.draw_ns,r.profiling);
     if (!r.initialized) throw std::runtime_error("Native resources not initialized");
     for (const auto& c:commands) {
         const auto& d=c.draw;
         if (d.left!=d.right && d.top!=d.bottom && d.right>d.pitch*64 && !can_map_wrapped_sprite(d))
             throw std::runtime_error("Wrapped textured, depth or self-aliasing framebuffer requires an explicit native resource mapping");
     }
+    // A draw-only run cannot modify a disjoint texture. Resolve resources once
+    // for compatible consecutive draws, but retain the ordinary alias/feedback
+    // path whenever a target can write texture storage or another attachment.
+    Impl::Image *cached_color=nullptr,*cached_depth=nullptr,*cached_texture=nullptr;
+    SpriteCommand cached_command{};
+    const auto same_texture=[](const SpriteCommand& a,const SpriteCommand& b) {
+        const auto& x=a.draw; const auto& y=b.draw;
+        constexpr unsigned formats=65|indexed8_flag;
+        return (x.flags&formats)==(y.flags&formats) &&
+            x.texture_base==y.texture_base && x.texture_pitch==y.texture_pitch &&
+            x.texture_width==y.texture_width && x.texture_height==y.texture_height &&
+            x.clamp_u==y.clamp_u && x.clamp_v==y.clamp_v &&
+            x.min_u==y.min_u && x.max_u==y.max_u && x.min_v==y.min_v && x.max_v==y.max_v &&
+            (!(x.flags&64) || a.palette==b.palette);
+    };
     const auto emit=[&](SpriteCommand c,unsigned height) {
         // An enabled NEVER alpha test always takes its failure action. FB_ONLY
         // and RGB_ONLY cannot write depth. With an ALWAYS depth comparison they
@@ -813,13 +835,30 @@ void NativeRaster::draw(std::span<const SpriteCommand> commands) {
             c.draw.flags&=~depth_test_flag;
         const auto& d=c.draw;
         if (r.records_used==records_per_slot) r.flush(VK_NULL_HANDLE,VK_NULL_HANDLE,false);
-        auto& color=r.surface(d.base,d.pitch,height,false);
-        auto& depth=r.surface((d.flags&depth_test_flag) ? d.depth_base : 0,d.pitch,height,true,!(d.flags&depth_test_flag));
-        auto& texture=r.texture(c);
+        const auto& previous=cached_command.draw;
+        const bool reuse=cached_color && previous.base==d.base && previous.pitch==d.pitch &&
+            (previous.flags&depth_test_flag)==(d.flags&depth_test_flag) &&
+            (!(d.flags&depth_test_flag) || previous.depth_base==d.depth_base) &&
+            cached_color->height>=height && cached_depth->height>=height && same_texture(c,cached_command);
+        auto& color=reuse ? *cached_color : r.surface(d.base,d.pitch,height,false);
+        auto& depth=reuse ? *cached_depth : r.surface((d.flags&depth_test_flag) ? d.depth_base : 0,d.pitch,height,true,!(d.flags&depth_test_flag));
+        auto& texture=reuse ? *cached_texture : r.texture(c);
+        if (!reuse) {
+            cached_color=nullptr;
+            const auto source=(d.flags&1) ? region(d.texture_base,d.texture_pitch,texture.width,texture.height,
+                (d.flags&indexed8_flag) ? 2U : (d.flags&64) ? 1U : 0U) : Region{};
+            const bool full_texture=!(d.flags&1) ||
+                (texture.width==texture_extent(d.texture_width,d.clamp_u,d.min_u,d.max_u) &&
+                 texture.height==texture_extent(d.texture_height,d.clamp_v,d.min_v,d.max_v));
+            if (full_texture && color.valid && depth.valid && !color.region.overlaps(depth.region) &&
+                !source.overlaps(color.region) && !source.overlaps(depth.region)) {
+                cached_color=&color; cached_depth=&depth; cached_texture=&texture; cached_command=c;
+            }
+        }
         const auto set=r.bind_target(color,depth,texture,d);
-        { Measure timing(r.stats.draw_record_ns); r.append_draw(set,c); }
+        { Measure timing(r.stats.draw_record_ns,r.profiling); r.append_draw(set,c); }
         color.dirty=true; color.revision=++r.revision;
-        { Measure timing(r.stats.invalidate_ns);
+        { Measure timing(r.stats.invalidate_ns,r.profiling);
         r.touch(color.region);
         if (d.flags&depth_write_flag) r.touch(depth.region);
         }

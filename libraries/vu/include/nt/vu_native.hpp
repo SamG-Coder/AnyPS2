@@ -1,20 +1,22 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <cstddef>
+#include <type_traits>
 
 namespace nt::vu {
 // Native function ABI. Instruction words are never stored or decoded here.
 enum class Result : std::uint32_t { complete, unsupported_numeric, transfer, unsupported_schedule, unsupported_memory, unsupported_context, graphics_request };
-struct State {
+struct alignas(16) State {
     std::array<std::array<std::uint32_t,4>,31> vectors{};
     std::array<std::uint16_t,15> integers{};
     std::uint32_t immediate=0;
-    std::array<std::uint32_t,4> accumulator{};
+    alignas(16) std::array<std::uint32_t,4> accumulator{};
     std::uint32_t mac=0,status=0;
     std::uint32_t next_pair=0;
     std::uint16_t delayed_integer=0,delayed_value=0;
     std::uint32_t quotient=0,pending_quotient=0,quotient_flags=0,quotient_pending=0;
-    std::array<std::array<std::uint32_t,4>,1024> data{};
+    alignas(16) std::array<std::array<std::uint32_t,4>,1024> data{};
     std::uint16_t input_top=0,input_itop=0;
     std::uint32_t input_valid=0; // bit 0: TOP supplied; bit 1: ITOP supplied.
     std::uint32_t scalar_p=0,pending_p=0,p_pending=0;
@@ -33,4 +35,9 @@ struct State {
     std::uint32_t p_read_delay=0;
     bool operator==(const State&) const = default;
 };
+// Native-only ABI: C++20 stack, new, make_unique and container allocations
+// preserve this alignment. The LLVM generator derives offsets from this type.
+static_assert(std::is_standard_layout_v<State> && std::is_trivially_copyable_v<State>);
+static_assert(alignof(State)==16 && offsetof(State,vectors)%16==0 &&
+              offsetof(State,accumulator)%16==0 && offsetof(State,data)%16==0);
 }

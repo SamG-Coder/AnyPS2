@@ -1627,6 +1627,10 @@ Native MSCNT submission behavior was checked against the already pinned PCSX2
 program position and perform the same TOP/ITOP and buffer selection updates as
 MSCAL. AnyPS2 implements this through existing compiled-entry dispatch and its
 transactional native submission owner. No upstream execution loop was copied.
+The same PCSX2 pin's `Gif_Unit.h` and `x86/microVU_Lower.inl` informed
+ordered graphics publication while later VU launches continue. `Vif0_Dma.cpp`
+and `Vif1_Dma.cpp` confirm independent VU ownership; AnyPS2 uses bounded native
+jobs and GPU fences, without copying the reference timing or execution loops.
 
 
 Native host profiling-source enumeration uses Microsoft public Windows APIs:
@@ -2162,12 +2166,22 @@ explains the finite exponent-255 format and VU MAC/status lane layout. The pinne
 PCSX2 `VUflags.cpp` and `VUops.cpp` cross-check flag ownership, masked lanes and
 separate multiply/add stages. AnyPS2 reuses its original integer-significand
 arithmetic for both compiled VU regions and EE vector instructions. No reference
-implementation is copied or linked. MAC overflow includes exponent-255 results;
-status keeps sticky flags and the independent quotient flags.
+implementation is copied or linked. Status keeps sticky flags and the independent
+quotient flags.
 
-Multiply-accumulate supports extended operands and unambiguous saturation when
-an overflowing product is added to zero or a same-sign accumulator. Opposing-sign
-accumulation after product overflow remains an explicit unsupported boundary.
+The public ARMSX2 hardware-capture tests at
+[05f55b8e197b6a5b31d2b258a3827a6b4769478b](https://github.com/ARMSX2/ARMSX2/tree/05f55b8e197b6a5b31d2b258a3827a6b4769478b/tests/ctest/core/recompilers)
+(`vu0_macro_fmac_range_console_tests.cpp`, `autocases_vusat.h`, and
+`vu_micro_fmac_console_tests.cpp`; GPL-3.0-or-later, copyright 2026 ARMSX2 Dev Team)
+provide behavioral evidence for the extended range and multiply overflow.
+These describe captures on an SCPH-90000: finite exponent-255 results do not
+raise overflow; results beyond the finite range do. An overflowing product takes
+precedence over an opposing accumulator in MADD/MSUB, retaining saturation with
+its signed product. AnyPS2 implements those rules in its existing arithmetic;
+no upstream implementation or test table is copied. Its original synthetic tests
+exercise the rules through LLVM-compiled VU code. The captures cover VU0 macro
+mode; applying the shared FMAC rules to VU microcode is an inference, not an
+independent VU1 hardware validation.
 Underflowing products flush to signed zero before the separate addition; product
 Z/S/U/O contribute sticky flags independently of the final MAC/current flags.
 The pinned god-of-war-recomp `ps2recomp-vu1-sticky-preserve.patch` and

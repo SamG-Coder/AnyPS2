@@ -47,7 +47,9 @@ private:
     std::uint64_t elapsed() const {
         return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-epoch_).count();
     }
-    std::vector<Record> records_=std::vector<Record>(4096);
+    // Keep enough opt-in history to compare several animation phases without
+    // synchronous tracing I/O. Storage stays bounded even for long sessions.
+    std::vector<Record> records_=std::vector<Record>(65536);
     std::uint64_t count_=0;
     std::vector<Delivery> deliveries_=std::vector<Delivery>(4096);
     std::uint64_t delivered_=0;

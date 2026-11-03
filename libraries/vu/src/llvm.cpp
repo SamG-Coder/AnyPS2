@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <bit>
 #include <map>
+#include <numeric>
 #include <algorithm>
 #include <sstream>
 #include <stdexcept>
@@ -29,21 +30,23 @@ public:
     static constexpr auto data_begin=offsetof(State,data);
     static constexpr auto data_size=sizeof(State{}.data);
     static constexpr auto data_end=data_begin+data_size;
+    static std::size_t alignment(std::size_t offset) { return std::gcd(std::size_t(alignof(State)),offset); }
     void copy_state(bool commit) {
         const auto destination=commit ? "%output" : "%state",source=commit ? "%state" : "%output";
-        out<<"  call void @llvm.memcpy.p0.p0.i64(ptr "<<destination<<", ptr "<<source<<", i64 "
+        out<<"  call void @llvm.memcpy.p0.p0.i64(ptr align "<<alignof(State)<<' '<<destination
+           <<", ptr align "<<alignof(State)<<' '<<source<<", i64 "
            <<(sparse_data ? data_begin : sizeof(State))<<", i1 false)\n";
         if (sparse_data)
-            out<<"  call void @llvm.memcpy.p0.p0.i64(ptr "<<(commit ? "%output_tail" : "%state_tail")
-               <<", ptr "<<(commit ? "%state_tail" : "%output_tail")<<", i64 "<<sizeof(State)-data_end<<", i1 false)\n";
+            out<<"  call void @llvm.memcpy.p0.p0.i64(ptr align "<<alignment(data_end)<<' '<<(commit ? "%output_tail" : "%state_tail")
+               <<", ptr align "<<alignment(data_end)<<' '<<(commit ? "%state_tail" : "%output_tail")<<", i64 "<<sizeof(State)-data_end<<", i1 false)\n";
         if (commit) for (const auto& store:data_stores)
-            out<<"  store "<<store.type<<' '<<store.value<<", ptr "<<store.address<<", align 1\n";
+            out<<"  store "<<store.type<<' '<<store.value<<", ptr "<<store.address<<", align 4\n";
     }
     std::vector<Store> pending;
     // Compile-time SSA stores, published only after the whole block succeeds.
     std::vector<Store> data_stores;
     std::string load_data(const std::string& address) {
-        auto result=value("load i32, ptr "+address+", align 1");
+        auto result=value("load i32, ptr "+address+", align 4");
         for (const auto& store:data_stores) {
             const auto aliases=value("icmp eq ptr "+address+", "+store.address);
             result=value("select i1 "+aliases+", i32 "+store.value+", i32 "+result);
@@ -60,7 +63,7 @@ public:
         return value(std::string("getelementptr i8, ptr ")+(original ? "%output" : "%state")+", i64 "+std::to_string(offset));
     }
     std::string load(const std::string& type,std::size_t offset) {
-        return value("load "+type+", ptr "+pointer(offset)+", align 1");
+        return value("load "+type+", ptr "+pointer(offset)+", align "+std::to_string(alignment(offset)));
     }
     std::string integer(unsigned index) { return index ? load("i16",offsetof(State,integers)+(index-1)*2) : "0"; }
     std::string vector(unsigned index,unsigned lane) {
@@ -99,19 +102,21 @@ public:
         pending.push_back({"i32","0",offsetof(State,p_read_delay)});
         commit();
     }
-    void advance_scalar(bool quotient,std::size_t index) {
+    void advance_scalar(bool quotient,std::size_t index,unsigned steps=1) {
         const auto offset=quotient ? offsetof(State,quotient_read_delay) : offsetof(State,p_read_delay);
         const auto prefix=std::string(quotient ? "q" : "p")+std::to_string(index);
-        const auto due=value("icmp eq i32 "+load("i32",offset)+", 1");
-        advance_visibility(offset);
+        const auto delay=load("i32",offset);
+        const auto due=steps==1 ? value("icmp eq i32 "+delay+", 1") :
+            value("icmp ult i32 "+value("sub i32 "+delay+", 1")+", "+std::to_string(steps));
+        advance_visibility(offset,steps);
         out<<"  br i1 "<<due<<", label %"<<prefix<<"_publish, label %"<<prefix<<"_elapsed\n"<<prefix<<"_publish:\n";
         if (quotient) publish_quotient(); else publish_p();
         out<<"  br label %"<<prefix<<"_elapsed\n"<<prefix<<"_elapsed:\n";
     }
-    void advance_visibility(std::size_t offset) {
+    void advance_visibility(std::size_t offset,unsigned steps=1) {
         const auto delay=load("i32",offset);
-        const auto active=value("icmp ne i32 "+delay+", 0");
-        const auto remaining=value("select i1 "+active+", i32 "+value("sub i32 "+delay+", 1")+", i32 0");
+        const auto active=value("icmp uge i32 "+delay+", "+std::to_string(steps));
+        const auto remaining=value("select i1 "+active+", i32 "+value("sub i32 "+delay+", "+std::to_string(steps))+", i32 0");
         pending.push_back({"i32",remaining,offset});
         commit();
     }
@@ -145,7 +150,36 @@ public:
         out<<"  br label %"<<label<<"_done\n"<<label<<"_done:\n";
         advance_visibility(offsetof(State,mac_read_delay));
     }
-    void advance_clip() {
+    void advance_clip(unsigned steps=1) {
+        if (steps>1) {
+            // Without producers or observers, publish only the final visible
+            // value. Retain the exact queue contents, including invalid slots,
+            // so the native block boundary is identical to individual advances.
+            const auto mask=load("i32",offsetof(State,pending_clip_mask));
+            std::array<std::string,4> slots;
+            for (unsigned i=0;i<4;++i) slots[i]=load("i32",offsetof(State,pending_clip)+i*4);
+            auto visible=load("i32",offsetof(State,visible_clip));
+            const auto ready=steps>=32 ? mask : value("and i32 "+mask+", "+std::to_string((1U<<steps)-1));
+            for (unsigned i=0;i<std::min(steps,4U);++i) {
+                const auto bits=i==3 ? 0xfffffff8U : 1U<<i;
+                const auto active=value("icmp ne i32 "+value("and i32 "+ready+", "+std::to_string(bits))+", 0");
+                visible=value("select i1 "+active+", i32 "+slots[i]+", i32 "+visible);
+            }
+            const auto idle=steps>32 ? "true" : value("icmp eq i32 "+value("lshr i32 "+mask+", "+std::to_string(steps-1))+", 0");
+            pending.push_back({"i32",value("select i1 "+idle+", i32 "+load("i32",offsetof(State,clip))+", i32 "+visible),offsetof(State,visible_clip)});
+            for (unsigned i=0;i<3;++i) {
+                auto shifted=slots[i];
+                for (unsigned j=1;j<=std::min(steps,3-i);++j) {
+                    const auto active=value("icmp uge i32 "+mask+", "+std::to_string(1U<<(j-1)));
+                    shifted=value("select i1 "+active+", i32 "+slots[i+j]+", i32 "+shifted);
+                }
+                pending.push_back({"i32",shifted,offsetof(State,pending_clip)+i*4});
+            }
+            pending.push_back({"i32",steps>=32 ? "0" : value("lshr i32 "+mask+", "+std::to_string(steps)),offsetof(State,pending_clip_mask)});
+            commit();
+            advance_visibility(offsetof(State,clip_read_delay),steps);
+            return;
+        }
         const auto mask=load("i32",offsetof(State,pending_clip_mask));
         const auto idle=value("icmp eq i32 "+mask+", 0");
         const auto label="clip_queue"+std::to_string(next_++);
@@ -179,7 +213,8 @@ public:
                 continue;
             }
             const auto address=store.address.empty() ? pointer(store.offset) : store.address;
-            out<<"  store "<<store.type<<' '<<store.value<<", ptr "<<address<<", align 1\n";
+            out<<"  store "<<store.type<<' '<<store.value<<", ptr "<<address<<", align "
+               <<(store.address.empty() ? alignment(store.offset) : 4)<<'\n';
         }
         pending.clear();
     }
@@ -221,6 +256,24 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         throw std::invalid_argument(diagnostic);
     }
     Writer writer;
+    // A scalar publication can cross an observer-free native region as one
+    // operation. Q's status bits are disjoint from MAC current/sticky bits;
+    // without a status read, its publication commutes with vector arithmetic.
+    // Nested delay helpers share state, so retain per-pair visibility there.
+    bool batch_q=!nested_branch,batch_p=!nested_branch,batch_clip=!nested_branch;
+    for (const auto& pair:pairs) {
+        const auto upper=decode_upper(pair.upper);
+        const auto lower=decode_lower(pair,unit).operation;
+        batch_q &= upper.operand!=Operand::quotient && lower!=LowerOperation::divide &&
+            lower!=LowerOperation::square_root && lower!=LowerOperation::reciprocal_square_root &&
+            lower!=LowerOperation::wait_quotient && lower!=LowerOperation::status_and &&
+            lower!=LowerOperation::status_or && lower!=LowerOperation::status_equal;
+        batch_p &= lower!=LowerOperation::reciprocal_length && lower!=LowerOperation::sine &&
+            lower!=LowerOperation::efu_square_root && lower!=LowerOperation::wait_p && lower!=LowerOperation::move_p;
+        batch_clip &= upper.operation!=Arithmetic::clip && lower!=LowerOperation::clip_set &&
+            lower!=LowerOperation::clip_and && lower!=LowerOperation::clip_or &&
+            lower!=LowerOperation::clip_equal && lower!=LowerOperation::clip_get;
+    }
     // Prove memory effects from the decoded block, never from an observed run.
     // Nested-delay helpers keep the full transaction because they share state.
     std::size_t stored_lanes=0,loaded_lanes=0;
@@ -253,8 +306,8 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         <<"declare i64 @nt_vu_efu_square_root_finite(i32) nounwind willreturn memory(none)\n"
         <<"declare i32 @nt_vu_clip_flags(i32, i32, i32, i32) nounwind willreturn memory(none)\n"
         <<"declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n";
-    writer.out<<"define i32 @"<<symbol<<"(ptr %output) {\nentry:\n"
-        <<"  %state = alloca ["<<sizeof(State)-(writer.sparse_data ? Writer::data_size : 0)<<" x i8], align 8\n";
+    writer.out<<"define i32 @"<<symbol<<"(ptr align "<<alignof(State)<<" %output) {\nentry:\n"
+        <<"  %state = alloca ["<<sizeof(State)-(writer.sparse_data ? Writer::data_size : 0)<<" x i8], align "<<alignof(State)<<"\n";
     if (writer.sparse_data)
         writer.out<<"  %state_tail = getelementptr i8, ptr %state, i64 "<<Writer::data_begin<<"\n"
                   <<"  %output_tail = getelementptr i8, ptr %output, i64 "<<Writer::data_end<<"\n";
@@ -274,11 +327,11 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         const bool quotient_producer=lower.operation==LowerOperation::divide || lower.operation==LowerOperation::square_root ||
             lower.operation==LowerOperation::reciprocal_square_root;
         writer.advance_mac();
-        writer.advance_clip();
+        if (!batch_clip) writer.advance_clip();
         // Scalar reads use the last published value while a newer result is
         // pending. Carry publication distance across compiled native blocks.
-        writer.advance_scalar(true,index);
-        writer.advance_scalar(false,index);
+        if (!batch_q) writer.advance_scalar(true,index);
+        if (!batch_p) writer.advance_scalar(false,index);
         // These lower operations synchronize an earlier quotient before this
         // pair reads Q. Unscheduled visibility is deliberately not approximated.
         if (quotient_producer || lower.operation==LowerOperation::wait_quotient) writer.publish_quotient();
@@ -558,6 +611,9 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         writer.pending.push_back({"i16",delayed_value,offsetof(State,delayed_value)});
         writer.commit();
     }
+    if (batch_q) writer.advance_scalar(true,pairs.size(),static_cast<unsigned>(pairs.size()));
+    if (batch_p) writer.advance_scalar(false,pairs.size(),static_cast<unsigned>(pairs.size()));
+    if (batch_clip) writer.advance_clip(static_cast<unsigned>(pairs.size()));
     if (nested_branch) {
         const auto call_delay=[&](unsigned address) {
             return writer.value("call i32 @"+std::string(symbol)+"_delay_"+std::to_string(address)+"(ptr %state)");
@@ -720,7 +776,7 @@ void emit_catalog(std::ostream& output,std::span<const ArtifactDescription> arti
             <<", i32 "<<artifact.destination<<", ptr @"<<artifact.symbol<<"_identity, i32 "<<artifact.bytes<<" }"
             <<(i+1==artifacts.size() ? "\n" : ",\n");
     }
-    output<<"]\ndefine ptr @"<<symbol<<"_artifacts_v2() {\n  ret ptr @"<<symbol<<"_catalog\n}\n"
+    output<<"]\ndefine ptr @"<<symbol<<"_artifacts_v3() {\n  ret ptr @"<<symbol<<"_catalog\n}\n"
         <<"define i32 @"<<symbol<<"_artifact_count() {\n  ret i32 "<<artifacts.size()<<"\n}\n";
 }
 }

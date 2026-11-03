@@ -41,12 +41,22 @@ NT_FORCE_INLINE FiniteFloatResult add_subtract_finite(uint32_t a, uint32_t b, bo
     const unsigned ea = (a >> 23) & 255, eb = (b >> 23) & 255;
     if (!extended && (ea == 255 || eb == 255))
         return {0,false,false};
-    const unsigned exponent = (ea > eb ? ea : eb);
-    // Extra fraction bits plus a sticky bit avoid host rounding mode dependence.
-    const auto magnitude = [exponent](uint32_t bits, unsigned e) {
-        return e ? shift_jam(uint64_t((bits & 0x7fffff) | 0x800000) << 32,exponent-e) : 0ULL;
-    };
-    const auto x = magnitude(a,ea), y = magnitude(b,eb);
+    const auto signed_b=b^(subtract ? 0x80000000U : 0U);
+    // Exponent-zero inputs are signed zero on this interface, including denormals.
+    if (!ea) return {!eb ? (a&signed_b&0x80000000U) : signed_b};
+    if (!eb) return {a};
+    // Beyond the 24-bit significand, adding a smaller magnitude cannot carry.
+    // Subtracting any nonzero amount truncates to the preceding encoded value,
+    // including the exponent boundary. The larger exponent is at least 26 here,
+    // so this shortcut cannot underflow. Keep the tie/cancellation range below.
+    if (ea>eb+24) return {a-((a^signed_b)>>31)};
+    if (eb>ea+24) return {signed_b-((a^signed_b)>>31)};
+    const unsigned exponent = (ea < eb ? ea : eb);
+    // The remaining exponent distance is at most 24. Align to the smaller
+    // exponent: both complete significands fit in 48 bits, so cancellation is
+    // exact and no discarded-bit/sticky calculation is needed.
+    const auto x = uint64_t((a&0x7fffff)|0x800000) << (ea-exponent);
+    const auto y = uint64_t((b&0x7fffff)|0x800000) << (eb-exponent);
     const bool sx = (a >> 31) != 0, sy = ((b >> 31) != 0) != subtract;
     bool sign;
     uint64_t value;
@@ -55,7 +65,7 @@ NT_FORCE_INLINE FiniteFloatResult add_subtract_finite(uint32_t a, uint32_t b, bo
     else { value = y-x; sign = sy; }
     if (!value) return {(!x && !y && sx && sy) ? 0x80000000U : 0U};
     const unsigned high = highest_bit(value);
-    const int result_exponent = static_cast<int>(exponent) + static_cast<int>(high) - 55;
+    const int result_exponent = static_cast<int>(exponent) + static_cast<int>(high) - 23;
     const auto sign_bit = sign ? 0x80000000U : 0U;
     if (result_exponent <= 0) return {sign_bit,true};
     if (result_exponent >= (extended ? 256 : 255))

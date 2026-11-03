@@ -4,12 +4,14 @@
 #include <nt/vu_graphics.hpp>
 #include <chrono>
 #include <future>
+#include <mutex>
 
 namespace nt::ee {
-// Transactional native launch owner. VU0 shares completed vector state with EE
-// macro operations. No host effects may occur
-// inside a compiled block. Graphics packets are staged until the whole launch
-// completes, then delivered atomically through a native consumer.
+// Native launch owner. VU0 shares completed vector state with EE macro
+// operations. Compiled blocks have no host effects. Asynchronous VU1 jobs
+// publish owned graphics batches after each completed launch, allowing native
+// drawing to overlap subsequent compiled work. Shared vector state and DMA
+// completion remain private until the complete submission succeeds.
 class NativeVuLaunch {
 public:
     explicit NativeVuLaunch(vu::Binding& binding,std::uint64_t block_budget=100000,VectorStorage* shared=nullptr,
@@ -21,6 +23,7 @@ public:
     struct Profile {
         std::uint64_t compiled_ns=0,blocks=0,jobs=0,job_ns=0,submit_ns=0;
         std::uint64_t longest_job_ns=0,longest_submit_ns=0;
+        vu::ExecutionProfile execution;
     };
     Profile* profile=nullptr;
     unsigned unit() const { return binding_.unit(); }
@@ -38,7 +41,18 @@ public:
     bool pending() const { return busy_; }
     Stop poll() {
         if (!busy_) return job_status_;
-        if (job_.wait_for(std::chrono::seconds(0))!=std::future_status::ready) return Stop::budget;
+        // Drain completed launches while later compiled launches are running.
+        // The owner alone calls the renderer; the producer only moves owned data.
+        const bool ready=job_.wait_for(std::chrono::seconds(0))==std::future_status::ready;
+        auto output=stream_->take();
+        const auto began=profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        const auto accepted=accept_packets(output);
+        if (profile) {
+            const auto elapsed=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-began).count());
+            profile->submit_ns+=elapsed; profile->longest_submit_ns=std::max(profile->longest_submit_ns,elapsed);
+        }
+        if (!accepted) { job_status_=Stop::unsupported_vector; job_.wait(); }
+        if (!ready && accepted) return Stop::budget;
         auto result=job_.get();
         busy_=false;
         last_result=result.last_result; last_entry=result.entry; last_next_pair=result.next;
@@ -47,16 +61,10 @@ public:
             profile->compiled_ns+=result.profile.compiled_ns; profile->blocks+=result.profile.blocks;
             ++profile->jobs; profile->job_ns+=result.profile.job_ns;
             profile->longest_job_ns=std::max(profile->longest_job_ns,result.profile.job_ns);
+            profile->execution.merge(result.profile.execution);
         }
-        job_status_=result.status;
+        if (job_status_==Stop::budget) job_status_=result.status;
         if (job_status_!=Stop::budget) return job_status_;
-        const auto began=profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-        const auto accepted=accept_packets(result.output);
-        if (profile) {
-            const auto elapsed=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-began).count());
-            profile->submit_ns+=elapsed; profile->longest_submit_ns=std::max(profile->longest_submit_ns,elapsed);
-        }
-        if (!accepted) return job_status_=Stop::unsupported_vector;
         binding_=std::move(result.binding); state=std::move(result.state); completed_=result.completed;
         return Stop::budget;
     }
@@ -68,8 +76,9 @@ public:
         if (job_status_!=Stop::budget) return job_status_;
         if (asynchronous_) return begin_sequence(steps);
         // Reuse the ordinary compiled launch path against private candidate
-        // state. No graphics or shared EE state is published until every step
-        // succeeds, including continuation and code-identity validation.
+        // state. Shared EE state remains private until every step succeeds.
+        // A streaming asynchronous owner can consume completed launch packets;
+        // the synchronous transaction retains whole-sequence publication.
         auto candidate_binding=binding_;
         VectorStorage candidate_shared{};
         if (shared_) candidate_shared=*shared_;
@@ -93,6 +102,7 @@ public:
                 last_sequence.largest_launch=std::max(last_sequence.largest_launch,last_result.blocks);
             }
             if (result!=Stop::budget) { failed_state=std::move(candidate.failed_state); return result; }
+            if (stream_ && !stream_->publish(output)) return Stop::unsupported_vector;
         }
         if (!accept_packets(output)) return Stop::unsupported_vector;
         binding_=std::move(candidate_binding); state=std::move(candidate.state); completed_=candidate.completed_;
@@ -152,7 +162,8 @@ public:
             last_entry=request->continuation ? next.next_pair : request->entry;
             const auto run_compiled=[&](bool resume,std::uint64_t budget) {
                 const auto began=profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-                const auto result=resume ? binding_.resume(next,budget) : binding_.launch(next,last_entry,budget);
+                const auto result=resume ? binding_.resume(next,budget,profile ? &profile->execution : nullptr) :
+                    binding_.launch(next,last_entry,budget,profile ? &profile->execution : nullptr);
                 if (profile) {
                     profile->compiled_ns+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-began).count();
                     profile->blocks+=result.blocks;
@@ -241,6 +252,27 @@ public:
     }
 private:
     struct SequenceOutput { std::vector<graphics::Packet> packets; std::size_t quadwords=0; };
+    struct GraphicsStream {
+        std::mutex mutex;
+        SequenceOutput ready;
+        std::size_t total_words=0;
+        bool publish(SequenceOutput& output) {
+            if (output.packets.empty()) return true;
+            std::lock_guard lock(mutex);
+            if (output.quadwords>NativePacketBatch::maximum_bytes/16-total_words) return false;
+            total_words+=output.quadwords;
+            ready.quadwords+=output.quadwords;
+            for (auto& packet:output.packets) ready.packets.push_back(std::move(packet));
+            output.packets.clear(); output.quadwords=0;
+            return true;
+        }
+        SequenceOutput take() {
+            std::lock_guard lock(mutex);
+            SequenceOutput output;
+            std::swap(output,ready);
+            return output;
+        }
+    };
     bool accept_packets(SequenceOutput& output) {
         if (output.packets.empty()) return true;
         if (!sequence_output_) return graphics.submit && graphics.submit(graphics.context,output.packets);
@@ -276,7 +308,6 @@ private:
     struct JobResult {
         vu::Binding binding;
         vu::State state;
-        SequenceOutput output;
         Profile profile;
         SequenceWork sequence;
         vu::RunResult last_result;
@@ -291,19 +322,20 @@ private:
         try { for (const auto& step:steps) owned.emplace_back(step); }
         catch (const std::invalid_argument&) { return Stop::invalid_state; }
         // The worker sees only owned input, immutable compiled code and private
-        // candidate state. Vulkan and guest-visible publication stay on the owner.
-        job_=std::async(std::launch::async,[owned=std::move(owned),binding=binding_,initial=state,
+        // candidate state. Completed packets cross an ordered, bounded queue.
+        stream_=std::make_shared<GraphicsStream>();
+        job_=std::async(std::launch::async,[owned=std::move(owned),binding=binding_,initial=state,stream=stream_,
             completed=completed_,block_budget=block_budget_,sequence_budget=sequence_budget_,profiling=profile!=nullptr]() mutable {
             const auto began=profiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             NativeVuLaunch worker(binding,block_budget,nullptr,sequence_budget);
             worker.state=std::move(initial); worker.completed_=completed;
             SequenceOutput output; Profile profile;
-            worker.sequence_output_=&output; worker.profile=profiling ? &profile : nullptr;
+            worker.sequence_output_=&output; worker.stream_=std::move(stream); worker.profile=profiling ? &profile : nullptr;
             std::vector<NativeSubmissionStep> views; views.reserve(owned.size());
             for (const auto& step:owned) views.push_back(step.view);
             const auto status=worker.submit_sequence(1,views);
             if (profiling) profile.job_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-began).count();
-            return JobResult{std::move(binding),std::move(worker.state),std::move(output),profile,worker.last_sequence,
+            return JobResult{std::move(binding),std::move(worker.state),profile,worker.last_sequence,
                 worker.last_result,worker.last_entry,worker.last_next_pair,worker.completed_,status,std::move(worker.failed_state)};
         });
         busy_=true;
@@ -312,6 +344,7 @@ private:
     SequenceOutput* sequence_output_=nullptr;
     bool asynchronous_=false,busy_=false;
     Stop job_status_=Stop::budget;
+    std::shared_ptr<GraphicsStream> stream_;
     std::future<JobResult> job_;
     vu::Binding& binding_;
     std::uint64_t block_budget_;

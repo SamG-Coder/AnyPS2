@@ -33,6 +33,7 @@ function(anyps2_numeric_bitcode output)
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>"
             COMMAND "${ANYPS2_CLANG}"
                 -target x86_64-pc-windows-msvc -std=c++20 -O2 -fms-runtime-lib=${runtime_flag} -emit-llvm -c
+                "$<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:-DNDEBUG>"
                 "${root}/libraries/ee_native/src/numeric.cpp"
                 -I "${root}/libraries/runtime/include" ${system_includes} -o "${bitcode}"
             DEPENDS "${root}/libraries/ee_native/src/numeric.cpp" ${numeric_headers}

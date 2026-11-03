@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <vector>
 #include <memory>
+#include <chrono>
 
 namespace nt::vu {
 using Entry = Result (*)(State*);
@@ -18,6 +19,20 @@ enum class RunStatus { complete, unsupported_numeric, unmapped_block, budget_exh
 struct RunResult {
     RunStatus status;
     std::uint64_t blocks;
+};
+// Optional conversion diagnostics. Entries group native block costs by unit
+// and original entry index, including different uploaded artifacts at that index.
+struct ExecutionProfile {
+    struct Site { std::uint64_t calls=0,samples=0,nanoseconds=0; };
+    std::vector<Site> sites;
+    void merge(const ExecutionProfile& other) {
+        if (other.sites.empty()) return;
+        if (sites.empty()) sites.resize(4096);
+        for (std::size_t i=0;i<other.sites.size();++i) {
+            sites[i].calls+=other.sites[i].calls; sites[i].samples+=other.sites[i].samples;
+            sites[i].nanoseconds+=other.sites[i].nanoseconds;
+        }
+    }
 };
 
 // Owns an immutable address index of trusted, ahead-of-time compiled functions.
@@ -55,15 +70,23 @@ public:
 
     // Completed blocks remain committed. A failing generated block is atomic.
     // next_pair identifies the next block when the budget expires or lookup fails.
-    [[nodiscard]] RunResult run(State& state, std::uint64_t budget) const {
+    [[nodiscard]] RunResult run(State& state, std::uint64_t budget,ExecutionProfile* profile=nullptr) const {
         if (state.graphics_pending) return {RunStatus::graphics_pending,0};
         if (state.graphics_completes) return {RunStatus::complete,0};
         std::uint64_t count = 0;
+        if (profile && profile->sites.empty()) profile->sites.resize(4096);
         auto found=find(state.next_pair);
         while (count < budget) {
             if (!found)
                 return {RunStatus::unmapped_block, count};
+            auto* site=profile ? &profile->sites[unit_*2048+found->address] : nullptr;
+            const bool sample=site && (++site->calls%1024)==0;
+            const auto began=sample ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             const auto result = found->entry(&state);
+            if (sample) {
+                site->nanoseconds+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-began).count();
+                ++site->samples;
+            }
             ++count;
             switch (result) {
             case Result::complete: return {RunStatus::complete, count};

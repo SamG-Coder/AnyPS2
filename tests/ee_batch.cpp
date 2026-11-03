@@ -500,7 +500,7 @@ void vector_families() {
             vectors.values[3]={11,22,33,44}; vectors.mac=77; vectors.status=88; const auto before=vectors;
             nt::ee::Memory memory; memory.vectors=&vectors;
             check(execute(state,memory)==Stop::syscall && state.executed==1 &&
-                  vectors.values[3][3]==0x7f800000 && vectors.mac==0x1000 && (vectors.status&0x208)==0x208);
+                  vectors.values[3][3]==0x7f800000 && vectors.mac==0 && vectors.status==(before.status&0xff0));
         }
     }
 }

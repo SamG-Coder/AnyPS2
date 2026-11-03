@@ -74,6 +74,8 @@ extern "C" std::uint32_t nt_vu_graphics_end_count();
 extern "C" nt::vu::Result nt_vu_clip_0(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_clip_4(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_clip_18(nt::vu::State*);
+extern "C" const nt::vu::Block* nt_vu_clip_blocks();
+extern "C" std::uint32_t nt_vu_clip_count();
 extern "C" const nt::vu::Block* nt_vu_continuation_blocks();
 extern "C" std::uint32_t nt_vu_continuation_count();
 extern "C" const std::uint8_t* nt_vu_continuation_image();
@@ -84,6 +86,65 @@ extern "C" std::uint32_t nt_vu_whole_count();
 extern "C" const nt::vu::Block* nt_vu_mac_pipeline_blocks();
 extern "C" std::uint32_t nt_vu_mac_pipeline_count();
 namespace {
+void test_clip_publication() {
+    auto storage=std::make_unique<nt::vu::State>();
+    const std::span blocks(nt_vu_clip_blocks(),nt_vu_clip_count());
+    unsigned address=20;
+    for (const unsigned count:{2U,3U,4U,5U,31U,32U,33U,64U}) {
+        const auto block=std::find_if(blocks.begin(),blocks.end(),[&](const auto& b){return b.address==address;});
+        if (block==blocks.end()) throw std::runtime_error("Missing clip publication fixture");
+        for (unsigned selection=0;selection<20;++selection) for (const unsigned delay:{0U,4U,0xffffffffU}) {
+            auto& state=*storage; state={};
+            state.clip=0x123456; state.visible_clip=0x789abc;
+            state.pending_clip={0x110001,0x220002,0x330003,0x440004};
+            state.pending_clip_mask=selection<16 ? selection : 0x80000000U|(1U<<(selection-16));
+            state.clip_read_delay=delay;
+            auto expected_slots=state.pending_clip;
+            auto expected_visible=state.visible_clip,expected_mask=state.pending_clip_mask;
+            for (unsigned step=0;step<count;++step) {
+                if (expected_mask) {
+                    if (expected_mask&1) expected_visible=expected_slots[0];
+                    for (unsigned i=0;i<3;++i) expected_slots[i]=expected_slots[i+1];
+                    expected_mask>>=1;
+                } else expected_visible=state.clip;
+            }
+            if (block->entry(&state)!=nt::vu::Result::transfer || state.clip!=0x123456 ||
+                state.visible_clip!=expected_visible || state.pending_clip!=expected_slots ||
+                state.pending_clip_mask!=expected_mask || state.clip_read_delay!=(delay>count ? delay-count : 0))
+                throw std::runtime_error("Batched clip publication changed native boundary state: count="+std::to_string(count)+
+                    " mask_case="+std::to_string(selection)+" visible="+std::to_string(state.visible_clip)+
+                    " expected="+std::to_string(expected_visible)+" pending="+std::to_string(state.pending_clip_mask)+
+                    " expected_pending="+std::to_string(expected_mask));
+        }
+        address+=count;
+    }
+}
+void test_scalar_publication() {
+    // The ADD/branch region has three pairs and no Q/P observers. Pending
+    // scalar results must cross it exactly, including status bits independent
+    // of the ADD's MAC flags and results that are still pending at the exit.
+    auto storage=std::make_unique<nt::vu::State>();
+    for (const auto q_delay:{0U,1U,2U,3U,4U,7U,0xffffffffU})
+        for (const auto p_delay:{0U,1U,3U,4U,54U,0xffffffffU})
+            for (const auto active:{0U,1U}) {
+        auto& pending=*storage; pending={};
+        pending.vectors[3].fill(0x3f800000); pending.vectors[4].fill(0x40000000);
+        pending.status=pending.visible_status=0x410;
+        pending.quotient=0x3f800000; pending.pending_quotient=0x40400000;
+        pending.quotient_flags=0x20; pending.quotient_pending=active; pending.quotient_read_delay=q_delay;
+        pending.scalar_p=0x40000000; pending.pending_p=0x40800000;
+        pending.p_pending=active; pending.p_read_delay=p_delay;
+        const bool q_due=q_delay && q_delay<=3,p_due=p_delay && p_delay<=3;
+        if (nt_vu_branch(&pending)!=nt::vu::Result::transfer || pending.vectors[5][0]!=0x40400000 ||
+            pending.quotient!=(q_due && active ? 0x40400000U : 0x3f800000U) ||
+            pending.scalar_p!=(p_due && active ? 0x40800000U : 0x40000000U) ||
+            pending.quotient_pending!=(q_due ? 0U : active) || pending.p_pending!=(p_due ? 0U : active) ||
+            pending.quotient_read_delay!=(q_delay>3 ? q_delay-3 : 0U) ||
+            pending.p_read_delay!=(p_delay>3 ? p_delay-3 : 0U) ||
+            pending.status!=(q_due && active ? 0xc20U : 0x410U) || pending.visible_status!=pending.status)
+            throw std::runtime_error("Scalar publication across compiled arithmetic region changed state or flags");
+    }
+}
 void test_async_submission() {
     const auto image=std::span(nt_vu_graphics_batch_image(),nt_vu_graphics_batch_size());
     nt::vu::Binding binding(nt::vu::Program(1,{nt_vu_graphics_batch_blocks(),nt_vu_graphics_batch_count()}),0,image);
@@ -101,7 +162,8 @@ void test_async_submission() {
     nt::ee::NativePlatform platform;
     std::vector<std::uint8_t> ram(4096);
     nt::ee::Memory memory; memory.data=ram.data(); memory.size=ram.size(); platform.attach(memory);
-    owner.connect(platform.packet_setup); owner.connect_data(memory);
+    nt::ee::NativeVuSubmissions routing; routing.add(owner);
+    routing.connect(platform.packet_setup); owner.connect_data(memory);
     const auto start=[&] {
         const std::array<std::uint32_t,8> words{0x6c010000,11,22,33,44,0x94000000,0,0};
         std::memcpy(ram.data()+256,words.data(),sizeof(words));
@@ -112,6 +174,31 @@ void test_async_submission() {
             throw std::runtime_error("Async compiled submission was not accepted");
     };
     start();
+    // Compiled EE interrupt acknowledgement remains independent of an owned
+    // VU job. Waiting here would hold the interrupt handler until rendering.
+    platform.graphics.drawing_completed();
+    nt::runtime::State acknowledgement;
+    acknowledgement.pc=0x4f0020; acknowledgement.set(4,0x12001000); acknowledgement.set(8,2);
+    if (nt_ee_generated_run(&acknowledgement,&memory,1)!=nt::ee::Stop::budget ||
+        acknowledgement.executed!=1 || (platform.graphics.read(0x12001000).value&2) ||
+        memory.io.write32(memory.io.context,0x12001010,0x7f00)!=nt::ee::Stop::budget ||
+        platform.graphics.read(0x12001010).value!=0x7f00 ||
+        memory.io.write32(memory.io.context,0x12001000,8)!=nt::ee::Stop::budget ||
+        memory.io.write64(memory.io.context,0x12001000,0x200)!=nt::ee::Stop::native_wait ||
+        memory.io.write64(memory.io.context,0x12001000,0x100)!=nt::ee::Stop::native_wait ||
+        memory.io.write64(memory.io.context,0x12000070,0x14000a008cULL)!=nt::ee::Stop::budget ||
+        platform.graphics.output().buffers[0]!=0x14000a008cULL)
+        throw std::runtime_error("Pending VU job blocked display/interrupt controls or released flush/reset");
+    const std::array<std::uint32_t,4> independent{0x01000101,0x20000000,0x12345678,0};
+    const auto independent_bytes=std::span(reinterpret_cast<const std::uint8_t*>(independent.data()),sizeof(independent));
+    if (platform.packet_setup.consume(0,independent_bytes,false)!=nt::ee::Stop::budget ||
+        platform.packet_setup.read(0x10003870).value!=0x12345678 ||
+        platform.packet_setup.write(0x10003870,0x87654321)!=nt::ee::Stop::budget ||
+        platform.packet_setup.read(0x10003870).value!=0x87654321 ||
+        platform.packet_setup.write(0x10003c70,0)!=nt::ee::Stop::native_wait ||
+        platform.packet_setup.consume(1,independent_bytes,false)!=nt::ee::Stop::native_wait ||
+        platform.packet_setup.consume(2,{},false)!=nt::ee::Stop::native_wait)
+        throw std::runtime_error("Independent VU0 work stalled behind VU1 or conflicting work escaped ownership");
     if (!owner.pending() || !platform.packet_setup.working() || !platform.packet_setup.pending(1) ||
         owner.state!=before || sink.calls || platform.completions.status()&(1U<<1) ||
         !(platform.packet_submission.read(0x10009000).value&0x100) || platform.packet_setup.take_interrupts() ||
@@ -145,6 +232,62 @@ void test_async_submission() {
         throw std::runtime_error("Async renderer rejection committed private state");
     if (platform.poll_submissions()!=nt::ee::Stop::unsupported_vector || owner.state!=before || sink.calls!=2)
         throw std::runtime_error("Failed asynchronous job later reported success");
+}
+nt::vu::Entry streamed_entry=nullptr;
+std::atomic<unsigned> streamed_launches=0;
+std::atomic<bool> streamed_second_entered=false;
+std::shared_future<void> streamed_release;
+nt::vu::Result gated_streamed_entry(nt::vu::State* state) {
+    if (++streamed_launches==2) {
+        streamed_second_entered=true;
+        if (streamed_release.wait_for(std::chrono::seconds(5))!=std::future_status::ready)
+            return nt::vu::Result::unsupported_schedule;
+    }
+    return streamed_entry(state);
+}
+void test_streamed_launches(bool fail_later) {
+    const auto image=std::span(nt_vu_graphics_batch_image(),nt_vu_graphics_batch_size());
+    const auto source=std::span(nt_vu_graphics_batch_blocks(),nt_vu_graphics_batch_count());
+    std::vector<nt::vu::Block> blocks(source.begin(),source.end());
+    for (auto& block:blocks) for (auto* link:{&block.target,&block.fallthrough})
+        if (*link) *link=&blocks[static_cast<std::size_t>(*link-source.data())];
+    streamed_entry=blocks.front().entry; blocks.front().entry=gated_streamed_entry;
+    streamed_launches=0; streamed_second_entered=false;
+    std::promise<void> release; streamed_release=release.get_future().share();
+    nt::vu::Binding binding(nt::vu::Program(1,blocks),0,image);
+    if (!binding.upload(1,std::array{nt::vu::UploadView{0,image}}))
+        throw std::runtime_error("Streamed fixture binding failed");
+    nt::ee::NativeVuLaunch owner(binding); owner.enable_async();
+    owner.state.integers[0]=0xffff;
+    owner.state.data[1023]={0x8001,0x10000000,0,0};
+    owner.state.data[0]={11,22,33,44}; owner.state.vectors[0]={55,66,77,88};
+    auto before=std::make_unique<nt::vu::State>(owner.state);
+    std::vector<nt::graphics::Packet> packets;
+    owner.graphics={&packets,[](void* raw,std::span<const nt::graphics::Packet> batch) {
+        auto& output=*static_cast<std::vector<nt::graphics::Packet>*>(raw);
+        output.insert(output.end(),batch.begin(),batch.end()); return true;
+    }};
+    std::array<nt::ee::NativeSubmissionStep,3> steps;
+    steps[0].launch=nt::ee::NativeLaunchView{0,0,0}; steps[1].launch=steps[0].launch;
+    steps[2].launch=nt::ee::NativeLaunchView{2047,0,0};
+    if (owner.submit_sequence(1,std::span(steps).first(fail_later ? 3 : 2))!=nt::ee::Stop::budget)
+        throw std::runtime_error("Streamed sequence was not accepted");
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+    while (!streamed_second_entered && std::chrono::steady_clock::now()<deadline) std::this_thread::yield();
+    const auto status=owner.poll();
+    const bool early=streamed_second_entered && status==nt::ee::Stop::budget && owner.pending() &&
+        owner.state==*before && packets.size()==2 && packets[0][1]==before->data[0] && packets[1][1]==before->vectors[0];
+    release.set_value();
+    if (!early) throw std::runtime_error("Completed graphics waited for unrelated later compiled work or published shared state early: entered="+std::to_string(streamed_second_entered.load())+" calls="+std::to_string(streamed_launches.load())+" status="+std::to_string(unsigned(status))+" packets="+std::to_string(packets.size())+" next="+std::to_string(owner.last_next_pair));
+    auto result=nt::ee::Stop::budget;
+    while (owner.pending() && std::chrono::steady_clock::now()<deadline) {
+        result=owner.poll(); if (result!=nt::ee::Stop::budget) break;
+        std::this_thread::yield();
+    }
+    if (owner.pending() || packets.size()!=4 || packets[1]!=packets[2] || packets[1]!=packets[3] ||
+        result!=(fail_later ? nt::ee::Stop::unsupported_vector : nt::ee::Stop::budget) ||
+        (fail_later && (owner.state!=*before || owner.poll()!=result)))
+        throw std::runtime_error("Streamed completion/failure lost ordered completed packets or reported false success");
 }
 void test_memory_transactions() {
     nt::vu::State memory;
@@ -332,6 +475,8 @@ int run_core_tests() {
                 branch.integers[0]!=6 || branch.integers[2]!=1 || branch.delayed_integer!=3 || branch.delayed_value!=0)
                 throw std::runtime_error("Compiled VU branch/delay behavior failed");
         }
+        test_scalar_publication();
+        test_clip_publication();
         nt::vu::State call; call.integers[0]=7;
         if (nt_vu_call(&call)!=nt::vu::Result::transfer || call.next_pair!=7 || call.integers[0]!=102 || call.integers[2]!=102)
             throw std::runtime_error("Compiled VU indirect link alias failed");
@@ -342,19 +487,53 @@ int run_core_tests() {
             nt::vu::State range;
             range.vectors[0]={0x7fffffff,0xffffffff,0x7f800000,0};
             range.vectors[1]={0x40000000,0x40000000,0x3f800000,0x7fffffff};
-            const auto before=range;
             const std::array<std::uint32_t,4> expected{0x7fffffff,0xffffffff,0x7f800000,0};
             if (nt_vu_range(&range)!=nt::vu::Result::complete || range.vectors[2]!=expected ||
-                range.vectors[3]!=expected || range.mac!=0xe041 || range.status!=0x2cb)
+                range.vectors[3]!=expected ||
+                range.vectors[4]!=std::array<std::uint32_t,4>{0xffffffff,0x7fffffff,0xff800000,0} ||
+                range.mac!=0xc0a1 || range.status!=0x2cb)
                 throw std::runtime_error("Compiled VU extended MUL/MADD or lane flags failed");
-            auto rejected=before; rejected.accumulator[0]=0xbf800000;
-            const auto original=rejected;
-            if (nt_vu_range(&rejected)!=nt::vu::Result::unsupported_numeric || rejected!=original)
-                throw std::runtime_error("Unvalidated opposing overflow did not roll back native VU region");
+            // Overflow must take precedence even over an opposing maximum
+            // accumulator. Exercise both product signs and add/subtract forms.
+            for (const auto sign:{0U,0x80000000U}) {
+                nt::vu::State saturated;
+                saturated.vectors[0].fill(0x7f800000U|sign);
+                saturated.vectors[1]={0x40000000,0x40800000,0x40000000,0x40800000};
+                saturated.accumulator={0x7fffffff,0xffffffff,0,0x80000000};
+                const auto product=0x7fffffffU|sign;
+                if (nt_vu_range(&saturated)!=nt::vu::Result::complete ||
+                    saturated.vectors[2]!=std::array<std::uint32_t,4>{product,product,product,product} ||
+                    saturated.vectors[3]!=saturated.vectors[2] ||
+                    saturated.vectors[4]!=std::array<std::uint32_t,4>{product^0x80000000U,product^0x80000000U,
+                                                             product^0x80000000U,product^0x80000000U} ||
+                    saturated.mac!=(sign ? 0xf000U : 0xf0f0U) ||
+                    saturated.status!=(sign ? 0x288U : 0x28aU))
+                    throw std::runtime_error("Compiled VU product overflow lost precedence over accumulator");
+            }
+        }
+        // Exercise the arithmetic shortcuts through an LLVM-compiled ADD/branch,
+        // including exponent separation on both sides of the fast-path boundary.
+        for (const auto values:std::array<std::array<std::uint32_t,3>,18>{{
+            {0,0x3f800000,0x3f800000},{0x80000001,0x80000000,0x80000000},
+            {0x007fffff,0x80000001,0},{0x80000000,0x7fffffff,0x7fffffff},
+            {0x3f800000,0x33000000,0x3f800000},{0x3f800000,0xb3000000,0x3f7fffff},
+            {0x3f800000,0x33800000,0x3f800000},{0x3f800000,0xb3800000,0x3f7fffff},
+            {0xbf800000,0x00800000,0xbf7fffff},{0xbf800000,0x80800000,0xbf800000},
+            {0x7fffffff,0x00800000,0x7fffffff},{0x7f800000,0x80800000,0x7f7fffff},
+            {0x3f800001,0xbf800000,0x34000000},{0xbf800001,0x3f800000,0xb4000000},
+            {0x3f800000,0xbf7fffff,0x33800000},{0x00800001,0x80800000,0},
+            {0x7fffffff,0xffffffff,0},{0x3fffffff,0x33800000,0x3fffffff}}}) {
+            for (const bool swap:{false,true}) {
+                auto sample=std::make_unique<nt::vu::State>();
+                sample->vectors[3][0]=values[swap ? 1 : 0];
+                sample->vectors[4][0]=values[swap ? 0 : 1];
+                if (nt_vu_branch(sample.get())!=nt::vu::Result::transfer || sample->vectors[5][0]!=values[2])
+                    throw std::runtime_error("Compiled VU zero/separated-exponent addition failed");
+            }
         }
         nt::vu::State extended_branch; extended_branch.vectors[3][0]=0x7f800000;
         if (nt_vu_branch(&extended_branch)!=nt::vu::Result::transfer || extended_branch.vectors[5][0]!=0x7f800000 ||
-            extended_branch.mac!=0x8000 || extended_branch.status!=0x208)
+            extended_branch.mac!=0 || extended_branch.status!=0)
             throw std::runtime_error("Compiled VU extended ADD/branch flags failed");
         const auto native=[] {
             std::array blocks{
@@ -501,7 +680,7 @@ int run_core_tests() {
             throw std::runtime_error("Routed VU1 artifact did not execute native code");
         {
             auto switched=binding1;
-            const auto* catalog=nt_vu_program1_artifacts_v2();
+            const auto* catalog=nt_vu_program1_artifacts_v3();
             if (nt_vu_program1_artifact_count()!=2) throw std::runtime_error("VU catalog did not export both images");
             const std::span alternative(catalog[1].image,catalog[1].image_size);
             const std::array replacement{nt::vu::UploadView{4,alternative.subspan(32,8)}};
@@ -1222,7 +1401,7 @@ int run_core_tests() {
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }
 int main() {
-    try { test_async_submission(); }
+    try { test_async_submission(); test_streamed_launches(false); test_streamed_launches(true); }
     catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
     return run_core_tests();
 }

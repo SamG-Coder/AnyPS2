@@ -340,8 +340,10 @@ private:
                 state.upload.append(packet.subspan(cursor,count),writes);
                 draws.emplace_back(std::move(writes));
             }
+            unsigned register_index=0;
             for (std::uint64_t index=0;format<2 && index<entries;++index) {
-                const auto reg=unsigned((registers>>((index%nreg)*4))&15);
+                const auto reg=unsigned((registers>>(register_index*4))&15);
+                if (++register_index==nreg) register_index=0;
                 const auto& q=packet[cursor+(format ? index/2 : index)];
                 if (format) {
                     if (reg==14) throw std::invalid_argument("Address/data is invalid in a register-list packet");

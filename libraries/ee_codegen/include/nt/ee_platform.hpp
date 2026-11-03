@@ -95,7 +95,15 @@ private:
     static Stop write64(void* context,std::uint32_t address,std::uint64_t value) {
         if (address<0x12000000 || address>=0x12002000) return Stop::memory_fault;
         auto& self=*static_cast<NativePlatform*>(context);
-        return self.packet_setup.working() ? Stop::native_wait : self.graphics.write(address,value);
+        return self.write_graphics(address,value);
+    }
+    Stop write_graphics(std::uint32_t address,std::uint64_t value) {
+        // Display selection and interrupt controls do not consume vector output.
+        // They may change while a compiled VU job is still producing geometry.
+        // Flush/reset affect the drawing owner and must await its publication.
+        if (address==0x12001000 && (value&0x300) && packet_setup.working())
+            return Stop::native_wait;
+        return graphics.write(address,value);
     }
     static bool event_address(std::uint32_t address) { return address==0x1000f000 || address==0x1000f010; }
     static IoRead read(void* context,std::uint32_t address) {
@@ -123,7 +131,7 @@ private:
         auto& self=*static_cast<NativePlatform*>(context);
         if (address==0x1000f180)
             return self.debug_byte ? self.debug_byte(self.debug_context,static_cast<std::uint8_t>(value)) : Stop::unsupported_system;
-        if (NativeGraphics::maps(address)) return self.packet_setup.working() ? Stop::native_wait : self.graphics.write(address,value);
+        if (NativeGraphics::maps(address)) return self.write_graphics(address,value);
         if (NativePacketSetup::maps(address)) {
             const auto result=self.packet_setup.write(address,value);
             if (result!=Stop::budget || (address!=0x10003810 && address!=0x10003c10)) return result;

@@ -18,6 +18,7 @@
 #include <functional>
 #include <thread>
 #include <chrono>
+#include <map>
 
 namespace nt::ee {
 struct MainThread { runtime::InitialStack stack; std::uint32_t global_pointer,root; };
@@ -25,6 +26,8 @@ struct ExecutionProfile {
     std::uint64_t entry_ns=0,service_ns=0,idle_ns=0,entries=0,operations=0;
     std::uint64_t longest_entry_ns=0;
     std::uint64_t display_waits=0,job_waits=0,display_sleep_ns=0,job_sleep_ns=0;
+    struct Site { std::uint64_t nanoseconds=0,operations=0,calls=0; };
+    std::map<std::uint32_t,Site> sites;
 };
 class StartupServices {
 public:
@@ -308,6 +311,7 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
         // foreground progress and must not restart the bounded idle timeout.
         if (!services.foreground_waiting()) idle_since.reset();
         const auto before=state.executed;
+        const auto entry_pc=state.pc;
         const auto slice=memory.io.poll && budget>4096 ? 4096 : budget;
         const auto entry_start=services.profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         const auto result=entry(&state,&memory,slice);
@@ -317,6 +321,11 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
             services.profile->entry_ns+=elapsed;
             services.profile->longest_entry_ns=std::max(services.profile->longest_entry_ns,elapsed);
             ++services.profile->entries; services.profile->operations+=retired;
+            auto& sites=services.profile->sites;
+            if (sites.size()<4096 || sites.contains(entry_pc)) {
+                auto& site=sites[entry_pc];
+                site.nanoseconds+=elapsed; site.operations+=retired; ++site.calls;
+            }
         }
         if (retired>slice) return Stop::invalid_state;
         budget-=retired;
