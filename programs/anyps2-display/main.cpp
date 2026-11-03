@@ -30,7 +30,7 @@ int main(int argc,char** argv) {
             bounds.right-bounds.left,bounds.bottom-bounds.top,nullptr,nullptr,wc.hInstance,nullptr)};
         if (!window.handle) throw std::runtime_error("Cannot create window");
         ShowWindow(window.handle,SW_SHOW);
-        nt::graphics::VulkanRenderer renderer(window.handle,true);
+        nt::graphics::VulkanRenderer renderer(window.handle,true,nt::graphics::RenderPath::reference_compute);
         std::vector<std::uint32_t> memory(1024*1024,0xff18120e), pixels(width*height);
         renderer.sprite(memory,{32,32,608,416,0,10,0xff384828,0});
         renderer.sprite(memory,{64,64,320,384,0,10,0xffdda32a,0});

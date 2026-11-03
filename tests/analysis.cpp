@@ -1024,6 +1024,34 @@ int main() {
             check(roots()==std::set<std::uint32_t>{0x1080,0x1090},"Adjacent stack write hid a switch table");
             put(image,0x104,0x2008);
             check(roots().empty(),"Spilled table promoted a data target to executable code");
+            put(image,0x104,0x1090);
+            put(image,0x2c,0x8d230010); // Reload before scale instead of after it.
+            put(image,0x30,0x00041080);
+            check(roots()==std::set<std::uint32_t>{0x1080,0x1090},"Reload-before-scale switch table lost");
+            put(image,0x14,0xa1200011);
+            check(roots().empty(),"Reload-before-scale resurrected an overwritten spill");
+            put(image,0x14,0xad200014);
+            put(image,0x28,0x24840001);
+            check(roots().empty(),"Reload-before-scale ignored delay-slot index modification");
+
+        }
+        {
+            nt::Bytes image(0x120,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,0x100,0x100,5,4},{0x100,0x2000,0x20,0x20,6,4}}};
+            const std::uint32_t setup[]{0x27bdffe0,0x24082000,0xafa80010,0x2c850002,
+                0x240a0002,0x254affff,0x1540fffe,0,0x10c00003,0,0x10000003,0,0,0,
+                0x10a00019,0,0x8fa30010,0x00041080,0x00621021,0x8c420000,0x00400008,0};
+            for (unsigned n=0;n<std::size(setup);++n) put(image,n*4,setup[n]);
+            for (const auto at:{0x80U,0x90U,0xa0U}) { put(image,at,0x03e00008); put(image,at+4,0x27bd0020); }
+            put(image,0x100,0x1080); put(image,0x104,0x1090);
+            const auto roots=[&] { return nt::analysis::bounded_switch_entries(image,fixture,nt::analysis::discover(image,fixture,128,{},true)); };
+            check(roots()==std::set<std::uint32_t>{0x1080,0x1090},"Hoisted predicate lost across loop and diamond");
+            put(image,0x30,0x24840001);
+            check(roots().empty(),"One incoming path changed the guarded index");
+            put(image,0x30,0x2c850003);
+            check(roots().empty(),"Mutually exclusive range predicates were combined");
+            put(image,0x30,0); put(image,0x2c,0x24050001);
+            check(roots().empty(),"Branch-delay predicate overwrite was ignored");
         }
         std::cout << "Control-flow discovery and address-boundary tests passed\n";
         return 0;

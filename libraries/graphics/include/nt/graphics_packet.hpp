@@ -1,14 +1,32 @@
 #pragma once
 #include <array>
+#include <algorithm>
 #include <cstdint>
 #include <span>
 #include <stdexcept>
 #include <vector>
 #include <utility>
+#include <bit>
+#include <cstring>
 
 namespace nt::graphics {
 using Quadword=std::array<std::uint32_t,4>;
 using Packet=std::vector<Quadword>;
+namespace detail {
+// Native transport bytes are little endian and may be unaligned. Copy payloads
+// in bulk on little-endian hosts; retain explicit decoding on other hosts.
+inline void append_quadwords(Packet& words,std::span<const std::uint8_t> bytes) {
+    if (bytes.size()%16) throw std::invalid_argument("Unaligned graphics payload size");
+    const auto first=words.size();
+    words.resize(first+bytes.size()/16);
+    if constexpr (std::endian::native==std::endian::little) {
+        if (!bytes.empty()) std::memcpy(words.data()+first,bytes.data(),bytes.size());
+    } else {
+        for (std::size_t i=0;i<bytes.size();++i)
+            words[first+i/16][(i%16)/4]|=std::uint32_t(bytes[i])<<((i%4)*8);
+    }
+}
+}
 struct BatchConsumer {
     void* context=nullptr;
     // Accept the complete ordered batch or leave external state unchanged.
@@ -36,17 +54,21 @@ public:
         constexpr std::size_t limit=65536;
         if (bytes.empty() || bytes.size()%16 || bytes.size()/16>limit-packet_.size())
             throw std::invalid_argument("Invalid graphics stream extent");
-        for (std::size_t offset=0;offset<bytes.size();offset+=16) {
-            Quadword word{};
-            for (unsigned byte=0;byte<16;++byte)
-                word[byte/4]|=std::uint32_t(bytes[offset+byte])<<((byte%4)*8);
+        std::size_t offset=0;
+        while (offset<bytes.size()) {
             if (!remaining_) {
+                // Only tags need inspection; payload words are opaque data.
+                detail::append_quadwords(packet_,bytes.subspan(offset,16)); offset+=16;
+                const auto& word=packet_.back();
                 remaining_=payload_words(word);
-                if (remaining_>limit-packet_.size()-1)
+                if (remaining_>limit-packet_.size())
                     throw std::invalid_argument("Graphics stream packet exceeds bound");
                 end_=(word[0]&0x8000U)!=0;
-            } else --remaining_;
-            packet_.push_back(word);
+            } else {
+                const auto count=std::min(remaining_,(bytes.size()-offset)/16);
+                detail::append_quadwords(packet_,bytes.subspan(offset,count*16));
+                remaining_-=count; offset+=count*16;
+            }
             if (!remaining_ && end_) {
                 output.push_back(std::move(packet_)); packet_.clear(); end_=false;
             }
@@ -77,9 +99,8 @@ inline std::vector<Quadword> collect_packet(std::span<const Quadword> ring,unsig
 inline void append_packets(std::vector<Packet>& packets,std::span<const std::uint8_t> bytes) {
     if (bytes.empty() || bytes.size()%16 || bytes.size()>65536U*16U)
         throw std::invalid_argument("Invalid native graphics transfer extent");
-    std::vector<Quadword> words(bytes.size()/16);
-    for (std::size_t index=0;index<bytes.size();++index)
-        words[index/16][(index%16)/4]|=std::uint32_t(bytes[index])<<((index%4)*8);
+    std::vector<Quadword> words;
+    detail::append_quadwords(words,bytes);
     std::size_t cursor=0;
     while (cursor<words.size()) {
         auto packet=collect_packet(std::span(words).subspan(cursor),0);

@@ -5,10 +5,11 @@ cmake_minimum_required(VERSION 3.24)
 function(check_content relative physical)
     string(TOLOWER "${relative}" lower)
     if(NOT lower MATCHES "^(libraries|programs|tests)/[a-z0-9_./-]+\\.(cpp|hpp|h|cmake)$"
-       AND NOT lower MATCHES "^libraries/graphics/shaders/[a-z0-9_-]+\\.comp$"
+       AND NOT lower MATCHES "^libraries/graphics/shaders/[a-z0-9_-]+\\.(comp|vert|frag)$"
+       AND NOT lower STREQUAL "libraries/graphics/shaders/texture_decode.ll"
        AND NOT lower MATCHES "^docs/[a-z0-9_./-]+\\.md$"
        AND NOT lower MATCHES "^tests/ps2_programs/(cmakelists\\.txt|start\\.s|link\\.ld|cases\\.json|run\\.py|test_runner\\.py)$"
-       AND NOT lower MATCHES "^cmake/(native_output|check_native_output|converter_zlib|llvm_objects|validate_native)\\.cmake$"
+       AND NOT lower MATCHES "^cmake/(native_output|check_native_output|converter_zlib|llvm_objects|validate_native|embed_spirv|llvm_shaders)\\.cmake$"
        AND NOT lower STREQUAL "docs/third-party/play-license.txt"
        AND NOT lower STREQUAL "docs/third-party/zlib-license.txt"
        AND NOT lower STREQUAL "docs/third-party/hidapi-license.txt"

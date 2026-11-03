@@ -61,6 +61,7 @@ extern "C" const nt::vu::Block* nt_vu_continuation_blocks();
 extern "C" std::uint32_t nt_vu_continuation_count();
 extern "C" const std::uint8_t* nt_vu_continuation_image();
 extern "C" std::uint32_t nt_vu_continuation_size();
+extern "C" nt::vu::Result nt_vu_range(nt::vu::State*);
 int main() {
     try {
         {
@@ -169,12 +170,6 @@ int main() {
         if (nt_ee_multiply_accumulate_finite(0xbf800000,0x3f800001,0x3f7ffffe,0)!=0xb3800000ULL ||
             !(nt_ee_multiply_accumulate_finite(0x3f800000,0x00800000,0x3f000000,0)&(1ULL<<33)))
             throw std::runtime_error("VU multiply/accumulate rounding boundary failed");
-        for (const auto invalid:{0x7f800000U,0x7fc12345U,0x7f7fffffU}) {
-            auto rejected=initial; rejected.vectors[13][0]=invalid;
-            const auto before=rejected;
-            if (nt_vu_generated(&rejected)!=nt::vu::Result::unsupported_numeric || !(rejected==before))
-                throw std::runtime_error("VU numeric failure partially committed a native region");
-        }
         auto underflow=initial;
         underflow.vectors[13][0]=0x00800000; underflow.vectors[14][0]=0x3f000000;
         const auto before_underflow=underflow;
@@ -192,10 +187,24 @@ int main() {
         call={}; call.integers[0]=9; call.delayed_integer=1; call.delayed_value=511;
         if (nt_vu_call(&call)!=nt::vu::Result::transfer || call.next_pair!=511)
             throw std::runtime_error("Compiled VU incoming delayed operand failed");
-        nt::vu::State bad_branch; bad_branch.vectors[3][0]=0x7f800000;
-        const auto before_branch=bad_branch;
-        if (nt_vu_branch(&bad_branch)!=nt::vu::Result::unsupported_numeric || !(bad_branch==before_branch))
-            throw std::runtime_error("Compiled VU branch numeric rollback failed");
+        {
+            nt::vu::State range;
+            range.vectors[0]={0x7fffffff,0xffffffff,0x7f800000,0};
+            range.vectors[1]={0x40000000,0x40000000,0x3f800000,0x7fffffff};
+            const auto before=range;
+            const std::array<std::uint32_t,4> expected{0x7fffffff,0xffffffff,0x7f800000,0};
+            if (nt_vu_range(&range)!=nt::vu::Result::complete || range.vectors[2]!=expected ||
+                range.vectors[3]!=expected || range.mac!=0xe041 || range.status!=0x2cb)
+                throw std::runtime_error("Compiled VU extended MUL/MADD or lane flags failed");
+            auto rejected=before; rejected.accumulator[0]=0xbf800000;
+            const auto original=rejected;
+            if (nt_vu_range(&rejected)!=nt::vu::Result::unsupported_numeric || rejected!=original)
+                throw std::runtime_error("Unvalidated opposing overflow did not roll back native VU region");
+        }
+        nt::vu::State extended_branch; extended_branch.vectors[3][0]=0x7f800000;
+        if (nt_vu_branch(&extended_branch)!=nt::vu::Result::transfer || extended_branch.vectors[5][0]!=0x7f800000 ||
+            extended_branch.mac!=0x8000 || extended_branch.status!=0x208)
+            throw std::runtime_error("Compiled VU extended ADD/branch flags failed");
         const std::array blocks{
             nt::vu::Block{5,nt_vu_end_true}, nt::vu::Block{0,nt_vu_branch},
             nt::vu::Block{3,nt_vu_end_false}, nt::vu::Block{100,nt_vu_call}};
@@ -226,9 +235,6 @@ int main() {
         const auto missing_before=missing;
         if (native.run(missing,10).blocks!=0 || missing!=missing_before)
             throw std::runtime_error("Native VU missing entry executed code");
-        const auto numeric=native.run(bad_branch,10);
-        if (numeric.status!=nt::vu::RunStatus::unsupported_numeric || numeric.blocks!=1 || bad_branch!=before_branch)
-            throw std::runtime_error("Native VU dispatcher lost numeric failure");
         for (const auto invalid:std::array{
                 std::array{nt::vu::Block{0,nt_vu_branch},nt::vu::Block{0,nt_vu_call}},
                 std::array{nt::vu::Block{0,nt_vu_branch},nt::vu::Block{512,nt_vu_call}},
@@ -737,10 +743,10 @@ int main() {
             if (nt_vu_geometry(&absent)!=nt::vu::Result::unsupported_context || absent!=before)
                 throw std::runtime_error("Absent native launch input silently supplied");
         }
-        auto bad_geometry=geometry_initial; bad_geometry.vectors[0][1]=0x7f800000;
-        const auto bad_geometry_before=bad_geometry;
-        if (nt_vu_geometry(&bad_geometry)!=nt::vu::Result::unsupported_numeric || bad_geometry!=bad_geometry_before)
-            throw std::runtime_error("Outer-product numeric failure was not atomic");
+        auto extended_geometry=geometry_initial; extended_geometry.vectors[0][1]=0x7f800000;
+        extended_geometry.vectors[1]={0,0x40a00000,0x3f800000,88};
+        if (nt_vu_geometry(&extended_geometry)!=nt::vu::Result::complete || extended_geometry.accumulator[0]!=0x7f800000)
+            throw std::runtime_error("Outer-product extended input failed");
         nt::vu::State p;
         p.vectors[0]={0x40400000,0x40800000,0,0x7f800000}; // Length 5; w is unused.
         p.vectors[1]={11,22,33,44}; p.scalar_p=0x3f800000; p.status=0xabc; p.mac=0x1234;

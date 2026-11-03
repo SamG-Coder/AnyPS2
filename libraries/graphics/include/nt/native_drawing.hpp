@@ -7,6 +7,7 @@
 #include <nt/palette_plan.hpp>
 #include <bit>
 #include <variant>
+#include <deque>
 
 namespace nt::graphics {
 // Native command planning for a bounded GIF subset. No CPU/VU instruction code
@@ -14,11 +15,24 @@ namespace nt::graphics {
 class NativeDrawing {
 public:
     using Packet=graphics::Packet;
-    const std::vector<std::uint32_t>& pixels() const { return pixels_; }
+    enum class Completion { synchronous, deferred };
+    explicit NativeDrawing(bool resident=false,Completion completion=Completion::synchronous):resident_(resident),completion_(completion) {}
+    // The renderer must outlive a resident drawing and be exclusively owned by it.
+    const std::vector<std::uint32_t>& pixels() const {
+        if (dirty_) { renderer_->read(pixels_); dirty_=false; }
+        return pixels_;
+    }
     std::uint64_t submitted_draws() const { return submitted_draws_; }
     std::uint64_t completed_finishes() const { return completed_finishes_; }
     const std::optional<Sprite>& last_draw() const { return last_draw_; }
     void reset() { state_={}; }
+    void poll_completions(VulkanRenderer& renderer) {
+        if (pending_finishes_.empty()) return;
+        const auto completed=renderer.completed_submission();
+        while (!pending_finishes_.empty() && pending_finishes_.front()<=completed) {
+            pending_finishes_.pop_front(); ++completed_finishes_;
+        }
+    }
     void submit(VulkanRenderer& renderer,std::span<const Packet> packets) {
         auto candidate=state_;
         std::vector<Operation> draws;
@@ -28,6 +42,52 @@ public:
             total+=packet.size(); parse(candidate,packet,draws);
         }
         if (draws.empty()) { state_=candidate; return; }
+        // Validate every draw before recording any part of this submission.
+        // Parsing already validated uploads/palette addresses and state changes.
+        for (const auto& operation:draws) if (const auto* draw=std::get_if<Draw>(&operation)) {
+            const SpriteCommand command{draw->sprite,{},draw->triangle};
+            VulkanRenderer::validate(std::span(&command,1));
+        }
+        if (resident_) {
+            if (renderer_ && renderer_!=&renderer) throw std::invalid_argument("Resident drawing renderer changed");
+            if (!renderer_) { renderer.upload(pixels_); renderer_=&renderer; }
+            std::vector<SpriteCommand> pending;
+            pending.reserve(std::min<std::size_t>(256,draws.size()));
+            const auto flush=[&] {
+                if (pending.empty()) return;
+                renderer.draw(pending); pending.clear(); dirty_=true;
+            };
+            for (const auto& operation:draws) {
+                if (const auto* draw=std::get_if<Draw>(&operation)) {
+                    SpriteCommand command{draw->sprite,{},draw->triangle};
+                    std::copy_n(candidate.palette.begin()+draw->bank*16,16,command.palette.begin());
+                    pending.push_back(command);
+                    if (pending.size()==256) flush();
+                    continue;
+                }
+                // Preserve palette, resource-upload and FINISH boundaries.
+                flush();
+                if (const auto* load=std::get_if<PaletteLoad>(&operation)) {
+                    renderer.read_words(load->addresses,std::span(candidate.palette).subspan(load->bank*16,16));
+                } else if (std::holds_alternative<Finish>(operation)) {
+                    // Native queue tokens preserve FINISH ordering without blocking
+                    // command consumption on every texture switch.
+                    if (completion_==Completion::deferred) {
+                        pending_finishes_.push_back(renderer.enqueue_finish());
+                        if (pending_finishes_.size()>=1024) renderer.synchronize();
+                        poll_completions(renderer);
+                    } else renderer.synchronize();
+                } else {
+                    renderer.write(std::get<ImageWrites>(operation)); dirty_=true;
+                }
+            }
+            flush();
+            state_=candidate;
+            for (const auto& operation:draws) if (const auto* draw=std::get_if<Draw>(&operation)) {
+                ++submitted_draws_; last_draw_=draw->sprite;
+            } else if (std::holds_alternative<Finish>(operation) && completion_==Completion::synchronous) ++completed_finishes_;
+            return;
+        }
         auto pixels=pixels_;
         std::vector<SpriteCommand> sprites;
         const auto flush=[&] {
@@ -82,7 +142,12 @@ private:
         std::array<unsigned,2> palette_bases{};
         std::uint64_t palette_config=0;
     } state_;
-    std::vector<std::uint32_t> pixels_=std::vector<std::uint32_t>(1024*1024);
+    bool resident_=false;
+    Completion completion_=Completion::synchronous;
+    std::deque<std::uint64_t> pending_finishes_;
+    VulkanRenderer* renderer_=nullptr;
+    mutable bool dirty_=false;
+    mutable std::vector<std::uint32_t> pixels_=std::vector<std::uint32_t>(1024*1024);
     std::uint64_t submitted_draws_=0;
     std::uint64_t completed_finishes_=0;
     std::optional<Sprite> last_draw_;
@@ -230,7 +295,10 @@ private:
             if (!format && (low&(1ULL<<46))) command(state,0,(low>>47)&2047,draws);
             if (format>=2) {
                 ImageWrites writes;
-                for (std::size_t index=0;index<count;++index) state.upload.append(packet[cursor+index],writes);
+                if (state.upload.bits) writes.reserve(std::min<std::size_t>(
+                    state.upload.width*state.upload.height-state.upload.pixel,
+                    (count*128+state.upload.pending_bits)/state.upload.bits));
+                state.upload.append(packet.subspan(cursor,count),writes);
                 draws.emplace_back(std::move(writes));
             }
             for (std::uint64_t index=0;format<2 && index<entries;++index) {

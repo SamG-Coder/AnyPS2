@@ -10,6 +10,11 @@ namespace nt::ee {
 // are independent of retired instructions and physical monitor presentation.
 class NativeGraphics {
 public:
+    struct Profile {
+        std::uint64_t status_reads=0,finish_not_ready=0,vsync_not_ready=0,buffer_changes=0;
+        std::uint64_t vsync_clear_to_observe_ns=0,vsync_observations=0;
+    };
+    Profile* profile=nullptr;
     explicit NativeGraphics(NativeClock clock=nullptr) : clock_(clock ? clock : native_now) {}
     struct DisplayMode { std::uint32_t interlace,standard,frame; };
     struct Output { std::uint64_t control=0,background=0; std::array<std::uint64_t,2> buffers{},displays{}; };
@@ -19,6 +24,7 @@ public:
     void drawing_completed() { event(2); }
     void* context=nullptr;
     Stop (*synchronize)(void*)=nullptr;
+    Stop (*poll_drawing)(void*)=nullptr;
     // Optional drawing owner. Rejection must preserve that owner's state.
     Stop (*reset_drawing)(void*)=nullptr;
     void* edge_context=nullptr;
@@ -31,6 +37,7 @@ public:
         if (ready!=Stop::budget) return ready;
         mode_=DisplayMode{interlace,standard,frame}; epoch_=clock_(); ticks_=0;
         flags_=0; field_=0; events_=0; edge_lost_=false;
+        vsync_profile_start_.reset();
         return Stop::budget;
     }
     const std::optional<DisplayMode>& mode() const { return mode_; }
@@ -42,6 +49,7 @@ public:
     }
     IoRead64 read(std::uint32_t address) {
         if (!maps(address)) return {Stop::unsupported_system};
+        if (poll_drawing) { const auto result=poll_drawing(context); if (result!=Stop::budget) return {result}; }
         advance();
         if (address==0x12000000) return {Stop::budget,output_.control};
         if (address==0x120000e0) return {Stop::budget,output_.background};
@@ -50,7 +58,15 @@ public:
             return {Stop::budget,slot&1 ? output_.displays[slot/2] : output_.buffers[slot/2]};
         }
         if (address==0x12000020) return {Stop::budget,mode_ ? mode_->interlace|(mode_->frame<<1) : 0};
-        if (address==0x12001000) return {Stop::budget,0x4000U|field_|flags_};
+        if (address==0x12001000) {
+            if (profile) { ++profile->status_reads; profile->finish_not_ready+=!(flags_&2); profile->vsync_not_ready+=!(flags_&8); }
+            if (profile && vsync_profile_start_ && (flags_&8)) {
+                const auto observed=clock_();
+                if (observed>=*vsync_profile_start_) profile->vsync_clear_to_observe_ns+=observed-*vsync_profile_start_;
+                ++profile->vsync_observations; vsync_profile_start_.reset();
+            }
+            return {Stop::budget,0x4000U|field_|flags_};
+        }
         return {Stop::budget,mask_};
     }
     Stop write(std::uint32_t address,std::uint64_t value) {
@@ -58,6 +74,7 @@ public:
         if (address==0x120000e0) { output_.background=value&0xffffffU; return Stop::budget; }
         if (address>=0x12000070 && address<=0x120000a0 && address%16==0) {
             const auto slot=(address-0x12000070)/16;
+            if (profile && !(slot&1) && output_.buffers[slot/2]!=value) ++profile->buffer_changes;
             (slot&1 ? output_.displays[slot/2] : output_.buffers[slot/2])=value;
             return Stop::budget;
         }
@@ -79,6 +96,7 @@ public:
                 }
             }
             advance(); flags_&=~static_cast<std::uint32_t>(value&31);
+            if (profile && (value&8)) vsync_profile_start_=clock_();
             return Stop::budget;
         }
         if (address==0x12001010) {
@@ -140,6 +158,7 @@ private:
         ticks_=ticks;
     }
     NativeClock clock_;
+    std::optional<std::uint64_t> vsync_profile_start_;
     Output output_;
     bool edge_lost_=false;
     std::optional<DisplayMode> mode_;

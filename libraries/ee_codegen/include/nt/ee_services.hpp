@@ -21,8 +21,13 @@
 
 namespace nt::ee {
 struct MainThread { runtime::InitialStack stack; std::uint32_t global_pointer,root; };
+struct ExecutionProfile {
+    std::uint64_t entry_ns=0,service_ns=0,idle_ns=0,entries=0,operations=0;
+};
 class StartupServices {
 public:
+    // Optional wall-time accounting. Compiled entry time includes native calls.
+    ExecutionProfile* profile=nullptr;
     // Owner pumps external native completions. A bounded idle wait preserves
     // resumable state and never consumes the compiled operation budget.
     std::function<Stop()> idle_pump;
@@ -285,7 +290,9 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
                 continue;
             }
             if (std::chrono::steady_clock::now()-*idle_since>=services.idle_timeout) return Stop::thread_wait;
+            const auto idle_start=services.profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            if (services.profile) services.profile->idle_ns+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-idle_start).count();
             continue;
         }
         // An interrupt that does not wake a native continuation is not
@@ -293,8 +300,13 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
         if (!services.foreground_waiting()) idle_since.reset();
         const auto before=state.executed;
         const auto slice=memory.io.poll && budget>4096 ? 4096 : budget;
+        const auto entry_start=services.profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         const auto result=entry(&state,&memory,slice);
         const auto retired=state.executed-before;
+        if (services.profile) {
+            services.profile->entry_ns+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-entry_start).count();
+            ++services.profile->entries; services.profile->operations+=retired;
+        }
         if (retired>slice) return Stop::invalid_state;
         budget-=retired;
         if ((result==Stop::unmapped_code || result==Stop::budget) && services.returning(state)) {
@@ -319,7 +331,9 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
             continue;
         }
         if (result!=Stop::syscall || !budget) return result;
+        const auto service_start=services.profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         const auto service=services.invoke(state,memory);
+        if (services.profile) services.profile->service_ns+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-service_start).count();
         if (service!=Stop::budget) return service;
         --budget;
     }

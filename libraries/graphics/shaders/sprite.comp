@@ -36,10 +36,11 @@ uint wrap(int t,uint size,uint mode,uint low,uint high) {
 uint texel_at(int u,int v) {
         uint tx=wrap(u,draw.texture_width,draw.clamp_u,draw.min_u,draw.max_u);
         uint ty=wrap(v,draw.texture_height,draw.clamp_v,draw.min_v,draw.max_v);
-        uint texel=memory.pixels[1048576+address(draw.texture_base,draw.texture_pitch,tx,ty)];
+        uint texture_offset=(draw.flags&4194304)!=0 ? 0 : 1048576;
+        uint texel=memory.pixels[texture_offset+address(draw.texture_base,draw.texture_pitch,tx,ty)];
         if((draw.flags&64)!=0) {
             uint nibble=nibble_address(draw.texture_base,draw.texture_pitch,tx,ty);
-            uint index=(memory.pixels[1048576+nibble/8]>>((nibble%8)*4))&15;
+            uint index=(memory.pixels[texture_offset+nibble/8]>>((nibble%8)*4))&15;
             texel=memory.pixels[2097152+index];
         }
         if((draw.flags&2)!=0) {
@@ -86,29 +87,43 @@ bool covered(int64_t weight,ivec2 a,ivec2 b) {
     return weight>0 || (weight==0 && inclusive);
 }
 void main() {
+    if ((draw.flags&8388608)!=0) {
+        uint index=gl_GlobalInvocationID.x+gl_GlobalInvocationID.y*gl_NumWorkGroups.x*8;
+        if (index>=draw.right) return;
+        uint entry=2097216+index*3;
+        uint target=memory.pixels[entry], value=memory.pixels[entry+1], mask=memory.pixels[entry+2];
+        memory.pixels[target]=(memory.pixels[target]&~mask)|value;
+        return;
+    }
     uint x=draw.left+gl_GlobalInvocationID.x, y=draw.top+gl_GlobalInvocationID.y;
     if ((draw.flags&4096)!=0 && (y&1)==((draw.flags>>13)&1)) return;
     if (x>=draw.right || y>=draw.bottom) return;
     uint output_address=address(draw.base,draw.pitch,x,y);
     uint color=draw.color;
     uint depth=draw.depth,coverage=16;
+    bool triangle_interior=true;
     int uf=0,vf=0;
     if ((draw.flags&16384)!=0) {
         ivec2 a=vertex_position(0),b=vertex_position(1),c=vertex_position(2),p=ivec2(x,y)*16;
         int64_t w0=edge(b,c,p),w1=edge(c,a,p),w2=edge(a,b,p);
+        triangle_interior=covered(w0,b,c) && covered(w1,c,a) && covered(w2,a,b);
         if ((draw.flags&1048576)!=0) {
-            // Native 4x4 coverage sampling. Interpolate at the covered-sample
-            // centroid; no approximation of the console's internal edge units.
-            coverage=0; w0=0; w1=0; w2=0;
-            for (int sy=2;sy<16;sy+=4) for (int sx=2;sx<16;sx+=4) {
-                ivec2 position=p+ivec2(sx,sy);
-                int64_t s0=edge(b,c,position),s1=edge(c,a,position),s2=edge(a,b,position);
-                if (covered(s0,b,c) && covered(s1,c,a) && covered(s2,a,b)) {
-                    ++coverage; w0+=s0; w1+=s1; w2+=s2;
+            if (!triangle_interior) {
+                // Native 4x4 coverage sampling. Interpolate at the covered-sample
+                // centroid under the supported exterior coverage rule.
+                coverage=0; w0=0; w1=0; w2=0;
+                for (int sy=2;sy<16;sy+=4) for (int sx=2;sx<16;sx+=4) {
+                    ivec2 position=p+ivec2(sx,sy);
+                    int64_t s0=edge(b,c,position),s1=edge(c,a,position),s2=edge(a,b,position);
+                    if (covered(s0,b,c) && covered(s1,c,a) && covered(s2,a,b)) {
+                        ++coverage; w0+=s0; w1+=s1; w2+=s2;
+                    }
                 }
+                if (coverage==0) return;
+                w0/=int64_t(coverage); w1/=int64_t(coverage); w2/=int64_t(coverage);
+                // Exterior coverage must not replace interior depth/opacity.
+                coverage=min(coverage,15u);
             }
-            if (coverage==0) return;
-            w0/=int64_t(coverage); w1/=int64_t(coverage); w2/=int64_t(coverage);
         } else if (!covered(w0,b,c) || !covered(w1,c,a) || !covered(w2,a,b)) return;
         int64_t area=w0+w1+w2;
         if ((draw.flags&131072)!=0)
@@ -155,15 +170,17 @@ void main() {
         color=0;
         for(uint channel=0;channel<4;++channel) {
             uint t=(texel>>(channel*8))&255, c=(vertex_color>>(channel*8))&255;
-            uint result=function==0 ? min((t*c)>>7,255) : t;
+            uint result=function==1 ? t : (t*c)>>7;
+            if(function>=2) result=channel==3 ? t+(function==2 ? vertex_color>>24 : 0) : result+(vertex_color>>24);
             if(channel==3 && (draw.flags&4)==0) result=c;
+            result=min(result,255);
             color |= result<<(channel*8);
         }
     }
     if ((draw.flags&1048576)!=0 && ((draw.flags&2097152)==0 || (color>>24)==128))
         color=(color&0xffffff)|(coverage*8<<24);
     uint mask=draw.mask;
-    bool write_depth=(draw.flags&262144)!=0 && coverage==16;
+    bool write_depth=(draw.flags&262144)!=0 && triangle_interior;
     if((draw.test&1)!=0 && !alpha_pass(color>>24)) {
         uint failure=(draw.test>>12)&3;
         if(failure==0) return;

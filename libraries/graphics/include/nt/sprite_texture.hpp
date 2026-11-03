@@ -1,12 +1,14 @@
 #pragma once
 #include <nt/vulkan_renderer.hpp>
 #include <stdexcept>
+#include <string>
 
 namespace nt::graphics {
 inline void plan_texture(Sprite& draw,std::uint64_t texture,
     std::uint64_t filter,std::uint64_t clamp,std::uint32_t texa) {
     const unsigned format=(texture>>20)&63,function=(texture>>35)&3;
-    if ((format>1 && format!=20) || function>1) throw std::invalid_argument("Unsupported texture format or function");
+    if (format>1 && format!=20)
+        throw std::invalid_argument("Unsupported texture format PSM="+std::to_string(format)+" TFX="+std::to_string(function));
     const unsigned magnify=(filter>>5)&1,minify=(filter>>6)&7;
     if (((filter>>2)&7) || minify>1 || minify!=magnify) throw std::invalid_argument("Unsupported mipmap or mixed sprite filtering");
     if (magnify) draw.flags|=128;

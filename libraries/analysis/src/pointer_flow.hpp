@@ -126,6 +126,47 @@ struct Graph {
         }
     }
 };
+// Recover a range predicate hoisted across branches/loops. Both the tested
+// index and predicate must remain unchanged on every incoming path. This is
+// discovery evidence only; generated code still executes the guard and load.
+inline std::optional<std::uint32_t> range_bound(const Program& program,const Graph& graph,
+                                               std::uint32_t before,unsigned guard,unsigned index) {
+    if (!guard || !index || guard==index) return {};
+    std::deque<std::uint32_t> pending{before};
+    std::set<std::uint32_t> visited;
+    std::optional<std::uint32_t> result;
+    unsigned budget=1024;
+    const auto reverse=[&](std::uint32_t pc) {
+        const auto found=program.instructions.find(pc);
+        if (found==program.instructions.end()) return -1;
+        const auto& i=found->second;
+        const auto effect=write(i);
+        if (!effect || i.terminal()) return -1;
+        if (*effect!=guard && *effect!=index) return 0;
+        if (i.op!=r5900::Op::sltiu || i.rt!=guard || i.rs!=index || i.immediate<=0 || i.immediate>4096) return -1;
+        const auto bound=static_cast<std::uint32_t>(i.immediate);
+        if (result && *result!=bound) return -1;
+        result=bound; return 1;
+    };
+    while (!pending.empty() && budget--) {
+        const auto pc=pending.front(); pending.pop_front();
+        if (!visited.insert(pc).second) continue;
+        const auto edges=graph.previous.find(pc);
+        if (edges==graph.previous.end() || edges->second.empty()) return {};
+        for (const auto& edge:edges->second) {
+            if (edge.call && (!preserved(guard) || !preserved(index))) return {};
+            if (edge.delay) {
+                const auto delay=reverse(edge.from+4);
+                if (delay<0) return {};
+                if (delay>0) continue;
+            }
+            const auto step=reverse(edge.from);
+            if (step<0) return {};
+            if (!step) pending.push_back(edge.from);
+        }
+    }
+    return pending.empty() ? result : std::nullopt;
+}
 // Recover affine stack aliases relative to one function entry. Requiring the
 // same root and offset on every incoming path prevents unrelated frames from
 // being equated, while ABI-preserved aliases can survive intervening calls.

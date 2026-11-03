@@ -69,8 +69,17 @@ struct VuCapture {
     }
 };
 struct NativeGpu {
-    std::unique_ptr<nt::graphics::VulkanRenderer> renderer;
-    nt::graphics::NativeDrawing drawing;
+    std::unique_ptr<nt::graphics::VulkanRenderer> headless_renderer;
+    nt::graphics::VulkanRenderer* renderer=nullptr;
+    bool verify_textures=false;
+    nt::graphics::NativeDrawing drawing{true,nt::graphics::NativeDrawing::Completion::deferred};
+    void ensure_renderer() {
+        if (!renderer) {
+            headless_renderer=std::make_unique<nt::graphics::VulkanRenderer>();
+            renderer=headless_renderer.get();
+            renderer->verify_texture_kernels(verify_textures);
+        }
+    }
     std::unique_ptr<probe::GraphicsCapture> capture;
     nt::ee::NativeGraphics* completion=nullptr;
     std::string error;
@@ -79,7 +88,7 @@ struct NativeGpu {
         auto& self=*static_cast<NativeGpu*>(raw);
         const auto began=std::chrono::steady_clock::now();
         try {
-            if (!self.renderer) self.renderer=std::make_unique<nt::graphics::VulkanRenderer>();
+            self.ensure_renderer();
             if (self.capture) self.capture->submit(packets);
             const auto finished=self.drawing.completed_finishes();
             self.drawing.submit(*self.renderer,packets);
@@ -89,12 +98,26 @@ struct NativeGpu {
         }
         catch (const std::exception& error) { self.error=error.what(); return false; }
     }
+    static nt::ee::Stop poll(void* context) {
+        auto& self=*static_cast<NativeGpu*>(context);
+        if (!self.renderer) return nt::ee::Stop::budget;
+        try {
+            if (self.renderer->validation_errors()) {
+                self.error=self.renderer->validation_message();
+                return nt::ee::Stop::unsupported_system;
+            }
+            const auto before=self.drawing.completed_finishes();
+            self.drawing.poll_completions(*self.renderer);
+            if (self.drawing.completed_finishes()!=before && self.completion) self.completion->drawing_completed();
+            return nt::ee::Stop::budget;
+        } catch (const std::exception& error) { self.error=error.what(); return nt::ee::Stop::unsupported_system; }
+    }
     static nt::ee::Stop synchronize(void* context) {
         auto& self=*static_cast<NativeGpu*>(context);
         try {
-            if (!self.renderer) self.renderer=std::make_unique<nt::graphics::VulkanRenderer>();
+            self.ensure_renderer();
             self.renderer->synchronize();
-            return nt::ee::Stop::budget;
+            return poll(context);
         } catch (const std::exception& error) {
             self.error=error.what(); return nt::ee::Stop::unsupported_system;
         }
@@ -132,7 +155,7 @@ nt::ee::Stop execute(nt::runtime::State* state,nt::ee::Memory* memory,std::uint6
 }
 int main(int argc,char** argv) {
     if (argc<2) {
-        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--run-seconds N] [--headless | --display-stop | --close-on-stop] [--strict-performance | --native-thread-cycles | --native-pmu] [--disc <image.iso>] [--capture-vu <new-private-directory>] [--capture-stop <new-private-directory>] [--capture-graphics <new-private-directory>]\n";
+        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--profile-graphics] [--validate-graphics] [--verify-textures] [--run-seconds N] [--headless | --display-stop | --close-on-stop] [--strict-performance | --native-thread-cycles | --native-pmu] [--disc <image.iso>] [--capture-vu <new-private-directory>] [--capture-stop <new-private-directory>] [--capture-graphics <new-private-directory>]\n";
 #ifdef ANYPS2_NATIVE_IOP
         std::cerr<<"Linked IOP investigation: --probe-iop-reset <module.data> (stops without acknowledging reset)\n";
         std::cerr<<"Explicit selected-bundle execution: --iop-reset-session <module.data> --disc <image.iso>\n";
@@ -143,6 +166,7 @@ int main(int argc,char** argv) {
         std::uint64_t budget=1000000;
         unsigned run_seconds=0;
         std::filesystem::path disc,capture_directory,stop_directory,graphics_directory;
+        bool profile_graphics=false,validate_graphics=false,verify_textures=false;
         bool has_budget=false,native_cycles=false,native_pmu=false,strict_performance=false,show_window=true,hold_window=true;
 #ifdef ANYPS2_NATIVE_IOP
         std::filesystem::path iop_data;
@@ -156,6 +180,9 @@ int main(int argc,char** argv) {
             if (text=="--display-stop") { show_window=hold_window=true; continue; }
             if (text=="--close-on-stop") { show_window=true; hold_window=false; continue; }
             if (text=="--headless") { show_window=false; continue; }
+            if (text=="--validate-graphics") { validate_graphics=true; continue; }
+            if (text=="--verify-textures") { verify_textures=true; continue; }
+            if (text=="--profile-graphics") { profile_graphics=true; continue; }
             if (text=="--trace-services") { trace_services=true; continue; }
             if (text=="--run-seconds") {
                 if (run_seconds || index+1==argc) throw std::runtime_error("Expected one diagnostic duration");
@@ -259,6 +286,7 @@ int main(int argc,char** argv) {
             std::cout<<"metrics=native-thread-cycles units=host-cpu-cycles includes=native-services cache-events=unsupported\n";
         }
         NativeGpu gpu;
+        gpu.verify_textures=verify_textures;
         if (!graphics_directory.empty()) gpu.capture=std::make_unique<probe::GraphicsCapture>(graphics_directory);
         nt::ee::NativePlatform platform; platform.attach(memory);
         platform.debug_byte=[](void*,std::uint8_t byte) {
@@ -299,7 +327,7 @@ int main(int argc,char** argv) {
             platform.packet_setup.uncompiled_packet=VuCapture::observe_packet;
         }
         gpu.completion=&platform.graphics;
-        platform.graphics.context=&gpu; platform.graphics.synchronize=NativeGpu::synchronize;
+        platform.graphics.context=&gpu; platform.graphics.synchronize=NativeGpu::synchronize; platform.graphics.poll_drawing=NativeGpu::poll;
         platform.graphics.reset_drawing=[](void* context) {
             auto& gpu=*static_cast<NativeGpu*>(context);
             if (gpu.capture) gpu.capture->reset();
@@ -345,6 +373,10 @@ int main(int argc,char** argv) {
         if (!command_peer.connect(platform.sif_outbound)) throw std::runtime_error("Cannot connect native command peer");
         auto state=nt::ee::NativePlatform::initial_state(ANYPS2_EE_ENTRY);
         nt::ee::StartupServices services(native_code_overlap,nt_ee_generated_contains,ANYPS2_EE_SYSCALL_TABLE);
+        nt::ee::ExecutionProfile execution_profile{},previous_execution{};
+        if (profile_graphics) services.profile=&execution_profile;
+        nt::ee::NativeGraphics::Profile display_profile{},previous_display{};
+        if (profile_graphics) platform.graphics.profile=&display_profile;
         probe::ServiceCapture service_observation;
         if (!stop_directory.empty()) service_capture=&service_observation;
         active_services=&services;
@@ -361,19 +393,79 @@ int main(int argc,char** argv) {
         if (iop_reset) services.idle_pump=[&] { return iop_reset->pump(); };
 #endif
         std::unique_ptr<probe::NativeWindow> window;
-        if (show_window) window=std::make_unique<probe::NativeWindow>();
+        if (show_window) {
+            window=std::make_unique<probe::NativeWindow>(validate_graphics);
+            gpu.renderer=&window->renderer();
+            gpu.renderer->verify_texture_kernels(verify_textures);
+            if (profile_graphics) std::cout<<"graphics_device="<<gpu.renderer->device_name()<<" validation="<<validate_graphics
+                <<" ordered_fragment_access="<<gpu.renderer->statistics().ordered_fragment_access
+                <<" llvm_texture_kernels="<<gpu.renderer->statistics().llvm_texture_kernels<<'\n';
+        }
         const auto started=std::chrono::steady_clock::now();
+        auto next_profile=started+std::chrono::seconds(5);
+        nt::graphics::RenderStatistics previous_statistics{};
+        auto previous_render_time=gpu.render_time;
+        double presentation_seconds=0,previous_presentation=0;
+        std::vector<double> update_intervals;
+        std::chrono::steady_clock::time_point last_update{};
+        auto profile_started=started;
+        unsigned profile_updates=0;
         auto next_present=started;
         auto next_input=started;
+        auto last_input=started;
+        double input_gap_max_ms=0,input_gap_total_ms=0;
+        std::uint64_t input_polls=0;
         nt::ee::Stop input_stop=nt::ee::Stop::budget;
         std::array<std::uint16_t,2> last_buttons{};
         std::uint64_t input_button_changes=0;
         bool timed_out=false,window_closed=false,application_exit=false;
         services.stop_requested=[&] {
+            if (NativeGpu::poll(&gpu)!=nt::ee::Stop::budget) return true;
             const auto now=std::chrono::steady_clock::now();
+            if (profile_graphics && now>=next_profile && gpu.renderer) {
+                const auto& s=gpu.renderer->statistics(); const auto& p=previous_statistics;
+                std::sort(update_intervals.begin(),update_intervals.end());
+                const auto percentile=[&](double fraction) {
+                    return update_intervals.empty() ? 0.0 : update_intervals[static_cast<std::size_t>((update_intervals.size()-1)*fraction)];
+                };
+                std::cout<<"graphics_profile seconds="<<std::chrono::duration<double>(now-started).count()
+                    <<" updates_per_second="<<profile_updates/std::chrono::duration<double>(now-profile_started).count()
+                    <<" update_p50_ms="<<percentile(0.50)<<" update_p95_ms="<<percentile(0.95)
+                    <<" render_ms="<<std::chrono::duration<double,std::milli>(gpu.render_time-previous_render_time).count()
+                    <<" present_ms="<<(presentation_seconds-previous_presentation)*1000
+                    <<" compiled_entry_ms="<<(execution_profile.entry_ns-previous_execution.entry_ns)/1e6
+                    <<" syscall_ms="<<(execution_profile.service_ns-previous_execution.service_ns)/1e6
+                    <<" idle_sleep_ms="<<(execution_profile.idle_ns-previous_execution.idle_ns)/1e6
+                    <<" compiled_entries="<<execution_profile.entries-previous_execution.entries
+                    <<" retired_operations="<<execution_profile.operations-previous_execution.operations
+                    <<" status_reads="<<display_profile.status_reads-previous_display.status_reads
+                    <<" finish_not_ready_reads="<<display_profile.finish_not_ready-previous_display.finish_not_ready
+                    <<" vsync_not_ready_reads="<<display_profile.vsync_not_ready-previous_display.vsync_not_ready
+                    <<" display_buffer_changes="<<display_profile.buffer_changes-previous_display.buffer_changes
+                    <<" vsync_clear_to_observe_ms="<<(display_profile.vsync_clear_to_observe_ns-previous_display.vsync_clear_to_observe_ns)/1e6
+                    <<" vsync_observations="<<display_profile.vsync_observations-previous_display.vsync_observations
+                    <<" draw_ms="<<(s.draw_ns-p.draw_ns)/1e6<<" write_ms="<<(s.write_ns-p.write_ns)/1e6
+                    <<" gpu_timing_supported="<<s.gpu_timing_supported<<" gpu_ms="<<(s.gpu_ns-p.gpu_ns)/1e6
+                    <<" wait_ms="<<(s.wait_ns-p.wait_ns)/1e6<<" upload_ms="<<(s.upload_ns-p.upload_ns)/1e6
+                    <<" decode_ms="<<(s.texture_decode_ns-p.texture_decode_ns)/1e6
+                    <<" texture_kernels="<<(s.texture_kernel_dispatches-p.texture_kernel_dispatches)
+                    <<" texture_kernels_verified="<<(s.texture_kernel_verified-p.texture_kernel_verified)
+                    <<" validation_errors="<<gpu.renderer->validation_errors()
+                    <<" submissions="<<s.submissions-p.submissions<<" uploads="<<s.uploads-p.uploads
+                    <<" triangles="<<s.triangles-p.triangles<<" barriers="<<s.feedback_barriers-p.feedback_barriers
+                    <<" draw_calls="<<s.draw_calls-p.draw_calls<<" batched_primitives="<<s.batched_primitives-p.batched_primitives<<'\n'<<std::flush;
+                update_intervals.clear(); profile_updates=0; profile_started=now;
+                previous_statistics=s; previous_render_time=gpu.render_time; previous_presentation=presentation_seconds;
+                previous_execution=execution_profile;
+                previous_display=display_profile;
+                next_profile=now+std::chrono::seconds(5);
+            }
             timed_out=run_seconds && now-started>=std::chrono::seconds(run_seconds);
             if (timed_out) return true;
             if (now>=next_input) {
+                const auto gap=std::chrono::duration<double,std::milli>(now-last_input).count();
+                input_gap_max_ms=std::max(input_gap_max_ms,gap);
+                input_gap_total_ms+=gap; ++input_polls; last_input=now;
                 next_input=now+std::chrono::milliseconds(4);
                 gamepads.update();
                 input_stop=pads.update(memory,native_code_overlap);
@@ -389,9 +481,21 @@ int main(int argc,char** argv) {
                     window_closed=true;
                 } else {
                     const auto& output=platform.graphics.output();
-                    if (const auto frame=nt::graphics::scanout(gpu.drawing.pixels(),output.control,output.buffers,output.displays,platform.graphics.half_height_output(),std::uint32_t(output.background))) {
-                        window->present(*frame);
-                        if (gpu.capture) gpu.capture->present(*frame,gpu.drawing.submitted_draws(),output.control,output.buffers,output.displays,platform.graphics.half_height_output());
+                    if (const auto plan=nt::graphics::plan_display(output.control,output.buffers,output.displays,
+                            platform.graphics.half_height_output(),std::uint32_t(output.background))) {
+                        const auto present_started=std::chrono::steady_clock::now();
+                        const auto updated=window->present(*plan);
+                        if (profile_graphics && updated) {
+                            const auto completed=std::chrono::steady_clock::now();
+                            if (last_update!=std::chrono::steady_clock::time_point{})
+                                update_intervals.push_back(std::chrono::duration<double,std::milli>(completed-last_update).count());
+                            last_update=completed; ++profile_updates;
+                        }
+                        presentation_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-present_started).count();
+                        if (gpu.capture) {
+                            const auto frame=gpu.renderer->scanout_readback(*plan);
+                            gpu.capture->present(frame,gpu.drawing.submitted_draws(),output.control,output.buffers,output.displays,platform.graphics.half_height_output());
+                        }
                     }
                 }
             }
@@ -409,6 +513,9 @@ int main(int argc,char** argv) {
         };
         auto stop=nt::ee::run(execute,state,memory,budget,services);
         if (input_stop!=nt::ee::Stop::budget) stop=input_stop;
+        if (!gpu.error.empty()) stop=nt::ee::Stop::unsupported_system;
+        std::cout<<"native_input_polls="<<input_polls<<" mean_poll_gap_ms="
+                 <<(input_polls ? input_gap_total_ms/input_polls : 0)<<" max_poll_gap_ms="<<input_gap_max_ms<<'\n';
         nt::audio::StreamState sample_state;
         const auto sample_state_ok=sample_audio.playback_state(sample_state);
         std::cout<<"native_sample_uploads="<<sample_audio.uploads()<<" plays="<<sample_audio.plays()
@@ -422,7 +529,12 @@ int main(int argc,char** argv) {
         if (gpu.renderer) {
             const auto& statistics=gpu.renderer->statistics();
             std::cout<<" gpu_submissions="<<statistics.submissions<<" gpu_sprites="<<statistics.sprites<<" gpu_triangles="<<statistics.triangles
-                     <<" gpu_upload_bytes="<<statistics.upload_bytes<<" gpu_readback_bytes="<<statistics.readback_bytes;
+                     <<" gpu_upload_bytes="<<statistics.upload_bytes<<" gpu_readback_bytes="<<statistics.readback_bytes
+                     <<" gpu_texture_snapshot_bytes="<<statistics.texture_snapshot_bytes
+                     <<" gpu_texture_kernels="<<statistics.texture_kernel_dispatches
+                     <<" gpu_texture_kernels_verified="<<statistics.texture_kernel_verified
+                     <<" gpu_validation_errors="<<gpu.renderer->validation_errors()
+                     <<" gpu_direct_texture_draws="<<statistics.direct_texture_draws;
         }
         std::cout<<'\n';
         if (timed_out || window_closed || application_exit)

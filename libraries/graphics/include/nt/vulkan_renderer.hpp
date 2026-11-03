@@ -4,6 +4,8 @@
 #include <span>
 #include <string>
 #include <array>
+#include <nt/image_upload.hpp>
+#include <nt/native_scanout.hpp>
 
 namespace nt::graphics {
 struct Sprite {
@@ -33,23 +35,50 @@ struct SpriteCommand {
 };
 struct RenderStatistics {
     std::uint64_t submissions=0,sprites=0,upload_bytes=0,readback_bytes=0;
-    std::uint64_t triangles=0;
+    std::uint64_t triangles=0,texture_snapshot_bytes=0,direct_texture_draws=0;
+    std::uint64_t wait_ns=0,upload_ns=0,write_ns=0,draw_ns=0,texture_decode_ns=0;
+    std::uint64_t uploads=0,feedback_barriers=0,gpu_ns=0;
+    std::uint64_t draw_calls=0,batched_primitives=0;
+    bool gpu_timing_supported=false;
+    bool ordered_fragment_access=false;
+    bool llvm_texture_kernels=false;
+    std::uint64_t texture_kernel_dispatches=0;
+    std::uint64_t texture_kernel_verified=0;
 };
-// Synchronous reference backend. Native window is an HWND on Windows.
+// Native Vulkan storage and ordered batches. Native window is an HWND on Windows.
+enum class RenderPath { native_images, reference_compute };
 class VulkanRenderer {
 public:
-    explicit VulkanRenderer(void* native_window = nullptr, bool validation = false);
+    explicit VulkanRenderer(void* native_window = nullptr, bool validation = false, RenderPath path = RenderPath::native_images);
     ~VulkanRenderer();
     VulkanRenderer(const VulkanRenderer&) = delete;
     VulkanRenderer& operator=(const VulkanRenderer&) = delete;
     void synchronize();
+    // Completion tokens refer to actual queue fences, never assumed readiness.
+    std::uint64_t enqueue_finish();
+    std::uint64_t completed_submission();
     void sprite(std::span<std::uint32_t> memory, const Sprite& draw, std::span<const std::uint32_t> palette = {});
     void sprites(std::span<std::uint32_t> memory, std::span<const SpriteCommand> commands);
+    // Resident clients exclusively own this renderer's working storage.
+    static void validate(std::span<const SpriteCommand> commands);
+    void upload(std::span<const std::uint32_t> memory);
+    void draw(std::span<const SpriteCommand> commands);
+    void write(std::span<const PixelWrite> writes);
+    void read(std::span<std::uint32_t> memory);
+    void read_words(std::span<const unsigned> addresses,std::span<std::uint32_t> values);
     const RenderStatistics& statistics() const;
+    // Diagnostic readback and exact comparison. Disabled during normal play.
+    void verify_texture_kernels(bool enable);
+    // GPU display resolve and direct GPU-to-swapchain transfer. Only a changed
+    // image flag is read by the host; scanout_readback is an explicit diagnostic.
+    bool present_display(DisplayPlan plan);
+    Scanout scanout_readback(DisplayPlan plan);
     void present(std::span<const std::uint32_t> rgba, unsigned width, unsigned height);
     const std::string& device_name() const;
     unsigned validation_errors() const;
+    std::string validation_message() const;
 private:
+    void present_buffer(bool resident,unsigned width,unsigned height);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

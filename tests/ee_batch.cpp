@@ -1,5 +1,6 @@
 #include "ee_batch_fixture.hpp"
 #include <nt/ee_native.hpp>
+#include <nt/ee_vector_math.hpp>
 #include <algorithm>
 #include <bit>
 #include <cfenv>
@@ -8,6 +9,9 @@
 #include <string>
 
 extern "C" nt::ee::Stop nt_ee_generated_run(nt::runtime::State*,nt::ee::Memory*,std::uint64_t);
+extern "C" unsigned nt_ee_vector_add(nt::ee::Memory*,unsigned,unsigned,unsigned,unsigned,unsigned,unsigned);
+extern "C" unsigned nt_ee_vector_multiply(nt::ee::Memory*,unsigned,unsigned,unsigned,unsigned,unsigned);
+extern "C" unsigned nt_ee_vector_multiply_accumulate(nt::ee::Memory*,unsigned,unsigned,unsigned,unsigned,unsigned,unsigned);
 namespace {
 using nt::runtime::State;
 using nt::runtime::Register;
@@ -281,22 +285,24 @@ void scalar_and_control() {
             check(execute(state)==Stop::syscall && state.fpr[4]==expected && state.fcr31==0x12345678);
         }
         context="sqrt_s";
-        for (const auto values : std::array<std::array<std::uint32_t,3>,7>{{
+        for (const auto values : std::array<std::array<std::uint32_t,3>,9>{{
             {0,0,0},{0x80000000,0x80000000,0},{0x40800000,0x40000000,0},
             {0xc0800000,0x40000000,0x20040},{0x40000000,0x3fb504f3,0},
-            {0x00800000,0x20000000,0},{0x80000001,0x80000000,0}}}) {
+            {0x00800000,0x20000000,0},{0x80000001,0x80000000,0},{0x7f800000,0x5f800000,0},{0xff800000,0x5f800000,0x20040}}}) {
             State state; state.pc=ee_batch::scalar_pc(context); state.fpr[3]=values[0]; state.fcr31=0x830000;
             check(execute(state)==Stop::syscall && state.fpr[4]==values[1] && state.fcr31==(0x800000|values[2]));
         }
         context="div_s";
-        for (const auto values : std::array<std::array<std::uint32_t,4>,5>{{
-            {0x3f800000,0x40400000,0x3eaaaaab,0}, {0x3f800000,0,0x7f7fffff,0x10020},
-            {0,0,0x7f7fffff,0x20040}, {0xbf800000,0,0xff7fffff,0x10020}, {0x00800000,0x40000000,0,0}}}) {
+        for (const auto values : std::array<std::array<std::uint32_t,4>,8>{{
+            {0x3f800000,0x40400000,0x3eaaaaab,0}, {0x3f800000,0,0x7fffffff,0x10020},
+            {0,0,0x7fffffff,0x20040}, {0xbf800000,0,0xffffffff,0x10020}, {0x00800000,0x40000000,0,0},
+            {0x7f800000,0x40000000,0x7f000000,0},{0x7fffffff,0x3f000000,0x7fffffff,0},
+            {0xff800000,0x7f800000,0xbf800000,0}}}) {
             State state; state.pc=ee_batch::scalar_pc(context); state.fpr[2]=values[0]; state.fpr[3]=values[1]; state.fcr31=0x830000;
             check(execute(state)==Stop::syscall && state.fpr[4]==values[2] && state.fcr31==(0x800000|values[3]));
         }
         State failed; failed.pc=ee_batch::scalar_pc("div_s"); failed.fpr[2]=0x7f800000; failed.fpr[3]=0x3f800000; failed.fpr[4]=99; failed.fcr31=0x830000;
-        check(execute(failed)==Stop::unsupported_numeric && failed.fpr[4]==99 && failed.executed==0 && failed.fcr31==0x830000);
+        check(execute(failed)==Stop::syscall && failed.fpr[4]==0x7f800000 && failed.executed==1 && failed.fcr31==0x800000);
         std::fesetround(previous);
     }
     for (const auto name : {"min_s","max_s"}) {
@@ -324,8 +330,36 @@ void scalar_and_control() {
         }
         State failed; failed.pc=ee_batch::scalar_pc(name); failed.fpr[2]=0x7f800000;
         failed.fpr[3]=0x3f800000; failed.accumulator=77; failed.fpr[4]=99; failed.fcr31=0x830000;
-        check(execute(failed)==Stop::unsupported_numeric && !failed.executed && failed.accumulator==77 &&
-              failed.fpr[4]==99 && failed.fcr31==0x830000);
+        check(execute(failed)==Stop::syscall && failed.executed==1 &&
+              (to_acc ? failed.accumulator : failed.fpr[4])==(context=="msub_s" || context=="msuba_s" ? 0xff800000U : 0x7f800000U) &&
+              !failed.accumulator_overflow && failed.fcr31==0x830000);
+        const bool subtract=context=="msub_s" || context=="msuba_s";
+        // Product overflow dominates ACC overflow; otherwise ACC's latch wins,
+        // even if another scalar instruction has cleared the current O flag.
+        for (const bool product_overflow:{false,true}) {
+            State state; state.pc=ee_batch::scalar_pc(name); state.accumulator=0xffffffff;
+            state.accumulator_overflow=true; state.fpr[2]=0x7fffffff;
+            state.fpr[3]=product_overflow ? 0x40000000 : 0x3f800000; state.fcr31=0;
+            check(execute(state)==Stop::syscall &&
+                  (to_acc ? state.accumulator : state.fpr[4])==
+                      (product_overflow && !subtract ? 0x7fffffffU : 0xffffffffU) &&
+                  state.accumulator_overflow && state.fcr31==0x8010);
+        }
+        // Saturated-looking data without the overflow latch can cancel normally.
+        State cancellation; cancellation.pc=ee_batch::scalar_pc(name);
+        cancellation.accumulator=subtract ? 0x7fffffff : 0xffffffff;
+        cancellation.fpr[2]=0x7fffffff; cancellation.fpr[3]=0x3f800000;
+        check(execute(cancellation)==Stop::syscall &&
+              (to_acc ? cancellation.accumulator : cancellation.fpr[4])==0 && !cancellation.accumulator_overflow);
+    }
+    for (const auto name:{"suba_s","mula_s"}) {
+        context=name; State state; state.pc=ee_batch::scalar_pc(name);
+        state.fpr[2]=0xffffffff; state.fpr[3]=context=="mula_s" ? 0x40000000 : 0x7fffffff;
+        check(execute(state)==Stop::syscall && state.accumulator==0xffffffff && state.accumulator_overflow && state.fcr31==0x8010);
+        state.pc=ee_batch::scalar_pc("madd_s"); state.fpr[2]=0x7fffffff; state.fpr[3]=0x3f800000;
+        check(execute(state)==Stop::syscall && state.fpr[4]==0xffffffff && state.accumulator_overflow);
+        state.pc=ee_batch::scalar_pc(name); state.fpr[2]=0; state.fpr[3]=0;
+        check(execute(state)==Stop::syscall && state.accumulator==0 && !state.accumulator_overflow && state.fcr31==0x10);
     }
     context="native memory initialization";
     for (const auto source : {0ULL,0x100000000ULL,1ULL,0xffffffffULL}) {
@@ -465,12 +499,58 @@ void vector_families() {
             vectors.values[1]={0x3f800000,0x3f800000,0x3f800000,0x7f800000}; vectors.values[2].fill(0x3f800000);
             vectors.values[3]={11,22,33,44}; vectors.mac=77; vectors.status=88; const auto before=vectors;
             nt::ee::Memory memory; memory.vectors=&vectors;
-            check(execute(state,memory)==Stop::unsupported_numeric && state.executed==0 && vectors.values==before.values && vectors.mac==77 && vectors.status==88);
+            check(execute(state,memory)==Stop::syscall && state.executed==1 &&
+                  vectors.values[3][3]==0x7f800000 && vectors.mac==0x1000 && (vectors.status&0x208)==0x208);
         }
     }
 }
 }
 void run_ee_batch_tests() {
+    {
+        context="native vector rounding, masks, aliases and exceptional ranges";
+        const auto previous_rounding=std::fegetround();
+        std::uint32_t seed=0x715ac329;
+        const auto random=[&] { seed^=seed<<13; seed^=seed>>17; seed^=seed<<5; return seed; };
+        for (const auto rounding:{FE_TONEAREST,FE_DOWNWARD,FE_UPWARD,FE_TOWARDZERO}) {
+            std::fesetround(rounding);
+            for (unsigned i=0;i<30000;++i) for (unsigned operation=0;operation<5;++operation) {
+                nt::ee::VectorStorage vectors{};
+                const auto sample=[&] {
+                    const auto raw=random();
+                    return i%2 ? raw : (raw&0x807fffffU)|((100U+raw%50)<<23);
+                };
+                for (unsigned lane=0;lane<4;++lane) {
+                    vectors.values[0][lane]=sample(); vectors.values[1][lane]=sample();
+                    vectors.accumulator[lane]=sample();
+                }
+                if (i%17==0) vectors.values[0]={0,0x80000000,1,0x80000001};
+                if (i%19==0) vectors.values[1]=vectors.values[0];
+                const auto mask=i%16,broadcast=(i/16)%5,destination=i%3 ? 1U : 32U;
+                vectors.status=random()&0xfff; vectors.mac=random()&0xffff;
+                const auto before=vectors;
+                const auto expected=nt::numeric::binary_vector(destination==32 ? before.accumulator : before.values[0],
+                    before.values[0],before.values[1],mask,broadcast,before.status,[&](auto a,auto b,unsigned lane) {
+                        if (operation<2) return nt::numeric::add_subtract_finite(a,b,operation==1,true);
+                        if (operation==2) return nt::numeric::multiply_finite(a,b,true);
+                        return nt::numeric::vector_multiply_accumulate(before.accumulator[lane],a,b,operation==4);
+                    });
+                nt::ee::Memory memory; memory.vectors=&vectors;
+                const auto stop=operation<2 ? nt_ee_vector_add(&memory,destination,1,2,mask,operation==1,broadcast) :
+                    operation==2 ? nt_ee_vector_multiply(&memory,destination,1,2,mask,broadcast) :
+                    nt_ee_vector_multiply_accumulate(&memory,destination,1,2,mask,operation==4,broadcast);
+                check(stop==unsigned(expected.supported ? Stop::budget : Stop::unsupported_numeric));
+                if (expected.supported) {
+                    check((destination==32 ? vectors.accumulator : vectors.values[0])==expected.value);
+                    check(vectors.mac==expected.mac && vectors.status==expected.status);
+                } else {
+                    check(vectors.values==before.values && vectors.accumulator==before.accumulator);
+                    check(vectors.mac==before.mac && vectors.status==before.status);
+                }
+                check(std::fegetround()==rounding);
+            }
+        }
+        std::fesetround(previous_rounding);
+    }
     packed_arithmetic();
     integer_products_and_funnels();
     accumulator_packing();

@@ -7,6 +7,32 @@ struct Scanout {
     unsigned width=0,height=0;
     std::vector<std::uint32_t> pixels;
 };
+struct DisplaySurface { std::uint32_t base=0,pitch=0,x=0,y=0,width=0,height=0; };
+struct DisplayPlan {
+    std::array<DisplaySurface,2> surfaces{};
+    std::uint32_t width=0,height=0,control=0,background=0,half_height=0,bgra=0;
+};
+inline std::optional<DisplayPlan> plan_display(std::uint64_t control,
+    const std::array<std::uint64_t,2>& buffers,const std::array<std::uint64_t,2>& displays,
+    bool half_height=false,std::uint32_t background=0) {
+    const auto enabled=control&3;
+    if (!enabled) return {};
+    if (enabled==3 && (!(control&32) || std::uint32_t(displays[0])!=std::uint32_t(displays[1])))
+        throw std::invalid_argument("Unsupported native display composition");
+    DisplayPlan plan{}; plan.control=std::uint32_t(control); plan.background=background; plan.half_height=half_height;
+    for (unsigned i=0;i<2;++i) if (enabled&(1U<<i)) {
+        const auto b=buffers[i],d=displays[i];
+        auto& surface=plan.surfaces[i];
+        surface={unsigned(b&511)*32,unsigned((b>>9)&63),unsigned((b>>32)&2047),unsigned((b>>43)&2047),
+            unsigned((((d>>32)&4095)+1)/(((d>>23)&15)+1)),
+            unsigned((((d>>44)&2047)+1)/(((d>>27)&3)+1))};
+        if (((b>>15)&31)>1 || !surface.pitch) throw std::invalid_argument("Unsupported native display surface");
+        if (!surface.width || !surface.height || surface.width>2048 || surface.height>2048)
+            throw std::invalid_argument("Invalid native display extent");
+        plan.width=std::max(plan.width,surface.width); plan.height=std::max(plan.height,surface.height);
+    }
+    return plan;
+}
 // Convert one enabled display circuit's 24/32-bit target to a native image.
 // Interlaced frame mode stores half as many source rows. Present each source
 // row twice on a progressive PC display; temporal field blending is separate.

@@ -1,6 +1,7 @@
 #include <nt/ee_native.hpp>
 #include <nt/ee_vector_math.hpp>
 #include <nt/vu_quotient.hpp>
+#include "vector_fast.hpp"
 
 extern "C" std::uint32_t nt_ee_vector_memory(nt::ee::Memory* memory,std::uint32_t unit) {
     using nt::ee::Stop;
@@ -57,8 +58,8 @@ extern "C" std::uint32_t nt_ee_vector_outer(nt::ee::Memory* memory,std::uint32_t
     const nt::numeric::Vector rotated_a{a[1],a[2],a[0],0},rotated_b{b[2],b[0],b[1],0};
     auto result=nt::numeric::binary_vector(read(destination),rotated_a,rotated_b,14,4,vectors->status,
         [&](auto first,auto second,unsigned lane) { return subtract ?
-            nt::numeric::multiply_accumulate_finite(vectors->accumulator[lane],first,second,true) :
-            nt::numeric::multiply_finite(first,second); });
+            nt::numeric::vector_multiply_accumulate(vectors->accumulator[lane],first,second,true) :
+            nt::numeric::multiply_finite(first,second,true); });
     if (!result.supported) return std::uint32_t(Stop::unsupported_numeric);
     result.mac|=vectors->mac&0x1111U;
     if (destination==32) vectors->accumulator=result.value;
@@ -79,8 +80,9 @@ extern "C" std::uint64_t nt_ee_vector_write(nt::ee::Memory* memory,std::uint32_t
 
 namespace {
 template<class Arithmetic>
-std::uint32_t vector_arithmetic(nt::ee::Memory* memory,std::uint32_t destination,std::uint32_t left,
-                                std::uint32_t right,std::uint32_t mask,std::uint32_t broadcast,Arithmetic arithmetic) {
+NT_FORCE_INLINE std::uint32_t vector_arithmetic(nt::ee::Memory* memory,std::uint32_t destination,std::uint32_t left,
+                                std::uint32_t right,std::uint32_t mask,std::uint32_t broadcast,Arithmetic arithmetic,
+                                nt::ee::detail::VectorArithmetic operation) {
     using nt::ee::Stop;
     auto* vectors=memory->vectors;
     if (!vectors) return std::uint32_t(Stop::unsupported_vector);
@@ -92,7 +94,9 @@ std::uint32_t vector_arithmetic(nt::ee::Memory* memory,std::uint32_t destination
     const auto read=[&](unsigned r) { return r==32 ? vectors->accumulator : r ? vectors->values[r-1] : nt::numeric::Vector{0,0,0,0x3f800000}; };
     auto operand=right<32 ? read(right) : nt::numeric::Vector{};
     if (right>=32) operand.fill(right==32 ? vectors->quotient : vectors->immediate);
-    const auto result=nt::numeric::binary_vector(read(destination),read(left),operand,mask,broadcast,vectors->status,arithmetic);
+    nt::numeric::VectorResult result{read(destination),0,vectors->status};
+    if (!nt::ee::detail::try_vector_arithmetic(result,read(left),operand,vectors->accumulator,mask,broadcast,vectors->status,operation))
+        result=nt::numeric::binary_vector(read(destination),read(left),operand,mask,broadcast,vectors->status,arithmetic);
     if (!result.supported) return std::uint32_t(Stop::unsupported_numeric);
     if (destination==32) vectors->accumulator=result.value;
     else if (destination) vectors->values[destination-1]=result.value;
@@ -104,11 +108,13 @@ extern "C" std::uint32_t nt_ee_vector_add(nt::ee::Memory* memory,std::uint32_t d
                                          std::uint32_t right,std::uint32_t mask,std::uint32_t subtract,std::uint32_t broadcast) {
     if (subtract>1) return std::uint32_t(nt::ee::Stop::invalid_state);
     return vector_arithmetic(memory,destination,left,right,mask,broadcast,
-        [subtract](auto a,auto b,unsigned) { return nt::numeric::add_subtract_finite(a,b,subtract!=0); });
+        [subtract](auto a,auto b,unsigned) { return nt::numeric::add_subtract_finite(a,b,subtract!=0,true); },
+        subtract ? nt::ee::detail::VectorArithmetic::subtract : nt::ee::detail::VectorArithmetic::add);
 }
 extern "C" std::uint32_t nt_ee_vector_multiply(nt::ee::Memory* memory,std::uint32_t destination,std::uint32_t left,
                                               std::uint32_t right,std::uint32_t mask,std::uint32_t broadcast) {
-    return vector_arithmetic(memory,destination,left,right,mask,broadcast,[](auto a,auto b,unsigned) { return nt::numeric::multiply_finite(a,b); });
+    return vector_arithmetic(memory,destination,left,right,mask,broadcast,[](auto a,auto b,unsigned) { return nt::numeric::multiply_finite(a,b,true); },
+        nt::ee::detail::VectorArithmetic::multiply);
 }
 
 extern "C" std::uint32_t nt_ee_vector_multiply_accumulate(nt::ee::Memory* memory,std::uint32_t destination,std::uint32_t left,
@@ -116,6 +122,6 @@ extern "C" std::uint32_t nt_ee_vector_multiply_accumulate(nt::ee::Memory* memory
     if (subtract>1) return std::uint32_t(nt::ee::Stop::invalid_state);
     return vector_arithmetic(memory,destination,left,right,mask,broadcast,
         [memory,subtract](auto a,auto b,unsigned lane) {
-            return nt::numeric::multiply_accumulate_finite(memory->vectors->accumulator[lane],a,b,subtract!=0);
-        });
+            return nt::numeric::vector_multiply_accumulate(memory->vectors->accumulator[lane],a,b,subtract!=0);
+        },subtract ? nt::ee::detail::VectorArithmetic::multiply_subtract : nt::ee::detail::VectorArithmetic::multiply_add);
 }

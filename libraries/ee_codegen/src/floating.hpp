@@ -51,9 +51,10 @@ inline void emit_floating(Writer& w,const r5900::Instruction& i) {
         const auto left=w.load("i32",offsetof(runtime::State,fpr)+i.rd*sizeof(std::uint32_t));
         const auto right=w.load("i32",offsetof(runtime::State,fpr)+i.rt*sizeof(std::uint32_t));
         const bool accumulate=i.op==Op::madd_s || i.op==Op::msub_s || i.op==Op::madda_s || i.op==Op::msuba_s;
-        const auto sum=accumulate ? w.value("call i64 @nt_ee_scalar_multiply_accumulate_finite(i32 "+
+        const auto sum=accumulate ? w.value("call i64 @nt_ee_scalar_multiply_accumulate(i32 "+
             w.load("i32",offsetof(runtime::State,accumulator))+", i32 "+left+", i32 "+right+", i32 "+
-            (i.op==Op::msub_s || i.op==Op::msuba_s ? "1" : "0")+")") : w.value(i.op==Op::mul_s || i.op==Op::mula_s ? "call i64 @nt_ee_multiply_finite(i32 "+left+", i32 "+right+")" : "call i64 @nt_ee_add_finite(i32 "+left+", i32 "+right+", i32 "+(i.op==Op::sub_s || i.op==Op::suba_s ? "1" : "0")+")");
+            (i.op==Op::msub_s || i.op==Op::msuba_s ? "1" : "0")+", i32 "+
+            w.value("zext i8 "+w.load("i8",offsetof(runtime::State,accumulator_overflow))+" to i32")+")") : w.value(i.op==Op::mul_s || i.op==Op::mula_s ? "call i64 @nt_ee_scalar_multiply(i32 "+left+", i32 "+right+")" : "call i64 @nt_ee_scalar_add(i32 "+left+", i32 "+right+", i32 "+(i.op==Op::sub_s || i.op==Op::suba_s ? "1" : "0")+")");
         const auto unsupported=w.value("icmp ne i64 "+w.binary("and","i64",sum,"8589934592")+", 0");
         const auto suffix=std::to_string(i.pc);
         w.out<<"  br i1 "<<unsupported<<", label %numeric_stop"<<suffix<<", label %numeric_result"<<suffix
@@ -64,9 +65,13 @@ inline void emit_floating(Writer& w,const r5900::Instruction& i) {
         const auto added=w.value("select i1 "+underflow+", i32 16392, i32 0");
         const auto sticky=w.value("icmp ne i64 "+w.binary("and","i64",sum,"17179869184")+", 0");
         const auto sticky_flag=w.value("select i1 "+sticky+", i32 8, i32 0");
+        const auto overflow=w.value("icmp ne i64 "+w.binary("and","i64",sum,"34359738368")+", 0");
+        const auto overflow_flag=w.value("select i1 "+overflow+", i32 32784, i32 0");
+        const bool to_acc=i.op==Op::adda_s || i.op==Op::suba_s || i.op==Op::mula_s || i.op==Op::madda_s || i.op==Op::msuba_s;
+        if (to_acc) w.store("i8",w.value("zext i1 "+overflow+" to i8"),offsetof(runtime::State,accumulator_overflow));
         w.store("i32",w.narrow(sum),(i.op==Op::adda_s || i.op==Op::suba_s || i.op==Op::mula_s || i.op==Op::madda_s || i.op==Op::msuba_s) ? offsetof(runtime::State,accumulator) :
               offsetof(runtime::State,fpr)+i.sa*sizeof(std::uint32_t));
-        w.store("i32",w.binary("or","i32",w.binary("or","i32",cleared,added),sticky_flag),offsetof(runtime::State,fcr31));
+        w.store("i32",w.binary("or","i32",w.binary("or","i32",w.binary("or","i32",cleared,added),sticky_flag),overflow_flag),offsetof(runtime::State,fcr31));
         return;
     }
     case Op::mov_s: case Op::abs_s: case Op::neg_s: {
@@ -88,17 +93,16 @@ inline void emit_floating(Writer& w,const r5900::Instruction& i) {
             const auto right=w.load("i32",offsetof(runtime::State,fpr)+i.rt*sizeof(std::uint32_t));
             const auto le=w.binary("and","i32",left,"2139095040");
             const auto re=w.binary("and","i32",right,"2139095040");
-            const auto invalid=w.binary("or","i1",w.value("icmp eq i32 "+le+", 2139095040"),w.value("icmp eq i32 "+re+", 2139095040"));
-            const auto suffix=std::to_string(i.pc);
-            w.out<<"  br i1 "<<invalid<<", label %compare_stop"<<suffix<<", label %compare_values"<<suffix
-               <<"\ncompare_stop"<<suffix<<":\n  ret i32 6\ncompare_values"<<suffix<<":\n";
-            const auto normalized=[&](const std::string& bits,const std::string& exponent) {
-                const auto zero=w.value("icmp eq i32 "+exponent+", 0");
-                const auto finite=w.value("select i1 "+zero+", i32 0, i32 "+bits);
-                return w.value("bitcast i32 "+finite+" to float");
+            // Raw signed-magnitude ordering includes exponent 255; no IEEE NaNs.
+            // Both signs of zero and denormal inputs compare as the same zero.
+            const auto key=[&](const std::string& bits,const std::string& exponent) {
+                const auto normalized=w.value("select i1 "+w.value("icmp eq i32 "+exponent+", 0")+", i32 0, i32 "+bits);
+                const auto negative=w.value("icmp slt i32 "+normalized+", 0");
+                return w.value("select i1 "+negative+", i32 "+w.binary("xor","i32",normalized,"4294967295")+
+                               ", i32 "+w.binary("or","i32",normalized,"2147483648"));
             };
-            const auto a=normalized(left,le),b=normalized(right,re);
-            condition=w.value(std::string("fcmp ")+(predicate==2 ? "oeq" : predicate==4 ? "olt" : "ole")+" float "+a+", "+b);
+            const auto a=key(left,le),b=key(right,re);
+            condition=w.value(std::string("icmp ")+(predicate==2 ? "eq" : predicate==4 ? "ult" : "ule")+" i32 "+a+", "+b);
         }
         const auto flags=w.load("i32",offsetof(runtime::State,fcr31));
         const auto kept=w.binary("and","i32",flags,"4286578687");

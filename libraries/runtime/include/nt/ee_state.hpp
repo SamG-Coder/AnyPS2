@@ -14,6 +14,7 @@ struct State {
     std::uint64_t hi1 = 0, lo1 = 0, sa = 0;
     std::uint32_t pc = 0, pending_target = 0, branch_pc = 0;
     bool delay_slot = false;
+    bool accumulator_overflow = false;
     void set(unsigned reg, std::uint64_t value) { if (reg) gpr[reg].lo = value; }
     void set128(unsigned reg, Register value) { if (reg) gpr[reg] = value; }
 };

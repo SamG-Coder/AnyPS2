@@ -245,8 +245,8 @@ underflow flags. `AdvancedSettingsWidget.cpp` documents default EE chop rounding
 AnyPS2 computes finite products independently using 24-bit integer significands.
 The multiplier precision caveat in `x86/iFPU.cpp` remains a limitation: this
 implementation does not reproduce the PS2 partial-product truncation quirk or
-apply the reference's game-specific workaround. Extended-range operands/results
-stop before state changes.
+apply the reference's game-specific workaround. The scalar extended-range
+implementation is described below; bounded VU paths still reject that domain.
 PCSX2 `COP0.cpp` and the performance-register fields in `R5900.h` establish
 MFPS/MTPS/MFPC/MTPC selector behavior, 32-bit counter storage and sign-extended
 reads. Event 1 counts diagnostic cycles with CTE, ERL and privilege gating.
@@ -1046,7 +1046,8 @@ no upstream execution code is copied and no host floating-point conversion occur
 
 Finite EE LLVM addition reuses AnyPS2's original integer arithmetic implementation,
 with public FPU.cpp accumulator destinations and status-flag contracts informing
-the adapter. Extended numeric ranges remain explicitly unsupported. SYNC uses
+the adapter. Scalar extended ranges are covered by the later numeric upgrade
+below. SYNC uses
 native LLVM fence semantics for the public ordering boundary; console pipeline
 and cache implementations are not copied or linked.
 
@@ -2052,8 +2053,9 @@ an independent behavioral reference: round and flush the product before the
 addition, retain sticky underflow from that stage, and derive current underflow
 from the final addition. AnyPS2 reuses its own integer-significand arithmetic
 and adds a separate scalar ABI helper; the conservative VU contract is unchanged.
-No upstream implementation is copied. Exponent-255 and overflow cases remain
-explicitly unsupported; this is not a claim of hardware-exact multiplication.
+No upstream implementation is copied. The later scalar extended-range upgrade
+covers exponent-255 and overflow cases; this is not a claim of hardware-exact
+multiplication.
 
 ## Native audsrv sample playback
 
@@ -2072,3 +2074,99 @@ copied. The original bounded decoder supports mono APCM version 1; unsupported
 formats and loops requiring continued predictor history are rejected explicitly.
 Decoded samples use the existing XAudio2 backend with native resampling, not
 console interpolation or an SPU register model.
+
+### Scalar extended-range arithmetic
+
+The pinned PCSX2 `pcsx2/x86/iFPUd.cpp` (`ToDouble`, `ToPS2FPU_Full`,
+`recDIVhelper1`, `recMaddsub`) is the public semantic reference for the EE
+scalar exponent-255 finite range, signed saturation, operation-specific status
+flags and the accumulator-overflow latch. AnyPS2 extends its original integer
+significand arithmetic and LLVM lowering; no upstream implementation is copied.
+The scalar policy is separate from the existing bounded VU helpers. This is
+reference-informed behavior, not physical-hardware validation; the documented
+multiplier partial-product precision limitation remains.
+
+### Vector extended-range arithmetic
+
+PSI-Rockin's public [ps2tek](https://github.com/PSI-Rockin/ps2tek/tree/1c9166066c3ab9ad089a4d12088acaa9476df4b6)
+explains the finite exponent-255 format and VU MAC/status lane layout. The pinned
+PCSX2 `VUflags.cpp` and `VUops.cpp` cross-check flag ownership, masked lanes and
+separate multiply/add stages. AnyPS2 reuses its original integer-significand
+arithmetic for both compiled VU regions and EE vector instructions. No reference
+implementation is copied or linked. MAC overflow includes exponent-255 results;
+status keeps sticky flags and the independent quotient flags.
+
+Multiply-accumulate supports extended operands and unambiguous saturation when
+an overflowing product is added to zero or a same-sign accumulator. Opposing-sign
+accumulation after product overflow and intermediate product underflow remain
+explicit unsupported boundaries pending validation of the internal VU pipeline.
+This extension does not claim bit-exact multiplier partial-product precision.
+
+### Highlight texture functions
+
+The pinned PCSX2 Vulkan `bin/resources/shaders/vulkan/tfx.glsl` `tfx` equations
+were consulted for HIGHLIGHT/HIGHLIGHT2 RGB modulation plus vertex alpha, their
+distinct alpha equations, TCC selection and channel saturation. AnyPS2 extends
+its own integer texture-combine shader for sprites and triangles; no upstream
+shader code is copied. Original packet fixtures verify GPU readback for all four
+functions, RGB/RGBA selection and saturation.
+
+### Native Vulkan attachment path
+
+The Khronos Vulkan specification, Render Pass chapter and Synchronization
+Examples (consulted 2026-11-03), define same-subpass input/colour attachment
+feedback and framebuffer-local dependencies. The implementation is original;
+no sample implementation is copied. Integer colour/depth attachments retain
+observable integer operations while Vulkan performs primitive rasterization.
+
+- https://docs.vulkan.org/spec/latest/chapters/renderpass.html
+- https://docs.vulkan.org/guide/latest/synchronization_examples.html
+
+The Khronos [Swapchain Semaphore Reuse guide](https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html)
+(consulted 2026-11-03) defines the semaphore lifetime used by native presentation:
+acquire semaphores belong to bounded in-flight frames and retire through graphics
+fences; presentation wait semaphores belong to swapchain images and are reused
+after image reacquisition. This is an original implementation of the documented
+API contract, with no sample code copied.
+
+The Khronos [Vulkan fragment interlock specification](https://docs.vulkan.org/refpages/latest/refpages/source/VK_EXT_fragment_shader_interlock.html)
+and [GLSL ARB fragment interlock revision 2](https://registry.khronos.org/OpenGL/extensions/ARB/ARB_fragment_shader_interlock.txt)
+(consulted 2026-11-03) define ordered per-pixel critical sections and coherent
+image access. AnyPS2 independently implements programmable integer colour/depth
+operations using these guarantees, selected by device capability rather than
+GPU vendor or game identity. No specification sample implementation is copied.
+
+### Native vector arithmetic acceleration
+
+The [Intel C++ intrinsics reference](https://www.intel.com/content/dam/develop/external/us/en/documents/cpp_compiler_classic.pdf)
+was consulted for AVX-512 embedded rounding and exception suppression. The native
+vector fast path uses separate round-toward-zero operations only after proving
+that the selected operands/results stay in the supported normal/zero range.
+CPU/OS feature checks gate these instructions; extended exponents, underflow and
+other exceptional cases retain the existing integer implementation. No reference
+implementation is copied, and no fused multiply-add substitution is enabled.
+
+### Antialiased triangle interiors
+
+The pinned PCSX2 revision `1f67c53b6723fcd6a90041a5b296f0e34a6a3222`,
+`bin/resources/shaders/vulkan/tfx.glsl` and
+`pcsx2/GS/Renderers/SW/GSDrawScanline.cpp`, distinguishes fully opaque triangle
+interiors from antialiased exterior edges and suppresses depth updates for the
+exterior. These were consulted as behavioral references; no implementation was
+copied. AnyPS2's independent regression uses original synthetic triangles to
+verify that interior pixels remain opaque and occlude a farther surface. Its
+existing sampled exterior coverage remains an approximation.
+
+### LLVM Vulkan kernel compilation
+
+- Reference: [LLVM SPIR-V target guide](https://llvm.org/docs/SPIRVUsage.html),
+  with the intrinsic ABI checked against LLVM `llvmorg-22.1.8`, commit
+  `ca7933e47d3a3451d81e72ac174dcb5aa28b59d1`.
+- Public interface examples: `llvm/test/CodeGen/SPIRV/hlsl-resources/StructuredBuffer.ll`
+  and `llvm/test/CodeGen/SPIRV/hlsl-intrinsics/SV_DispatchThreadID.ll` in that revision.
+- LLVM is Apache-2.0 WITH LLVM-exception. Local toolchain sources remain ignored;
+  no LLVM implementation is copied into AnyPS2.
+- AnyPS2's arithmetic graph, emitter and test data are original. CPU and GPU
+  arithmetic reuse the same AnyPS2 finite-arithmetic implementation. Generated
+  LLVM, linked bitcode and validated SPIR-V are build artifacts. The arithmetic
+  kernel interface alone does not establish EE/VU region legality or game use.

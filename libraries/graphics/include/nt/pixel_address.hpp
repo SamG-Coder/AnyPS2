@@ -1,0 +1,20 @@
+#pragma once
+
+// Format address calculations shared by CPU import and LLVM GPU conversion.
+namespace nt::graphics {
+inline unsigned rgba_word(unsigned base,unsigned pitch,unsigned x,unsigned y) {
+    x&=2047; y&=2047;
+    const auto page=(y/32)*pitch+x/64;
+    const auto block=((x>>3)&1)|(((y>>3)&1)<<1)|(((x>>4)&1)<<2)|(((y>>4)&1)<<3)|(((x>>5)&1)<<4);
+    const auto word=(x&1)|((y&1)<<1)|((x&6)<<1)|((y&6)<<3);
+    return (base*64+page*2048+block*64+word)&0xfffff;
+}
+inline unsigned indexed_nibble(unsigned base,unsigned pitch,unsigned x,unsigned y) {
+    x&=2047; y&=2047;
+    const auto page=(y/128)*(pitch/2)+x/128;
+    const auto block=((y>>4)&1)|(((x>>5)&1)<<1)|(((y>>5)&1)<<2)|(((x>>6)&1)<<3)|(((y>>6)&1)<<4);
+    const auto column=((x&1)<<3)|((x&2)<<4)|(((x>>2 ^ y>>1 ^ y>>2)&1)<<6)|
+        ((x&8)>>2)|((x&16)>>2)|((y&1)<<4)|((y&2)>>1)|((y&4)<<5)|((y&8)<<5);
+    return (base*512+page*16384+block*512+column)&0x7fffff;
+}
+}

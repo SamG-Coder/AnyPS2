@@ -73,10 +73,25 @@ void depth_and_coverage(nt::graphics::VulkanRenderer& renderer) {
     p=setup(3|128,1); ad(p,1,0x80808080);
     ad(p,5,10ULL<<32); ad(p,5,64ULL|(10ULL<<32)); ad(p,5,(64ULL<<16)|(10ULL<<32)); finish(p);
     aa.submit(renderer,std::array{p});
-    const auto edge=aa.pixels()[rgba_word(0,1,2,1)];
-    if (pixel(aa)!=0x80808080 || zpixel(aa)!=10 || (edge>>24)==0 || (edge>>24)>=128 ||
-        aa.pixels()[rgba_word(32,1,2,1)^0x600]!=0)
-        throw std::runtime_error("Native edge coverage alpha or partial-coverage depth mask differs");
+    // Integer pixel (2,1) is an interior sample, even though its surrounding
+    // area crosses the edge. It must stay opaque and update depth.
+    if (aa.pixels()[rgba_word(0,1,2,1)]!=0x80808080 || aa.pixels()[rgba_word(32,1,2,1)^0x600]!=10)
+        throw std::runtime_error("Antialiased triangle interior lost opacity or depth");
+    p=setup(3|128,3); ad(p,1,0x80000080);
+    ad(p,5,5ULL<<32); ad(p,5,64ULL|(5ULL<<32)); ad(p,5,(64ULL<<16)|(5ULL<<32)); finish(p);
+    aa.submit(renderer,std::array{p});
+    if (aa.pixels()[rgba_word(0,1,2,1)]!=0x80808080)
+        throw std::runtime_error("Farther geometry leaked through antialiased interior");
+    NativeDrawing exterior;
+    p=setup(3|128,1); ad(p,1,0x80808080);
+    ad(p,5,8ULL|(8ULL<<16)|(10ULL<<32));
+    ad(p,5,72ULL|(8ULL<<16)|(10ULL<<32));
+    ad(p,5,8ULL|(72ULL<<16)|(10ULL<<32)); finish(p);
+    exterior.submit(renderer,std::array{p});
+    const auto edge=exterior.pixels()[rgba_word(0,1,0,1)];
+    if ((edge>>24)==0 || (edge>>24)>=128 || exterior.pixels()[rgba_word(32,1,0,1)^0x600]!=0)
+        throw std::runtime_error("Antialiased exterior lost partial coverage or wrote depth");
+
 }
 
 void triangles(nt::graphics::VulkanRenderer& renderer) {

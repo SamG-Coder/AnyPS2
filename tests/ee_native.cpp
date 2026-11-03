@@ -188,12 +188,13 @@ int main() {
                 check((n<2 ? state.accumulator : state.fpr[3])==(n<2 ? 0x41200000U : 0xdeadbeefU));
                 state={}; state.pc=0x440000+n*8; state.fpr[1]=0x7f800000; state.fpr[2]=0x40400000;
                 state.accumulator=0x41200000; state.fpr[3]=0xdeadbeef; state.fcr31=123;
-                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_numeric && !state.executed &&
-                    state.fpr[3]==0xdeadbeef && state.accumulator==0x41200000 && state.fcr31==123);
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.executed==1 &&
+                    (n<2 ? state.fpr[3] : state.accumulator)==((n&1) ? 0xffffffffU : 0x7fffffffU) &&
+                    state.accumulator_overflow==(n>=2) && state.fcr31==(123|0x8010));
             }
             state={}; state.pc=0x440020; state.fpr[1]=0x40c00000; state.fpr[2]=0x40800000;
             check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.fpr[3]==0x40400000);
-            for (const auto invalid:{0U,0xbf800000U,0x7f800000U}) {
+            for (const auto invalid:{0U,0xbf800000U}) {
                 state={}; state.pc=0x440020; state.fpr[1]=0x40c00000; state.fpr[2]=invalid; state.fpr[3]=7; state.fcr31=123;
                 check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_numeric && !state.executed && state.fpr[3]==7 && state.fcr31==123);
             }
@@ -212,8 +213,8 @@ int main() {
             vectors.values[0][1]=0x7f800000; vectors.accumulator.fill(77);
             const auto previous=vectors.accumulator; const auto mac=vectors.mac,status=vectors.status;
             state={}; state.pc=0x440120;
-            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_numeric && !state.executed &&
-                vectors.accumulator==previous && vectors.mac==mac && vectors.status==status);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.executed==1 &&
+                vectors.accumulator[1]==0x7fffffff && (vectors.mac&0x4000) && (vectors.status&0x208)==0x208);
             vectors.active=true; state={}; state.pc=0x440100;
             check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::vector_pending && !state.executed);
             state={}; state.pc=0x440200; state.set(4,0xffffffff);
@@ -813,13 +814,14 @@ int main() {
             }
         }
         check(std::fesetround(rounding)==0);
-        for (const auto operands : {std::array{0x7f800000U,0U},std::array{0U,0xffc12345U},std::array{0x7f7fffffU,0x7f7fffffU}}) {
+        // Extended scalar values in a delay slot retain native branch semantics.
+        for (const auto values : {std::array{0x7f800000U,0U,0x7f800000U},
+                                 std::array{0U,0xffc12345U,0xffc12345U},
+                                 std::array{0x7f7fffffU,0x7f7fffffU,0x7fffffffU}}) {
             nt::runtime::State state; state.pc=0x1190;
-            state.fpr[2]=operands[0]; state.fpr[3]=operands[1]; state.accumulator=123; state.fcr31=456;
-            check(run(&state,8)==nt::ee::Stop::unsupported_numeric && state.executed==1 && state.pc==0x1194 &&
-                  state.delay_slot && state.pending_target==0x119c && state.accumulator==123 && state.fcr31==456);
-            state.fpr[2]=0; state.fpr[3]=0;
-            check(run(&state,8)==nt::ee::Stop::syscall && state.executed==2 && state.pc==0x119c && !state.delay_slot);
+            state.fpr[2]=values[0]; state.fpr[3]=values[1]; state.accumulator=123; state.fcr31=456;
+            check(run(&state,8)==nt::ee::Stop::syscall && state.executed==2 && state.pc==0x119c &&
+                  !state.delay_slot && state.accumulator==values[2] && state.fcr31==456 && !state.accumulator_overflow);
         }
         {
             nt::runtime::State state; state.pc=0x11a0; state.fpr[2]=0x3f800000; state.fpr[3]=0x40000000;
@@ -1465,7 +1467,10 @@ int main() {
             struct Comparison { unsigned a,b; bool equal,less; };
             for (const auto pair : {Comparison{0,0x80000000,true,false},Comparison{1,0x80000001,true,false},
                                    Comparison{0xbf800000,0x3f800000,false,true},Comparison{0x40000000,0x3f800000,false,false},
-                                   Comparison{0xbf800001,0xbf800000,false,true},Comparison{0x00800000,0,false,false}}) {
+                                   Comparison{0xbf800001,0xbf800000,false,true},Comparison{0x00800000,0,false,false},
+                                   Comparison{0x7f800000,0x7f7fffff,false,false},
+                                   Comparison{0xffffffff,0xff800000,false,true},
+                                   Comparison{0x7fc12345,0x7fc12345,true,false}}) {
                 for (unsigned predicate=0;predicate<4;++predicate) {
                     nt::runtime::State state; state.pc=0x13a4+predicate*8; state.fpr[2]=pair.a; state.fpr[3]=pair.b;
                     state.fcr31=0xffffffff;
@@ -1476,8 +1481,7 @@ int main() {
             }
             for (unsigned predicate=0;predicate<4;++predicate) {
                 nt::runtime::State state; state.pc=0x13a4+predicate*8; state.fpr[2]=0x7fc12345; state.fcr31=0xffffffff;
-                check(run(&state,8)==(predicate ? nt::ee::Stop::unsupported_numeric : nt::ee::Stop::syscall));
-                check(state.executed==(predicate ? 0 : 1) && state.fcr31==(predicate ? 0xffffffffU : 0xff7fffffU));
+                check(run(&state,8)==nt::ee::Stop::syscall && state.executed==1 && state.fcr31==0xff7fffffU);
             }
         }
         for (unsigned variant=0;variant<4;++variant) {
@@ -1740,10 +1744,20 @@ int main() {
                 }
             }
             std::fesetround(FE_TONEAREST);
-            for (const auto pair : {Product{0x7f800000,0x3f800000,0},Product{0x3f800000,0xffffffff,0},Product{0x7f7fffff,0x40000000,0}}) {
+            for (const auto pair : {Product{0x7f800000,0x3f800000,0x7f800000},
+                                    Product{0x3f800000,0xffffffff,0xffffffff},
+                                    Product{0x7f7fffff,0x40000000,0x7fffffff}}) {
                 nt::runtime::State state; state.pc=0x14e0; state.fpr[2]=pair.a; state.fpr[3]=pair.b; state.fpr[4]=123; state.fcr31=456;
-                check(run(&state,8)==nt::ee::Stop::unsupported_numeric && !state.executed && state.pc==0x14e0 &&
-                      state.fpr[4]==123 && state.fcr31==456);
+                check(run(&state,8)==nt::ee::Stop::syscall && state.executed==1 &&
+                      state.fpr[4]==pair.result && state.fcr31==456);
+            }
+            for (const auto sign:{0U,0x80000000U}) {
+                nt::runtime::State state; state.pc=0x14e0; state.fpr[2]=0x7fffffff|sign; state.fpr[3]=0x40000000;
+                state.fcr31=0x00830000;
+                check(run(&state,8)==nt::ee::Stop::syscall && state.fpr[4]==(0x7fffffff|sign) && state.fcr31==0x00838010);
+                // A subsequent non-overflow clears only the current flag.
+                state.pc=0x14e0; state.fpr[2]=0x3f800000;
+                check(run(&state,8)==nt::ee::Stop::syscall && state.fpr[4]==0x40000000 && state.fcr31==0x00830010);
             }
         }
         {
@@ -1759,10 +1773,10 @@ int main() {
                 check(vectors.mac==(variant==0 ? 0x52U : 0U) && vectors.status==(variant==0 ? 0xc3U : 0U));
             }
             nt::runtime::State state; state.pc=0x14f0; vectors.values[1][3]=0x7f800000;
-            const auto original=vectors.values; const auto flags=vectors.status;
-            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::unsupported_numeric && !state.executed &&
-                  vectors.values==original && vectors.status==flags);
-            vectors.active=true;
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall && state.executed==1 &&
+                  vectors.values[2][3]==0xff7fffff && !(vectors.mac&0x1000));
+            const auto original=vectors.values;
+            vectors.active=true; state.executed=0; state.pc=0x14f0;
             check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::vector_pending && !state.executed && vectors.values==original);
             vectors.active=false; state.pc=0x1510;
             check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall && state.executed==1 &&
@@ -2465,6 +2479,25 @@ int main() {
                 state.pc=0x3a0000; state.set(3,number==0x71 ? 0x70 : 0xffffff90U);
                 check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::budget && state.gpr[2].lo==0x6100);
             }
+        }
+        {
+            std::vector<std::uint8_t> ram(0x10000,0);
+            nt::ee::Memory memory{ram.data(),ram.size()};
+            nt::ee::NativePlatform platform; platform.attach(memory);
+            struct PendingDraw { nt::ee::NativeGraphics* graphics; bool ready=false,fail=false; } pending{&platform.graphics};
+            platform.graphics.context=&pending;
+            platform.graphics.poll_drawing=[](void* context) {
+                auto& p=*static_cast<PendingDraw*>(context);
+                if (p.fail) return nt::ee::Stop::unsupported_system;
+                if (p.ready) { p.graphics->drawing_completed(); p.ready=false; }
+                return nt::ee::Stop::budget;
+            };
+            nt::runtime::State state; state.pc=0x3d0018; state.set(4,0x12001000);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && !(state.gpr[9].lo&2));
+            pending.ready=true; state.pc=0x3d0018;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && (state.gpr[9].lo&2));
+            pending.fail=true; state.pc=0x3d0018; const auto retired=state.executed;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system && state.executed==retired);
         }
         {
             timer_now=0;

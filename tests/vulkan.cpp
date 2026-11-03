@@ -6,11 +6,72 @@
 #include <stdexcept>
 #include <chrono>
 
-int main() {
+namespace {
+void bulk_transfers() {
+    using namespace nt::graphics;
+    for (const unsigned bits:{4U,24U,32U}) for (const unsigned width:{1U,3U,17U,33U}) {
+        const unsigned pixels=width*3,mask=bits==32 ? 0xffffffffU : (1U<<bits)-1;
+        Packet payload((pixels*bits+127)/128,Quadword{0xa5a5a5a5,0xa5a5a5a5,0xa5a5a5a5,0xa5a5a5a5});
+        for (unsigned p=0;p<pixels;++p) {
+            const auto value=(0x1234567U*(p+1))&mask;
+            for (unsigned bit=0;bit<bits;++bit) {
+                const unsigned offset=p*bits+bit;
+                auto& word=payload[offset/128][(offset%128)/32];
+                word=(word&~(1U<<(offset%32)))|(((value>>bit)&1)<<(offset%32));
+            }
+        }
+        const auto initial=ImageUpload::begin((16383ULL<<32)|(3ULL<<48)|
+            (std::uint64_t(bits==4 ? 20 : bits==24 ? 1 : 0)<<56),
+            (2045ULL<<32)|(2046ULL<<48),width|(3ULL<<32),0);
+        auto bulk=initial,split=initial;
+        std::vector<PixelWrite> a,b;
+        bulk.append(payload,a);
+        for (const auto& q:payload) split.append(q,b);
+        if (a.size()!=pixels || b.size()!=pixels || bulk.pixel!=pixels || bulk.pending!=split.pending ||
+            bulk.pending_bits!=split.pending_bits || bulk.pending_bits!=(8-pixels*bits%8)%8)
+            throw std::runtime_error("Bulk image transfer lost partial-byte state");
+        for (unsigned p=0;p<pixels;++p) {
+            const auto x=2045+p%width,y=2046+p/width;
+            const unsigned index=bits==4 ? indexed_nibble(16383,3,x,y) : rgba_word(16383,3,x,y);
+            const unsigned shift=bits==4 ? (index%8)*4 : 0,address=bits==4 ? index/8 : index;
+            const auto value=((0x1234567U*(p+1))&mask)<<shift;
+            if (a[p].address!=address || a[p].value!=value || a[p].mask!=(mask<<shift) ||
+                b[p].address!=a[p].address || b[p].value!=a[p].value || b[p].mask!=a[p].mask)
+                throw std::runtime_error("Bulk image transfer changed pixels, wrapping or write masks");
+        }
+        bool rejected=false;
+        try {bulk.append(payload.front(),a);} catch(const std::invalid_argument&) {rejected=true;}
+        if (!rejected || a.size()!=pixels) throw std::runtime_error("Bulk image transfer accepted overrun");
+    }
+    const Packet first{{2,0x08000000,0,0},{1,2,3,4},{5,6,7,8},{0x8001,0x10000000,14,0},{9,10,11,12}};
+    const Packet second{{0x8000,0x08000000,0,0}};
+    // Offset the byte view deliberately: transport buffers need not be aligned.
+    std::vector<std::uint8_t> data(1+(first.size()+second.size())*16);
+    unsigned cursor=1;
+    for (const auto& packet:{first,second}) for (const auto& q:packet) for (auto word:q)
+        for (unsigned byte=0;byte<4;++byte) data[cursor++]=std::uint8_t(word>>(byte*8));
+    const auto bytes=std::span(data).subspan(1);
+    const std::vector<Packet> expected{first,second};
+    for (unsigned split=1;split<first.size()+second.size();++split) {
+        PacketStream stream; std::vector<Packet> result;
+        stream.append(bytes.first(split*16),result);
+        stream.append(bytes.subspan(split*16),result);
+        if (stream.pending() || result!=expected) throw std::runtime_error("Bulk packet framing lost split tags or payloads");
+    }
+    std::vector<Packet> result; append_packets(result,bytes);
+    if (result!=expected) throw std::runtime_error("Bulk packet extraction differs from streaming framing");
+    bool rejected=false;
+    try {PacketStream stream; stream.append(bytes.first(17),result);} catch(const std::invalid_argument&) {rejected=true;}
+    if (!rejected) throw std::runtime_error("Bulk packet framing accepted incomplete quadword");
+}
+}
+
+int main(int argc,char**) {
     try {
-        nt::graphics::VulkanRenderer gpu(nullptr,true);
+        bulk_transfers();
+        nt::graphics::VulkanRenderer gpu(nullptr,true,nt::graphics::RenderPath::reference_compute);
         gpu.synchronize();
-        nt::graphics::NativeDrawing native;
+        nt::graphics::NativeDrawing native(argc>1);
         nt::graphics::NativeDrawing::Packet packet{{0x8007,0x10000000,14,0}};
         const auto ad=[&](unsigned reg,std::uint64_t value) {
             packet.push_back({std::uint32_t(value),std::uint32_t(value>>32),reg,0});
@@ -60,6 +121,15 @@ int main() {
         native.submit(gpu,std::array{setup32,rgba,packet});
         for (unsigned pixel=0;pixel<4;++pixel)
             if (native.pixels()[pixel]!=0x80604020) throw std::runtime_error("Draw after image upload lost ordering");
+        const auto odd_rgba=transfer_setup(0,3,2);
+        const nt::graphics::Packet rgba_tail{{0x8001,0x08000000,0,0},{0x81abcdef,0x82abcdef,0xffffffff,0xffffffff}};
+        const auto before_odd=native.pixels();
+        native.submit(gpu,std::array{odd_rgba,rgba,rgba_tail});
+        const std::array<std::uint32_t,6> odd_expected{rgba[1][0],rgba[1][1],rgba[1][2],rgba[1][3],rgba_tail[1][0],rgba_tail[1][1]};
+        for (unsigned i=0;i<6;++i) if (native.pixels()[nt::graphics::rgba_word(0,1,i%3,i/3)]!=odd_expected[i])
+            throw std::runtime_error("Aligned RGBA upload lost row or packet boundaries");
+        if (native.pixels()[nt::graphics::rgba_word(0,1,0,2)]!=before_odd[nt::graphics::rgba_word(0,1,0,2)])
+            throw std::runtime_error("Aligned RGBA upload consumed packet padding");
         const auto before_rgb=native.pixels();
         const auto setup24=transfer_setup(1,6,1);
         const nt::graphics::Packet rgb_first{{0x8001,0x08000000,0,0},{0x04030201,0x08070605,0x0c0b0a09,0x100f0e0d}};
@@ -92,6 +162,25 @@ int main() {
         native.submit(gpu,std::array{setup32,rgba,textured_packet});
         for (unsigned pixel=0;pixel<4;++pixel)
             if (native.pixels()[2048+pixel]!=rgba[1][pixel]) throw std::runtime_error("Native uploaded texture did not reach Vulkan sampling");
+        // Packet-to-GPU texture combine equations, including alpha selection.
+        // Two independent texels exercise both ordinary and saturated results.
+        const std::array<std::array<std::uint32_t,2>,4> rgba_expected{{
+            {0x10c06020,0x30ffe078}, {0x40806040,0xc0d0e0f0},
+            {0x60e08040,0xe0ffff98}, {0x40e08040,0xc0ffff98}}};
+        for (unsigned function=0;function<4;++function) for (unsigned tcc=0;tcc<2;++tcc) {
+            auto combine=textured_packet; combine[5][0]=0x20c08040;
+            const auto description=(texture_description&~(7ULL<<34))|(std::uint64_t(tcc)<<34)|(std::uint64_t(function)<<35);
+            combine[6][0]=std::uint32_t(description); combine[6][1]=std::uint32_t(description>>32);
+            auto samples=rgba; samples[1]={0x40806040,0xc0d0e0f0,0x40806040,0xc0d0e0f0};
+            native.submit(gpu,std::array{setup32,samples,combine});
+            for (unsigned pixel=0;pixel<4;++pixel) {
+                auto expected=rgba_expected[function][pixel%2];
+                if (!tcc) expected=(expected&0xffffff)|0x20000000;
+                if (native.pixels()[2048+pixel]!=expected)
+                    throw std::runtime_error("Native texture combine/TCC/saturation mismatch");
+            }
+        }
+        native.submit(gpu,std::array{setup32,rgba,textured_packet});
         const auto before_bad_texture=native.pixels();
         auto perspective=textured_packet; perspective[2][0]=0x16; rejected=false;
         try { native.submit(gpu,std::array{perspective}); }
@@ -256,11 +345,44 @@ int main() {
             textured.clamp_u=textured.clamp_v=mode;
             textured.min_u=textured.min_v=0; textured.max_u=textured.max_v=1;
             textured.u0=textured.v0=32;
+            const auto snapshots=gpu.statistics().texture_snapshot_bytes;
+            const auto direct=gpu.statistics().direct_texture_draws;
             gpu.sprite(memory,textured);
+            if (gpu.statistics().texture_snapshot_bytes!=snapshots || gpu.statistics().direct_texture_draws!=direct+1)
+                throw std::runtime_error("Disjoint texture did not use direct GPU storage");
             for(unsigned i=0;i<4;++i) {
                 const unsigned expected_index=mode==0?i:3;
                 if(memory[2048+i]!=texels[expected_index]) throw std::runtime_error("Vulkan texture wrap/clamp mismatch");
             }
+        }
+        // A texture base near the end of storage wraps into page zero.
+        // Region clamp may address beyond the declared texture dimensions.
+        {
+            auto wrapped=textured;
+            wrapped.texture_base=16383;
+            wrapped.clamp_u=wrapped.clamp_v=2;
+            wrapped.min_u=wrapped.max_u=64;
+            wrapped.min_v=wrapped.max_v=0;
+            memory[1984]=0x80765432; // (16383*64 + one 2048-word page) modulo storage.
+            const auto before=gpu.statistics().texture_snapshot_bytes;
+            gpu.sprite(memory,wrapped);
+            if (memory[2048]!=0x80765432 || gpu.statistics().texture_snapshot_bytes-before!=16384)
+                throw std::runtime_error("Wrapped region texture snapshot lost pixels or copied the whole store");
+        }
+        {
+            auto feedback=textured;
+            feedback.left=feedback.top=0; feedback.right=feedback.bottom=1;
+            feedback.texture_width=64; feedback.texture_height=32;
+            feedback.clamp_u=feedback.clamp_v=2;
+            feedback.min_u=feedback.max_u=32; feedback.min_v=feedback.max_v=16;
+            feedback.flags=13|nt::graphics::depth_test_flag|nt::graphics::depth_write_flag;
+            feedback.depth_base=0; feedback.depth=123; feedback.test=1U<<17;
+            memory[1536]=0x80665544;
+            const auto before=gpu.statistics().texture_snapshot_bytes;
+            gpu.sprite(memory,feedback);
+            if (memory[2048]!=0x80665544 || memory[1536]!=123 ||
+                gpu.statistics().texture_snapshot_bytes-before!=8192)
+                throw std::runtime_error("Texture/depth feedback did not preserve the pre-draw snapshot");
         }
         textured.clamp_u=textured.clamp_v=0; textured.u0=textured.v0=0;
         textured.base=0; textured.du=-32; textured.u0=16;
@@ -344,10 +466,27 @@ int main() {
             const auto batch_time=std::chrono::steady_clock::now()-batch_began;
             if (batched!=singles || batched[4096]!=0x80998877 || gpu.statistics().submissions!=submissions+1)
                 throw std::runtime_error("Batched Vulkan draw order, palette changes or texture feedback differs");
+            // Resident calls keep storage on device across packets and preserve
+            // the same ordered pixels without one host round trip per call.
+            const auto resident_before=gpu.statistics();
+            std::vector<std::uint32_t> resident(1024*1024);
+            gpu.upload(resident);
+            const auto resident_began=std::chrono::steady_clock::now();
+            for (const auto& command:commands) gpu.draw(std::span(&command,1));
+            if (gpu.statistics().readback_bytes!=resident_before.readback_bytes)
+                throw std::runtime_error("Resident draws performed hidden readbacks");
+            gpu.read(resident);
+            const auto resident_time=std::chrono::steady_clock::now()-resident_began;
+            if (resident!=singles || gpu.statistics().upload_bytes-resident_before.upload_bytes!=resident.size()*4 ||
+                gpu.statistics().readback_bytes-resident_before.readback_bytes!=resident.size()*4)
+                throw std::runtime_error("Resident batch differs from immediate ordered rendering");
+            std::cout<<"resident_draws="<<commands.size()<<" resident_ms="
+                     <<std::chrono::duration<double,std::milli>(resident_time).count()<<'\n';
+            const auto after_resident=gpu.statistics().submissions;
             auto bad=commands; bad.back().draw.pitch=0;
             rejected=false;
             try { gpu.sprites(batched,bad); } catch (const std::runtime_error&) { rejected=true; }
-            if (!rejected || batched!=singles || gpu.statistics().submissions!=submissions+1)
+            if (!rejected || batched!=singles || gpu.statistics().submissions!=after_resident)
                 throw std::runtime_error("Invalid Vulkan batch submitted partial work");
             nt::graphics::NativeDrawing separate,together;
             separate.submit(gpu,std::array{packet}); separate.submit(gpu,std::array{packed});
@@ -358,6 +497,57 @@ int main() {
             std::cout<<"sprites="<<commands.size()<<" single_submit_ms="
                 <<std::chrono::duration<double,std::milli>(single_time).count()<<" batch_submit_ms="
                 <<std::chrono::duration<double,std::milli>(batch_time).count()<<'\n';
+        }
+        {
+            // Overlapping sub-word uploads are folded in submission order; large
+            // uploads cross the bounded command-data chunk without races.
+            std::vector<std::uint32_t> expected(1024*1024,0xdeadbeef),actual=expected;
+            gpu.upload(actual);
+            std::vector<nt::graphics::PixelWrite> writes;
+            for (unsigned i=0;i<70000;++i) {
+                writes.push_back({i,i&255,255});
+                writes.push_back({i,(i<<4)&0xff0,0xff0});
+            }
+            for (auto w:writes) expected[w.address]=(expected[w.address]&~w.mask)|w.value;
+            gpu.write(writes);
+            const std::array<unsigned,4> addresses{0,65535,65536,69999};
+            std::array<std::uint32_t,4> values{};
+            const auto bytes=gpu.statistics().readback_bytes;
+            gpu.read_words(addresses,values);
+            for (unsigned i=0;i<4;++i) if (values[i]!=expected[addresses[i]])
+                throw std::runtime_error("Resident partial upload or ordered sparse readback differs");
+            if (gpu.statistics().readback_bytes-bytes!=16)
+                throw std::runtime_error("Sparse palette readback copied whole graphics store");
+            gpu.read(actual);
+            if (actual!=expected) throw std::runtime_error("Resident masked upload corrupted untouched bits");
+            auto invalid_writes=writes; invalid_writes.push_back({1024*1024,0,~0U});
+            rejected=false;
+            try { gpu.write(invalid_writes); } catch (const std::runtime_error&) { rejected=true; }
+            gpu.read(actual);
+            if (!rejected || actual!=expected) throw std::runtime_error("Invalid resident upload partially committed");
+        }
+        {
+            nt::graphics::VulkanRenderer resident_gpu(nullptr,true,nt::graphics::RenderPath::reference_compute);
+            nt::graphics::NativeDrawing resident(true),reference;
+            reference.submit(gpu,std::array{packet,packed});
+            const auto before=resident_gpu.statistics();
+            resident.submit(resident_gpu,std::array{packet});
+            resident.submit(resident_gpu,std::array{packed});
+            if (resident_gpu.statistics().readback_bytes!=before.readback_bytes)
+                throw std::runtime_error("Native resident packet forced CPU visibility");
+            const nt::graphics::Packet finish{{0x8001,0x10000000,14,0},{0,0,0x61,0}};
+            resident.submit(resident_gpu,std::array{finish});
+            if (resident.completed_finishes()!=1 || resident_gpu.statistics().submissions!=1 ||
+                resident_gpu.statistics().readback_bytes!=before.readback_bytes)
+                throw std::runtime_error("Resident FINISH did not complete the GPU batch without readback");
+            if (resident.pixels()!=reference.pixels()) throw std::runtime_error("Resident packet pixels differ");
+            auto invalid_draw=packet; invalid_draw[3][0]=0; // Invalid FRAME pitch.
+            rejected=false;
+            try { resident.submit(resident_gpu,std::array{packet,invalid_draw}); }
+            catch (const std::exception&) { rejected=true; }
+            if (!rejected || resident.pixels()!=reference.pixels())
+                throw std::runtime_error("Invalid resident draw batch partially committed");
+            if (resident_gpu.validation_errors()) throw std::runtime_error("Resident Vulkan validation failed");
         }
         if (gpu.validation_errors()) throw std::runtime_error("Vulkan validation reported errors");
         std::cout << "Vulkan sprite readback verified on " << gpu.device_name() << "; validation errors=0\n";

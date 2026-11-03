@@ -12,7 +12,7 @@
     {"name": "direct_flow", "id": 4, "level": 1, "features": "direct calls, both branch paths, loop and empty loop", "sources": ["direct_flow.cpp"], "values": [18, 14, 61, 7]},
     {"name": "callback_arguments", "id": 5, "level": 2, "features": "function-pointer argument across translation units", "sources": ["callback_arguments.cpp", "callback_helpers.cpp"], "values": [20, 21]},
     {"name": "weak_callback", "id": 15, "level": 2, "features": "null weak-symbol call behind a constant guard", "sources": ["weak_callback.cpp"], "values": [123]},
-    {"name": "switch_spill", "id": 16, "level": 2, "features": "bounded switches with spilled and hoisted table bases, stack alias and branch delay store", "sources": ["switch_spill.cpp"], "values": [11, 23, 37, 99, 11, 23, 37, 99]},
+    {"name": "switch_spill", "id": 16, "level": 2, "features": "bounded switches with spilled/reordered bases and predicates hoisted across loops and diamonds", "sources": ["switch_spill.cpp"], "values": [11, 23, 37, 99, 11, 23, 37, 99, 41, 53, 67, 101, 71, 83, 97, 103]},
     {"name": "callback_stack", "id": 6, "level": 2, "features": "stack pointer slot, copied address, out-parameter replacement", "sources": ["callback_stack.cpp", "callback_helpers.cpp"], "values": [20, 21, 22]},
     {"name": "callback_mutation", "id": 7, "level": 2, "features": "global callback replacement and preserved earlier copy", "sources": ["callback_mutation.cpp", "callback_helpers.cpp"], "values": [20, 21, 20, 21]},
     {"name": "callback_returns", "id": 8, "level": 3, "features": "returned callbacks through both factory branches", "sources": ["callback_returns.cpp", "callback_helpers.cpp"], "values": [20, 21, 22]},

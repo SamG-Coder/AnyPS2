@@ -1,0 +1,39 @@
+#version 450
+layout(local_size_x=8,local_size_y=8) in;
+layout(set=0,binding=0,std430) buffer Memory { uint pixels[]; } memory;
+struct Surface { uint base,pitch,x,y,width,height; };
+layout(push_constant) uniform Display {
+    Surface surfaces[2];
+    uint width,height,control,background,half_height,bgra;
+} display;
+uint address(uint base,uint pitch,uint x,uint y) {
+    x &= 2047; y &= 2047;
+    uint page=(y/32)*pitch+x/64;
+    uint block=((x>>3)&1)|(((y>>3)&1)<<1)|(((x>>4)&1)<<2)|(((y>>4)&1)<<3)|(((x>>5)&1)<<4);
+    uint word=(x&1)|((y&1)<<1)|((x&6)<<1)|((y&6)<<3);
+    return (base*64+page*2048+block*64+word)&0xfffff;
+}
+uint sample_surface(uint index,uint x,uint y) {
+    Surface s=display.surfaces[index];
+    return memory.pixels[address(s.base,s.pitch,s.x+x,s.y+(display.half_height!=0 ? y/2 : y))]|0xff000000;
+}
+void main() {
+    uint x=gl_GlobalInvocationID.x,y=gl_GlobalInvocationID.y;
+    if (x>=display.width || y>=display.height) return;
+    uint enabled=display.control&3;
+    uint color=display.background|0xff000000;
+    if (enabled==3) {
+        if ((display.control&128)==0 && x<display.surfaces[1].width && y<display.surfaces[1].height)
+            color=sample_surface(1,x,y);
+        if (x<display.surfaces[0].width && y<display.surfaces[0].height) {
+            uint source=sample_surface(0,x,y),alpha=(display.control>>8)&255,blended=0xff000000;
+            for (uint shift=0;shift<24;shift+=8)
+                blended|=((((source>>shift)&255)*alpha+((color>>shift)&255)*(255-alpha)+127)/255)<<shift;
+            color=blended;
+        }
+    } else color=sample_surface(enabled==2 ? 1 : 0,x,y);
+    if (display.bgra!=0) color=(color&0xff00ff00)|((color&255)<<16)|((color>>16)&255);
+    uint index=2359552+y*display.width+x;
+    if (memory.pixels[index]!=color) atomicOr(memory.pixels[2359551],1);
+    memory.pixels[index]=color;
+}

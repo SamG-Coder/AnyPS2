@@ -324,7 +324,7 @@ void emit_declarations(Writer& w) {
     w.out<<"declare i64 @nt_ee_square_root_finite(i32)\n"
          <<"declare i64 @nt_ee_reciprocal_square_root_finite(i32, i32)\n"
          <<"declare i64 @nt_ee_multiply_accumulate_finite(i32, i32, i32, i32)\n"
-         <<"declare i64 @nt_ee_scalar_multiply_accumulate_finite(i32, i32, i32, i32)\n";
+         <<"declare i64 @nt_ee_scalar_multiply_accumulate(i32, i32, i32, i32, i32)\n";
     w.out<<"declare i32 @nt_ee_vector_multiply_accumulate(ptr, i32, i32, i32, i32, i32, i32)\n"
          <<"declare i32 @nt_ee_vector_quotient(ptr, i32, i32, i32, i32, i32)\n"
          <<"declare i32 @nt_ee_vector_outer(ptr, i32, i32, i32, i32)\n"
@@ -332,7 +332,8 @@ void emit_declarations(Writer& w) {
          <<"declare i32 @nt_ee_vector_multiply(ptr, i32, i32, i32, i32, i32)\n"
          <<"declare i32 @nt_ee_integer_to_scaled_scalar(i32, i32)\n"
          <<"declare i32 @nt_ee_scaled_scalar_to_integer(i32, i32)\n";
-    w.out<<"declare i64 @nt_ee_add_finite(i32, i32, i32)\n";
+    w.out<<"declare i64 @nt_ee_scalar_add(i32, i32, i32)\n"
+         <<"declare i64 @nt_ee_scalar_multiply(i32, i32)\n";
     w.out<<"declare i64 @nt_ee_vector_read(ptr, i32, i32)\n";
     w.out<<"declare i32 @nt_ee_vector_launch(ptr, i32, i32)\n";
     w.out<<"declare i32 @nt_ee_vector_memory(ptr, i32)\n";

@@ -6,9 +6,10 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #endif
 #include <vulkan/vulkan.h>
-#include <algorithm>
+#include "native_raster.hpp"
 #include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <cstring>
 #include <cmath>
 #include <stdexcept>
@@ -20,15 +21,63 @@ void check(VkResult result, const char* operation) {
     if (result != VK_SUCCESS) throw std::runtime_error(std::string(operation)+": Vulkan result "+std::to_string(result));
 }
 constexpr VkDeviceSize memory_bytes=4*1024*1024;
+// Internal shader flag: only the renderer may select direct texture reads,
+// after proving the current draw cannot write any sampled storage.
+constexpr std::uint32_t direct_texture_flag=1U<<22;
+struct StorageRange {
+    VkDeviceSize offset,length;
+};
+std::array<StorageRange,2> split_storage(StorageRange range) {
+    range.offset%=memory_bytes;
+    range.length=std::min(range.length,memory_bytes);
+    const auto first=std::min(range.length,memory_bytes-range.offset);
+    return {{{range.offset,first},{0,range.length-first}}};
+}
+bool overlaps(StorageRange a,StorageRange b) {
+    for (const auto left:split_storage(a)) for (const auto right:split_storage(b))
+        if (left.length && right.length && left.offset<right.offset+right.length &&
+            right.offset<left.offset+left.length) return true;
+    return false;
+}
+StorageRange texture_storage(const Sprite& draw) {
+    const auto maximum=[](unsigned size,unsigned mode,unsigned low,unsigned high) {
+        return mode==2 ? high : mode==3 ? (low|high) : size-1;
+    };
+    const auto x=maximum(draw.texture_width,draw.clamp_u,draw.min_u,draw.max_u);
+    const auto y=maximum(draw.texture_height,draw.clamp_v,draw.min_v,draw.max_v);
+    const auto page=(draw.flags&64) ? (y/128)*(draw.texture_pitch/2)+x/128
+                                    : (y/32)*draw.texture_pitch+x/64;
+    return {VkDeviceSize(draw.texture_base)*256,std::min(memory_bytes,VkDeviceSize(page+1)*8192)};
+}
+StorageRange output_storage(const Sprite& draw,unsigned base) {
+    const auto first=(draw.top/32)*draw.pitch+draw.left/64;
+    const auto last=((draw.bottom-1)/32)*draw.pitch+(draw.right-1)/64;
+    // Include full pages. Depth's XOR swizzle stays inside its aligned page.
+    return {VkDeviceSize(base)*256+VkDeviceSize(first)*8192,VkDeviceSize(last-first+1)*8192};
+}
 constexpr VkDeviceSize triangle_offset=memory_bytes*2+16*sizeof(std::uint32_t);
-constexpr VkDeviceSize buffer_bytes=triangle_offset+3*sizeof(RasterVertex);
+constexpr VkDeviceSize writes_offset=memory_bytes*2+256;
+constexpr unsigned max_writes=65536;
+constexpr VkDeviceSize display_offset=9*1024*1024+1024;
+constexpr VkDeviceSize display_bytes=2048*2048*4;
+constexpr VkDeviceSize buffer_bytes=display_offset+display_bytes;
+static_assert(writes_offset+max_writes*sizeof(PixelWrite)<display_offset-4);
+static_assert(sizeof(DisplayPlan)==72);
+static_assert(sizeof(PixelWrite)==12);
 static_assert(sizeof(RasterVertex)==36);
 static_assert(sizeof(Sprite)==128);
+#if ANYPS2_REFERENCE_RENDERER
 const std::uint32_t shader_code[] =
 #include "sprite.inc"
 ;
+const std::uint32_t scanout_code[] =
+#include "scanout.inc"
+;
+#endif
 }
 struct VulkanRenderer::Impl {
+    std::unique_ptr<NativeRaster> native;
+    RenderPath path=RenderPath::native_images;
     VkInstance instance{};
     VkDebugUtilsMessengerEXT debug{};
     VkSurfaceKHR surface{};
@@ -43,31 +92,70 @@ struct VulkanRenderer::Impl {
     VkDescriptorPool descriptors{};
     VkDescriptorSet set{};
     VkPipelineLayout layout{};
-    VkPipeline pipeline{};
+    VkPipeline pipeline{},display_pipeline{};
+    unsigned display_width=0,display_height=0,display_bgra=0;
     VkCommandPool pool{};
     VkCommandBuffer command{};
     VkFence fence{};
     VkSwapchainKHR swapchain{};
     VkSemaphore acquired{}, rendered{};
+    struct PresentFrame {
+        VkSemaphore acquired{};
+        std::uint64_t submission=0;
+    };
+    std::array<PresentFrame,2> present_frames{};
+    unsigned present_frame=0;
+    std::vector<VkSemaphore> present_ready;
     VkFormat format{};
     VkExtent2D extent{};
     std::vector<VkImage> images;
     std::string name;
     std::atomic<unsigned> errors=0;
+    mutable std::mutex validation_mutex;
+    std::string first_validation_error;
     RenderStatistics statistics;
+    bool recording=false,initialized=false;
+    unsigned recorded=0;
+    void order() {
+        if (!recording) { begin(); recording=true; recorded=0; }
+        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        barrier.srcAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
+        barrier.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
+        vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            0,1,&barrier,0,nullptr,0,nullptr);
+    }
+    void flush() {
+        if (!recording) return;
+        submit(); recording=false; recorded=0; ++statistics.submissions;
+    }
+    void bounded() { if (++recorded>=512) flush(); }
+    void bind() {
+        vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_COMPUTE,pipeline);
+        vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_COMPUTE,layout,0,1,&set,0,nullptr);
+    }
     static VKAPI_ATTR VkBool32 VKAPI_CALL report(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
-        VkDebugUtilsMessageTypeFlagsEXT, const VkDebugUtilsMessengerCallbackDataEXT*, void* user) {
-        if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ++static_cast<Impl*>(user)->errors;
+        VkDebugUtilsMessageTypeFlagsEXT, const VkDebugUtilsMessengerCallbackDataEXT* data, void* user) {
+        if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
+            auto& self=*static_cast<Impl*>(user);
+            ++self.errors;
+            std::lock_guard lock(self.validation_mutex);
+            if (self.first_validation_error.empty() && data && data->pMessage)
+                self.first_validation_error=data->pMessage;
+        }
         return VK_FALSE;
     }
     ~Impl() {
         if (device) vkDeviceWaitIdle(device);
+        native.reset();
         if (mapped) vkUnmapMemory(device,allocation);
         if (rendered) vkDestroySemaphore(device,rendered,nullptr);
         if (acquired) vkDestroySemaphore(device,acquired,nullptr);
+        for (const auto& frame:present_frames) if (frame.acquired) vkDestroySemaphore(device,frame.acquired,nullptr);
+        for (auto ready:present_ready) if (ready) vkDestroySemaphore(device,ready,nullptr);
         if (swapchain) vkDestroySwapchainKHR(device,swapchain,nullptr);
         if (fence) vkDestroyFence(device,fence,nullptr);
         if (pool) vkDestroyCommandPool(device,pool,nullptr);
+        if (display_pipeline) vkDestroyPipeline(device,display_pipeline,nullptr);
         if (pipeline) vkDestroyPipeline(device,pipeline,nullptr);
         if (layout) vkDestroyPipelineLayout(device,layout,nullptr);
         if (descriptors) vkDestroyDescriptorPool(device,descriptors,nullptr);
@@ -101,6 +189,9 @@ struct VulkanRenderer::Impl {
         check(vkBindBufferMemory(device,result,memory,0),"Bind graphics buffer");
     }
     void initialize(void* window, bool validation) {
+#if !ANYPS2_REFERENCE_RENDERER
+        if (path!=RenderPath::native_images) throw std::runtime_error("Reference compute renderer is not part of native output");
+#endif
         std::vector<const char*> extensions;
         if (validation) extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 #ifdef _WIN32
@@ -110,6 +201,9 @@ struct VulkanRenderer::Impl {
 #endif
         VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
         app.pApplicationName="AnyPS2"; app.apiVersion=VK_API_VERSION_1_1;
+#ifdef ANYPS2_LLVM_TEXTURES
+        app.apiVersion=VK_API_VERSION_1_3;
+#endif
         const char* layer="VK_LAYER_KHRONOS_validation";
         VkInstanceCreateInfo info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
         info.pApplicationInfo=&app; info.enabledExtensionCount=static_cast<unsigned>(extensions.size()); info.ppEnabledExtensionNames=extensions.data();
@@ -134,13 +228,16 @@ struct VulkanRenderer::Impl {
         int best=-1;
         for (auto candidate:devices) {
             VkPhysicalDeviceProperties props; vkGetPhysicalDeviceProperties(candidate,&props);
+#ifdef ANYPS2_LLVM_TEXTURES
+            if (props.apiVersion<VK_API_VERSION_1_3) continue;
+#endif
             unsigned n=0; vkGetPhysicalDeviceQueueFamilyProperties(candidate,&n,nullptr);
             std::vector<VkQueueFamilyProperties> queues(n); vkGetPhysicalDeviceQueueFamilyProperties(candidate,&n,queues.data());
             for (unsigned i=0;i<n;++i) {
                 VkBool32 present=VK_TRUE;
                 if (surface) check(vkGetPhysicalDeviceSurfaceSupportKHR(candidate,i,surface,&present),"Query presentation support");
                 const int score=props.deviceType==VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU?2:1;
-                if ((queues[i].queueFlags&VK_QUEUE_COMPUTE_BIT) && present && score>best) {
+                if ((queues[i].queueFlags&VK_QUEUE_COMPUTE_BIT) && (queues[i].queueFlags&VK_QUEUE_GRAPHICS_BIT) && present && score>best) {
                     physical=candidate; family=i; name=props.deviceName; best=score;
                 }
             }
@@ -155,8 +252,49 @@ struct VulkanRenderer::Impl {
         VkPhysicalDeviceFeatures features{}; features.shaderInt64=VK_TRUE;
         VkDeviceCreateInfo dc{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO}; dc.queueCreateInfoCount=1; dc.pQueueCreateInfos=&q;
         dc.pEnabledFeatures=&features;
-        dc.enabledExtensionCount=surface?1:0; dc.ppEnabledExtensionNames=&swap_extension;
+        std::vector<const char*> device_extensions;
+        VkPhysicalDeviceFragmentShaderInterlockFeaturesEXT interlock{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_INTERLOCK_FEATURES_EXT};
+        bool ordered_fragments=false;
+        if (surface) device_extensions.push_back(swap_extension);
+        if (path==RenderPath::native_images) {
+            unsigned n=0; check(vkEnumerateDeviceExtensionProperties(physical,nullptr,&n,nullptr),"Query native device extensions");
+            std::vector<VkExtensionProperties> properties(n);
+            check(vkEnumerateDeviceExtensionProperties(physical,nullptr,&n,properties.data()),"Query native device extensions");
+            if (std::none_of(properties.begin(),properties.end(),[](auto& p){return std::strcmp(p.extensionName,VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME)==0;}))
+                throw std::runtime_error("Native AA coverage requires VK_EXT_conservative_rasterization; no compute fallback is used");
+            device_extensions.push_back(VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME);
+            if (available.fragmentStoresAndAtomics && std::any_of(properties.begin(),properties.end(),[](auto& p){
+                    return std::strcmp(p.extensionName,VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME)==0;})) {
+                VkPhysicalDeviceFeatures2 query{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2}; query.pNext=&interlock;
+                vkGetPhysicalDeviceFeatures2(physical,&query);
+                ordered_fragments=interlock.fragmentShaderPixelInterlock;
+                if (ordered_fragments) {
+                    interlock.fragmentShaderSampleInterlock=interlock.fragmentShaderShadingRateInterlock=VK_FALSE;
+                    features.fragmentStoresAndAtomics=VK_TRUE;
+                    dc.pNext=&interlock;
+                    device_extensions.push_back(VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME);
+                }
+            }
+        }
+        dc.enabledExtensionCount=unsigned(device_extensions.size()); dc.ppEnabledExtensionNames=device_extensions.data();
+#ifdef ANYPS2_LLVM_TEXTURES
+        // LLVM's Vulkan resource-name lowering emits byte constants. Declare
+        // its Int8 capability explicitly, including on devices which otherwise
+        // accept the shader without enabling the feature.
+        VkPhysicalDeviceShaderFloat16Int8Features integers{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES};
+        VkPhysicalDeviceFeatures2 integer_query{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        integer_query.pNext=&integers; vkGetPhysicalDeviceFeatures2(physical,&integer_query);
+        if (!integers.shaderInt8) throw std::runtime_error("LLVM texture kernels require Vulkan shaderInt8");
+        integers.shaderFloat16=VK_FALSE;
+        integers.pNext=const_cast<void*>(dc.pNext); dc.pNext=&integers;
+#endif
         check(vkCreateDevice(physical,&dc,nullptr,&device),"Create device"); vkGetDeviceQueue(device,family,0,&queue);
+        if (path==RenderPath::native_images) {
+            native=std::make_unique<NativeRaster>(physical,device,queue,family,ordered_fragments);
+            if (surface) create_swapchain();
+            return;
+        }
+#if ANYPS2_REFERENCE_RENDERER
         constexpr auto transfers=VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         create_buffer(transfers|VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,0,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,storage,storage_allocation);
         // GPU working storage is separate from CPU staging. Cached coherent
@@ -184,12 +322,18 @@ struct VulkanRenderer::Impl {
         cp.stage={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}; cp.stage.stage=VK_SHADER_STAGE_COMPUTE_BIT; cp.stage.module=module; cp.stage.pName="main";
         const auto pipeline_result=vkCreateComputePipelines(device,VK_NULL_HANDLE,1,&cp,nullptr,&pipeline);
         vkDestroyShaderModule(device,module,nullptr); check(pipeline_result,"Create sprite pipeline");
+        sm.codeSize=sizeof(scanout_code); sm.pCode=scanout_code;
+        check(vkCreateShaderModule(device,&sm,nullptr,&module),"Create display shader");
+        cp.stage.module=module;
+        const auto display_result=vkCreateComputePipelines(device,VK_NULL_HANDLE,1,&cp,nullptr,&display_pipeline);
+        vkDestroyShaderModule(device,module,nullptr); check(display_result,"Create display pipeline");
         VkCommandPoolCreateInfo pc{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO}; pc.queueFamilyIndex=family; pc.flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         check(vkCreateCommandPool(device,&pc,nullptr,&pool),"Create command pool");
         VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO}; ca.commandPool=pool; ca.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY; ca.commandBufferCount=1;
         check(vkAllocateCommandBuffers(device,&ca,&command),"Allocate command buffer");
         VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}; check(vkCreateFence(device,&fi,nullptr,&fence),"Create fence");
         if (surface) create_swapchain();
+#endif
     }
     void create_swapchain() {
         VkSurfaceCapabilitiesKHR caps; check(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical,surface,&caps),"Query surface");
@@ -202,11 +346,55 @@ struct VulkanRenderer::Impl {
         if (!extent.width || !extent.height || std::uint64_t(extent.width)*extent.height*4>memory_bytes) throw std::runtime_error("Unsupported presentation extent");
         VkSwapchainCreateInfoKHR sc{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR}; sc.surface=surface;
         sc.minImageCount=std::min(caps.minImageCount+1,caps.maxImageCount?caps.maxImageCount:~0U);
-        sc.imageFormat=format; sc.imageColorSpace=selected->colorSpace; sc.imageExtent=extent; sc.imageArrayLayers=1; sc.imageUsage=VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        sc.imageFormat=format; sc.imageColorSpace=selected->colorSpace; sc.imageExtent=extent; sc.imageArrayLayers=1; sc.imageUsage=VK_IMAGE_USAGE_TRANSFER_DST_BIT|(native ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : 0);
         sc.preTransform=caps.currentTransform; sc.compositeAlpha=VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR; sc.presentMode=VK_PRESENT_MODE_FIFO_KHR; sc.clipped=VK_TRUE;
         check(vkCreateSwapchainKHR(device,&sc,nullptr,&swapchain),"Create swapchain");
         check(vkGetSwapchainImagesKHR(device,swapchain,&count,nullptr),"Get swapchain images"); images.resize(count); check(vkGetSwapchainImagesKHR(device,swapchain,&count,images.data()),"Get swapchain images");
-        VkSemaphoreCreateInfo sem{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO}; check(vkCreateSemaphore(device,&sem,nullptr,&acquired),"Create acquire semaphore"); check(vkCreateSemaphore(device,&sem,nullptr,&rendered),"Create render semaphore");
+        VkSemaphoreCreateInfo sem{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        if (native) {
+            for (auto& frame:present_frames) check(vkCreateSemaphore(device,&sem,nullptr,&frame.acquired),"Create native acquire semaphore");
+            // Reacquiring an image retires the presentation engine's previous wait.
+            // A graphics fence alone cannot prove that a present semaphore is reusable.
+            present_ready.resize(images.size());
+            for (auto& ready:present_ready) check(vkCreateSemaphore(device,&sem,nullptr,&ready),"Create native present semaphore");
+        } else {
+            check(vkCreateSemaphore(device,&sem,nullptr,&acquired),"Create acquire semaphore");
+            check(vkCreateSemaphore(device,&sem,nullptr,&rendered),"Create render semaphore");
+        }
+    }
+    void resolve(const DisplayPlan& plan) {
+#if ANYPS2_REFERENCE_RENDERER
+
+        if (!initialized || !plan.width || !plan.height || plan.width>2048 || plan.height>2048 || !(plan.control&3))
+            throw std::runtime_error("Invalid resident display plan");
+        for (unsigned i=0;i<2;++i) if (plan.control&(1U<<i)) {
+            const auto& surface=plan.surfaces[i];
+            if (!surface.pitch || surface.pitch>63 || surface.base>16383 || !surface.width || !surface.height ||
+                surface.width>plan.width || surface.height>plan.height)
+                throw std::runtime_error("Invalid resident display surface");
+        }
+        order();
+        const bool reset=display_width!=plan.width || display_height!=plan.height || display_bgra!=plan.bgra;
+        if (reset) vkCmdFillBuffer(command,storage,display_offset,display_bytes,0);
+        vkCmdFillBuffer(command,storage,display_offset-4,4,reset ? 1 : 0);
+        order();
+        vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_COMPUTE,display_pipeline);
+        vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_COMPUTE,layout,0,1,&set,0,nullptr);
+        vkCmdPushConstants(command,layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(plan),&plan);
+        vkCmdDispatch(command,(plan.width+7)/8,(plan.height+7)/8,1);
+        display_width=plan.width; display_height=plan.height; display_bgra=plan.bgra;
+
+#else
+    throw std::runtime_error("Reference renderer operation is unavailable in native output");
+#endif
+}
+    void copy_to_host(VkDeviceSize offset,VkDeviceSize bytes) {
+        order(); const VkBufferCopy copy{offset,0,bytes};
+        vkCmdCopyBuffer(command,storage,buffer,1,&copy);
+        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT; barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&barrier,0,nullptr,0,nullptr);
+        flush(); statistics.readback_bytes+=bytes;
     }
     void begin() {
         check(vkResetCommandBuffer(command,0),"Reset commands");
@@ -222,14 +410,30 @@ struct VulkanRenderer::Impl {
         check(vkWaitForFences(device,1,&fence,VK_TRUE,UINT64_MAX),"Wait for GPU");
     }
 };
-VulkanRenderer::VulkanRenderer(void* window,bool validation):impl_(std::make_unique<Impl>()) {impl_->initialize(window,validation);}
+VulkanRenderer::VulkanRenderer(void* window,bool validation,RenderPath path):impl_(std::make_unique<Impl>()) {impl_->path=path; impl_->initialize(window,validation);}
 VulkanRenderer::~VulkanRenderer()=default;
-void VulkanRenderer::synchronize() { check(vkDeviceWaitIdle(impl_->device),"Synchronize graphics"); }
+void VulkanRenderer::synchronize() { if (impl_->native) { impl_->native->finish(); return; } impl_->flush(); check(vkDeviceWaitIdle(impl_->device),"Synchronize graphics"); }
 const std::string& VulkanRenderer::device_name() const {return impl_->name;}
+std::uint64_t VulkanRenderer::enqueue_finish() {
+    if (impl_->native) return impl_->native->enqueue_finish();
+    synchronize(); return 0;
+}
+std::uint64_t VulkanRenderer::completed_submission() {
+    return impl_->native ? impl_->native->completed_submission() : 0;
+}
 unsigned VulkanRenderer::validation_errors() const {return impl_->errors.load();}
-const RenderStatistics& VulkanRenderer::statistics() const { return impl_->statistics; }
+std::string VulkanRenderer::validation_message() const {
+    std::lock_guard lock(impl_->validation_mutex);
+    return impl_->first_validation_error;
+}
+const RenderStatistics& VulkanRenderer::statistics() const { return impl_->native ? impl_->native->statistics() : impl_->statistics; }
+void VulkanRenderer::verify_texture_kernels(bool enable) {
+    if (impl_->native) impl_->native->verify_texture_kernels(enable);
+    else if (enable) throw std::runtime_error("LLVM texture verification requires the native renderer");
+}
 namespace {
 void validate_sprite(const Sprite& draw) {
+    if (draw.flags&~((1U<<22)-1)) throw std::runtime_error("Unknown Vulkan draw flags");
     if (draw.right>2048 || draw.bottom>2048 || draw.left>draw.right || draw.top>draw.bottom || !draw.pitch || draw.pitch>63 || draw.base>16383)
         throw std::runtime_error("Invalid Vulkan sprite bounds or GS memory");
     if (draw.left==draw.right || draw.top==draw.bottom) return;
@@ -262,7 +466,7 @@ void validate_sprite(const Sprite& draw) {
         const auto coordinate=[](int n){return n>=-65535 && n<=65535;};
         const auto delta=[](int n){return n>=-16383 && n<=16383;};
         if (draw.texture_base>16383 || draw.texture_pitch>63 || !power_of_two(draw.texture_width) ||
-            !power_of_two(draw.texture_height) || ((draw.flags>>3)&3)>1 || draw.clamp_u>3 || draw.clamp_v>3 ||
+            !power_of_two(draw.texture_height) || draw.clamp_u>3 || draw.clamp_v>3 ||
             draw.min_u>1023 || draw.max_u>1023 || draw.min_v>1023 || draw.max_v>1023 ||
             (draw.clamp_u==2 && draw.min_u>draw.max_u) || (draw.clamp_v==2 && draw.min_v>draw.max_v) ||
             !coordinate(draw.x0) || !coordinate(draw.y0) || !coordinate(draw.dx) || !coordinate(draw.dy) ||
@@ -277,10 +481,8 @@ void VulkanRenderer::sprite(std::span<std::uint32_t> memory,const Sprite& draw,s
     if (draw.flags&64) std::copy(palette.begin(),palette.end(),command.palette.begin());
     sprites(memory,std::span(&command,1));
 }
-void VulkanRenderer::sprites(std::span<std::uint32_t> memory,std::span<const SpriteCommand> commands) {
-    if (memory.size_bytes()!=memory_bytes || commands.size()>65536)
-        throw std::runtime_error("Invalid Vulkan sprite batch or graphics storage");
-    std::uint64_t count=0,triangles=0;
+void VulkanRenderer::validate(std::span<const SpriteCommand> commands) {
+    if (commands.size()>65536) throw std::runtime_error("Vulkan draw batch exceeds bound");
     for (const auto& command:commands) {
         validate_sprite(command.draw);
         if (command.draw.flags&triangle_flag) {
@@ -308,39 +510,63 @@ void VulkanRenderer::sprites(std::span<std::uint32_t> memory,std::span<const Spr
             const auto area=(std::int64_t(v[1].x)-v[0].x)*(std::int64_t(v[2].y)-v[0].y)-
                 (std::int64_t(v[1].y)-v[0].y)*(std::int64_t(v[2].x)-v[0].x);
             if (area<=0) throw std::runtime_error("Vulkan triangle must have positive area");
-            triangles+=command.draw.left!=command.draw.right && command.draw.top!=command.draw.bottom;
         }
-        count+=command.draw.left!=command.draw.right && command.draw.top!=command.draw.bottom;
     }
-    if (!count) return;
-    auto& v=*impl_; std::memcpy(v.mapped,memory.data(),memory_bytes);
-    v.begin();
-    const VkBufferCopy entire_store{0,0,memory_bytes};
-    vkCmdCopyBuffer(v.command,v.buffer,v.storage,1,&entire_store);
-    VkMemoryBarrier initial{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    initial.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
-    initial.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_TRANSFER_READ_BIT|VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(v.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT,
-        0,1,&initial,0,nullptr,0,nullptr);
-    vkCmdBindPipeline(v.command,VK_PIPELINE_BIND_POINT_COMPUTE,v.pipeline);
-    vkCmdBindDescriptorSets(v.command,VK_PIPELINE_BIND_POINT_COMPUTE,v.layout,0,1,&v.set,0,nullptr);
-    bool first=true;
+}
+void VulkanRenderer::sprites(std::span<std::uint32_t> memory,std::span<const SpriteCommand> commands) {
+    if (memory.size_bytes()!=memory_bytes) throw std::runtime_error("Invalid graphics storage");
+    validate(commands);
+    upload(memory); draw(commands); read(memory);
+}
+void VulkanRenderer::upload(std::span<const std::uint32_t> memory) {
+    if (impl_->native) { impl_->native->upload(memory); return; }
+#if ANYPS2_REFERENCE_RENDERER
+
+    if (memory.size_bytes()!=memory_bytes) throw std::runtime_error("Invalid graphics upload size");
+    auto& v=*impl_; v.flush();
+    std::memcpy(v.mapped,memory.data(),memory_bytes);
+    v.order();
+    const VkBufferCopy copy{0,0,memory_bytes};
+    vkCmdCopyBuffer(v.command,v.buffer,v.storage,1,&copy);
+    v.initialized=true; v.statistics.upload_bytes+=memory_bytes;
+
+#else
+    throw std::runtime_error("Reference renderer operation is unavailable in native output");
+#endif
+}
+void VulkanRenderer::draw(std::span<const SpriteCommand> commands) {
+    if (impl_->native) { impl_->native->draw(commands); return; }
+#if ANYPS2_REFERENCE_RENDERER
+
+    validate(commands);
+    auto& v=*impl_;
+    if (!v.initialized) throw std::runtime_error("Graphics storage was not initialized");
     for (const auto& command:commands) {
-        const auto& draw=command.draw;
+        auto draw=command.draw;
+        draw.flags&=~direct_texture_flag;
         if (draw.left==draw.right || draw.top==draw.bottom) continue;
-        if (!first) {
-            VkMemoryBarrier ordered{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-            ordered.srcAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT;
-            ordered.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_TRANSFER_READ_BIT|VK_ACCESS_TRANSFER_WRITE_BIT;
-            vkCmdPipelineBarrier(v.command,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT,0,1,&ordered,0,nullptr,0,nullptr);
-        }
-        first=false;
+        v.order(); v.bind();
         if (draw.flags&1) {
             // Snapshot immediately before this draw, including prior draws in
             // the same batch. This preserves overlapping framebuffer textures.
-            const VkBufferCopy copy{0,memory_bytes,memory_bytes};
-            vkCmdCopyBuffer(v.command,v.storage,v.storage,1,&copy);
+            // Include every texel reachable through wrap/region modes, including
+            // bilinear neighbours. Copy complete storage pages so swizzling and
+            // unaligned texture bases cannot leave holes in the snapshot.
+            const auto source=texture_storage(draw);
+            const bool color_overlap=overlaps(source,output_storage(draw,draw.base));
+            const bool depth_overlap=(draw.flags&depth_test_flag) && (draw.flags&depth_write_flag) &&
+                overlaps(source,output_storage(draw,draw.depth_base));
+            if (!color_overlap && !depth_overlap) {
+                draw.flags|=direct_texture_flag;
+                ++v.statistics.direct_texture_draws;
+            } else {
+                const auto ranges=split_storage(source);
+                const std::array<VkBufferCopy,2> copies{{
+                    {ranges[0].offset,memory_bytes+ranges[0].offset,ranges[0].length},
+                    {ranges[1].offset,memory_bytes+ranges[1].offset,ranges[1].length}}};
+                vkCmdCopyBuffer(v.command,v.storage,v.storage,ranges[1].length ? 2 : 1,copies.data());
+                v.statistics.texture_snapshot_bytes+=source.length;
+            }
         }
         if (draw.flags&64) vkCmdUpdateBuffer(v.command,v.storage,memory_bytes*2,64,command.palette.data());
         if (draw.flags&triangle_flag) vkCmdUpdateBuffer(v.command,v.storage,triangle_offset,sizeof(command.triangle),command.triangle.data());
@@ -353,35 +579,165 @@ void VulkanRenderer::sprites(std::span<std::uint32_t> memory,std::span<const Spr
         }
         vkCmdPushConstants(v.command,v.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(draw),&draw);
         vkCmdDispatch(v.command,(draw.right-draw.left+7)/8,(draw.bottom-draw.top+7)/8,1);
+        if (draw.flags&triangle_flag) ++v.statistics.triangles; else ++v.statistics.sprites;
+        v.bounded();
     }
-    VkMemoryBarrier copied{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    copied.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_TRANSFER_READ_BIT;
-    copied.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT|VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(v.command,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,
-        0,1,&copied,0,nullptr,0,nullptr);
-    vkCmdCopyBuffer(v.command,v.storage,v.buffer,1,&entire_store);
-    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER}; barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT; barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+
+#else
+    throw std::runtime_error("Reference renderer operation is unavailable in native output");
+#endif
+}
+void VulkanRenderer::read(std::span<std::uint32_t> memory) {
+    if (impl_->native) { impl_->native->read(memory); return; }
+#if ANYPS2_REFERENCE_RENDERER
+
+    if (memory.size_bytes()!=memory_bytes) throw std::runtime_error("Invalid graphics readback size");
+    auto& v=*impl_;
+    if (!v.initialized) throw std::runtime_error("Graphics storage was not initialized");
+    v.order(); const VkBufferCopy copy{0,0,memory_bytes};
+    vkCmdCopyBuffer(v.command,v.storage,v.buffer,1,&copy);
+    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT; barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
     vkCmdPipelineBarrier(v.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&barrier,0,nullptr,0,nullptr);
-    v.submit(); std::memcpy(memory.data(),v.mapped,memory_bytes);
-    ++v.statistics.submissions; v.statistics.sprites+=count-triangles; v.statistics.triangles+=triangles;
-    v.statistics.upload_bytes+=memory_bytes; v.statistics.readback_bytes+=memory_bytes;
+    v.flush(); std::memcpy(memory.data(),v.mapped,memory_bytes);
+    v.statistics.readback_bytes+=memory_bytes;
+
+#else
+    throw std::runtime_error("Reference renderer operation is unavailable in native output");
+#endif
+}
+void VulkanRenderer::read_words(std::span<const unsigned> addresses,std::span<std::uint32_t> values) {
+    if (impl_->native) { impl_->native->read_words(addresses,values); return; }
+#if ANYPS2_REFERENCE_RENDERER
+
+    if (addresses.size()!=values.size() || addresses.size()>256) throw std::runtime_error("Invalid graphics word readback");
+    for (auto address:addresses) if (address>=memory_bytes/4) throw std::runtime_error("Graphics readback address out of range");
+    if (addresses.empty()) return;
+    auto& v=*impl_;
+    if (!v.initialized) throw std::runtime_error("Graphics storage was not initialized");
+    v.order();
+    std::vector<VkBufferCopy> copies; copies.reserve(addresses.size());
+    for (std::size_t i=0;i<addresses.size();++i) copies.push_back({VkDeviceSize(addresses[i])*4,i*4,4});
+    vkCmdCopyBuffer(v.command,v.storage,v.buffer,unsigned(copies.size()),copies.data());
+    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT; barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(v.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&barrier,0,nullptr,0,nullptr);
+    v.flush(); std::memcpy(values.data(),v.mapped,values.size_bytes());
+    v.statistics.readback_bytes+=values.size_bytes();
+
+#else
+    throw std::runtime_error("Reference renderer operation is unavailable in native output");
+#endif
+}
+void VulkanRenderer::write(std::span<const PixelWrite> writes) {
+    if (impl_->native) { impl_->native->write(writes); return; }
+#if ANYPS2_REFERENCE_RENDERER
+
+    for (const auto& write:writes) if (write.address>=memory_bytes/4 || (write.value&~write.mask))
+        throw std::runtime_error("Invalid native graphics write");
+    if (writes.empty()) return;
+    auto& v=*impl_;
+    if (!v.initialized) throw std::runtime_error("Graphics storage was not initialized");
+    // Merge repeated word/nibble writes in original order before parallel GPU
+    // application. Distinct invocations then have disjoint destinations.
+    std::vector<PixelWrite> merged(writes.begin(),writes.end());
+    std::stable_sort(merged.begin(),merged.end(),[](auto a,auto b){return a.address<b.address;});
+    std::size_t count=0;
+    for (const auto write:merged) {
+        if (count && merged[count-1].address==write.address) {
+            auto& previous=merged[count-1];
+            previous.value=(previous.value&~write.mask)|write.value; previous.mask|=write.mask;
+        } else merged[count++]=write;
+    }
+    merged.resize(count);
+    for (std::size_t first=0;first<count;first+=max_writes) {
+        const auto n=std::min<std::size_t>(max_writes,count-first);
+        v.order(); v.bind();
+        const auto* data=reinterpret_cast<const std::uint8_t*>(merged.data()+first);
+        for (VkDeviceSize offset=0;offset<n*sizeof(PixelWrite);) {
+            const auto bytes=std::min<VkDeviceSize>(65536,n*sizeof(PixelWrite)-offset);
+            vkCmdUpdateBuffer(v.command,v.storage,writes_offset+offset,bytes,data+offset); offset+=bytes;
+        }
+        v.order();
+        Sprite upload{}; upload.flags=1U<<23; upload.right=unsigned(n);
+        vkCmdPushConstants(v.command,v.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(upload),&upload);
+        vkCmdDispatch(v.command,unsigned((n+63)/64),1,1);
+        v.statistics.upload_bytes+=n*sizeof(PixelWrite); v.bounded();
+    }
+
+#else
+    throw std::runtime_error("Reference renderer operation is unavailable in native output");
+#endif
+}
+Scanout VulkanRenderer::scanout_readback(DisplayPlan plan) {
+    if (impl_->native) return impl_->native->capture(plan);
+#if ANYPS2_REFERENCE_RENDERER
+    auto& v=*impl_; plan.bgra=0; v.resolve(plan);
+    Scanout frame{plan.width,plan.height,std::vector<std::uint32_t>(std::size_t(plan.width)*plan.height)};
+    v.copy_to_host(display_offset,frame.pixels.size()*4);
+    std::memcpy(frame.pixels.data(),v.mapped,frame.pixels.size()*4); return frame;
+#else
+    throw std::runtime_error("Reference scanout unavailable");
+#endif
+}
+bool VulkanRenderer::present_display(DisplayPlan plan) {
+    auto& v=*impl_;
+    if (v.native) {
+        if (!v.swapchain || plan.width!=v.extent.width || plan.height!=v.extent.height)
+            throw std::runtime_error("Presentation size must match the fixed window");
+        if (!v.native->changed(plan)) return false;
+        auto& frame=v.present_frames[v.present_frame];
+        v.native->wait_submission(frame.submission);
+        unsigned index=0; check(vkAcquireNextImageKHR(v.device,v.swapchain,UINT64_MAX,frame.acquired,VK_NULL_HANDLE,&index),"Acquire native image");
+        frame.submission=v.native->present(plan,v.images[index],v.format,frame.acquired,v.present_ready[index]);
+        VkPresentInfoKHR p{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR}; p.waitSemaphoreCount=1; p.pWaitSemaphores=&v.present_ready[index]; p.swapchainCount=1; p.pSwapchains=&v.swapchain; p.pImageIndices=&index;
+        check(vkQueuePresentKHR(v.queue,&p),"Present native image");
+        v.present_frame=(v.present_frame+1)%v.present_frames.size();
+        return true;
+    }
+#if ANYPS2_REFERENCE_RENDERER
+    if (!v.initialized) return false;
+    if (!v.swapchain || plan.width!=v.extent.width || plan.height!=v.extent.height)
+        throw std::runtime_error("Presentation size must match the fixed window");
+    plan.bgra=v.format==VK_FORMAT_B8G8R8A8_UNORM; v.resolve(plan);
+    v.copy_to_host(display_offset-4,4);
+    if (!*static_cast<const std::uint32_t*>(v.mapped)) return false;
+    present_buffer(true,plan.width,plan.height); return true;
+#else
+    throw std::runtime_error("Reference scanout unavailable");
+#endif
 }
 void VulkanRenderer::present(std::span<const std::uint32_t> rgba,unsigned width,unsigned height) {
     auto& v=*impl_;
-    if (!v.swapchain || width!=v.extent.width || height!=v.extent.height || rgba.size()!=std::size_t(width)*height) throw std::runtime_error("Presentation size must match the fixed window");
-    unsigned index=0; check(vkAcquireNextImageKHR(v.device,v.swapchain,UINT64_MAX,v.acquired,VK_NULL_HANDLE,&index),"Acquire image");
+    if (v.native) throw std::runtime_error("Native image renderer does not accept CPU presentation images");
+    v.flush();
+    if (rgba.size()!=std::size_t(width)*height || rgba.size_bytes()>display_bytes)
+        throw std::runtime_error("Invalid presentation pixels");
     auto* output=static_cast<std::uint32_t*>(v.mapped);
     for (std::size_t i=0;i<rgba.size();++i) {auto p=rgba[i];output[i]=v.format==VK_FORMAT_B8G8R8A8_UNORM ? (p&0xff00ff00U)|((p&255)<<16)|((p>>16)&255) : p;}
+    present_buffer(false,width,height);
+}
+void VulkanRenderer::present_buffer(bool resident,unsigned width,unsigned height) {
+#if ANYPS2_REFERENCE_RENDERER
+
+    auto& v=*impl_; v.flush();
+    if (!v.swapchain || width!=v.extent.width || height!=v.extent.height)
+        throw std::runtime_error("Presentation size must match the fixed window");
+    unsigned index=0; check(vkAcquireNextImageKHR(v.device,v.swapchain,UINT64_MAX,v.acquired,VK_NULL_HANDLE,&index),"Acquire image");
     v.begin();
     VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}; b.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
     b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED; b.image=v.images[index]; b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
     vkCmdPipelineBarrier(v.command,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&b);
-    VkBufferImageCopy copy{}; copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; copy.imageExtent={width,height,1};
-    vkCmdCopyBufferToImage(v.command,v.buffer,v.images[index],VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
+    VkBufferImageCopy copy{}; copy.bufferOffset=resident ? display_offset : 0; copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; copy.imageExtent={width,height,1};
+    vkCmdCopyBufferToImage(v.command,resident ? v.storage : v.buffer,v.images[index],VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
     b.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;b.newLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;b.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;b.dstAccessMask=0;
     vkCmdPipelineBarrier(v.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,0,0,nullptr,0,nullptr,1,&b);
     v.submit(true);
     VkPresentInfoKHR p{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};p.waitSemaphoreCount=1;p.pWaitSemaphores=&v.rendered;p.swapchainCount=1;p.pSwapchains=&v.swapchain;p.pImageIndices=&index;
     check(vkQueuePresentKHR(v.queue,&p),"Present image"); check(vkQueueWaitIdle(v.queue),"Wait for presentation");
+
+#else
+    throw std::runtime_error("Reference renderer operation is unavailable in native output");
+#endif
 }
 }

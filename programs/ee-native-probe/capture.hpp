@@ -92,7 +92,7 @@ inline void capture_stop(const std::filesystem::path& directory,
        <<"\ncop0_status="<<state.cop0_status<<"\ncop0_epc="<<state.cop0_epc
        <<"\ncop0_error_epc="<<state.cop0_error_epc
        <<"\nhi="<<state.hi<<"\nlo="<<state.lo<<"\nhi1="<<state.hi1<<"\nlo1="<<state.lo1
-       <<"\nsa="<<state.sa<<"\nfcr31="<<state.fcr31<<"\naccumulator="<<state.accumulator
+       <<"\nsa="<<state.sa<<"\nfcr31="<<state.fcr31<<"\naccumulator="<<state.accumulator<<"\naccumulator_overflow="<<state.accumulator_overflow
        <<"\nperformance_control="<<memory.performance.control
        <<"\nunavailable_counters="<<static_cast<unsigned>(memory.metrics.unavailable_counters)
        <<"\nperformance0="<<memory.performance.counters[0]

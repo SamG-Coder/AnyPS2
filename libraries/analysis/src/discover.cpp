@@ -1836,9 +1836,16 @@ std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executa
         const auto& scale=*(earlier_base ? prior[2] : prior[3]);
         const auto* branch_instruction=earlier_base ? prior[4] : prior[5];
         const auto table_register=add.rs==scale.rd ? add.rt : add.rs;
+        const bool reloaded_base=earlier_base &&
+            (prior[3]->op==Op::lw || prior[3]->op==Op::lwu) && prior[3]->rt==table_register;
         if (earlier_base) {
             const auto written=pointer_write(*prior[3]);
             if (!written || (*written && *written==scale.rt) || prior[3]->branch()) continue;
+            if (reloaded_base) {
+                branch_instruction=prior[5];
+                const auto delay_write=pointer_write(*prior[4]);
+                if (!delay_write || (*delay_write && *delay_write==scale.rt) || prior[4]->branch()) continue;
+            }
         }
         if (separate_low && branch_instruction->op!=Op::beq) {
             // The table high half may follow an independent branch-delay move.
@@ -1854,43 +1861,23 @@ std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executa
         if (separate_low && (prior[2]->rs!=high.rt || prior[2]->rt!=high.rt || high.rt==scale.rt)) continue;
         if (branch.op!=Op::beq || (branch.rs && branch.rt) || (!branch.rs && !branch.rt)) continue;
         const auto guard=branch.rs ? branch.rs : branch.rt;
-        // A compiler can schedule register setup and stack saves between the
-        // range comparison and its branch. Search a bounded straight-line
-        // suffix, rejecting writes to either the guard or switch index.
-        const r5900::Instruction* comparison=nullptr;
-        for (unsigned distance=4;distance<=64 && distance<=branch.pc;distance+=4) {
-            const auto found=program.instructions.find(branch.pc-distance);
-            if (found==program.instructions.end()) break;
-            const auto& instruction=found->second;
-            if (instruction.op==Op::sltiu && instruction.rt==guard) { comparison=&instruction; break; }
-            unsigned destination=0;
-            switch (instruction.op) {
-            case Op::sb: case Op::sh: case Op::sw: case Op::sd: case Op::sq: break;
-            case Op::lui: case Op::ori: case Op::andi: case Op::xori: case Op::addiu: case Op::daddiu:
-                destination=instruction.rt; break;
-            case Op::addu: case Op::daddu: case Op::subu: case Op::dsubu:
-            case Op::bit_or: case Op::bit_and: case Op::bit_xor: case Op::sll: case Op::srl: case Op::sra:
-                destination=instruction.rd; break;
-            default: destination=guard; break;
-            }
-            if (destination && (destination==guard || destination==scale.rt)) break;
-        }
-        if (!comparison) continue;
-        const auto& bound=*comparison;
+        const auto bound=pointer_flow::range_bound(program,graph,branch.pc,guard,scale.rt);
+        if (!bound) continue;
         if (load.op!=Op::lw || load.rt!=jump.rs || add.op!=Op::addu || add.rd!=load.rs ||
             (!earlier_base && ((high.op!=Op::lui && high.op!=Op::lw && high.op!=Op::lwu) || !high.rt)) ||
             scale.op!=Op::sll || scale.sa!=2 || !scale.rd ||
             !table_register || table_register==scale.rd ||
             !((add.rs==table_register && add.rt==scale.rd) || (add.rt==table_register && add.rs==scale.rd)) ||
             (!earlier_base && table_register!=high.rt) ||
-            bound.op!=Op::sltiu || bound.rs!=scale.rt || !bound.rt ||
-            bound.immediate<=0 || bound.immediate>4096 || branch.op!=Op::beq ||
-            !((branch.rs==bound.rt && !branch.rt) || (branch.rt==bound.rt && !branch.rs)) ||
             branch.target()<=pc) continue;
         // Candidate entries only: this is not a proof used to remove the guard
         // or to fold table contents. The compiled code retains both at runtime.
         std::set<std::uint32_t> bases;
-        if (earlier_base) {
+        if (reloaded_base) {
+            const auto& reload=*prior[3];
+            bases=frame_reference_values(bytes,elf,program,graph,reload.pc,reload.rs,
+                                         std::uint32_t(reload.immediate),false,4096);
+        } else if (earlier_base) {
             // Hoisted table construction is a register data-flow fact, not a
             // fixed instruction layout. Conflicting paths or clobbers fail it.
             if (const auto value=pointer_flow::constant(program,graph,add.pc,table_register)) bases.insert(*value);
@@ -1905,7 +1892,7 @@ std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executa
         for (auto base:bases) {
             base+=std::uint32_t(load.immediate)+(separate_low ? std::uint32_t(prior[2]->immediate) : 0U);
             std::set<std::uint32_t> entries;
-            for (unsigned n=0;n<static_cast<unsigned>(bound.immediate);++n) {
+            for (unsigned n=0;n<*bound;++n) {
                 if (std::uint64_t(base)+4*n>0xffffffffULL) { entries.clear(); break; }
                 const auto word=initial_word(bytes,elf,base+4*n);
                 const auto entry=word ? executable_pointer(elf,*word) : std::nullopt;
