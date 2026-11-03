@@ -9,9 +9,6 @@
 
 namespace nt::iop_codegen {
 namespace {
-void save(const std::filesystem::path& file,const std::string& text) {
-    write_file(file,ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));
-}
 std::string metadata_string(std::string_view text) {
     std::string result="\"";
     for (const unsigned char byte:text) {
@@ -154,7 +151,7 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
     code<<"}; }\n";
     // Finish validation before creating output. Never overwrite a prior conversion.
     if (!std::filesystem::create_directories(output)) throw std::runtime_error("IOP conversion: output directory already exists");
-    save(output/"module_metadata.cpp",code.str());
+    write_text_file(output/"module_metadata.cpp",code.str());
     std::ofstream llvm(output/"generated.ll",std::ios::binary);
     llvm.exceptions(std::ios::badbit|std::ios::failbit);
     std::vector<std::unique_ptr<std::ofstream>> streams;
@@ -168,7 +165,7 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
     });
     llvm.close();
     for (auto& stream:streams) stream->close();
-    save(output/"llvm-modules.txt",manifest);
+    write_text_file(output/"llvm-modules.txt",manifest);
     write_file(output/"module.data",ByteView(module.memory).first(module.initialized_size));
     if (any_sealed) write_file(output/"sealed.data",sealed_image);
     std::string cmake=R"cmake(cmake_minimum_required(VERSION 3.24)
@@ -200,7 +197,7 @@ anyps2_add_llvm_library(iop_code "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(iop-native PRIVATE iop_code)
 target_compile_definitions(iop-native PRIVATE ANYPS2_IOP_LLVM=1)
 )cmake";
-    save(output/"CMakeLists.txt",cmake);
+    write_text_file(output/"CMakeLists.txt",cmake);
     std::ostringstream layout;
     layout<<"AnyPS2 explicit module startup order (base, entry, memory size)\n";
     for (std::size_t index=0;index<modules.size();++index) {
@@ -208,7 +205,7 @@ target_compile_definitions(iop-native PRIVATE ANYPS2_IOP_LLVM=1)
         layout<<hex32(item.base)<<' '<<hex32(item.entry)<<' '<<hex32(static_cast<std::uint32_t>(item.memory.size()))
               <<(inputs[index].sealed ? " sealed" : inputs[index].native_romdrv ? " native-ROMDRV-archive" : " LLVM")<<'\n';
     }
-    save(output/"modules.txt",layout.str());
+    write_text_file(output/"modules.txt",layout.str());
     std::ostringstream diagnostics;
     for (const auto& item:compiled) for (const auto& library:elf::iop_exports(item))
         if (library.name=="libsd") diagnostics<<"Native LIBSD public ABI: LLVM entry stubs call the Windows audio owner. "
@@ -233,7 +230,7 @@ target_compile_definitions(iop-native PRIVATE ANYPS2_IOP_LLVM=1)
     for (const auto pc : program.open_indirect_sites)
         diagnostics<<"Open indirect at "<<hex32(pc)
                    <<": an unbounded fixed-slot store may call any instruction compiled into this program; every other address stops as unmapped code.\n";
-    save(output/"conversion.txt",std::string("AnyPS2 standalone IOP native conversion\n"
+    write_text_file(output/"conversion.txt",std::string("AnyPS2 standalone IOP native conversion\n"
         "Compile the emitted code with the supplied CMake project.\n"
         "module.data holds initialized program data; it is never decoded as instructions.\n"
         "Startup entries run in input order with shared native services; see modules.txt.\n"

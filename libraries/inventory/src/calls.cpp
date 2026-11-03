@@ -220,7 +220,7 @@ void write_call_reports(const Inventory& inventory,const std::filesystem::path& 
         for (const auto binding:bindings) { if (separator) markdown<<", "; markdown<<binding; separator=true; }
         markdown<<" | "<<count<<" | "<<sources.size()<<" | "<<detail::mapping_for(call,name.name).category<<" |\n";
     }
-    detail::save(output/"library-calls.json",json.str());
-    detail::save(output/"library-calls.md",markdown.str());
+    write_text_file(output/"library-calls.json",json.str());
+    write_text_file(output/"library-calls.md",markdown.str());
 }
 }

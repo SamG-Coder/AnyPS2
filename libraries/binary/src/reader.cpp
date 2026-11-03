@@ -44,6 +44,9 @@ void write_file(const std::filesystem::path& path, ByteView bytes) {
     file.close();
     if (!file) throw std::runtime_error("Cannot finish output file");
 }
+void write_text_file(const std::filesystem::path& path, std::string_view text) {
+    write_file(path, ByteView(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
+}
 std::string hex32(std::uint32_t value) {
     std::ostringstream out;
     out << "0x" << std::hex << std::setw(8) << std::setfill('0') << value;

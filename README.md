@@ -61,22 +61,6 @@ Native services aim to reproduce the *observable behavior* of console operations
 | Code discovery | Direct/indirect call and callback analysis; verification mode reports remaining flow and callback-binding gaps before LLVM generation or compilation |
 | Game compatibility | **GT4 is not playable.** No general game-compatibility claim |
 
-### Gran Turismo 4 milestone
-
-GT4 has displayed its opening warning using Vulkan. Title-screen and gameplay
-compatibility remain unestablished. Synthetic and homebrew passes do not prove
-complete commercial-game startup or correct gameplay.
-
-## What remains
-
-- Complete EE function and indirect-call discovery, including dynamically constructed pointers.
-- Finish native IOP and VU integration and missing console-service behavior.
-- Implement the remaining audio, rendering, disc, DMA and synchronization paths needed by games.
-- Verify correctness against PS2 behavior and eliminate unsupported startup boundaries.
-- Reach GT4's title screen, then gameplay, before making compatibility or performance claims.
-
-The current analysis intentionally reports uncertain pointer references instead of assuming data is executable code. See [EE native conversion](docs/ee-native.md) and [testing](docs/testing.md) for the technical details and validation approach.
-
 ## Build
 
 **Tested development environment:** Windows x64, Visual Studio C++ tools, CMake 3.24+, Vulkan SDK (including `glslc` and validation layers), and a Vulkan-capable driver with `shaderInt64`.
@@ -129,19 +113,10 @@ and the limits of static verification.
 - [Source references](docs/source-references.md) — pinned references and provenance
 - [Contributing](CONTRIBUTING.md) — contribution and publication rules
 - [Architecture](docs/architecture.md) — conversion boundaries and native services
+- [Technical debt](docs/technical-debt.md) — concrete maintenance boundaries and completion criteria
 - [EE native conversion](docs/ee-native.md) — R5900 conversion, LLVM generation, memory, call discovery and limits
 - [Flow verification](docs/flow-verification.md) — check discovery closure and callback-binding gaps before a native build
 - [Testing](docs/testing.md) — synthetic fixtures and opt-in local game validation
 - [Original PS2 test programs](docs/ps2-test-programs.md) — cross-compiled C++ cases and native/reference comparisons
 - [Batch conversion](docs/batch-conversion.md) — conversion workflow, LLVM build and performance measurements
 - [Usage and ownership disclaimer](DISCLAIMER.md) — game-file requirements
-
-## Project principles
-
-1. **Native ahead-of-time compilation**, not instruction interpretation or JIT execution.
-2. **No bundled PS2 BIOS or commercial game assets.**
-3. **Explicit failures** for unsupported code or unimplemented services.
-4. **Behavior first:** rendering a frame or compiling a binary is not the same as running a game correctly.
-5. **Reusable conversion:** build infrastructure that can eventually work beyond GT4.
-
-AnyPS2 is experimental software under active development. The source and technical documentation describe implemented subsets; they are not promises of full PS2 compatibility.

@@ -6,7 +6,6 @@
 namespace nt::inventory {
 namespace {
 using detail::quote;
-using detail::save;
 std::string relative_path_text(const std::filesystem::path& path,const std::filesystem::path& root) {
     return path.empty() ? std::string{} : path.lexically_relative(root).generic_string();
 }
@@ -56,7 +55,7 @@ std::string format_json(const Inventory& inventory,const std::filesystem::path& 
     return out.str();
 }
 void write_build_plan(const Inventory& inventory,const std::filesystem::path& output) {
-    save(output/"build-plan.json",format_json(inventory,output));
+    write_text_file(output/"build-plan.json",format_json(inventory,output));
     std::ostringstream cmake;
     cmake<<"cmake_minimum_required(VERSION 3.24)\nproject(AnyPS2Batch LANGUAGES CXX)\n"
         "if(NOT ANYPS2_ROOT)\n  message(FATAL_ERROR \"Set ANYPS2_ROOT to the AnyPS2 source directory\")\nendif()\n"
@@ -78,6 +77,6 @@ void write_build_plan(const Inventory& inventory,const std::filesystem::path& ou
     }
     cmake<<"message(STATUS \"Batch libraries are independent conversion artifacts; runtime dependencies still require validated binding.\")\n";
     if (!boot) cmake<<"message(STATUS \"Boot executable has unresolved conversion blockers; see build-plan.json.\")\n";
-    save(output/"CMakeLists.txt",cmake.str());
+    write_text_file(output/"CMakeLists.txt",cmake.str());
 }
 }

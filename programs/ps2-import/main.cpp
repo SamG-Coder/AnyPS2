@@ -26,7 +26,7 @@ int main(int argc, char** argv) {
         nt::write_file(output / "boot.elf", bytes);
         nt::write_file(output / "SYSTEM.CNF", cnf);
         const auto text = report.str();
-        nt::write_file(output / "report.txt", nt::ByteView(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
+        nt::write_text_file(output / "report.txt", text);
         std::cout << text;
         return 0;
     } catch (const std::exception& error) {

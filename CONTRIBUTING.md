@@ -14,6 +14,14 @@ related Release tests, and report exactly what was verified. See
 [testing](docs/testing.md) and [original PS2 programs](docs/ps2-test-programs.md).
 AI-generated contributions receive the same review, provenance and testing requirements.
 
+Keep changes focused and follow the existing names and ownership boundaries. The
+[code and documentation rules](AGENTS.md) are authoritative. Prefer concise durable
+contracts over progress diaries, following the spirit of
+[AnyPS5's conventions](https://github.com/boykopovar/AnyPS5/blob/main/docs/dev/CONVENTIONS.md).
+AnyPS2 retains its existing C++ naming and comments needed to explain numeric,
+ordering and lifetime constraints. Use descriptive Conventional Commit subjects
+such as `refactor(binary): share text artifact writing`.
+
 Never attach or commit BIOS/firmware, keys, proprietary SDKs, game images,
 extracted modules, assets, saves, memory dumps, game instruction traces, translated
 commercial IR/code or converted game binaries. Reproduce problems with synthetic

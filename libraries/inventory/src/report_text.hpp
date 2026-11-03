@@ -1,5 +1,5 @@
 #pragma once
-#include <nt/binary.hpp>
+#include <string>
 #include <string_view>
 
 namespace nt::inventory::detail {
@@ -12,9 +12,6 @@ inline std::string quote(std::string_view text) {
         else result+=char(c);
     }
     return result+'"';
-}
-inline void save(const std::filesystem::path& path,const std::string& text) {
-    write_file(path,ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));
 }
 inline std::string table_text(std::string_view text) {
     std::string result;

@@ -37,7 +37,7 @@ int main(int argc,char** argv) {
             std::ostringstream module;
             nt::vu::emit_catalog_llvm(module,images,unit,unit ? "nt_vu_program1" : "nt_vu_program");
             const auto text=module.str();
-            nt::write_file(argv[3],nt::ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));
+            nt::write_text_file(argv[3], text);
             std::cout<<"Emitted "<<images.size()<<" whole-entry VU artifacts and native catalog. LLVM compilation and linking remain separate stages.\n";
             return 0;
         }
@@ -66,7 +66,7 @@ int main(int argc,char** argv) {
             nt::vu::emit_program_llvm(output,pairs,unit,entries,unit ? "nt_vu_program1" : "nt_vu_program",continuation_depth);
         } else nt::vu::emit_llvm(output,pairs,unit);
         const auto text=output.str();
-        nt::write_file(argv[2],nt::ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));
+        nt::write_text_file(argv[2], text);
         std::cout<<"Emitted VU LLVM region; compilation and runtime binding are separate stages.\n";
         return 0;
     } catch (const std::exception& error) { std::cerr<<"VU conversion: "<<error.what()<<'\n'; return 1; }

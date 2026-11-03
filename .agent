@@ -1,18 +1,4 @@
 # AnyPS2 agent entry point
 
-Read AGENTS.md for authoritative engineering, testing, and provenance instructions.
-Read DISCLAIMER.md before handling game inputs.
-
-AnyPS2 targets a fast, modern native PC program. Convert EE, IOP and VU code into
-typed IR and compile ahead of time through LLVM. Keep the tool and shared native
-services in clean C++20. LLVM is the only output backend. Do not generate C++ game code or maintain
-a selectable C++ conversion fallback.
-
-Do not ship an interpreter, JIT, emulator wrapper or emulator fallback. Existing
-IOP interpretation is diagnostic scaffolding to replace. Modernize supported
-console operations into native PC systems, including Vulkan rendering, while
-preserving observable game behaviour. Keep generated commercial content ignored.
-
-Retain IR and reproducible build configuration locally. Verify the compiled
-executable and its dependencies; source emission or compilation alone is not game
-compatibility or measured performance. Run only relevant milestone tests after cohesive operation-family batches, not after each opcode.
+Read [AGENTS.md](AGENTS.md) for the authoritative engineering, testing and
+provenance rules, and [DISCLAIMER.md](DISCLAIMER.md) before handling game inputs.

@@ -133,9 +133,6 @@ bool looks_reboot(ByteView header) {
     const auto text=reinterpret_cast<const char*>(header.data());
     return header.size()>=22 && std::string_view(text,5)=="RESET" && std::string_view(text+16,6)=="ROMDIR";
 }
-void write_text(const std::filesystem::path& path,const std::string& text) {
-    write_file(path,ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));
-}
 std::string hex_list(const std::vector<std::uint32_t>& values) {
     std::ostringstream text;
     for (std::size_t index=0;index<values.size();++index) {
@@ -187,9 +184,9 @@ void emit_iop(Unit& unit,const iop_codegen::ir::Program& program,const std::file
     llvm.close(); for (auto& stream:streams) stream->close();
     std::string manifest;
     for (const auto& file:unit.modules) manifest+=file.filename().string()+'\n';
-    write_text(directory/"llvm-modules.txt",manifest);
-    write_text(directory/"source.txt",unit.id);
-    write_text(directory/"conversion.txt",
+    write_text_file(directory/"llvm-modules.txt",manifest);
+    write_text_file(directory/"source.txt",unit.id);
+    write_text_file(directory/"conversion.txt",
         "AnyPS2 IOP module LLVM inventory\n"
         "This file is machine code only after a separate clang compilation.\n"
         "It is not linked into a runtime and it was not executed.\n"
@@ -360,7 +357,7 @@ void record_ee(Accumulator& accumulator,const std::string& id,ByteView bytes,con
             write_file(directory/"input.elf",bytes);
             const auto project=directory/"project";
             ee_codegen::project(directory/"input.elf",project,payloads);
-            write_text(project/"source.txt",unit.id);
+            write_text_file(project/"source.txt",unit.id);
             unit.artifact=project/"generated.ll";
             unit.stage=Stage::llvm_generated;
             std::ifstream manifest(project/"llvm-modules.txt");

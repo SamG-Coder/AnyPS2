@@ -60,6 +60,14 @@ to advance a trace. Do not require, embed, or reconstruct a proprietary BIOS.
 
 ## Clean and reusable C++
 
+- Follow the surrounding naming and layout conventions. Use descriptive types and
+  functions; do not introduce a second naming style or mass-rename working APIs.
+- Comments explain invariants, ownership, non-obvious numeric behavior or known
+  limitations. Remove narration of edits and comments that merely restate code;
+  preserve attribution and correctness explanations.
+- Keep build orchestration in the root CMake file and test registration in
+  `tests/targets.cmake`. Reuse shared I/O and generation helpers instead of adding
+  local copies. Extract cohesive responsibilities, not arbitrary line counts.
 - Product code is C++20. Programs own CLI handling; libraries own reusable logic.
   Keep parsing, decoding, analysis, generation, runtime, hardware, kernel services,
   and process execution separate.
@@ -127,3 +135,7 @@ Document stable commands, contracts, current limitations and provenance. Do not
 create per-operation progress notes, repeated test logs or speculative design
 documents. Keep transient investigation in ignored work/ and use commit messages
 for change history. Remove obsolete or redundant documentation when replacing it.
+Keep one authoritative home for each contract. The source-reference ledger records
+one entry per reference with its pin, purpose, license and adaptations; it is not
+a second change log. Technical-debt entries must identify an existing code boundary,
+its consequence and a concrete completion condition, and be removed when resolved.

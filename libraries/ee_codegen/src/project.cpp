@@ -63,9 +63,6 @@ struct Prepared {
     std::size_t wrapper_candidates=0;
     std::uint32_t syscall_table=0;
 };
-void save(const std::filesystem::path& path,const std::string& text) {
-    write_file(path,ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));
-}
 std::vector<CodeRange> declared_code_ranges(const elf::Executable& executable) {
     std::vector<CodeRange> result;
     if (executable.inferred_permissions) return result;
@@ -396,23 +393,23 @@ void write_discovery_reports(const std::filesystem::path& output,const Prepared&
     coverage<<"selection="<<(prepared.whole_code ? "whole-declared-EE-code" : "reachable-flow")<<"\n"
         <<"selected_instructions="<<prepared.discovered.instructions.size()<<"\n"
         <<"runtime_target_selection=dynamic\n";
-    save(output/"code-coverage.txt",coverage.str());
+    write_text_file(output/"code-coverage.txt",coverage.str());
     std::ostringstream regions;
     regions<<"image\taddress\tbytes\tselected_words\n";
     for (const auto& range:prepared.selected_regions)
         regions<<range.image<<'\t'<<hex32(range.address)<<'\t'<<range.size<<'\t'<<range.size/4<<'\n';
-    save(output/"code-regions.tsv",regions.str());
+    write_text_file(output/"code-regions.tsv",regions.str());
     std::ostringstream functions;
     functions<<"image\tentry\tevidence\n";
     for (const auto& [image,entry]:prepared.function_roots) functions<<image<<'\t'<<hex32(entry)<<"\tELF-STT_FUNC\n";
-    save(output/"function-roots.tsv",functions.str());
-    save(output/"input-identity.txt","format=anyps2-ee-input-v1\ninput_identity="+std::to_string(prepared.input_identity)+"\n");
+    write_text_file(output/"function-roots.tsv",functions.str());
+    write_text_file(output/"input-identity.txt","format=anyps2-ee-input-v1\ninput_identity="+std::to_string(prepared.input_identity)+"\n");
     std::ostringstream observed;
     observed<<"image\tsite\ttarget\tevidence\tcoverage\n";
     for (const auto& edge:prepared.observations)
         observed<<edge.image<<'\t'<<hex32(edge.site)<<'\t'<<hex32(edge.target)
             <<"\tvalidated-native-stop\t"<<(verification ? "discovered-observed-target" : "generated-observed-target")<<'\n';
-    save(output/"observed-call-edges.tsv",observed.str());
+    write_text_file(output/"observed-call-edges.tsv",observed.str());
     std::ostringstream calls;
     calls<<"pc\tkind\ttarget\tcoverage\n";
     for (const auto& call:prepared.calls) {
@@ -429,7 +426,7 @@ void write_discovery_reports(const std::filesystem::path& output,const Prepared&
         else calls<<"unresolved-indirect";
         calls<<'\n';
     }
-    save(output/"call-sites.tsv",calls.str());
+    write_text_file(output/"call-sites.tsv",calls.str());
     std::ostringstream pointers;
     pointers<<"site\ttarget\tsource\tuse\tcoverage\tcallee\targument_index\n";
     for (const auto& reference:prepared.pointers) {
@@ -441,12 +438,12 @@ void write_discovery_reports(const std::filesystem::path& output,const Prepared&
         else pointers<<"-\t-";
         pointers<<'\n';
     }
-    save(output/"pointer-references.tsv",pointers.str());
+    write_text_file(output/"pointer-references.tsv",pointers.str());
     std::ostringstream passes;
     passes<<"image\tpass\tdiscovered_instructions\tnew_roots\tnew_registrations\n";
     for (const auto& pass:prepared.passes)
         passes<<pass.image<<'\t'<<pass.index<<'\t'<<pass.instructions<<'\t'<<pass.new_roots<<'\t'<<pass.new_registrations<<'\n';
-    save(output/"discovery-passes.tsv",passes.str());
+    write_text_file(output/"discovery-passes.tsv",passes.str());
 }
 }
 void project(const std::filesystem::path& input,const std::filesystem::path& destination,std::span<const PayloadMapping> mappings,
@@ -472,7 +469,7 @@ void project(const std::filesystem::path& input,const std::filesystem::path& des
     for (auto& stream:streams) stream->close();
     std::string module_manifest;
     for (const auto& name:modules) module_manifest+=name+'\n';
-    save(output/"llvm-modules.txt",module_manifest);
+    write_text_file(output/"llvm-modules.txt",module_manifest);
     write_discovery_reports(output,prepared);
     const auto& executable=prepared.executable;
     const auto& image=prepared.image;
@@ -518,11 +515,11 @@ target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codeg
 )cmake";
     cmake<<"target_compile_definitions(ps2-native PRIVATE ANYPS2_EE_ENTRY="<<executable.entry
          <<"U ANYPS2_EE_SYSCALL_TABLE="<<syscall_table<<"U ANYPS2_EE_DATA_SIZE="<<image.size()<<"U ANYPS2_EE_DATA_HASH="<<fingerprint(image)<<"ULL)\n";
-    save(output/"CMakeLists.txt",cmake.str());
+    write_text_file(output/"CMakeLists.txt",cmake.str());
     std::ostringstream native_layout;
     for (const auto& record:prepared.layouts)
         native_layout<<hex32(record[0])<<' '<<hex32(record[1])<<' '<<hex32(record[2])<<' '<<hex32(record[3])<<'\n';
-    save(output/"native-layout-candidates.txt",native_layout.str());
+    write_text_file(output/"native-layout-candidates.txt",native_layout.str());
     if (!prepared.images.empty()) {
         std::ostringstream manifest;
         for (const auto& executable_image:prepared.images) {
@@ -531,7 +528,7 @@ target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codeg
                 manifest<<"  section "<<hex32(segment.address)<<" bytes "<<segment.bytes.size()<<'\n';
         }
         manifest<<"Only image 1 is initialized at launch. Other images must be loaded and validated at ExecPS2.\n";
-        save(output/"executable-images.txt",manifest.str());
+        write_text_file(output/"executable-images.txt",manifest.str());
     }
     const auto layout_plan=prepare_native_layout(prepared.layouts);
     std::ostringstream accepted_layout;
@@ -543,7 +540,7 @@ target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codeg
         accepted_layout<<"access "<<hex32(guard.address)<<" bytes "<<hex32(guard.bytes)
             <<" read "<<guard.readable<<" write "<<guard.writable<<'\n';
     accepted_layout<<"accepted declarations "<<layout_plan.declarations.size()<<'\n';
-    save(output/"native-layout-plan.txt",accepted_layout.str());
+    write_text_file(output/"native-layout-plan.txt",accepted_layout.str());
     if (!mappings.empty()) {
         std::ostringstream plan;
         for (const auto& mapping:mappings) {
@@ -552,10 +549,10 @@ target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codeg
             for (const auto& region:mapping.code_ranges) plan<<" code="<<region.offset<<':'<<region.size;
             plan<<'\n';
         }
-        save(output/"payloads.txt",plan.str());
+        write_text_file(output/"payloads.txt",plan.str());
     }
     write_file(output/"program.data",image);
-    save(output/"conversion.txt","AnyPS2 EE LLVM entry-flow conversion\n"
+    write_text_file(output/"conversion.txt","AnyPS2 EE LLVM entry-flow conversion\n"
          "Discovery includes leaf syscall-wrapper candidates and recognized startup continuations. Compiled wrappers do not implement missing services; runtime dispatch still validates them.\n"
          "Indirect destinations must already belong to the discovered code set; other targets stop.\n"
          "call-sites.tsv inventories reached transfers; compiled initial candidates do not prove complete indirect coverage.\n"
@@ -594,7 +591,7 @@ FlowVerification verify_flow(const std::filesystem::path& input,const std::files
         if (reference.argument) gaps<<hex32(reference.callee)<<" argument "<<reference.argument_index<<"; ";
         gaps<<(reference.data_read ? "data use observed, callable use not established" : "callable use not established")<<'\n';
     }
-    save(output/"flow-gaps.tsv",gaps.str());
+    write_text_file(output/"flow-gaps.tsv",gaps.str());
     std::ostringstream bindings;
     bindings<<"store\ttarget\tfield\tstatus\tconsumer_sites\n";
     for (const auto& gap:prepared.flow_gaps) {
@@ -605,17 +602,17 @@ FlowVerification verify_flow(const std::filesystem::path& input,const std::files
         }
         bindings<<'\n';
     }
-    save(output/"callback-flow-gaps.tsv",bindings.str());
+    write_text_file(output/"callback-flow-gaps.tsv",bindings.str());
     std::vector<r5900::Instruction> instructions;
     instructions.reserve(prepared.discovered.instructions.size());
     for (const auto& [pc,instruction]:prepared.discovered.instructions) instructions.push_back(instruction);
     const auto rejection=reject_unsupported(instructions);
     result.lowering_supported=!instructions.empty() && rejection.empty();
-    save(output/"lowering-diagnostics.txt",rejection.text());
+    write_text_file(output/"lowering-diagnostics.txt",rejection.text());
     std::string layout_error;
     try { (void)prepare_native_layout(prepared.layouts); result.layout_supported=true; }
     catch (const std::exception& error) { layout_error=error.what(); }
-    save(output/"layout-diagnostics.txt",layout_error);
+    write_text_file(output/"layout-diagnostics.txt",layout_error);
     std::ostringstream summary;
     summary<<"known_flow="<<(result.closed() ? "closed" : "incomplete")<<'\n'
         <<"code_selection="<<(whole_code ? "whole-declared-EE-code" : "reachable-flow")<<'\n'
@@ -631,7 +628,7 @@ FlowVerification verify_flow(const std::filesystem::path& input,const std::files
             "Discovery closure means the implemented rules found no additional roots, not complete game coverage.\n")
         <<"Callback layout matches are diagnostics only and never promote a pointer to executable code.\n"
         <<"Unknown dynamic content, native service behavior, rendering and gameplay require separate validation.\n";
-    save(output/"flow-verification.txt",summary.str());
+    write_text_file(output/"flow-verification.txt",summary.str());
     staged.publish();
     return result;
 }

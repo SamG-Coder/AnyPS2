@@ -50,7 +50,7 @@ inline void add_subtract_scalar(State& state, unsigned destination, unsigned lef
 void divide_scalar(State& state, unsigned destination, unsigned left, unsigned right);
 // Translate only the BIOS-free default RAM aliases; callers enforce RAM bounds.
 struct SifTransfer { std::uint32_t source, destination, bytes, attributes; };
-// The generated code uses this boundary; a future PCSX2 adapter owns MMIO and timing.
+// Diagnostic execution boundary. Production output links native service owners.
 class Bus {
 public:
     virtual ~Bus() = default;

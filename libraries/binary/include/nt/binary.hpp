@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace nt {
@@ -15,6 +16,7 @@ std::uint32_t le32(ByteView bytes, std::size_t offset);
 std::uint32_t be32(ByteView bytes, std::size_t offset);
 Bytes read_file(const std::filesystem::path& path, std::uint64_t limit = 128 * 1024 * 1024);
 void write_file(const std::filesystem::path& path, ByteView bytes);
+void write_text_file(const std::filesystem::path& path, std::string_view text);
 std::string hex32(std::uint32_t value);
 // Non-cryptographic build identity check; not an authenticity guarantee.
 std::uint64_t fingerprint(ByteView bytes);

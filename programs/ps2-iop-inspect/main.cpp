@@ -88,7 +88,7 @@ int main(int argc,char** argv) {
             for (const auto& [key,value]:observed) text+=key+"="+nt::hex32(value)+"\n";
         }
         if (std::filesystem::exists(output)) throw std::invalid_argument("Inspection report already exists");
-        nt::write_file(output,{reinterpret_cast<const std::uint8_t*>(text.data()),text.size()});
+        nt::write_text_file(output, text);
         std::cout<<"Offline neighborhood: "<<report.calls.size()<<" candidate call sites, "<<report.function_candidates.size()
                  <<" function candidates, "<<report.unknown.size()<<" undecoded words\nReport: "<<output.string()<<'\n';
         std::cout<<"Module: "<<(module->info ? module->info->name : "unnamed")<<" base="<<nt::hex32(module->base)<<'\n';
