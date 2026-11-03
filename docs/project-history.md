@@ -25,6 +25,7 @@ duplicated here as a per-operation log.
 | glampert Audio/Sound | Native XAudio2 sample playback; user reported it sounds about the same as PCSX2 | Listening comparison, not waveform equivalence or general game audio |
 | glampert Dungeon | User confirmed solid armour and smooth movement after rendering fixes | Rotation slowdowns remain a performance concern; no complete-game claim |
 | PS2SDK Teapot | Four rotating lit teapots in native Vulkan; a 20-second run measured about 59–60 display updates/s | Narrow sample coverage; not a benchmark against PCSX2 |
+| PS2SDK VU1 | Textured cubes rendered through separately AOT-compiled EE and VU1 code | Visual capture and bounded run; full reference parity not established |
 
 These are locally adapted inputs, not unmodified-upstream compatibility claims.
 Ports include compiler compatibility, native service binding and a public SDK

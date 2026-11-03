@@ -679,7 +679,9 @@ int main(int argc,char** argv) {
             std::cout<<" compiled_vu_unit="<<nt_vu_program_unit()<<" compiled_vu_ready="<<compiled_vu.ready();
 #endif
 #ifdef ANYPS2_NATIVE_VU1
-            std::cout<<" compiled_vu1_ready="<<compiled_vu1.ready();
+            std::cout<<" compiled_vu1_ready="<<compiled_vu1.ready()
+                <<" vu1_run_status="<<static_cast<unsigned>(compiled_vu1_launch.last_result.status)
+                <<" vu1_blocks="<<compiled_vu1_launch.last_result.blocks;
 #endif
             if (gpu.renderer) std::cout<<" graphics_resets="<<platform.graphics.resets()<<" gpu=\""<<gpu.renderer->device_name()<<"\"";
             if (cdvd) std::cout<<" cdvd_initialized="<<cdvd->initialized();

@@ -54,6 +54,7 @@ public:
         pending.push_back({"i32",result,offsetof(State,quotient)});
         pending.push_back({"i32",status,offsetof(State,status)});
         pending.push_back({"i32","0",offsetof(State,quotient_pending)});
+        pending.push_back({"i32","0",offsetof(State,quotient_read_delay)});
         commit();
     }
     void publish_p() {
@@ -148,6 +149,13 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
             lower.operation==LowerOperation::reciprocal_square_root;
         writer.advance_visibility(offsetof(State,mac_read_delay));
         writer.advance_visibility(offsetof(State,clip_read_delay));
+        // The compiled schedule can make Q available without an explicit WAITQ.
+        // Preserve the remaining dependency distance across native block calls.
+        const auto q_due=writer.value("icmp eq i32 "+writer.load("i32",offsetof(State,quotient_read_delay))+", 1");
+        writer.advance_visibility(offsetof(State,quotient_read_delay));
+        writer.out<<"  br i1 "<<q_due<<", label %q_publish"<<index<<", label %q_elapsed"<<index<<"\nq_publish"<<index<<":\n";
+        writer.publish_quotient();
+        writer.out<<"  br label %q_elapsed"<<index<<"\nq_elapsed"<<index<<":\n";
         // These lower operations synchronize an earlier quotient before this
         // pair reads Q. Unscheduled visibility is deliberately not approximated.
         if (quotient_producer || lower.operation==LowerOperation::wait_quotient) writer.publish_quotient();
@@ -343,6 +351,7 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
             writer.pending.push_back({"i32",writer.value("trunc i64 "+packed+" to i32"),offsetof(State,pending_quotient)});
             writer.pending.push_back({"i32",writer.value("trunc i64 "+writer.value("lshr i64 "+packed+", 32")+" to i32"),offsetof(State,quotient_flags)});
             writer.pending.push_back({"i32","1",offsetof(State,quotient_pending)});
+            writer.pending.push_back({"i32",lower.operation==LowerOperation::reciprocal_square_root ? "13" : "7",offsetof(State,quotient_read_delay)});
             break;
         }
         case LowerOperation::branch: {

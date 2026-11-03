@@ -268,6 +268,9 @@ steps are diagnostic scheduling, not accurate DMA or VU timing.
 PCSX2 `GS/GSRegs.h`, `GS/GSState.cpp` and `Gif_Unit.cpp` inform GIF tag fields,
 PACKED A_D dispatch, REGLIST packing, GS register addresses and masked
 SIGNAL/LABEL updates. The path-3 receiver uses the shared source-DMA transport.
+The same pinned `GSState.cpp` Write/transfer-buffer logic bounds IMAGE writes to
+the declared rectangle and discards excess data after completion. This informs
+the independent upload planner's padding handling; no reference code is copied.
 `Vif_Codes.cpp` DIRECT supplies the immediate quadword count (zero means 65,536)
 and path-2 destination. AnyPS2 uses an independent four-word assembler and reuses
 its existing GIF decoder, retaining DMA input when paused or another packet owns
@@ -1790,6 +1793,10 @@ updates, outer-product operand ordering and the 23-bit random-register recurrenc
 shared vector ownership; no upstream execution loop or instruction interpreter
 is copied into generated output.
 
+At the same PCSX2 pin, `x86/microVU_Lower.inl` provides the DIV/SQRT (7) and
+RSQRT (13) dependency distances. Independent LLVM lowering retains pending Q
+across compiled blocks and publishes it when the scheduled distance has elapsed.
+
 Native USB enumeration uses Windows SDK SetupAPI, `GUID_DEVINTERFACE_USB_HUB`,
 `IOCTL_USB_GET_NODE_INFORMATION`, `IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX`
 and `IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION` public interfaces:
@@ -2171,7 +2178,7 @@ existing sampled exterior coverage remains an approximation.
   LLVM, linked bitcode and validated SPIR-V are build artifacts. The arithmetic
   kernel interface alone does not establish EE/VU region legality or game use.
 
-## PS2SDK Teapot sample
+## PS2SDK rendering samples
 
 The Teapot integration input is `ee/draw/samples/teapot` from the PS2SDK revision
 `2a18d15da1332665451a9bcf9a0d4df9029c9490` recorded above (AFL-2.0 and file notices).
@@ -2179,3 +2186,6 @@ Its source, mesh and converted artifacts remain ignored. Both native and PCSX2
 comparison use the same locally built ELF. The local public `graph.c` helper
 acknowledges VSYNC/HSYNC with their write-one-to-clear masks instead of read/OR/write,
 so acknowledging one event does not also clear FINISH. Teapot drawing code is unchanged.
+The `ee/draw/samples/vu1` sample at the same pin exercises packet2 and a separately
+assembled VU1 program. Its source, texture, microprogram and converted artifacts
+also stay ignored; the local build uses the same SDK synchronization correction.

@@ -22,6 +22,7 @@ struct State {
     std::uint32_t graphics_address=0,graphics_pending=0,graphics_completes=0;
     std::uint32_t clip=0,clip_read_delay=0;
     std::uint32_t random=0x3f800000;
+    std::uint32_t quotient_read_delay=0;
     bool operator==(const State&) const = default;
 };
 }

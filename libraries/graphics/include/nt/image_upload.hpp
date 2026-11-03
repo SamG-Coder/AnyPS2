@@ -26,14 +26,17 @@ struct ImageUpload {
     }
     void append(std::span<const Quadword> values,std::vector<PixelWrite>& writes) {
         if (values.empty()) return;
-        if ((bits!=4 && bits!=24 && bits!=32) || pixel>=width*height) throw std::invalid_argument("Image payload without active native upload");
+        if (bits!=4 && bits!=24 && bits!=32) throw std::invalid_argument("Image payload without active native upload");
+        // IMAGE packets may contain more data than the declared rectangle.
+        // Once it is complete, consume transport padding without writing pixels.
+        if (pixel>=width*height) return;
         unsigned column=pixel%width,row=pixel/width;
         const auto advance=[&] {
             ++pixel;
             if (++column==width) { column=0; ++row; }
         };
         for (const auto& value:values) {
-            if (pixel>=width*height) throw std::invalid_argument("Image payload without active native upload");
+            if (pixel>=width*height) break;
             if (bits==32 && pending_bits==0) {
                 for (unsigned word=0;word<4 && pixel<width*height;++word) {
                     writes.push_back({rgba_word(base,pitch,x+column,y+row),value[word],0xffffffffU});

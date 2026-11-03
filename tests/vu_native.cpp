@@ -34,6 +34,8 @@ extern "C" nt::vu::Result nt_vu_end_true(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_q_start(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_q_finish(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_q_early(nt::vu::State*);
+extern "C" nt::vu::Result nt_vu_q_elapsed(nt::vu::State*);
+extern "C" nt::vu::Result nt_vu_q_scheduled(nt::vu::State*);
 extern "C" const nt::vu::Block* nt_vu_program_blocks();
 extern "C" std::uint32_t nt_vu_program_count();
 extern "C" const std::uint8_t* nt_vu_program_image();
@@ -253,6 +255,15 @@ int main() {
             q.quotient!=0x3f800000 || q.pending_quotient!=0x40000000 || q.quotient_pending!=1)
             throw std::runtime_error("Pending native quotient did not survive transfer");
         const auto pending_q=q;
+        auto elapsed_q=q;
+        if (nt_vu_q_elapsed(&elapsed_q)!=nt::vu::Result::complete || elapsed_q.vectors[3][0]!=0x40c00000 ||
+            elapsed_q.quotient_pending || elapsed_q.quotient_read_delay)
+            throw std::runtime_error("Scheduled Q completion was lost across native blocks");
+        auto scheduled_q=q; scheduled_q.quotient_pending=0; scheduled_q.quotient_read_delay=0;
+        if (nt_vu_q_scheduled(&scheduled_q)!=nt::vu::Result::complete ||
+            scheduled_q.vectors[3][0]!=0x40c00000 || scheduled_q.vectors[4][0]!=0x40c00000 ||
+            scheduled_q.vectors[5][0]!=0x41400000 || scheduled_q.quotient_pending || scheduled_q.quotient_read_delay)
+            throw std::runtime_error("Scheduled DIV/SQRT/RSQRT did not publish Q without WAITQ");
         if (nt_vu_q_early(&q)!=nt::vu::Result::unsupported_schedule || q!=pending_q)
             throw std::runtime_error("Unscheduled Q read did not stop atomically");
         if (quotient_program.run(q,1).status!=nt::vu::RunStatus::complete || q.quotient!=0x40800000 ||

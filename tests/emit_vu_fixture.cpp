@@ -82,6 +82,19 @@ int main(int argc,char** argv) {
     pair(0x80000335);
     save_block(".q_early","nt_vu_q_early",200);
     bytes.clear();
+    for (unsigned i=0;i<4;++i) pair(0x80000335);
+    pair(0x80000335,0x40000000|mulq(4));
+    pair(0x80000335);
+    save_block(".q_elapsed","nt_vu_q_elapsed",200);
+    bytes.clear();
+    for (unsigned operation=0;operation<3;++operation) {
+        pair(0x80000000|(1U<<11)|(2U<<16)|(14U<<6)|(60+operation));
+        for (unsigned i=1;i<(operation==2 ? 13U : 7U);++i) pair(0x80000335);
+        pair(0x80000335,mulq(4+operation));
+    }
+    pair(0x80000335,0x400002ff); pair(0x80000335);
+    save_block(".q_scheduled","nt_vu_q_scheduled",0);
+    bytes.clear();
     pair((40U<<25)|(1U<<11)|(2U<<16)|3); // Conditional branch to 4; otherwise 2.
     pair(0x80000000|(3U<<11)|(3U<<16)|(1U<<6)|50);
     pair(0x80000000|(4U<<11)|(4U<<16)|(1U<<6)|50,0x400002ff);

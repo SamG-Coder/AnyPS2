@@ -23,6 +23,9 @@ void bulk_transfers() {
         const auto initial=ImageUpload::begin((16383ULL<<32)|(3ULL<<48)|
             (std::uint64_t(bits==4 ? 20 : bits==24 ? 1 : 0)<<56),
             (2045ULL<<32)|(2046ULL<<48),width|(3ULL<<32),0);
+        // Exercise whole trailing quadwords as well as padding within the final
+        // word. Public upload builders can overprovision 24-bit IMAGE packets.
+        payload.insert(payload.end(),3,Quadword{0xdeadbeef,0xdeadbeef,0xdeadbeef,0xdeadbeef});
         auto bulk=initial,split=initial;
         std::vector<PixelWrite> a,b;
         bulk.append(payload,a);
@@ -39,10 +42,16 @@ void bulk_transfers() {
                 b[p].address!=a[p].address || b[p].value!=a[p].value || b[p].mask!=a[p].mask)
                 throw std::runtime_error("Bulk image transfer changed pixels, wrapping or write masks");
         }
-        bool rejected=false;
-        try {bulk.append(payload.front(),a);} catch(const std::invalid_argument&) {rejected=true;}
-        if (!rejected || a.size()!=pixels) throw std::runtime_error("Bulk image transfer accepted overrun");
+        bulk.append(payload.front(),a);
+        if (a.size()!=pixels) throw std::runtime_error("Completed image transfer wrote beyond its rectangle");
+        bulk=initial;
+        a.clear(); bulk.append(payload,a);
+        if (a.size()!=pixels || bulk.pixel!=pixels) throw std::runtime_error("New image transfer did not restart");
     }
+    bool uninitialized_rejected=false;
+    std::vector<PixelWrite> uninitialized;
+    try {ImageUpload{}.append(Quadword{},uninitialized);} catch(const std::invalid_argument&) {uninitialized_rejected=true;}
+    if (!uninitialized_rejected || !uninitialized.empty()) throw std::runtime_error("Uninitialized image upload was accepted");
     const Packet first{{2,0x08000000,0,0},{1,2,3,4},{5,6,7,8},{0x8001,0x10000000,14,0},{9,10,11,12}};
     const Packet second{{0x8000,0x08000000,0,0}};
     // Offset the byte view deliberately: transport buffers need not be aligned.
@@ -146,10 +155,9 @@ int main(int argc,char**) {
             if (native.pixels()[addresses[pixel]]!=((before_rgb[addresses[pixel]]&0xff000000U)|value))
                 throw std::runtime_error("RGB image continuation or alpha preservation failed");
         }
-        const auto complete_rgb=native.pixels(); rejected=false;
-        try { native.submit(gpu,std::array{rgb_last}); }
-        catch (const std::invalid_argument&) { rejected=true; }
-        if (!rejected || native.pixels()!=complete_rgb) throw std::runtime_error("Image overrun was accepted");
+        const auto complete_rgb=native.pixels();
+        native.submit(gpu,std::array{rgb_last});
+        if (native.pixels()!=complete_rgb) throw std::runtime_error("Trailing IMAGE data changed completed pixels");
         nt::graphics::Packet textured_packet{{0x800a,0x10000000,14,0}};
         const auto texture_ad=[&](unsigned reg,std::uint64_t value) {
             textured_packet.push_back({std::uint32_t(value),std::uint32_t(value>>32),reg,0});
