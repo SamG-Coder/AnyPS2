@@ -410,7 +410,7 @@ int main(int argc,char** argv) {
         std::chrono::steady_clock::time_point last_update{};
         auto profile_started=started;
         unsigned profile_updates=0;
-        auto next_present=started;
+        auto next_window_poll=started;
         auto next_input=started;
         auto last_input=started;
         double input_gap_max_ms=0,input_gap_total_ms=0;
@@ -419,6 +419,28 @@ int main(int argc,char** argv) {
         std::array<std::uint16_t,2> last_buttons{};
         std::uint64_t input_button_changes=0;
         bool timed_out=false,window_closed=false,application_exit=false;
+        auto present_output=[&] {
+            if (!window || window_closed) return;
+            const auto& output=platform.graphics.output();
+            if (const auto plan=nt::graphics::plan_display(output.control,output.buffers,output.displays,
+                    platform.graphics.half_height_output(),std::uint32_t(output.background))) {
+                const auto present_started=std::chrono::steady_clock::now();
+                const auto updated=window->present(*plan);
+                if (profile_graphics && updated) {
+                    const auto completed=std::chrono::steady_clock::now();
+                    if (last_update!=std::chrono::steady_clock::time_point{})
+                        update_intervals.push_back(std::chrono::duration<double,std::milli>(completed-last_update).count());
+                    last_update=completed; ++profile_updates;
+                }
+                presentation_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-present_started).count();
+                if (gpu.capture) {
+                    const auto frame=gpu.renderer->scanout_readback(*plan);
+                    gpu.capture->present(frame,gpu.drawing.submitted_draws(),output.control,output.buffers,output.displays,platform.graphics.half_height_output());
+                }
+            }
+        };
+        platform.graphics.scanout_context=&present_output;
+        platform.graphics.scanout_ready=[](void* raw) { (*static_cast<decltype(present_output)*>(raw))(); };
         services.stop_requested=[&] {
             if (NativeGpu::poll(&gpu)!=nt::ee::Stop::budget) return true;
             const auto now=std::chrono::steady_clock::now();
@@ -475,28 +497,10 @@ int main(int argc,char** argv) {
                     if (buttons!=last_buttons[port]) { ++input_button_changes; last_buttons[port]=buttons; }
                 }
             }
-            if (window && !window_closed && now>=next_present) {
-                next_present=now+std::chrono::milliseconds(16);
+            if (window && !window_closed && now>=next_window_poll) {
+                next_window_poll=now+std::chrono::milliseconds(16);
                 if (!window->poll()) {
                     window_closed=true;
-                } else {
-                    const auto& output=platform.graphics.output();
-                    if (const auto plan=nt::graphics::plan_display(output.control,output.buffers,output.displays,
-                            platform.graphics.half_height_output(),std::uint32_t(output.background))) {
-                        const auto present_started=std::chrono::steady_clock::now();
-                        const auto updated=window->present(*plan);
-                        if (profile_graphics && updated) {
-                            const auto completed=std::chrono::steady_clock::now();
-                            if (last_update!=std::chrono::steady_clock::time_point{})
-                                update_intervals.push_back(std::chrono::duration<double,std::milli>(completed-last_update).count());
-                            last_update=completed; ++profile_updates;
-                        }
-                        presentation_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-present_started).count();
-                        if (gpu.capture) {
-                            const auto frame=gpu.renderer->scanout_readback(*plan);
-                            gpu.capture->present(frame,gpu.drawing.submitted_draws(),output.control,output.buffers,output.displays,platform.graphics.half_height_output());
-                        }
-                    }
                 }
             }
 #ifdef ANYPS2_NATIVE_IOP

@@ -30,6 +30,10 @@ public:
     void* edge_context=nullptr;
     void (*display_edge)(void*,bool)=nullptr;
     void (*display_overflow)(void*)=nullptr;
+    // Present the selected output at a display boundary, before execution can
+    // observe VSYNC and begin overwriting a single-buffered frame.
+    void* scanout_context=nullptr;
+    void (*scanout_ready)(void*)=nullptr;
     Stop configure(std::uint32_t interlace,std::uint32_t standard,std::uint32_t frame) {
         if (interlace!=1 || (standard!=2 && standard!=3) || frame>1) return Stop::unsupported_system;
         if (!synchronize) return Stop::unsupported_system;
@@ -152,10 +156,13 @@ private:
         }
         if (ticks/2>ticks_/2) event(4);
         if (edges(ticks,period,blank)>edges(ticks_,period,blank)) events_|=1U<<2;
-        if (edges(ticks,period,sync)>edges(ticks_,period,sync)) event(8);
+        const bool scanout=edges(ticks,period,sync)>edges(ticks_,period,sync);
+        if (scanout) event(8);
         field_=(edges(ticks,period,sync)&1) ? 0x2000 : 0;
         if (ticks/period>ticks_/period) events_|=1U<<3;
         ticks_=ticks;
+        // Missed boundaries share the current image; do not present it repeatedly.
+        if (scanout && scanout_ready) scanout_ready(scanout_context);
     }
     NativeClock clock_;
     std::optional<std::uint64_t> vsync_profile_start_;

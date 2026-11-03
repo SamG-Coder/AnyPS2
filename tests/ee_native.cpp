@@ -2508,6 +2508,9 @@ int main() {
             std::vector<bool> edges_seen;
             platform.graphics.edge_context=&edges_seen;
             platform.graphics.display_edge=[](void* raw,bool end) { static_cast<std::vector<bool>*>(raw)->push_back(end); };
+            unsigned presented=0;
+            platform.graphics.scanout_context=&presented;
+            platform.graphics.scanout_ready=[](void* raw) { ++*static_cast<unsigned*>(raw); };
             platform.graphics.synchronize=[](void* p) { return *static_cast<bool*>(p) ? nt::ee::Stop::unsupported_system : nt::ee::Stop::budget; };
             nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
             nt::runtime::State state;
@@ -2522,11 +2525,12 @@ int main() {
             check(platform.interrupts.service(0x10,state,nt_ee_generated_contains).status==nt::ee::Stop::budget);
             platform.interrupts.write(0x1000f010,13);
             timer_now=edge(480)-1; poll(); check(!memory.pending_interrupts);
-            timer_now=edge(480); poll(); check(memory.pending_interrupts==0x400);
+            timer_now=edge(480); poll(); check(memory.pending_interrupts==0x400 && presented==0);
             state.pc=0x3a0000; state.cop0_status=0x10c01; state.set(29,0xff00);
             check(nt::ee::run(nt_ee_generated_run,state,memory,3,services)==nt::ee::Stop::budget && state.pc==0x3a0000);
             std::uint32_t line; std::memcpy(&line,ram.data()+0x6000,4); check(line==2 && !memory.pending_interrupts);
-            timer_now=edge(487); poll(); check((platform.graphics.read(0x12001000).value&0x2008)==0x2008 && !memory.pending_interrupts);
+            timer_now=edge(487); poll(); check((platform.graphics.read(0x12001000).value&0x2008)==0x2008 && !memory.pending_interrupts && presented==1);
+            poll(); platform.graphics.read(0x12001000); check(presented==1);
             platform.graphics.write(0x12001010,0x7700); poll(); check(platform.interrupts.read(0x1000f000).value==1);
             platform.interrupts.write(0x1000f000,1); poll(); check(!memory.pending_interrupts);
             platform.graphics.write(0x12001000,8); timer_now=edge(525); poll();
