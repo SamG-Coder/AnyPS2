@@ -69,7 +69,9 @@ target_include_directories(nt_gpu_codegen PUBLIC libraries/gpu_codegen/include)
 add_library(nt_ee_native INTERFACE)
 target_link_libraries(nt_ee_native INTERFACE nt_binary)
 target_include_directories(nt_ee_native INTERFACE libraries/ee_codegen/include libraries/runtime/include libraries/graphics/include)
-add_library(nt_ee_codegen libraries/ee_codegen/src/llvm.cpp libraries/ee_codegen/src/project.cpp)
+add_library(nt_ee_codegen libraries/ee_codegen/src/llvm.cpp libraries/ee_codegen/src/project.cpp
+    libraries/ee_codegen/src/project_preparation.cpp libraries/ee_codegen/src/project_reports.cpp
+    libraries/ee_codegen/src/project_build.cpp)
 target_include_directories(nt_ee_codegen PUBLIC libraries/ee_codegen/include)
 target_link_libraries(nt_ee_codegen PUBLIC nt_r5900 nt_ee_native)
 add_library(nt_analysis libraries/analysis/src/discover.cpp libraries/analysis/src/metrics.cpp)
