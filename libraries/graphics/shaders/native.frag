@@ -1,5 +1,7 @@
 #version 450
 #extension GL_ARB_gpu_shader_int64 : require
+#extension GL_GOOGLE_include_directive : require
+#include "line_coverage.glsl"
 #ifdef ANYPS2_ORDERED_FRAGMENTS
 #extension GL_ARB_fragment_shader_interlock : require
 layout(pixel_interlock_ordered) in;
@@ -151,6 +153,13 @@ void main() {
     uint depth=draw.depth,coverage=16;
     bool triangle_interior=true;
     int uf=0,vf=0;
+    if ((draw.flags&16777216)!=0) {
+        int64_t numerator,denominator;
+        if (!line_sample(ivec2(x,y),vertex_position(0),vertex_position(1),numerator,denominator)) discard;
+        depth=line_value(draw.vertices[0].z,draw.vertices[1].z,numerator,denominator);
+        if ((draw.flags&32768)!=0)
+            color=line_color(draw.vertices[0].color,draw.vertices[1].color,numerator,denominator);
+    }
     if ((draw.flags&16384)!=0) {
         ivec2 a=vertex_position(0),b=vertex_position(1),c=vertex_position(2),p=ivec2(x,y)*16;
         int64_t w0=edge(b,c,p),w1=edge(c,a,p),w2=edge(a,b,p);

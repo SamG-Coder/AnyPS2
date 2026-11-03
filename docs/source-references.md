@@ -2196,3 +2196,15 @@ build does. These sample sources, assets and generated artifacts remain ignored.
 The pinned PCSX2 `GSDeviceVK::DoMerge` and `merge.glsl` were consulted for the
 RC1 constant-alpha display blend against BGCOLOR when RC2 is disabled. The native
 composition change and synthetic colour fixtures are original implementations.
+
+## gsKit integration samples
+
+Point rounding and non-antialiased line coverage were checked against
+`GS/Renderers/SW/GSRasterizer.cpp` at the PCSX2 revision pinned above.
+AnyPS2 independently evaluates the endpoint diamond-exit rule and rational
+interpolation in Vulkan shaders; no rasterizer implementation is copied.
+
+The local graphics examples use [ps2dev/gsKit](https://github.com/ps2dev/gsKit)
+at `8ef73d05f022d14b3ded7c70cba670fe333ed61a` (AFL-2.0 and per-file notices),
+with the gsKit/dmaKit archives supplied by the PS2DEV v2.0.0 toolchain.
+The upstream checkout, sample assets, PS2 ELFs and converted output stay ignored.

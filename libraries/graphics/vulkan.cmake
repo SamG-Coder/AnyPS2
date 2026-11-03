@@ -30,7 +30,7 @@ function(anyps2_add_vulkan target)
         add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/sprite.inc"
             COMMAND Vulkan::glslc -mfmt=c "${renderer_root}/shaders/sprite.comp"
                 -o "${CMAKE_CURRENT_BINARY_DIR}/sprite.inc"
-            DEPENDS "${renderer_root}/shaders/sprite.comp" VERBATIM)
+            DEPENDS "${renderer_root}/shaders/sprite.comp" "${renderer_root}/shaders/line_coverage.glsl" VERBATIM)
         add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/scanout.inc"
             COMMAND Vulkan::glslc -mfmt=c "${renderer_root}/shaders/scanout.comp"
                 -o "${CMAKE_CURRENT_BINARY_DIR}/scanout.inc"
@@ -42,13 +42,13 @@ function(anyps2_add_vulkan target)
         add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${shader}.inc"
             COMMAND Vulkan::glslc -mfmt=c "${renderer_root}/shaders/${shader}"
                 -o "${CMAKE_CURRENT_BINARY_DIR}/${shader}.inc"
-            DEPENDS "${renderer_root}/shaders/${shader}" VERBATIM)
+            DEPENDS "${renderer_root}/shaders/${shader}" "${renderer_root}/shaders/line_coverage.glsl" VERBATIM)
         list(APPEND native_shaders "${CMAKE_CURRENT_BINARY_DIR}/${shader}.inc")
     endforeach()
     add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/native-interlock.frag.inc"
         COMMAND Vulkan::glslc --target-env=vulkan1.1 -DANYPS2_ORDERED_FRAGMENTS=1 -mfmt=c "${renderer_root}/shaders/native.frag"
             -o "${CMAKE_CURRENT_BINARY_DIR}/native-interlock.frag.inc"
-        DEPENDS "${renderer_root}/shaders/native.frag" VERBATIM)
+        DEPENDS "${renderer_root}/shaders/native.frag" "${renderer_root}/shaders/line_coverage.glsl" VERBATIM)
     list(APPEND native_shaders "${CMAKE_CURRENT_BINARY_DIR}/native-interlock.frag.inc")
     add_library(${target} ${native_shaders} ${llvm_shaders} "${renderer_root}/src/native_raster.cpp" "${renderer_root}/src/vulkan_renderer.cpp" ${reference_shaders})
     if(ANYPS2_LLVM_TEXTURES)

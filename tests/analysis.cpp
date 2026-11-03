@@ -990,6 +990,13 @@ int main() {
             put(image,8,0x00a02021);
             check(roots().empty(),"Delay-slot index clobber was ignored");
             put(image,8,0); check(roots()==std::set<std::uint32_t>{0x1060,0x1070},"NOP delay slot hid switch table");
+            for (const auto slot:{0xac800004U,0xffb00010U,0xe7a00018U}) {
+                put(image,8,slot); // SW, SD and SWC1 preserve the guarded GPR.
+                check(roots()==std::set<std::uint32_t>{0x1060,0x1070},"Scheduled delay-slot store hid switch table");
+            }
+            put(image,8,0x8c840004);
+            check(roots().empty(),"Delay-slot load overwrote the guarded switch index");
+            put(image,8,0);
             put(image,0x84,0x1071);
             check(roots().empty(),"Split switch accepted a malformed entry");
         }

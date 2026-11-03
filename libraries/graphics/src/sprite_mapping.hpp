@@ -10,7 +10,7 @@ namespace nt::graphics {
 inline bool can_map_wrapped_sprite(const Sprite& draw) {
     const auto width=draw.pitch*64;
     if (!width || draw.right<=width || draw.right<=draw.left || draw.bottom<=draw.top ||
-        draw.right-draw.left>width || (draw.flags&(1|triangle_flag|depth_test_flag))) return false;
+        draw.right-draw.left>width || (draw.flags&(1|triangle_flag|line_flag|depth_test_flag))) return false;
     const auto height=draw.bottom+(draw.right-1)/width*32;
     return height<=2048 && ((height+31)/32)*draw.pitch<=512;
 }

@@ -4,6 +4,7 @@
 #include <nt/image_upload.hpp>
 #include <nt/sprite_texture.hpp>
 #include <nt/triangle_plan.hpp>
+#include <nt/line_plan.hpp>
 #include <nt/palette_plan.hpp>
 #include <bit>
 #include <variant>
@@ -208,6 +209,23 @@ private:
         const unsigned x=value&65535,y=(value>>16)&65535;
         const auto z=std::uint32_t(value>>32)&((reg==4 || reg==12) ? 0xffffffU : 0xffffffffU);
         const auto primitive=state.primitive&7;
+        if (primitive<=2) {
+            state.vertices[state.vertex_count++]={int(x),int(y),state.color,state.uv&16383,(state.uv>>16)&16383,
+                std::bit_cast<float>(state.s),std::bit_cast<float>(state.t),std::bit_cast<float>(state.q),z};
+            if (primitive && state.vertex_count<2) return;
+            const std::array<RasterVertex,2> vertices{state.vertices[0],state.vertices[primitive ? 1 : 0]};
+            state.vertex_count=primitive==2 ? 1 : 0;
+            if (primitive==2) state.vertices[0]=vertices[1];
+            if (reg==12 || reg==13) return;
+            if (attributes&~0x34fU)
+                throw std::invalid_argument("Unsupported native point/line attributes: "+std::to_string(attributes));
+            const auto& context=state.contexts[(attributes>>9)&1];
+            if (auto draw=plan_line_or_point(context.frame,context.offset,context.scissor,vertices,primitive==0,(attributes&8)!=0)) {
+                configure_draw(state,context,attributes,draw->draw);
+                draws.push_back(Draw{draw->draw,0,draw->triangle});
+            }
+            return;
+        }
         if (primitive>=3 && primitive<=5) {
             state.vertices[state.vertex_count++]={int(x),int(y),state.color,state.uv&16383,(state.uv>>16)&16383,
                 std::bit_cast<float>(state.s),std::bit_cast<float>(state.t),std::bit_cast<float>(state.q),z};

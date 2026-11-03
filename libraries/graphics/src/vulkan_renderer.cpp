@@ -434,7 +434,9 @@ void VulkanRenderer::verify_texture_kernels(bool enable) {
 }
 namespace {
 void validate_sprite(const Sprite& draw) {
-    if (draw.flags&~((1U<<22)-1)) throw std::runtime_error("Unknown Vulkan draw flags");
+    if (draw.flags&~(((1U<<22)-1)|line_flag)) throw std::runtime_error("Unknown Vulkan draw flags");
+    if ((draw.flags&line_flag) && (draw.flags&(1|triangle_flag|coverage_flag|perspective_triangle_flag)))
+        throw std::runtime_error("Unsupported native line attributes");
     if (draw.right>2048 || draw.bottom>2048 || draw.left>draw.right || draw.top>draw.bottom || !draw.pitch || draw.pitch>63 || draw.base>16383)
         throw std::runtime_error("Invalid Vulkan sprite bounds or GS memory");
     if (draw.left==draw.right || draw.top==draw.bottom) return;
@@ -487,6 +489,14 @@ void VulkanRenderer::validate(std::span<const SpriteCommand> commands) {
     if (commands.size()>65536) throw std::runtime_error("Vulkan draw batch exceeds bound");
     for (const auto& command:commands) {
         validate_sprite(command.draw);
+        if (command.draw.flags&line_flag) {
+            const auto& v=command.triangle;
+            for (unsigned i=0;i<2;++i)
+                if (v[i].x < -65535 || v[i].x>65535 || v[i].y < -65535 || v[i].y>65535)
+                    throw std::runtime_error("Invalid Vulkan line vertex");
+            if (v[0].x==v[1].x && v[0].y==v[1].y)
+                throw std::runtime_error("Degenerate Vulkan line");
+        }
         if (command.draw.flags&triangle_flag) {
             for (const auto& vertex:command.triangle)
                 if (vertex.x < -65535 || vertex.x>65535 || vertex.y < -65535 || vertex.y>65535 || vertex.u>16383 || vertex.v>16383)
@@ -571,8 +581,8 @@ void VulkanRenderer::draw(std::span<const SpriteCommand> commands) {
             }
         }
         if (draw.flags&64) vkCmdUpdateBuffer(v.command,v.storage,memory_bytes*2,64,command.palette.data());
-        if (draw.flags&triangle_flag) vkCmdUpdateBuffer(v.command,v.storage,triangle_offset,sizeof(command.triangle),command.triangle.data());
-        if (draw.flags&(1|64|triangle_flag)) {
+        if (draw.flags&(triangle_flag|line_flag)) vkCmdUpdateBuffer(v.command,v.storage,triangle_offset,sizeof(command.triangle),command.triangle.data());
+        if (draw.flags&(1|64|triangle_flag|line_flag)) {
             VkMemoryBarrier uploaded{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
             uploaded.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
             uploaded.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT;

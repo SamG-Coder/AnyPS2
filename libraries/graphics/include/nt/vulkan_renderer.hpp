@@ -21,6 +21,7 @@ inline constexpr std::uint32_t triangle_flag=1U<<14, shaded_triangle_flag=1U<<15
 inline constexpr std::uint32_t perspective_triangle_flag=1U<<16;
 inline constexpr std::uint32_t depth_test_flag=1U<<17, depth_write_flag=1U<<18;
 inline constexpr std::uint32_t depth_24_flag=1U<<19, coverage_flag=1U<<20, alpha_blend_flag=1U<<21;
+inline constexpr std::uint32_t line_flag=1U<<24;
 struct RasterVertex {
     std::int32_t x=0,y=0;
     std::uint32_t color=0;

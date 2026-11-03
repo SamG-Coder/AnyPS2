@@ -22,6 +22,86 @@ int main(int argc,char** argv) {
             ++checks;
         };
         SpriteCommand clear{{0,0,32,32,0,1,0x80203040,0}};
+        // Original packet fixtures: all octants, fractional positions, endpoint
+        // exclusion, packet-spanning strips, suppressed kicks and depth/blending.
+        // Explicit pixel expectations are independent of the shared GPU helper.
+        {
+            const auto packet_for=[](unsigned primitive,std::span<const RasterVertex> vertices) {
+                Packet p{{0,0x10000000,14,0},{1,0,0x1a,0},{primitive,0,0,0},{1<<16,0,0x4c,0},
+                    {15<<16,15<<16,0x40,0},{1,0,0x46,0},{0x44,0,0x42,0}};
+                for (const auto& v:vertices) {
+                    p.push_back({v.color,0,1,0});
+                    p.push_back({unsigned(v.x)|(unsigned(v.y)<<16),v.z,5,0});
+                }
+                p[0][0]=0x8000U|unsigned(p.size()-1); return p;
+            };
+            const auto verify=[&](const Packet& p,std::span<const std::pair<unsigned,unsigned>> points,std::uint32_t color=0x80402010) {
+                NativeDrawing drawing(true);
+                drawing.submit(native,std::array{p});
+                std::vector<std::uint32_t> wanted(1024*1024);
+                for (auto [x,y]:points) wanted[rgba_word(0,1,x,y)]=color;
+                if (drawing.pixels()!=wanted) throw std::runtime_error("Point/line coverage differs from expected pixels");
+            };
+            for (bool steep:{false,true}) for (bool reverse_x:{false,true}) for (bool reverse_y:{false,true}) {
+                const auto transform=[&](int x,int y) {
+                    if (reverse_x) x=8-x;
+                    if (reverse_y) y=8-y;
+                    return steep ? std::pair{y,x} : std::pair{x,y};
+                };
+                auto [ax,ay]=transform(1,1); auto [bx,by]=transform(5,3);
+                const std::array v{RasterVertex{ax*16,ay*16,0x80402010},RasterVertex{bx*16,by*16,0x80402010}};
+                std::vector<std::pair<unsigned,unsigned>> points;
+                // Ties round toward positive coordinates, also for negative slopes.
+                for (int i=0;i<4;++i) {
+                    const int x=ax+(bx-ax)*i/4;
+                    const int y=ay+(by-ay)*i/4;
+                    int px=x,py=y;
+                    if (steep) px=(ax*4+(bx-ax)*i+2)/4;
+                    else py=(ay*4+(by-ay)*i+2)/4;
+                    points.emplace_back(unsigned(px),unsigned(py));
+                }
+                verify(packet_for(1,v),points);
+            }
+            const std::array fractional{RasterVertex{24,16,0x80402010},RasterVertex{72,16,0x80402010}};
+            const std::array fractional_pixels{std::pair{2U,1U},std::pair{3U,1U},std::pair{4U,1U}};
+            verify(packet_for(1,fractional),fractional_pixels);
+            const std::array point{RasterVertex{24,39,0x80402010}};
+            const std::array point_pixels{std::pair{2U,2U}};
+            verify(packet_for(0,point),point_pixels);
+            const std::array strip{RasterVertex{16,16,0x80402010},RasterVertex{64,16,0x80402010},RasterVertex{64,64,0x80402010}};
+            const std::array strip_pixels{std::pair{1U,1U},std::pair{2U,1U},std::pair{3U,1U},
+                std::pair{4U,1U},std::pair{4U,2U},std::pair{4U,3U}};
+            auto translucent=strip;
+            for (auto& v:translucent) v.color=0x40402010;
+            verify(packet_for(2|64,translucent),strip_pixels,0x40201008); // Duplicate shared endpoints would blend twice.
+            NativeDrawing split(true);
+            auto first=packet_for(2,std::span(strip).first(1));
+            split.submit(native,std::array{first});
+            Packet rest{{0x8004,0x10000000,14,0},{strip[1].color,0,1,0},{64|(16<<16),0,13,0},
+                {strip[2].color,0,1,0},{64|(64<<16),0,5,0}};
+            split.submit(native,std::array{rest});
+            std::vector<std::uint32_t> wanted(1024*1024);
+            for (unsigned y=1;y<4;++y) wanted[rgba_word(0,1,4,y)]=0x80402010;
+            if (split.pixels()!=wanted) throw std::runtime_error("Line strip lost a suppressed or packet-spanning vertex");
+            const auto before=split.pixels();
+            auto unsupported=packet_for(1|128,std::span(strip).first(2));
+            bool rejected=false;
+            try { split.submit(native,std::array{unsupported}); } catch (const std::invalid_argument&) { rejected=true; }
+            if (!rejected || split.pixels()!=before) throw std::runtime_error("Unsupported line partially published a batch");
+
+            auto gradient=*plan_line_or_point(1U<<16,0,(15ULL<<16)|(15ULL<<48),
+                {RasterVertex{16,32,0x80000000,0,0,0,0,1,100},RasterVertex{80,32,0x80808080,0,0,0,0,1,104}},false,true);
+            gradient.draw.flags|=depth_test_flag|depth_write_flag;
+            gradient.draw.depth_base=32; gradient.draw.test=1<<17;
+            actual.assign(actual.size(),0); expected=actual;
+            compare(std::array{gradient});
+            for (unsigned x=1;x<5;++x) {
+                if (actual[rgba_word(0,1,x,2)]!=(0x80000000U|(x-1)*0x202020U) ||
+                    actual[rgba_word(32,1,x,2)^0x600] != 99+x)
+                    throw std::runtime_error("Native line color/depth interpolation differs");
+            }
+            actual.assign(actual.size(),0); expected=actual;
+        }
         // Constant-alpha display composition applies to RC1 even when RC2 is
         // disabled. Disabled circuits must not be sampled. RC2 alone bypasses
         // the RC1 blend, regardless of the constant alpha.

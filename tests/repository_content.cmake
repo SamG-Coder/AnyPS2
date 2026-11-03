@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.24)
 function(check_content relative physical)
     string(TOLOWER "${relative}" lower)
     if(NOT lower MATCHES "^(libraries|programs|tests)/[a-z0-9_./-]+\\.(cpp|hpp|h|cmake)$"
-       AND NOT lower MATCHES "^libraries/graphics/shaders/[a-z0-9_-]+\\.(comp|vert|frag)$"
+       AND NOT lower MATCHES "^libraries/graphics/shaders/[a-z0-9_-]+\\.(comp|vert|frag|glsl)$"
        AND NOT lower STREQUAL "libraries/graphics/shaders/texture_decode.ll"
        AND NOT lower MATCHES "^docs/[a-z0-9_./-]+\\.md$"
        AND NOT lower MATCHES "^tests/ps2_programs/(cmakelists\\.txt|start\\.s|link\\.ld|cases\\.json|run\\.py|test_runner\\.py)$"

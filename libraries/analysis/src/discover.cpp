@@ -1848,13 +1848,14 @@ std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executa
             }
         }
         if (separate_low && branch_instruction->op!=Op::beq) {
-            // The table high half may follow an independent branch-delay move.
-            // Reject delay slots that change the index before scaling it.
+            // The table high half may follow a scheduled branch-delay operation.
+            // Reuse GPR effects so stores and independent work preserve the
+            // guarded index; unknown effects and index writes still fail.
             const auto& delay=*prior[5];
-            const bool move=(delay.op==Op::addu || delay.op==Op::daddu || delay.op==Op::bit_or) && (!delay.rs || !delay.rt);
-            const bool nop=delay.op==Op::sll && !delay.rd;
+            const auto effect=pointer_write(delay);
             const auto earlier=program.instructions.find(pc-28);
-            if ((!move && !nop) || (delay.rd && delay.rd==scale.rt) || earlier==program.instructions.end()) continue;
+            if (!effect || (*effect && *effect==scale.rt) || delay.branch() || delay.terminal() ||
+                delay.op==Op::syscall || earlier==program.instructions.end()) continue;
             branch_instruction=&earlier->second;
         }
         const auto& branch=*branch_instruction;
