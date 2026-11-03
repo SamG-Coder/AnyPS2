@@ -44,18 +44,20 @@ public:
         if (!(value&0x100)) { config[0]=value; return Stop::budget; }
         const auto mode=value&0xc;
         if (!policy.enabled() || !(value&1) || (mode!=0 && mode!=4) ||
-            (value&0x0000fe32U) || (channel==2 && (value&0x40)) || !consumer.consume || !memory.completions)
+            (value&0x0000fe02U) || ((value>>4)&3)==3 || (channel==2 && (value&0x40)) || !consumer.consume || !memory.completions)
             return Stop::unsupported_system;
         auto next=config;
         std::span<const std::uint8_t> payload;
         NativePacketBatch batch;
         if (mode==4) {
             if (config[2]) return Stop::unsupported_system;
-            const auto result=batch.chain(memory,config[3],(value&0x40)!=0,(value&0x80)!=0);
+            batch.stack={{config[4],config[5]},(value>>4)&3U};
+            const auto result=batch.chain(memory,config[3],(value&0x40)!=0,(value&0x80)!=0,8,NativePacketBatch::view,true);
             if (result!=Stop::budget) return result;
             payload=batch.bytes;
             next[1]=batch.source; next[3]=batch.tag;
-            next[0]=(value&0xffffU)|batch.tag_bits;
+            next[0]=(value&0xffcfU)|batch.tag_bits|(batch.stack.size<<4);
+            next[4]=batch.stack.returns[0]; next[5]=batch.stack.returns[1];
         } else {
             const auto size=config[2]*16U;
             const auto result=NativePacketBatch::view(memory,config[1],size,payload);

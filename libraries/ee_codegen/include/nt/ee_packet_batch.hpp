@@ -1,5 +1,6 @@
 #pragma once
 #include <nt/ee_native.hpp>
+#include <array>
 #include <cstring>
 #include <span>
 #include <vector>
@@ -13,6 +14,7 @@ public:
     std::vector<std::uint8_t> bytes;
     std::vector<NativePacketOrigin> origins;
     std::uint32_t source=0,tag=0,tag_bits=0;
+    struct CallStack { std::array<std::uint32_t,2> returns{}; unsigned size=0; } stack;
     static Stop view(const Memory& memory,std::uint32_t raw,std::uint32_t size,
                      std::span<const std::uint8_t>& result) {
         const bool scratch=(raw&0x80000000U)!=0;
@@ -27,8 +29,8 @@ public:
     }
     using ReadView=Stop (*)(const Memory&,std::uint32_t,std::uint32_t,std::span<const std::uint8_t>&);
     Stop chain(const Memory& memory,std::uint32_t first,bool transfer_tags,bool interrupt_tags,
-               unsigned tag_bytes=8,ReadView read=view) {
-        if ((tag_bytes!=8 && tag_bytes!=16) || !read) return Stop::invalid_state;
+               unsigned tag_bytes=8,ReadView read=view,bool with_stack=false) {
+        if ((tag_bytes!=8 && tag_bytes!=16) || !read || stack.size>stack.returns.size()) return Stop::invalid_state;
         tag=first;
         for (unsigned count=0;count<256;++count) {
             std::span<const std::uint8_t> descriptor;
@@ -39,14 +41,23 @@ public:
             const auto after=tag+16;
             tag_bits=words[0]&0xffff0000U;
             std::uint32_t next=tag;
+            bool return_end=false;
             switch (kind) {
             // REFS has REF semantics when stall control is disabled. The
             // native submission policy rejects enabling console stall control.
             case 0: case 3: case 4: source=words[1]; next=after; break;
             case 1: source=after; next=after+size; break;
             case 2: source=after; next=words[1]; break;
+            case 5:
+                if (!with_stack || stack.size==stack.returns.size()) return Stop::unsupported_system;
+                source=after; stack.returns[stack.size++]=after+size; next=words[1]; break;
+            case 6:
+                if (!with_stack) return Stop::unsupported_system;
+                source=after;
+                if (stack.size) { next=stack.returns[--stack.size]; stack.returns[stack.size]=0; }
+                else return_end=true;
+                break;
             case 7: source=after; break;
-            default: return Stop::unsupported_system; // Call and return need separate ownership.
             }
             std::span<const std::uint8_t> payload;
             result=read(memory,source,size,payload);
@@ -61,7 +72,7 @@ public:
                 bytes.insert(bytes.end(),payload.begin(),payload.end());
             }
             source+=size; tag=next;
-            if (kind==0 || kind==7 || (interrupt_tags && (words[0]&0x80000000U))) return Stop::budget;
+            if (kind==0 || kind==7 || return_end || (interrupt_tags && (words[0]&0x80000000U))) return Stop::budget;
         }
         return Stop::invalid_state;
     }

@@ -19,6 +19,8 @@ public:
     vu::State state;
     vu::RunResult last_result{vu::RunStatus::unbound_program,0};
     unsigned last_entry=0,last_next_pair=0;
+    // Failure-only diagnostic snapshot; never used to resume execution.
+    std::unique_ptr<vu::State> failed_state;
     vu::GraphicsBatchConsumer graphics;
     Stop submit_sequence(unsigned unit,std::span<const NativeSubmissionStep> steps) {
         if (unit!=binding_.unit() || steps.empty() || steps.size()>256) return Stop::unsupported_vector;
@@ -46,7 +48,7 @@ public:
             const auto result=step.uploads.empty() ? candidate.submit(unit,step.data,request,step.drawing) :
                 candidate.submit_uploaded(unit,step.uploads,step.data,request,step.drawing);
             last_result=candidate.last_result; last_entry=candidate.last_entry; last_next_pair=candidate.last_next_pair;
-            if (result!=Stop::budget) return result;
+            if (result!=Stop::budget) { failed_state=std::move(candidate.failed_state); return result; }
             if (step.launch) candidate.block_budget_-=candidate.last_result.blocks;
         }
         if (!output.packets.empty() && (!graphics.submit || !graphics.submit(graphics.context,output.packets)))
@@ -112,8 +114,10 @@ public:
                 blocks+=last_result.blocks;
                 last_result.blocks=blocks;
             }
-            if (last_result.status!=vu::RunStatus::complete)
+            if (last_result.status!=vu::RunStatus::complete) {
+                failed_state=std::make_unique<vu::State>(next);
                 return last_result.status==vu::RunStatus::unsupported_numeric ? Stop::unsupported_numeric : Stop::unsupported_vector;
+            }
         }
         if (!packets.empty()) {
             if (!graphics.submit || !graphics.submit(graphics.context,packets)) {

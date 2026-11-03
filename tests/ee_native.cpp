@@ -2898,8 +2898,37 @@ int main() {
             check(submit()==nt::ee::Stop::invalid_state && !platform.completions.status());
             put(0,0x00000001); put(4,1024);
             check(submit()==nt::ee::Stop::memory_fault && !platform.completions.status());
-            put(0,0x50000000);
+            put(0,0x50000000); put(4,0); // Recursive CALL exceeds the two return slots.
             check(submit()==nt::ee::Stop::unsupported_system && !platform.completions.status());
+            // Nested packet subchains preserve ordering, transferred tags and
+            // return addresses through the same compiled submission entry.
+            ram.fill(0);
+            put(0,0x50000001); put(4,128); put(16,0x07000001);
+            put(32,0x70000000); put(40,0x07000004);
+            put(128,0x50000001); put(132,256); put(144,0x07000002);
+            put(160,0x60000001); put(176,0x07000003);
+            put(256,0x60000001); put(272,0x07000005);
+            check(submit()==nt::ee::Stop::budget && platform.packet_setup.read(0x10003830).value==4);
+            check(platform.packet_submission.read(0x10008030).value==32 &&
+                !(platform.packet_submission.read(0x10008000).value&0x30) &&
+                !platform.packet_submission.read(0x10008040).value && !platform.packet_submission.read(0x10008050).value);
+            platform.completions.acknowledge(1);
+            // An interrupting CALL publishes a resumable return stack only
+            // after the consumer accepts its payload; later RET pops it.
+            put(0,0xd0000001);
+            check(submit(0x1c5)==nt::ee::Stop::budget && platform.packet_setup.read(0x10003830).value==1);
+            check(platform.packet_submission.read(0x10008030).value==128 &&
+                platform.packet_submission.read(0x10008040).value==32 &&
+                (platform.packet_submission.read(0x10008000).value&0x30)==0x10);
+            platform.completions.acknowledge(1);
+            put(128,0x60000001); put(144,0x7b000000);
+            check(write(0x10008000,0x155)==nt::ee::Stop::unsupported_system && !platform.completions.status());
+            check(platform.packet_submission.read(0x10008040).value==32 &&
+                (platform.packet_submission.read(0x10008000).value&0x30)==0x10);
+            put(144,0x07000006);
+            check(write(0x10008000,0x155)==nt::ee::Stop::budget && platform.packet_setup.read(0x10003830).value==4);
+            ram.fill(0); put(0,0x60000001); put(16,0x07000007);
+            check(submit()==nt::ee::Stop::budget && platform.packet_setup.read(0x10003830).value==7);
             // IRQ termination excludes the following bad descriptor.
             put(0,0x90000000); put(8,0x07000033); put(16,0x50000000);
             check(submit(0x1c5)==nt::ee::Stop::budget && platform.packet_setup.read(0x10003830).value==51);

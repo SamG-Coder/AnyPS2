@@ -625,6 +625,32 @@ int main(int argc,char** argv) {
         if (!stop_directory.empty()) {
             probe::capture_stop(stop_directory,state,memory,stop,nt_ee_generated_input_identity());
             service_observation.save(stop_directory);
+#if defined(ANYPS2_NATIVE_VU) || defined(ANYPS2_NATIVE_VU1)
+            const auto capture_vector_failure=[&](const nt::ee::NativeVuLaunch& owner) {
+                if (!owner.failed_state) return;
+                const auto& failed=*owner.failed_state;
+                const auto name="vu"+std::to_string(owner.unit())+"-failure";
+                std::ofstream output(stop_directory/(name+".txt"));
+                output.exceptions(std::ios::failbit|std::ios::badbit);
+                output<<"format=anyps2-vu-failure-v1\nentry="<<owner.last_entry<<"\nnext="<<failed.next_pair<<'\n';
+                for (unsigned i=0;i<failed.integers.size();++i) output<<"vi"<<i+1<<'='<<failed.integers[i]<<'\n';
+                for (unsigned i=0;i<failed.vectors.size();++i) {
+                    output<<"vf"<<i+1<<'=';
+                    for (auto lane:failed.vectors[i]) output<<nt::hex32(lane)<<' ';
+                    output<<'\n';
+                }
+                output<<"clip="<<failed.clip<<"\nvisible_clip="<<failed.visible_clip
+                    <<"\nstatus="<<failed.status<<"\nvisible_status="<<failed.visible_status<<'\n';
+                nt::write_file(stop_directory/(name+"-data.bin"),
+                    {reinterpret_cast<const std::uint8_t*>(failed.data.data()),sizeof(failed.data)});
+            };
+#ifdef ANYPS2_NATIVE_VU
+            capture_vector_failure(compiled_vu_launch);
+#endif
+#ifdef ANYPS2_NATIVE_VU1
+            capture_vector_failure(compiled_vu1_launch);
+#endif
+#endif
 #ifdef ANYPS2_NATIVE_IOP
             if (iop_reset && iop_reset->invoked())
                 probe::capture_iop(stop_directory,iop_reset->data(),iop_reset->active_state());

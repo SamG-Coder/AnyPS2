@@ -414,9 +414,9 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
             const auto branch_register=[&](unsigned reg) {
                 if (!reg) return std::string("0");
                 if (delayed) return writer.integer(reg);
-                const auto delayed=writer.load("i16",offsetof(State,delayed_integer));
+                const auto delayed_register=writer.load("i16",offsetof(State,delayed_integer));
                 const auto backup=writer.load("i16",offsetof(State,delayed_value));
-                const auto matches=writer.value("icmp eq i16 "+delayed+", "+std::to_string(reg));
+                const auto matches=writer.value("icmp eq i16 "+delayed_register+", "+std::to_string(reg));
                 const auto current=writer.integer(reg);
                 return writer.value("select i1 "+matches+", i16 "+backup+", i16 "+current);
             };
@@ -425,7 +425,9 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
                 writer.value("and i32 "+writer.value("add i32 "+delay_destination+", 1")+", "+std::to_string(address_mask)) :
                 std::to_string((pair.address+2)&address_mask);
             if (transfer.target) next_pair=std::to_string(*transfer.target);
-            else next_pair=writer.value("and i32 "+writer.value("zext i16 "+branch_register(transfer.source)+" to i32")+", "+std::to_string(address_mask));
+            // JR/JALR consume the current VI value. The one-pair integer
+            // backup applies to conditional comparisons, not jump addresses.
+            else next_pair=writer.value("and i32 "+writer.value("zext i16 "+writer.integer(transfer.source)+" to i32")+", "+std::to_string(address_mask));
             const char* predicate=nullptr;
             switch (transfer.branch) {
             case Branch::equal: predicate="eq"; break;

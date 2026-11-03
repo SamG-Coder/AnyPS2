@@ -2279,6 +2279,10 @@ The pinned PCSX2 `SPR.cpp` and `Dmac.cpp` were consulted for scratchpad transfer
 direction, 16 KiB wrap, descriptor ordering and full-quadword tag transfer. The
 native implementation uses independently written validated buffer-copy batches;
 it does not copy the emulator's channel scheduling or timing implementation.
+The same pin's `Hw.cpp` source-chain interface informs bounded CALL/RET return
+slots and interrupt continuation. Native graphics submissions flatten these
+data descriptors before committing consumer state; scratchpad channels retain
+their separate descriptor capabilities.
 
 The same PCSX2 pin's `GSTables.cpp` and `GSClut.cpp` describe PSMT8 byte
 addressing, CSM1 palette ordering and CSA bank selection. AnyPS2 implements
@@ -2301,6 +2305,8 @@ The same pin's `microVU_Lower.inl` and `microVU_Misc.h` inform ESIN's polynomial
 coefficients/rounding sequence and direct branches in branch delay slots. The
 converter emits fixed native calls for the latter's possible delay destinations;
 it does not copy the reference recompiler or translate instructions at runtime.
+Its JR/JALR lowering distinguishes current VI jump addresses from the delayed
+integer values used by conditional branch comparisons.
 The same pin's `GSState.cpp` and Vulkan `tfx.glsl` document XYZF/FOG packing
 and fog's 256 divisor. AnyPS2 passes the factor to its native fragment shader,
 retaining affine interpolation and alpha independently of perspective texturing.

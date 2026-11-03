@@ -217,8 +217,8 @@ int main() {
         if (nt_vu_call(&call)!=nt::vu::Result::transfer || call.next_pair!=7 || call.integers[0]!=102 || call.integers[2]!=102)
             throw std::runtime_error("Compiled VU indirect link alias failed");
         call={}; call.integers[0]=9; call.delayed_integer=1; call.delayed_value=511;
-        if (nt_vu_call(&call)!=nt::vu::Result::transfer || call.next_pair!=511)
-            throw std::runtime_error("Compiled VU incoming delayed operand failed");
+        if (nt_vu_call(&call)!=nt::vu::Result::transfer || call.next_pair!=9)
+            throw std::runtime_error("Compiled VU indirect jump used stale conditional-branch input");
         {
             nt::vu::State range;
             range.vectors[0]={0x7fffffff,0xffffffff,0x7f800000,0};
