@@ -7,6 +7,7 @@
 #endif
 #include <vulkan/vulkan.h>
 #include "native_raster.hpp"
+#include "sprite_mapping.hpp"
 #include <algorithm>
 #include <atomic>
 #include <mutex>
@@ -438,7 +439,8 @@ void validate_sprite(const Sprite& draw) {
         throw std::runtime_error("Invalid Vulkan sprite bounds or GS memory");
     if (draw.left==draw.right || draw.top==draw.bottom) return;
     if ((draw.flags&(256|depth_test_flag)) || (draw.test&0x4000)) {
-        if (draw.right>draw.pitch*64 || ((draw.bottom-1)/32-draw.top/32)*draw.pitch+(draw.right-1)/64-draw.left/64>=512)
+        if ((draw.right>draw.pitch*64 && !can_map_wrapped_sprite(draw)) ||
+            ((draw.bottom-1)/32-draw.top/32)*draw.pitch+(draw.right-1)/64-draw.left/64>=512)
             throw std::runtime_error("Destination-dependent sprite requires non-aliased framebuffer");
         if (draw.flags&256) for (unsigned shift=0;shift<8;shift+=2)
             if (((draw.blend>>shift)&3)>2) throw std::runtime_error("Unsupported Vulkan blend selector");

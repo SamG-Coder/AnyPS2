@@ -36,6 +36,7 @@ inline std::optional<DisplayPlan> plan_display(std::uint64_t control,
 // Convert one enabled display circuit's 24/32-bit target to a native image.
 // Interlaced frame mode stores half as many source rows. Present each source
 // row twice on a progressive PC display; temporal field blending is separate.
+// RC1 constant alpha also blends against BGCOLOR when RC2 is disabled.
 // Aligned dual-circuit output supports constant-alpha composition, including
 // adjacent-row flicker filters. Dynamic-alpha and displaced outputs stop.
 inline std::optional<Scanout> scanout(std::span<const std::uint32_t> memory,std::uint64_t control,
@@ -44,17 +45,18 @@ inline std::optional<Scanout> scanout(std::span<const std::uint32_t> memory,std:
     const auto enabled=control&3;
     if (!enabled) return {};
     if (memory.size()!=1024*1024) throw std::invalid_argument("Invalid native display memory size");
-    if (enabled==3) {
-        if (!(control&32) || (std::uint32_t(displays[0])!=std::uint32_t(displays[1])))
+    if (enabled==3 || (enabled==1 && (control&32))) {
+        if (!(control&32) || (enabled==3 && std::uint32_t(displays[0])!=std::uint32_t(displays[1])))
             throw std::invalid_argument("Unsupported native display composition");
         const auto first=scanout(memory,1,buffers,displays,half_height);
-        const auto second=scanout(memory,2,buffers,displays,half_height);
+        const auto second=enabled==3 ? scanout(memory,2,buffers,displays,half_height) : std::nullopt;
         const unsigned alpha=(control>>8)&255;
-        Scanout frame{std::max(first->width,second->width),std::max(first->height,second->height),{}};
+        Scanout frame{second ? std::max(first->width,second->width) : first->width,
+            second ? std::max(first->height,second->height) : first->height,{}};
         frame.pixels.resize(std::size_t(frame.width)*frame.height);
         for (unsigned y=0;y<frame.height;++y) for (unsigned x=0;x<frame.width;++x) {
             auto color=background|0xff000000U;
-            if (!(control&128) && x<second->width && y<second->height) color=second->pixels[y*second->width+x];
+            if (second && !(control&128) && x<second->width && y<second->height) color=second->pixels[y*second->width+x];
             if (x<first->width && y<first->height) {
                 const auto source=first->pixels[y*first->width+x];
                 std::uint32_t blended=0xff000000U;

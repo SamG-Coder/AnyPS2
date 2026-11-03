@@ -22,11 +22,55 @@ int main(int argc,char** argv) {
             ++checks;
         };
         SpriteCommand clear{{0,0,32,32,0,1,0x80203040,0}};
+        // Constant-alpha display composition applies to RC1 even when RC2 is
+        // disabled. Disabled circuits must not be sampled. RC2 alone bypasses
+        // the RC1 blend, regardless of the constant alpha.
+        {
+            std::vector<std::uint32_t> white(actual.size(),0xffffffffU);
+            native.upload(white); reference.upload(white);
+            const std::array<std::uint64_t,2> buffers{1U<<9,1U<<9};
+            const std::array<std::uint64_t,2> displays{(1ULL<<32)|(1ULL<<44),(1ULL<<32)|(1ULL<<44)};
+            struct DisplayCase { unsigned alpha,background,pixel; };
+            for (const auto test:{DisplayCase{0,0,0xff000000},DisplayCase{128,0,0xff808080},
+                                 DisplayCase{255,0,0xffffffff},DisplayCase{128,0x00302010,0xff989088}})
+                for (unsigned background_select:{0U,128U}) {
+                    const auto control=1U|32U|background_select|(test.alpha<<8);
+                    const auto plan=*plan_display(control,buffers,displays,false,test.background);
+                    const auto a=native.scanout_readback(plan),b=reference.scanout_readback(plan);
+                    if (a.pixels!=std::vector<std::uint32_t>(4,test.pixel) || a.pixels!=b.pixels)
+                        throw std::runtime_error("Single-circuit constant-alpha display composition differs");
+                }
+            const auto plan=*plan_display(2U|32U,buffers,displays,false,0x00302010);
+            const auto a=native.scanout_readback(plan),b=reference.scanout_readback(plan);
+            if (a.pixels!=std::vector<std::uint32_t>(4,0xffffffff) || a.pixels!=b.pixels)
+                throw std::runtime_error("RC2-only output incorrectly uses the RC1 blend");
+        }
         SpriteCommand quad{{2,2,18,18,0,1,0x80406080,0}};
         compare(std::array{clear,quad});
         quad.draw.mask=0xff00ff00; compare(std::array{clear,quad}); quad.draw.mask=0;
         quad.draw.flags=256|alpha_blend_flag; quad.draw.blend=0x44;
         compare(std::array{clear,quad});
+        // GS coordinates past framebuffer pitch address the next 32-line
+        // page row. Preserve those writes and destination blending instead of
+        // clipping them at the edge of the native image.
+        for (unsigned pitch:{1U,2U,10U}) for (unsigned base:{0U,16352U}) {
+            const unsigned width=pitch*64;
+            for (unsigned left:{width-3,width,width*2+5}) {
+                actual.assign(actual.size(),0x80202020); expected=actual;
+                SpriteCommand wrapped{{left,29,left+10,40,base,pitch,0x40808080,0}};
+                wrapped.draw.flags=256|alpha_blend_flag; wrapped.draw.blend=0x44;
+                compare(std::array{wrapped});
+                for (unsigned y=29;y<40;++y) for (unsigned x=left;x<left+10;++x)
+                    if (actual[rgba_word(base,pitch,x,y)]!=0x40505050)
+                        throw std::runtime_error("Wrapped sprite lost a blended pixel");
+                auto overlap=wrapped;
+                overlap.draw.left=left%width; overlap.draw.right=overlap.draw.left+2;
+                overlap.draw.top+=left/width*32; overlap.draw.bottom+=left/width*32;
+                overlap.draw.mask=0xff00ff00; overlap.draw.color=0x40706050;
+                compare(std::array{wrapped,overlap,wrapped});
+            }
+        }
+        actual.assign(actual.size(),0); expected=actual;
         for (unsigned method=0;method<8;++method) for (unsigned failure=0;failure<4;++failure) {
             quad.draw.test=1|(method<<1)|(128<<4)|(failure<<12);
             compare(std::array{clear,quad});

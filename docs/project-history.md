@@ -28,6 +28,7 @@ duplicated here as a per-operation log.
 | PS2SDK VU1 | Textured cubes rendered through separately AOT-compiled EE and VU1 code | Visual capture and bounded run; full reference parity not established |
 | PS2SDK Double-buffer | Moving coloured triangles with alternating buffers | Native line-doubling differs from PCSX2 deinterlacing; hardware parity unverified |
 | PS2SDK Texture | Rotating flower-textured cube at 640×512; bounded native run and capture | Reference and hardware parity not established |
+| PS2SDK Sprites | 1,000 moving sprites; user confirmed appearance after native framebuffer mapping and display-alpha fixes | Visual PCSX2 comparison; hardware parity unverified |
 
 These are locally adapted inputs, not unmodified-upstream compatibility claims.
 Ports include compiler compatibility, native service binding and a public SDK

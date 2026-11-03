@@ -2189,7 +2189,10 @@ so acknowledging one event does not also clear FINISH. Teapot drawing code is un
 The `ee/draw/samples/vu1` sample at the same pin exercises packet2 and a separately
 assembled VU1 program. Its source, texture, microprogram and converted artifacts
 also stay ignored; the local build uses the same SDK synchronization correction.
-The `ee/libgs/samples/libgs_doublebuffer` input uses unmodified demo source at
+The `ee/libgs/samples/libgs_doublebuffer` and `ee/libgs/samples/libgs_draw` inputs use unmodified demo source at
 the same pin. The `ee/draw/samples/texture` input uses the synchronization
 correction above and embeds its original `texture.raw` locally, as its upstream
 build does. These sample sources, assets and generated artifacts remain ignored.
+The pinned PCSX2 `GSDeviceVK::DoMerge` and `merge.glsl` were consulted for the
+RC1 constant-alpha display blend against BGCOLOR when RC2 is disabled. The native
+composition change and synthetic colour fixtures are original implementations.

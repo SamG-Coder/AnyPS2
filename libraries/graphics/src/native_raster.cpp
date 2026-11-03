@@ -1,5 +1,6 @@
 #include "native_raster.hpp"
 #include "raster_hazards.hpp"
+#include "sprite_mapping.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -667,11 +668,15 @@ void NativeRaster::draw(std::span<const SpriteCommand> commands) {
     VulkanRenderer::validate(commands); auto& r=*impl_; Measure timing(r.stats.draw_ns);
     if (!r.initialized) throw std::runtime_error("Native resources not initialized");
     for (const auto& c:commands) {
-        const auto& d=c.draw; if (d.left==d.right || d.top==d.bottom) continue;
+        const auto& d=c.draw;
+        if (d.left!=d.right && d.top!=d.bottom && d.right>d.pitch*64 && !can_map_wrapped_sprite(d))
+            throw std::runtime_error("Wrapped textured, depth or self-aliasing framebuffer requires an explicit native resource mapping");
+    }
+    const auto emit=[&](const SpriteCommand& c,unsigned height) {
+        const auto& d=c.draw;
         if (r.records_used==records_per_slot) r.flush(VK_NULL_HANDLE,VK_NULL_HANDLE,false);
-        if (d.right>d.pitch*64) throw std::runtime_error("Wrapped framebuffer requires an explicit native resource mapping");
-        auto& color=r.surface(d.base,d.pitch,d.bottom,false);
-        auto& depth=r.surface((d.flags&depth_test_flag) ? d.depth_base : 0,d.pitch,d.bottom,true,!(d.flags&depth_test_flag));
+        auto& color=r.surface(d.base,d.pitch,height,false);
+        auto& depth=r.surface((d.flags&depth_test_flag) ? d.depth_base : 0,d.pitch,height,true,!(d.flags&depth_test_flag));
         auto& texture=r.texture(c);
         const auto set=r.bind_target(color,depth,texture,d);
         r.append_draw(set,c);
@@ -680,6 +685,14 @@ void NativeRaster::draw(std::span<const SpriteCommand> commands) {
             ((d.flags&depth_write_flag) && t.region.overlaps(depth.region))) t.valid=false;
         if ((d.flags&depth_test_flag) && (d.flags&depth_write_flag)) { depth.dirty=true; depth.revision=r.revision; }
         if (d.flags&triangle_flag) ++r.stats.triangles; else ++r.stats.sprites;
+    };
+    for (const auto& c:commands) {
+        const auto& d=c.draw;
+        if (d.left==d.right || d.top==d.bottom) continue;
+        if (d.right<=d.pitch*64) { emit(c,d.bottom); continue; }
+        const auto mapped=map_wrapped_sprite(c);
+        const auto height=mapped.commands[mapped.count-1].draw.bottom;
+        for (unsigned i=0;i<mapped.count;++i) emit(mapped.commands[i],height);
     }
 }
 Scanout NativeRaster::capture(const DisplayPlan& plan) {

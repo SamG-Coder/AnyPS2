@@ -16,8 +16,8 @@ void main() {
     if (x>=display.width || y>=display.height) discard;
     uint enabled=display.control&3;
     uint color=display.background|0xff000000;
-    if (enabled==3) {
-        if ((display.control&128)==0 && x<display.surfaces[1].width && y<display.surfaces[1].height)
+    if (enabled==3 || (enabled==1 && (display.control&32)!=0)) {
+        if ((enabled&2)!=0 && (display.control&128)==0 && x<display.surfaces[1].width && y<display.surfaces[1].height)
             color=sample_surface(1,x,y);
         if (x<display.surfaces[0].width && y<display.surfaces[0].height) {
             uint source=sample_surface(0,x,y),alpha=(display.control>>8)&255,blended=0xff000000;
