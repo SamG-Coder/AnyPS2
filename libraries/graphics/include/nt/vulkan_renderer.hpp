@@ -72,6 +72,9 @@ public:
     // GPU display resolve and direct GPU-to-swapchain transfer. Only a changed
     // image flag is read by the host; scanout_readback is an explicit diagnostic.
     bool present_display(DisplayPlan plan);
+    // The host resized its window. Retain rendering resources and recreate
+    // only presentation objects after their queued work has retired.
+    void refresh_surface();
     Scanout scanout_readback(DisplayPlan plan);
     void present(std::span<const std::uint32_t> rgba, unsigned width, unsigned height);
     const std::string& device_name() const;

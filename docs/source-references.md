@@ -2170,3 +2170,12 @@ existing sampled exterior coverage remains an approximation.
   arithmetic reuse the same AnyPS2 finite-arithmetic implementation. Generated
   LLVM, linked bitcode and validated SPIR-V are build artifacts. The arithmetic
   kernel interface alone does not establish EE/VU region legality or game use.
+
+## PS2SDK Teapot sample
+
+The Teapot integration input is `ee/draw/samples/teapot` from the PS2SDK revision
+`2a18d15da1332665451a9bcf9a0d4df9029c9490` recorded above (AFL-2.0 and file notices).
+Its source, mesh and converted artifacts remain ignored. Both native and PCSX2
+comparison use the same locally built ELF. The local public `graph.c` helper
+acknowledges VSYNC/HSYNC with their write-one-to-clear masks instead of read/OR/write,
+so acknowledging one event does not also clear FINISH. Teapot drawing code is unchanged.

@@ -50,6 +50,7 @@ public:
     bool present(const nt::graphics::DisplayPlan& plan) {
 #ifdef _WIN32
         if (!IsWindow(window_.handle) || IsIconic(window_.handle)) return false;
+        resize(plan.width,plan.height);
         const bool changed=renderer_->present_display(plan);
         if (renderer_->validation_errors()) throw std::runtime_error("Native GPU display validation failed");
         if (changed) ++frames_;
@@ -68,13 +69,7 @@ public:
     void present(const nt::graphics::Scanout& frame) {
 #ifdef _WIN32
         if (!IsWindow(window_.handle) || IsIconic(window_.handle)) return;
-        if (width_!=frame.width || height_!=frame.height) {
-            RECT bounds{0,0,static_cast<LONG>(frame.width),static_cast<LONG>(frame.height)};
-            AdjustWindowRect(&bounds,style,FALSE);
-            SetWindowPos(window_.handle,nullptr,0,0,bounds.right-bounds.left,bounds.bottom-bounds.top,
-                SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
-            width_=frame.width; height_=frame.height;
-        }
+        resize(frame.width,frame.height);
         const auto now=std::chrono::steady_clock::now();
         const bool changed=last_pixels_!=frame.pixels;
         if (!stopped_) {
@@ -108,6 +103,18 @@ public:
     }
 private:
 #ifdef _WIN32
+    void resize(unsigned width,unsigned height) {
+        if (width_==width && height_==height) return;
+        if (!width || !height || width>2048 || height>2048)
+            throw std::runtime_error("Invalid native display size");
+        RECT bounds{0,0,static_cast<LONG>(width),static_cast<LONG>(height)};
+        if (!AdjustWindowRect(&bounds,style,FALSE) ||
+            !SetWindowPos(window_.handle,nullptr,0,0,bounds.right-bounds.left,bounds.bottom-bounds.top,
+                SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE))
+            throw std::runtime_error("Cannot resize native output window");
+        renderer_->refresh_surface();
+        width_=width; height_=height;
+    }
     void update_title() const {
         const auto title=L"AnyPS2 - display updates: "+std::to_wstring(frames_)+
             L" | rendered updates/s: "+std::to_wstring(stopped_ ? 0 : fps_)+

@@ -8,15 +8,12 @@ AnyPS2 is an experimental, BIOS-free C++20 toolchain for converting user-owned P
 
 > **Work in progress:** AnyPS2 is not a general-purpose PS2 game launcher. GT4 has rendered its opening warning through Vulkan and progressed into subsequent graphics/startup work, but it has **not reached the title screen or playable gameplay**.
 
-**Three homebrew demos are working:** locally adapted demos from
-[glampert/ps2-homebrew](https://github.com/glampert/ps2-homebrew) run through LLVM
-AOT and Vulkan. **Cubes** renders its animated 640 x 448 scene with user-verified
-DualSense camera control. **Console/Input** displays button presses and has
-user-verified native vibration start/stop. **Audio/Sound** renders and plays its
-ADPCM sample through native XAudio2; the user compared playback with PCSX2 and
-reported that it sounds about the same. These are adapted homebrew milestones,
-not a claim of playable commercial games. See
-[milestone evidence and project history](docs/project-history.md).
+**Homebrew milestones:** locally adapted Cubes, Console/Input, Audio/Sound and
+Dungeon demos from [glampert/ps2-homebrew](https://github.com/glampert/ps2-homebrew)
+run through LLVM AOT and native services. The user verified camera control, button
+input, vibration and audio; Dungeon renders its 3D scene but performance work remains.
+PS2SDK Teapot also renders through Vulkan. These are adapted sample milestones,
+not commercial-game compatibility claims. See [results and limits](docs/project-history.md).
 
 ## License and provenance
 
@@ -66,14 +63,9 @@ Native services aim to reproduce the *observable behavior* of console operations
 
 ### Gran Turismo 4 milestone
 
-GT4 has displayed its opening warning using Vulkan. Earlier builds also reached
-triangle rendering and a LIBSD sample-voice start. The latest integration rerun
-preserved the warning pixels but exposed an earlier missing-callback regression
-after discovery changes. That regression remains unresolved; the title screen and
-gameplay are not established. See the [correctness review](docs/ee-correctness-review.md)
-for the broader audit and remaining gaps.
-
-This is **real progress in the conversion pipeline**, but not proof of a complete boot, correct gameplay, or improved performance. Some subsystems are validated with synthetic programs and are not yet proven with GT4 itself.
+GT4 has displayed its opening warning using Vulkan. Title-screen and gameplay
+compatibility remain unestablished. Synthetic and homebrew passes do not prove
+complete commercial-game startup or correct gameplay.
 
 ## What remains
 
@@ -92,9 +84,11 @@ The current analysis intentionally reports uncertain pointer references instead 
 ```powershell
 cmake -S . -B build -A x64
 cmake --build build --config Release --parallel 8
-ctest --test-dir build -C Release --output-on-failure
+ctest --test-dir build -C Release -N
 ```
 
+Select related Release tests from the listing; see [testing](docs/testing.md).
+Visible presentation tests are opt-in and disabled by default.
 Initial configuration downloads the pinned zlib importer dependency. Tests use synthetic fixtures; passing them does not establish compatibility with a commercial game.
 
 ## Try a local conversion
@@ -134,13 +128,12 @@ and the limits of static verification.
 - [Project history and working demo](docs/project-history.md) — development path, evidence and limits
 - [Source references](docs/source-references.md) — pinned references and provenance
 - [Contributing](CONTRIBUTING.md) — contribution and publication rules
+- [Architecture](docs/architecture.md) — conversion boundaries and native services
 - [EE native conversion](docs/ee-native.md) — R5900 conversion, LLVM generation, memory, call discovery and limits
-- [EE correctness review](docs/ee-correctness-review.md) — regression fixes, validation evidence and unresolved audit items
 - [Flow verification](docs/flow-verification.md) — check discovery closure and callback-binding gaps before a native build
 - [Testing](docs/testing.md) — synthetic fixtures and opt-in local game validation
 - [Original PS2 test programs](docs/ps2-test-programs.md) — cross-compiled C++ cases and native/reference comparisons
 - [Batch conversion](docs/batch-conversion.md) — conversion workflow, LLVM build and performance measurements
-- [SIF implementation](docs/sif.md) — native EE/IOP communication work
 - [Usage and ownership disclaimer](DISCLAIMER.md) — game-file requirements
 
 ## Project principles

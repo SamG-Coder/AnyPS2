@@ -701,6 +701,17 @@ bool NativeRaster::changed(const DisplayPlan& plan) {
     const auto bytes=std::as_bytes(std::span(&plan,1)); for (auto b:bytes) key=(key^std::to_integer<unsigned>(b))*1099511628211ULL;
     if (key==r.last_present) return false; r.last_present=key; return true;
 }
+void NativeRaster::release_presentation() {
+    auto& r=*impl_;
+    // Owner has drained rendering and presentation before releasing images.
+    for (auto [image,framebuffer]:r.present_framebuffers) vkDestroyFramebuffer(r.device,framebuffer,nullptr);
+    r.present_framebuffers.clear();
+    for (auto view:r.present_views) vkDestroyImageView(r.device,view,nullptr);
+    r.present_views.clear();
+    if (r.present_pipeline) vkDestroyPipeline(r.device,r.present_pipeline,nullptr);
+    if (r.present_pass) vkDestroyRenderPass(r.device,r.present_pass,nullptr);
+    r.present_pipeline={}; r.present_pass={}; r.last_present=0;
+}
 
 void NativeRaster::wait_submission(std::uint64_t token) {
     auto& r=*impl_;

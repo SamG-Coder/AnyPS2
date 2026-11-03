@@ -19,6 +19,7 @@ public:
     std::uint64_t completed_submission();
     void wait_submission(std::uint64_t token);
     bool changed(const DisplayPlan& plan);
+    void release_presentation();
     std::uint64_t present(const DisplayPlan& plan,VkImage image,VkFormat format,VkSemaphore acquired,VkSemaphore rendered);
     Scanout capture(const DisplayPlan& plan);
     const RenderStatistics& statistics() const;

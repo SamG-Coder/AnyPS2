@@ -1,100 +1,45 @@
 # Project history and verified milestones
 
-AnyPS2 began as an experiment in converting user-supplied PS2 programs into native
-PC software, with Gran Turismo 4 as the first commercial integration target.
-Development has been directed by SamG-Coder with AI-assisted implementation and
-review using Codex and, during part of development, Grok. AI assistance is not
-proof of correctness or provenance: source changes still need review and tests.
+AnyPS2 began as SamG-Coder's experiment in converting user-supplied PS2 programs
+into native PC software, with Gran Turismo 4 as the first commercial target.
+Implementation and review have used Codex and, during part of development, Grok.
+AI assistance does not establish correctness or provenance.
 
-## How the architecture developed
+Early diagnostic hardware models helped investigate startup. The production goal
+became LLVM ahead-of-time compilation with native C++ services and Vulkan rendering.
+Existing register-state and address adapters remain migration work toward recovered
+native functions and module bindings. Runtime interpretation and JIT are not
+production fallbacks.
 
-- `87a2109` established the C++ toolchain and tested SIF transport. Early hardware
-  models and reference execution helped investigate startup behavior.
-- `669d91f` made LLVM the sole conversion backend. `e0761cc` introduced EE LLVM
-  AOT conversion and native startup services. The current direction is typed IR,
-  LLVM machine code and reusable C++ services, not generated C++ game code.
-- `62f57fa` added VU compilation; `54ddac1` connected compiled EE/VU execution to
-  native Vulkan sprites. Subsequent work added native services, resource loading,
-  graphics and stricter discovery. GT4 has rendered its opening warning, but has
-  not reached a verified title screen or playable gameplay.
-- `f435433` added validated runtime-stop observations as inputs to a subsequent
-  offline conversion. `ee47497` stabilized LLVM units for incremental rebuilding.
-  Neither change makes unknown code executable at runtime.
-- `433dfa1` added original cross-compiled PS2 source tests and external reference
-  comparison. These exposed callback-discovery gaps that simple opcode tests missed.
-- `9d436c8` established the working homebrew cube milestone described below.
-
-Existing register-state/address adapters and diagnostic hardware models remain
-migration work. Their presence is not concealed by the native executable suffix;
-the intended ABI uses recovered functions and explicit native module bindings.
-Unknown instructions, services and indirect targets must remain explicit failures.
+Original cross-compiled PS2 tests exposed callback and object-layout failures that
+simple instruction fixtures missed. Public homebrew programs now exercise a broader
+rendering, input and audio path. Historical changes remain in Git rather than being
+duplicated here as a per-operation log.
 
 ## Working homebrew demos
 
-The locally adapted **glampert/ps2-homebrew cubes demo**, pinned to
-[`602441a6877a3136709d6320664340d52e3027a1`](https://github.com/glampert/ps2-homebrew/tree/602441a6877a3136709d6320664340d52e3027a1),
-was built into a PS2 ELF, converted to LLVM, compiled to Windows x64 machine code
-and run with AnyPS2's native services and Vulkan renderer.
+| Locally adapted program | Verified behavior | Limits |
+| --- | --- | --- |
+| glampert Cubes | Animated textured scene; user confirmed DualSense camera control | Original inverted vertical look retained |
+| glampert Console/Input | User confirmed button labels and vibration start/stop | Supported native gamepad capabilities only |
+| glampert Audio/Sound | Native XAudio2 sample playback; user reported it sounds about the same as PCSX2 | Listening comparison, not waveform equivalence or general game audio |
+| glampert Dungeon | User confirmed solid armour and smooth movement after rendering fixes | Rotation slowdowns remain a performance concern; no complete-game claim |
+| PS2SDK Teapot | Four rotating lit teapots in native Vulkan; a 20-second run measured about 59–60 display updates/s | Narrow sample coverage; not a benchmark against PCSX2 |
 
-The verified 20-second run displayed an animated grid of checker-textured cubes
-and text at 640 x 448, submitted 55,432 triangles, and stopped at the requested
-diagnostic deadline. A subsequent controller-enabled run lasted 120 seconds,
-submitted 1,003,962 triangles, and ended only at its requested deadline. The user
-confirmed camera movement with a physical PS5 DualSense. Native SDL input feeds
-the public legacy pad RPC interface; the local source port binds those endpoints
-without requesting ROM modules. Vertical look preserves the original demo's
-inverted direction. This establishes an interactive homebrew demo, not general
-homebrew compatibility or commercial-game playability. Native edge coverage
-also differs from GS precision.
+These are locally adapted inputs, not unmodified-upstream compatibility claims.
+Ports include compiler compatibility, native service binding and a public SDK
+write-one-to-clear synchronization correction. The demo source, assets, PS2 ELFs,
+converted output and captures remain outside Git. Upstream source licenses do not
+necessarily cover every included asset. See [source references](source-references.md)
+and [homebrew testing](ps2-test-programs.md#larger-homebrew-tests).
 
-The local port updates compiler/assembler compatibility, assembly memory clobbers,
-controller failure handling and a public SDK synchronization helper. It is not an
-unmodified upstream compatibility test. Source, assets, ELF, generated IR, native
-binary and screenshots remain outside Git. The upstream project includes material
-with different provenance; its top-level source license is not a blanket asset license.
-See [source references](source-references.md#homebrew-integration-candidate) and
-[homebrew testing](ps2-test-programs.md#larger-homebrew-tests).
+## Commercial and provenance boundaries
 
-The same pinned checkout's **Console/Input** demo was subsequently compiled from
-PS2 source to LLVM AOT and run in its own native Vulkan window. The user confirmed
-that face buttons and D-pad display their names and that L1/R1 start vibration,
-with L2/R2 stopping it. A captured window independently shows the button labels.
-SDL supplies actual host capabilities and vibration; unsupported pressure sensors
-are not advertised. Synthetic tests cover motor-byte alignment, channel amplitudes,
-failed host requests, stop commands and disconnected devices. The source, converted
-binary and captures remain ignored local artifacts.
+GT4 has displayed its opening warning through Vulkan. Its title screen and playable
+gameplay have not been demonstrated. Homebrew progress does not establish GT4 support.
 
-**Audio/Sound** is the third adapted homebrew milestone. Its EE code compiles
-through LLVM AOT, renders through Vulkan and uploads a mono ADPCM sample to a
-native audsrv provider backed by XAudio2. A visible 66-second run recorded one
-sample upload, one playback start and 526,766 source frames consumed by the
-native audio engine, with no audio error or unsupported-operation stop. The user
-confirmed audible playback after correcting the Windows output-device setting,
-then compared it with the same sample in PCSX2 and reported "About the same."
-That is a listening comparison, not a waveform-equivalence claim. Synthetic
-regressions verify upload ownership, decode/loop limits and lifecycle; a real
-device test verifies sample consumption and cleanup. This milestone does not
-resolve GT4 audio, general streaming, stereo APCM or all sample-loop formats.
-
-## References and attribution
-
-The main references have been PCSX2 for instruction/device behavior and external
-differential tests, PS2SDK for public interfaces, Play! for service behavior, and
-other recompilation projects for architectural comparisons. These are acknowledged
-in the [pinned provenance ledger](source-references.md), including licenses and
-whether material was consulted, adapted or linked. They are not shipped runtime
-fallbacks. Commercial inputs were used only for local integration investigation;
-the repository contains original synthetic fixtures instead of extracted game code.
-
-## Public-source review
-
-The pre-release review at `9d436c8` scanned all 87 commits reachable through local
-Git refs and 1,598 unique historical blobs. It found no binary signatures/NUL-bearing
-files, prohibited game/build artifact paths, oversized source blobs, generated-guest
-source headers, or private-key/token patterns in that scan. The current index and
-working-tree repository-content checks are separate acceptance gates.
-
-These checks detect common publication mistakes, not copyright ownership or every
-possible secret. Reference notices and build dependencies were also reviewed. No
-history rewrite was required. Local inputs and investigation artifacts remain
-ignored; they must not be included in a release upload.
+Public references include PCSX2, PS2SDK, Play! and recompilation projects. Their
+roles, pins and licenses are recorded in the [provenance ledger](source-references.md).
+PCSX2 is used only as an external reference when requested. No games, BIOS/firmware,
+proprietary SDKs or converted commercial binaries are distributed. Repository-content
+checks and human provenance review are required before publication.

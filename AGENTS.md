@@ -89,6 +89,8 @@ before running their combined milestone tests. Do not repeat integration tests
 after each small opcode addition. Build during development when useful, then run
 the affected tests after the coherent batch; rerun only for fixes or new concerns.
 Honor any testing delay requested by the user.
+Keep visible presentation tests disabled during ordinary development. Only run
+window-opening tests when explicitly requested; opening a requested demo is separate.
 
 Commercial-game integration tests must be opt-in, take paths from configuration,
 and keep inputs and outputs ignored. Distinguish startup progress, visible boot,
@@ -121,3 +123,7 @@ Keep README.md focused on the goal, build, usage, limitations, and links. Keep
 architecture and test details in dedicated documents. Avoid personal absolute
 paths, copied logs, stale claims, and duplicated policy. Update documentation
 when observable behavior or supported scope changes.
+Document stable commands, contracts, current limitations and provenance. Do not
+create per-operation progress notes, repeated test logs or speculative design
+documents. Keep transient investigation in ignored work/ and use commit messages
+for change history. Remove obsolete or redundant documentation when replacing it.

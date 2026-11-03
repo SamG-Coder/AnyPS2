@@ -680,6 +680,26 @@ Scanout VulkanRenderer::scanout_readback(DisplayPlan plan) {
     throw std::runtime_error("Reference scanout unavailable");
 #endif
 }
+void VulkanRenderer::refresh_surface() {
+    auto& v=*impl_;
+    if (!v.surface) throw std::runtime_error("Cannot resize a headless renderer");
+    if (v.native) v.native->finish(); else v.flush();
+    check(vkDeviceWaitIdle(v.device),"Retire presentation before resize");
+    if (v.native) v.native->release_presentation();
+    for (auto& frame:v.present_frames) {
+        if (frame.acquired) vkDestroySemaphore(v.device,frame.acquired,nullptr);
+        frame={};
+    }
+    for (auto ready:v.present_ready) vkDestroySemaphore(v.device,ready,nullptr);
+    v.present_ready.clear(); v.present_frame=0;
+    if (v.acquired) vkDestroySemaphore(v.device,v.acquired,nullptr);
+    if (v.rendered) vkDestroySemaphore(v.device,v.rendered,nullptr);
+    v.acquired={}; v.rendered={};
+    v.images.clear();
+    if (v.swapchain) vkDestroySwapchainKHR(v.device,v.swapchain,nullptr);
+    v.swapchain={};
+    v.create_swapchain();
+}
 bool VulkanRenderer::present_display(DisplayPlan plan) {
     auto& v=*impl_;
     if (v.native) {
