@@ -13,6 +13,7 @@
 #include <mutex>
 #include <cstring>
 #include <cmath>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 
@@ -534,8 +535,17 @@ void VulkanRenderer::validate(std::span<const SpriteCommand> commands) {
                         std::abs(vertex.s)>1e20f || std::abs(vertex.t)>1e20f ||
                         std::signbit(vertex.q)!=std::signbit(v[0].q) ||
                         std::abs(double(vertex.s)/vertex.q*command.draw.texture_width*16)>0x3fffffff ||
-                        std::abs(double(vertex.t)/vertex.q*command.draw.texture_height*16)>0x3fffffff)
-                        throw std::runtime_error("Unsupported native triangle ST/Q range or zero crossing");
+                        std::abs(double(vertex.t)/vertex.q*command.draw.texture_height*16)>0x3fffffff) {
+                        std::ostringstream detail;
+                        detail<<"Unsupported native triangle ST/Q range or zero crossing; texture="
+                            <<command.draw.texture_width<<'x'<<command.draw.texture_height<<" bounds=("
+                            <<command.draw.left<<','<<command.draw.top<<','<<command.draw.right<<','<<command.draw.bottom<<')'
+                            <<std::hexfloat;
+                        for (unsigned i=0;i<v.size();++i)
+                            detail<<" vertex["<<i<<"]=("<<v[i].x<<','<<v[i].y<<") STQ=("
+                                <<v[i].s<<','<<v[i].t<<','<<v[i].q<<')';
+                        throw std::runtime_error(detail.str());
+                    }
                 }
             }
             const auto area=(std::int64_t(v[1].x)-v[0].x)*(std::int64_t(v[2].y)-v[0].y)-

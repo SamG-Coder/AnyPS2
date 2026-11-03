@@ -556,6 +556,15 @@ int main(int argc,char**) {
             catch (const std::exception&) { rejected=true; }
             if (!rejected || resident.pixels()!=reference.pixels())
                 throw std::runtime_error("Invalid resident draw batch partially committed");
+            const auto draws_before=resident.submitted_draws();
+            resident.submit(resident_gpu,std::array{finish});
+            if (resident.submitted_draws()!=draws_before || resident.completed_finishes()!=2 ||
+                resident.pixels()!=reference.pixels())
+                throw std::runtime_error("Rejected batch leaked operations into the next submission");
+            resident.submit(resident_gpu,std::array{packed});
+            reference.submit(gpu,std::array{packed});
+            if (resident.pixels()!=reference.pixels())
+                throw std::runtime_error("Command workspace reuse changed subsequent drawing");
             if (resident_gpu.validation_errors()) throw std::runtime_error("Resident Vulkan validation failed");
         }
         indexed8_textures(gpu,argc>1);

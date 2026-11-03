@@ -163,6 +163,7 @@ struct NativeRaster::Impl {
         std::span<const std::uint32_t> fs,unsigned colors,bool coverage);
     std::unique_ptr<Image> image(unsigned width,unsigned height);
     void upload_image(Image&,std::span<const std::uint32_t>);
+    void copy_display_pages(Image& destination,const Image& source);
     void export_image(Image&); void synchronize_source(Region); void clear_views();
     Image& surface(unsigned base,unsigned pitch,unsigned height,bool depth,bool scratch=false,bool display=false);
     Image& display_surface(unsigned base,unsigned pitch,unsigned height);
@@ -484,6 +485,28 @@ void NativeRaster::Impl::clear_views() {
     field_sets.clear();
     checked(vkResetDescriptorPool(device,descriptor_pool,0),"Reset native resource descriptors");
 }
+void NativeRaster::Impl::copy_display_pages(Image& destination,const Image& source) {
+    // A full storage page is 64x32 pixels. Depth's address XOR 0x600
+    // permutes its four 32x16 tiles, without changing the page number.
+    const bool permute=destination.depth!=source.depth;
+    const unsigned tile_width=permute ? 32 : 64,tile_height=permute ? 16 : 32;
+    std::vector<VkImageCopy> copies;
+    for (unsigned y=0;y<destination.height;y+=tile_height)
+        for (unsigned x=0;x<destination.width;x+=tile_width) {
+            const unsigned page=(destination.base/32+(y/32)*destination.pitch+x/64-source.base/32)&511;
+            const unsigned sx=(page%source.pitch)*64+((x%64)^(permute ? 32 : 0));
+            const unsigned sy=(page/source.pitch)*32+((y%32)^(permute ? 16 : 0));
+            if (sx+tile_width>source.width || sy+tile_height>source.height) continue;
+            VkImageCopy copy{};
+            copy.srcSubresource=copy.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
+            copy.srcOffset={int(sx),int(sy),0}; copy.dstOffset={int(x),int(y),0};
+            copy.extent={tile_width,tile_height,1}; copies.push_back(copy);
+        }
+    if (copies.empty()) return;
+    order();
+    vkCmdCopyImage(command,source.image,VK_IMAGE_LAYOUT_GENERAL,destination.image,VK_IMAGE_LAYOUT_GENERAL,
+        static_cast<unsigned>(copies.size()),copies.data());
+}
 NativeRaster::Impl::Image& NativeRaster::Impl::surface(unsigned base,unsigned pitch,unsigned height,bool depth,bool scratch,bool display) {
     Measure timing(stats.surface_lookup_ns,profiling);
     const auto key=std::tuple(scratch ? 0x10000U : base|(display ? 0x20000U : 0U),pitch,depth); const unsigned width=pitch*64;
@@ -495,8 +518,18 @@ NativeRaster::Impl::Image& NativeRaster::Impl::surface(unsigned base,unsigned pi
         throw std::runtime_error("Aliased oversized framebuffer requires explicit resource conversion");
     auto& slot=surfaces[key];
     if (slot && slot->height<height) { export_image(*slot); clear_views(); slot.reset(); }
+    const auto requested=region(base,pitch,width,slot ? slot->height : height);
+    bool compose=display && base%32==0 && width<=2048;
+    std::vector<Image*> writers;
+    if (compose) {
+        for (auto& [other_key,other]:surfaces) if (other && other->dirty && other->region.overlaps(requested)) {
+            if (!other->valid || other->scratch || other->base%32 || other->width>2048) { compose=false; break; }
+            writers.push_back(other.get());
+        }
+        std::sort(writers.begin(),writers.end(),[](auto a,auto b){return a->revision<b->revision;});
+    }
     if (!slot) {
-        if (!scratch) synchronize_source(region(base,pitch,width,height)); slot=image(width,height);
+        if (!scratch && !compose) synchronize_source(requested); slot=image(width,height);
         slot->base=base; slot->pitch=pitch; slot->depth=depth; slot->scratch=scratch;
         slot->region=scratch ? Region{} : region(base,pitch,width,height); slot->valid=false;
     }
@@ -504,14 +537,19 @@ NativeRaster::Impl::Image& NativeRaster::Impl::surface(unsigned base,unsigned pi
         ++stats.surface_conflicts;
         stats.last_surface_conflict={slot->base,slot->pitch,slot->height,unsigned(slot->depth),
             other->base,other->pitch,other->height,unsigned(other->depth)};
-        synchronize_source(slot->region); slot->valid=false; break;
+        if (!compose) synchronize_source(slot->region);
+        slot->valid=false; break;
     }
     if (!slot->valid) {
         Measure timing(stats.surface_import_ns,profiling);
         std::vector<std::uint32_t> pixels(std::size_t(width)*slot->height);
         if (!scratch) for (unsigned y=0;y<slot->height;++y) for (unsigned x=0;x<width;++x)
             pixels[std::size_t(y)*width+x]=source[rgba_word(base,pitch,x,y)^(depth ? 0x600 : 0)];
-        upload_image(*slot,pixels); slot->revision=revision;
+        upload_image(*slot,pixels);
+        // Only the read-only display alias is composed. Writers stay dirty so
+        // genuine CPU consumers still synchronize through the existing path.
+        if (compose) for (const auto* writer:writers) copy_display_pages(*slot,*writer);
+        slot->revision=revision;
     }
     return *slot;
 }
@@ -522,8 +560,8 @@ NativeRaster::Impl::Image& NativeRaster::Impl::display_surface(unsigned base,uns
     // Display offsets can read beyond the drawing extent, even into adjacent
     // storage. Such a read must not permanently enlarge the writable target:
     // that would make later unrelated draws conflict through the extra rows.
-    // This separately cached view is never dirtied by drawing. Existing source
-    // synchronization preserves any genuinely aliased rows in the display.
+    // This separately cached view is never dirtied by drawing. Page-aligned
+    // aliases are composed on the GPU; other layouts synchronize backing data.
     return surface(base,pitch,height,false,false,true);
 }
 

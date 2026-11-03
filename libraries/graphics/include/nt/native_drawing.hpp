@@ -45,8 +45,11 @@ public:
             profile->*member+=std::chrono::duration_cast<std::chrono::nanoseconds>(now-marked).count();
             marked=now;
         };
+        // Submission is exclusively owned. Keep ordinary batch storage across
+        // calls, but release its contents on success and on validation failure.
+        struct ReleaseWorkspace { Workspace& workspace; ~ReleaseWorkspace() { workspace.clear(); } } release{workspace_};
         auto candidate=state_;
-        std::vector<Operation> draws;
+        auto& draws=workspace_.operations;
         std::size_t total=0;
         for (const auto& packet:packets) {
             if (packet.size()>maximum_batch_bytes/sizeof(Quadword)-total)
@@ -65,7 +68,7 @@ public:
         if (resident_) {
             if (renderer_ && renderer_!=&renderer) throw std::invalid_argument("Resident drawing renderer changed");
             if (!renderer_) { renderer.upload(pixels_); renderer_=&renderer; }
-            std::vector<SpriteCommand> pending;
+            auto& pending=workspace_.commands;
             pending.reserve(std::min<std::size_t>(256,draws.size()));
             const auto flush=[&] {
                 if (pending.empty()) return;
@@ -134,6 +137,15 @@ private:
     struct Draw { Sprite sprite; unsigned bank; std::array<RasterVertex,3> triangle{}; std::uint32_t fog_color=0,fog=0; };
     struct Finish {};
     using Operation=std::variant<Draw,ImageWrites,PaletteLoad,Finish>;
+    struct Workspace {
+        std::vector<Operation> operations;
+        std::vector<SpriteCommand> commands;
+        void clear() {
+            operations.clear(); commands.clear();
+            // A large one-off upload/batch must not pin its planning allocation.
+            if (operations.capacity()>4096) std::vector<Operation>().swap(operations);
+        }
+    } workspace_;
     struct Context {
         std::uint64_t frame=0,offset=0,scissor=0,test=0,depth=0,texture=0,filter=0,clamp=0,alpha=0;
         std::array<std::uint64_t,2> mipmap_bases{};

@@ -209,6 +209,46 @@ int main(int argc,char** argv) {
                 throw std::runtime_error("Exported drawing left a stale overlapping display view");
             ++checks;
         }
+        // Extended display aliases compose dirty color/depth pages directly.
+        // Exercise different pitches, storage wrap and CPU invalidation against
+        // the reference path, while requiring no intermediate writer readback.
+        for (unsigned base:{0U,16352U,1U}) for (unsigned display_pitch:{1U,2U}) {
+            std::vector<std::uint32_t> initial(actual.size(),0x80402010);
+            native.upload(initial); reference.upload(initial);
+            std::array<SpriteCommand,4> tiles;
+            for (unsigned n=0;n<tiles.size();++n) {
+                auto& draw=tiles[n].draw;
+                draw={(n%2)*32,(n/2)*16,(n%2+1)*32,(n/2+1)*16,base,1,
+                    0x80000020U+n*0x00201008U,0};
+                draw.flags=depth_test_flag|depth_write_flag;
+                draw.depth_base=((base+63)&~31U)&16383; draw.test=1U<<17;
+                draw.depth=0x80506070U+n*0x00010305U;
+            }
+            native.draw(tiles); reference.draw(tiles);
+            const unsigned width=display_pitch*64,height=96/display_pitch;
+            const auto buffer=std::uint64_t(base/32)|(std::uint64_t(display_pitch)<<9);
+            const auto display=(std::uint64_t(width-1)<<32)|(std::uint64_t(height*2-1)<<44);
+            const auto plan=*plan_display(2,{buffer,buffer},{display,display},true,0,DisplayField::even);
+            const auto before=native.statistics().readback_bytes;
+            const auto composed=native.scanout_readback(plan);
+            if (composed.pixels!=reference.scanout_readback(plan).pixels)
+                throw std::runtime_error("GPU display page composition changed color/depth aliases");
+            if (base%32==0 && native.statistics().readback_bytes-before!=composed.pixels.size()*sizeof(std::uint32_t))
+                throw std::runtime_error("Display composition exported an intermediate writer");
+            // A later draw must replace the cached view, and a partial CPU write
+            // must preserve the other bytes before invalidating it.
+            tiles[0].draw.color=0x80776655; tiles[0].draw.depth=0x80332211;
+            native.draw(std::span(tiles).first(1)); reference.draw(std::span(tiles).first(1));
+            if (native.scanout_readback(plan).pixels!=reference.scanout_readback(plan).pixels)
+                throw std::runtime_error("GPU display alias retained an older writer");
+            const std::array writes{PixelWrite{rgba_word(base,1,3,5),0x0000aa00,0x0000ff00}};
+            native.write(writes); reference.write(writes);
+            if (native.scanout_readback(plan).pixels!=reference.scanout_readback(plan).pixels)
+                throw std::runtime_error("CPU write left a stale GPU display alias");
+            native.read(actual); reference.read(expected);
+            if (actual!=expected) throw std::runtime_error("Display composition changed eventual CPU backing contents");
+            ++checks;
+        }
         // Relative display origins are independent of source buffer origins.
         // Verify both displacement directions, unequal extents and odd field
         // offsets against explicit pixels, not just two matching implementations.
