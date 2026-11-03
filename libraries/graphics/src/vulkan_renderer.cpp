@@ -349,6 +349,16 @@ struct VulkanRenderer::Impl {
         sc.minImageCount=std::min(caps.minImageCount+1,caps.maxImageCount?caps.maxImageCount:~0U);
         sc.imageFormat=format; sc.imageColorSpace=selected->colorSpace; sc.imageExtent=extent; sc.imageArrayLayers=1; sc.imageUsage=VK_IMAGE_USAGE_TRANSFER_DST_BIT|(native ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : 0);
         sc.preTransform=caps.currentTransform; sc.compositeAlpha=VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR; sc.presentMode=VK_PRESENT_MODE_FIFO_KHR; sc.clipped=VK_TRUE;
+        if (native) {
+            // Application display deadlines already pace converted execution.
+            // Do not add a FIFO of stale fields paced by the desktop monitor.
+            unsigned mode_count=0;
+            check(vkGetPhysicalDeviceSurfacePresentModesKHR(physical,surface,&mode_count,nullptr),"Query presentation modes");
+            std::vector<VkPresentModeKHR> modes(mode_count);
+            check(vkGetPhysicalDeviceSurfacePresentModesKHR(physical,surface,&mode_count,modes.data()),"Read presentation modes");
+            if (std::find(modes.begin(),modes.end(),VK_PRESENT_MODE_MAILBOX_KHR)!=modes.end())
+                sc.presentMode=VK_PRESENT_MODE_MAILBOX_KHR;
+        }
         check(vkCreateSwapchainKHR(device,&sc,nullptr,&swapchain),"Create swapchain");
         check(vkGetSwapchainImagesKHR(device,swapchain,&count,nullptr),"Get swapchain images"); images.resize(count); check(vkGetSwapchainImagesKHR(device,swapchain,&count,images.data()),"Get swapchain images");
         VkSemaphoreCreateInfo sem{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};

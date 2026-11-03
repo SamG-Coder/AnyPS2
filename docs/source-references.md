@@ -1702,6 +1702,10 @@ public event classification and `R5900.h` control fields. The independent native
 implementation recognizes explicit selector disable without adopting PCSX2's
 virtual-cycle accumulation or unsupported-event zero approximation. Regression
 fixtures execute original counter transfers compiled through LLVM.
+The same pinned `COP0.cpp` and `Common.h` define Count in 294.912 MHz units.
+Native Count reads convert QPC time using its reported frequency and retain
+32-bit wrapping. Profiling counters retain host tick units; this conversion is
+not a measurement or simulation of executed console cycles.
 
 The explicit native thread-cycle policy uses Microsoft's public Windows API
 contracts, consulted 2026-10-31:
@@ -2198,6 +2202,11 @@ acquire semaphores belong to bounded in-flight frames and retire through graphic
 fences; presentation wait semaphores belong to swapchain images and are reused
 after image reacquisition. This is an original implementation of the documented
 API contract, with no sample code copied.
+
+The [Vulkan presentation-mode contract](https://docs.vulkan.org/refpages/latest/refpages/source/VkPresentModeKHR.html)
+(consulted 2026-11-03) defines mailbox replacement of queued images without tearing.
+Native presentation prefers it when supported, keeping the host monitor queue
+separate from the application's display deadlines; FIFO remains the supported fallback.
 
 The Khronos [Vulkan fragment interlock specification](https://docs.vulkan.org/refpages/latest/refpages/source/VK_EXT_fragment_shader_interlock.html)
 and [GLSL ARB fragment interlock revision 2](https://registry.khronos.org/OpenGL/extensions/ARB/ARB_fragment_shader_interlock.txt)

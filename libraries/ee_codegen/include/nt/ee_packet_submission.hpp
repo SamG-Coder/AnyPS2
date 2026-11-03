@@ -16,6 +16,7 @@ struct NativePacketConsumer {
     Stop (*consume)(void*,unsigned,std::span<const std::uint8_t>)=nullptr;
     bool (*pending)(void*,unsigned)=nullptr;
     Stop (*consume_with_origins)(void*,unsigned,std::span<const std::uint8_t>,std::span<const NativePacketOrigin>)=nullptr;
+    bool (*working)(void*)=nullptr;
 };
 class NativePacketSubmission {
 public:
@@ -32,7 +33,7 @@ public:
     Stop write(Memory& memory,std::uint32_t address,std::uint32_t value) {
         unsigned channel,field;
         if (!decode(address,channel,field)) return Stop::unsupported_system;
-        if (pending_[channel]) return Stop::unsupported_system;
+        if (pending_[channel]) return consumer.working && consumer.working(consumer.context) ? Stop::native_wait : Stop::unsupported_system;
         auto& config=channels_[channel];
         if (field==8) return value ? Stop::unsupported_system : Stop::budget;
         if (field) {

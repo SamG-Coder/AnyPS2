@@ -149,6 +149,7 @@ nt::ee::Stop execute(nt::runtime::State* state,nt::ee::Memory* memory,std::uint6
             thread ? thread->id : 0,state->cop0_status,memory->pending_interrupts,
             memory->completions ? memory->completions->status() : 0,{}};
         for (unsigned i=0;i<4;++i) record.arguments[i]=static_cast<std::uint32_t>(state->gpr[4+i].lo);
+        record.return_address=static_cast<std::uint32_t>(state->gpr[31].lo);
         service_capture->observe(record);
     }
     if (trace_services && stop==nt::ee::Stop::syscall) {
@@ -264,14 +265,6 @@ int main(int argc,char** argv) {
             throw std::runtime_error("Select only one native performance provider");
         const bool native_clock=!native_cycles && !native_pmu && !strict_performance;
         std::uint64_t clock_frequency=0;
-        nt::ee::NativePerformanceCounters clock([]() -> std::optional<std::uint64_t> {
-#ifdef _WIN32
-            LARGE_INTEGER value{};
-            if (QueryPerformanceCounter(&value) && value.QuadPart>=0)
-                return static_cast<std::uint64_t>(value.QuadPart);
-#endif
-            return std::nullopt;
-        },nt::ee::NativePerformanceCounters::ClockPolicy::elapsed_time);
         if (native_clock) {
 #ifdef _WIN32
             LARGE_INTEGER frequency{};
@@ -279,9 +272,19 @@ int main(int argc,char** argv) {
                 clock_frequency=static_cast<std::uint64_t>(frequency.QuadPart);
 #endif
             if (!clock_frequency) throw std::runtime_error("Native performance clock is unavailable");
+        }
+        nt::ee::NativePerformanceCounters clock([]() -> std::optional<std::uint64_t> {
+#ifdef _WIN32
+            LARGE_INTEGER value{};
+            if (QueryPerformanceCounter(&value) && value.QuadPart>=0)
+                return static_cast<std::uint64_t>(value.QuadPart);
+#endif
+            return std::nullopt;
+        },nt::ee::NativePerformanceCounters::ClockPolicy::elapsed_time,clock_frequency);
+        if (native_clock) {
             clock.attach(memory);
             std::cout<<"metrics=native-qpc units=elapsed-clock-ticks frequency="<<clock_frequency
-                     <<" cycle-and-cache-profiling=elapsed-time includes=waits-and-native-services\n";
+                     <<" count-frequency=294912000 cycle-and-cache-profiling=elapsed-time includes=waits-and-native-services\n";
         }
         std::unique_ptr<nt::host::LiveCounters> live_counters;
         std::unique_ptr<nt::ee::NativePerformanceCounters> pmu;
@@ -332,6 +335,7 @@ int main(int argc,char** argv) {
         auto compiled_vu1=nt::vu::linked_binding1();
         compiled_uploads.add(compiled_vu1);
         nt::ee::NativeVuLaunch compiled_vu1_launch(compiled_vu1);
+        compiled_vu1_launch.enable_async();
         if (profile_graphics) compiled_vu1_launch.profile=&vector_profile;
         compiled_submissions.add(compiled_vu1_launch);
         compiled_vu1_launch.connect_data(memory);
@@ -398,6 +402,8 @@ int main(int argc,char** argv) {
         auto state=nt::ee::NativePlatform::initial_state(ANYPS2_EE_ENTRY);
         nt::ee::StartupServices services(native_code_overlap,nt_ee_generated_contains,ANYPS2_EE_SYSCALL_TABLE);
         nt::ee::ExecutionProfile execution_profile{},previous_execution{};
+        services.poll_native_jobs=[&] { return platform.poll_submissions(); };
+        services.native_jobs_pending=[&] { return platform.packet_setup.working(); };
         if (profile_graphics) services.profile=&execution_profile;
         nt::ee::NativeGraphics::Profile display_profile{},previous_display{};
         if (profile_graphics) platform.graphics.profile=&display_profile;
@@ -481,7 +487,12 @@ int main(int argc,char** argv) {
                 };
 #if defined(ANYPS2_NATIVE_VU) || defined(ANYPS2_NATIVE_VU1)
                 std::cout<<"vector_profile compiled_ms="<<(vector_profile.compiled_ns-previous_vector_profile.compiled_ns)/1e6
-                         <<" blocks="<<(vector_profile.blocks-previous_vector_profile.blocks)<<'\n';
+                         <<" blocks="<<(vector_profile.blocks-previous_vector_profile.blocks)
+                         <<" jobs="<<(vector_profile.jobs-previous_vector_profile.jobs)
+                         <<" job_ms="<<(vector_profile.job_ns-previous_vector_profile.job_ns)/1e6
+                         <<" submit_ms="<<(vector_profile.submit_ns-previous_vector_profile.submit_ns)/1e6
+                         <<" longest_job_ms="<<vector_profile.longest_job_ns/1e6
+                         <<" longest_submit_ms="<<vector_profile.longest_submit_ns/1e6<<'\n';
                 previous_vector_profile=vector_profile;
 #endif
 #ifdef ANYPS2_NATIVE_IOP
@@ -497,8 +508,13 @@ int main(int argc,char** argv) {
                     <<" command_submit_ms="<<(gpu.drawing_profile.submit_ns-previous_drawing.submit_ns)/1e6
                     <<" present_ms="<<(presentation_seconds-previous_presentation)*1000
                     <<" compiled_entry_ms="<<(execution_profile.entry_ns-previous_execution.entry_ns)/1e6
+                    <<" longest_compiled_entry_ms="<<execution_profile.longest_entry_ns/1e6
                     <<" syscall_ms="<<(execution_profile.service_ns-previous_execution.service_ns)/1e6
                     <<" idle_sleep_ms="<<(execution_profile.idle_ns-previous_execution.idle_ns)/1e6
+                    <<" display_waits="<<(execution_profile.display_waits-previous_execution.display_waits)
+                    <<" native_job_waits="<<(execution_profile.job_waits-previous_execution.job_waits)
+                    <<" display_sleep_ms="<<(execution_profile.display_sleep_ns-previous_execution.display_sleep_ns)/1e6
+                    <<" native_job_sleep_ms="<<(execution_profile.job_sleep_ns-previous_execution.job_sleep_ns)/1e6
                     <<" compiled_entries="<<execution_profile.entries-previous_execution.entries
                     <<" retired_operations="<<execution_profile.operations-previous_execution.operations
                     <<" status_reads="<<display_profile.status_reads-previous_display.status_reads
@@ -507,6 +523,10 @@ int main(int argc,char** argv) {
                     <<" display_buffer_changes="<<display_profile.buffer_changes-previous_display.buffer_changes
                     <<" vsync_clear_to_observe_ms="<<(display_profile.vsync_clear_to_observe_ns-previous_display.vsync_clear_to_observe_ns)/1e6
                     <<" vsync_observations="<<display_profile.vsync_observations-previous_display.vsync_observations
+                    <<" vsync_deadlines="<<display_profile.vsync_deadlines-previous_display.vsync_deadlines
+                    <<" vsync_coalesced="<<display_profile.vsync_coalesced-previous_display.vsync_coalesced
+                    <<" vsync_acknowledged="<<display_profile.vsync_acknowledged-previous_display.vsync_acknowledged
+                    <<" scanout_missed="<<display_profile.scanout_missed-previous_display.scanout_missed
                     <<" draw_ms="<<(s.draw_ns-p.draw_ns)/1e6<<" write_ms="<<(s.write_ns-p.write_ns)/1e6
                     <<" gpu_timing_supported="<<s.gpu_timing_supported<<" gpu_ms="<<(s.gpu_ns-p.gpu_ns)/1e6
                     <<" wait_ms="<<(s.wait_ns-p.wait_ns)/1e6<<" upload_ms="<<(s.upload_ns-p.upload_ns)/1e6
@@ -749,7 +769,7 @@ int main(int argc,char** argv) {
                      <<" metric_operation="<<static_cast<unsigned>(memory.metrics.rejected_operation)
                      <<" metric_counter="<<static_cast<unsigned>(memory.metrics.rejected_counter);
         }
-        if (native_clock) std::cout<<" native_metric_samples="<<clock.samples()
+        if (native_clock) std::cout<<" native_metric_samples="<<clock.samples()<<" native_clock_reads="<<clock.clock_reads()
             <<" native_metric_error="<<static_cast<unsigned>(clock.error());
         if (native_cycles) std::cout<<" native_metric_samples="<<cycles.samples()
             <<" native_metric_error="<<static_cast<unsigned>(cycles.error());

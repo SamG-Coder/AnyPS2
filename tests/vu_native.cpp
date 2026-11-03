@@ -9,6 +9,8 @@
 #include <nt/vu_graphics.hpp>
 #include <nt/vu_clip.hpp>
 #include <nt/vu_quotient.hpp>
+#include <nt/ee_platform.hpp>
+#include <thread>
 #include <iostream>
 #include <cmath>
 #include <stdexcept>
@@ -81,7 +83,103 @@ extern "C" const nt::vu::Block* nt_vu_whole_blocks();
 extern "C" std::uint32_t nt_vu_whole_count();
 extern "C" const nt::vu::Block* nt_vu_mac_pipeline_blocks();
 extern "C" std::uint32_t nt_vu_mac_pipeline_count();
-int main() {
+namespace {
+void test_async_submission() {
+    const auto image=std::span(nt_vu_graphics_batch_image(),nt_vu_graphics_batch_size());
+    nt::vu::Binding binding(nt::vu::Program(1,{nt_vu_graphics_batch_blocks(),nt_vu_graphics_batch_count()}),0,image);
+    if (!binding.upload(1,std::array{nt::vu::UploadView{0,image}})) throw std::runtime_error("Async fixture binding failed");
+    nt::ee::NativeVuLaunch owner(binding); owner.enable_async();
+    owner.state.integers[0]=0xffff; owner.state.data[1023]={0x8001,0x10000000,0,0};
+    owner.state.vectors[0]={55,66,77,88};
+    const auto before=owner.state;
+    struct Sink { unsigned calls=0; bool accept=true; std::vector<nt::graphics::Packet> packets; } sink;
+    owner.graphics={&sink,[](void* raw,std::span<const nt::graphics::Packet> packets) {
+        auto& sink=*static_cast<Sink*>(raw); ++sink.calls;
+        if (!sink.accept) return false;
+        sink.packets.assign(packets.begin(),packets.end()); return true;
+    }};
+    nt::ee::NativePlatform platform;
+    std::vector<std::uint8_t> ram(4096);
+    nt::ee::Memory memory; memory.data=ram.data(); memory.size=ram.size(); platform.attach(memory);
+    owner.connect(platform.packet_setup); owner.connect_data(memory);
+    const auto start=[&] {
+        const std::array<std::uint32_t,8> words{0x6c010000,11,22,33,44,0x94000000,0,0};
+        std::memcpy(ram.data()+256,words.data(),sizeof(words));
+        auto& submit=platform.packet_submission;
+        if (submit.write(memory,0x10009010,256)!=nt::ee::Stop::budget ||
+            submit.write(memory,0x10009020,2)!=nt::ee::Stop::budget ||
+            submit.write(memory,0x10009000,0x101)!=nt::ee::Stop::budget)
+            throw std::runtime_error("Async compiled submission was not accepted");
+    };
+    start();
+    if (!owner.pending() || !platform.packet_setup.working() || !platform.packet_setup.pending(1) ||
+        owner.state!=before || sink.calls || platform.completions.status()&(1U<<1) ||
+        !(platform.packet_submission.read(0x10009000).value&0x100) || platform.packet_setup.take_interrupts() ||
+        !(platform.packet_setup.read(0x10003c00).value&4) || !*memory.vector_data[1].active)
+        throw std::runtime_error("Async submission published completion or state early");
+    std::fill(ram.begin(),ram.end(),0); // The queued job must own its input.
+    const auto finish=[&] {
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+        while (platform.packet_setup.working()) {
+            const auto result=platform.poll_submissions();
+            if (result!=nt::ee::Stop::budget) return result;
+            if (std::chrono::steady_clock::now()>deadline) throw std::runtime_error("Async native job did not finish");
+            std::this_thread::yield();
+        }
+        return nt::ee::Stop::budget;
+    };
+    if (finish()!=nt::ee::Stop::budget || sink.calls!=1 || sink.packets.size()!=2 ||
+        sink.packets[0][1]!=std::array<std::uint32_t,4>{11,22,33,44} ||
+        sink.packets[1][1]!=std::array<std::uint32_t,4>{55,66,77,88} ||
+        platform.packet_setup.take_interrupts()!=2 || !platform.packet_setup.pending(1) ||
+        platform.completions.status()&(1U<<1))
+        throw std::runtime_error("Async publication lost snapshots or interrupt-stalled suffix");
+    if (memory.io.write32(memory.io.context,0x10003c10,8)!=nt::ee::Stop::budget ||
+        platform.packet_setup.pending(1) || !(platform.completions.status()&(1U<<1)) ||
+        platform.packet_submission.read(0x10009000).value&0x100)
+        throw std::runtime_error("Async suffix completion was not delivered exactly once");
+    owner.state=before; sink.accept=false; platform.completions.acknowledge(2);
+    start();
+    if (finish()!=nt::ee::Stop::unsupported_vector || owner.state!=before ||
+        platform.completions.status()&2 || sink.calls!=2)
+        throw std::runtime_error("Async renderer rejection committed private state");
+    if (platform.poll_submissions()!=nt::ee::Stop::unsupported_vector || owner.state!=before || sink.calls!=2)
+        throw std::runtime_error("Failed asynchronous job later reported success");
+}
+void test_memory_transactions() {
+    nt::vu::State memory;
+    memory.integers[1]=2; memory.integers[2]=1;
+    memory.integers[7]=0x8001;
+    memory.data[0]={9,9,9,9}; memory.vectors[0]={1,2,3,4}; memory.vectors[3]={5,6,7,8};
+    memory.vectors[30]={0x12345678,0x87654321,0xabcdef01,0x10203040};
+    memory.integers[14]=0x9876; memory.input_top=0x123; memory.input_itop=0x234;
+    memory.random=0x3fabcdef; memory.graphics_address=0x345;
+    const auto memory_before=memory;
+    if (nt_vu_memory(&memory)!=nt::vu::Result::complete || memory.integers[0]!=0 || memory.integers[2]!=1 ||
+        memory.vectors[1]!=std::array<std::uint32_t,4>{1,9,3,9} ||
+        memory.vectors[2]!=std::array<std::uint32_t,4>{1,9,3,0x3f800000} ||
+        memory.vectors[4]!=std::array<std::uint32_t,4>{5,6,7,8} ||
+        memory.vectors[6]!=std::array<std::uint32_t,4>{5,6,7,0x8001} ||
+        memory.data[0]!=std::array<std::uint32_t,4>{5,6,7,0x8001} || memory.data[2][0]!=1 ||
+        memory.data[1]!=std::array<std::uint32_t,4>{0x8001,0,0x8001,0} || memory.integers[5]!=0x8001 || memory.integers[6]!=8 ||
+        memory.vectors[30]!=memory_before.vectors[30] || memory.integers[14]!=memory_before.integers[14] ||
+        memory.input_top!=memory_before.input_top || memory.input_itop!=memory_before.input_itop ||
+        memory.random!=memory_before.random || memory.graphics_address!=memory_before.graphics_address)
+        throw std::runtime_error("Native VU load/store addressing failed");
+    auto mapped_memory=memory_before; mapped_memory.integers[1]=1024;
+    const auto mapped_before=mapped_memory;
+    if (nt_vu_memory(&mapped_memory)!=nt::vu::Result::unsupported_memory || mapped_memory!=mapped_before)
+        throw std::runtime_error("Native VU mapped memory failure was not atomic");
+    auto unit1=memory_before; unit1.integers[1]=1024; unit1.data[1023]={11,12,13,14};
+    if (nt_vu_memory1(&unit1)!=nt::vu::Result::complete ||
+        unit1.data[256]!=std::array<std::uint32_t,4>{5,6,7,8} ||
+        unit1.vectors[6]!=std::array<std::uint32_t,4>{1,9,3,0x8001} ||
+        unit1.data[0]!=std::array<std::uint32_t,4>{1,9,3,0x8001} ||
+        unit1.vectors[5]!=std::array<std::uint32_t,4>{11,12,13,14})
+        throw std::runtime_error("Native VU1 memory extent or signed offset failed");
+}
+}
+int run_core_tests() {
     try {
         {
             if (nt_vu_whole_count()!=8) throw std::runtime_error("Whole VU entry coverage incomplete");
@@ -258,10 +356,13 @@ int main() {
         if (nt_vu_branch(&extended_branch)!=nt::vu::Result::transfer || extended_branch.vectors[5][0]!=0x7f800000 ||
             extended_branch.mac!=0x8000 || extended_branch.status!=0x208)
             throw std::runtime_error("Compiled VU extended ADD/branch flags failed");
-        const std::array blocks{
-            nt::vu::Block{5,nt_vu_end_true}, nt::vu::Block{0,nt_vu_branch},
-            nt::vu::Block{3,nt_vu_end_false}, nt::vu::Block{100,nt_vu_call}};
-        const nt::vu::Program native(0,blocks);
+        const auto native=[] {
+            std::array blocks{
+                nt::vu::Block{5,nt_vu_end_true}, nt::vu::Block{0,nt_vu_branch},
+                nt::vu::Block{3,nt_vu_end_false}, nt::vu::Block{100,nt_vu_call}};
+            blocks[1].target=&blocks[0]; blocks[1].fallthrough=&blocks[2];
+            return nt::vu::Program(0,blocks);
+        }(); // Unsorted source descriptors need not outlive the native graph.
         for (const bool taken:{false,true}) {
             nt::vu::State routed; routed.integers[0]=5; routed.integers[1]=taken ? 5 : 6;
             const auto unchanged=routed;
@@ -346,28 +447,7 @@ int main() {
                 generated.integers[3]!=(taken ? 0 : 1) || generated.integers[4]!=(taken ? 1 : 0))
                 throw std::runtime_error("Generated VU program routing failed");
         }
-        nt::vu::State memory;
-        memory.integers[1]=2; memory.integers[2]=1;
-        memory.integers[7]=0x8001;
-        memory.data[0]={9,9,9,9}; memory.vectors[0]={1,2,3,4}; memory.vectors[3]={5,6,7,8};
-        const auto memory_before=memory;
-        if (nt_vu_memory(&memory)!=nt::vu::Result::complete || memory.integers[0]!=0 || memory.integers[2]!=1 ||
-            memory.vectors[1]!=std::array<std::uint32_t,4>{1,9,3,9} ||
-            memory.vectors[2]!=std::array<std::uint32_t,4>{1,9,3,0x3f800000} ||
-            memory.vectors[4]!=std::array<std::uint32_t,4>{5,6,7,8} ||
-            memory.data[0]!=std::array<std::uint32_t,4>{5,6,7,0x8001} || memory.data[2][0]!=1 ||
-            memory.data[1]!=std::array<std::uint32_t,4>{0x8001,0,0x8001,0} || memory.integers[5]!=0x8001 || memory.integers[6]!=8)
-            throw std::runtime_error("Native VU load/store addressing failed");
-        auto mapped_memory=memory_before; mapped_memory.integers[1]=1024;
-        const auto mapped_before=mapped_memory;
-        if (nt_vu_memory(&mapped_memory)!=nt::vu::Result::unsupported_memory || mapped_memory!=mapped_before)
-            throw std::runtime_error("Native VU mapped memory failure was not atomic");
-        auto unit1=memory_before; unit1.integers[1]=1024; unit1.data[1023]={11,12,13,14};
-        if (nt_vu_memory1(&unit1)!=nt::vu::Result::complete ||
-            unit1.data[256]!=std::array<std::uint32_t,4>{5,6,7,8} ||
-            unit1.data[0]!=std::array<std::uint32_t,4>{1,9,3,0x8001} ||
-            unit1.vectors[5]!=std::array<std::uint32_t,4>{11,12,13,14})
-            throw std::runtime_error("Native VU1 memory extent or signed offset failed");
+        test_memory_transactions();
         const std::span<const std::uint8_t> identity{nt_vu_program_image(),nt_vu_program_size()};
         nt::vu::Binding binding(generated_program,nt_vu_program_destination(),identity);
         nt::vu::State launched; launched.integers[0]=launched.integers[1]=1;
@@ -421,7 +501,7 @@ int main() {
             throw std::runtime_error("Routed VU1 artifact did not execute native code");
         {
             auto switched=binding1;
-            const auto* catalog=nt_vu_program1_artifacts();
+            const auto* catalog=nt_vu_program1_artifacts_v2();
             if (nt_vu_program1_artifact_count()!=2) throw std::runtime_error("VU catalog did not export both images");
             const std::span alternative(catalog[1].image,catalog[1].image_size);
             const std::array replacement{nt::vu::UploadView{4,alternative.subspan(32,8)}};
@@ -984,6 +1064,9 @@ int main() {
         {
             nt::vu::Program program(0,{nt_vu_mac_pipeline_blocks(),nt_vu_mac_pipeline_count()});
             nt::vu::State rolling; rolling.integers[0]=0xffff;
+            // Invalid queue slots must stay invisible across idle/active transitions.
+            rolling.pending_mac.fill(0xffff);
+            rolling.pending_product_sticky.fill(15);
             rolling.vectors[9][0]=0x3f800000; // VF10.x = 1.
             const auto first=program.run(rolling,1);
             if (first.status!=nt::vu::RunStatus::budget_exhausted || rolling.next_pair!=4 || rolling.pending_mac_mask!=15)
@@ -1054,6 +1137,25 @@ int main() {
         if (limited_graphics.submit(1,{},&load_request)!=nt::ee::Stop::unsupported_vector || sink.calls!=2 ||
             limited_graphics.state!=before_batch || limited_graphics.last_result.status!=nt::vu::RunStatus::budget_exhausted)
             throw std::runtime_error("Incomplete native launch delivered partial graphics");
+        {
+            std::array<nt::ee::NativeSubmissionStep,2> sequence;
+            sequence[0].launch=load_request;
+            sequence[1].launch=nt::ee::NativeLaunchView{2047,0,0};
+            batch_owner.state=before_batch; sink.packets.clear();
+            if (batch_owner.submit_sequence(1,sequence)!=nt::ee::Stop::unsupported_vector ||
+                batch_owner.state!=before_batch || sink.calls!=2 || !sink.packets.empty())
+                throw std::runtime_error("Later sequence failure published earlier state or packets");
+            sequence[1].launch=load_request; sink.accept=false;
+            if (batch_owner.submit_sequence(1,sequence)!=nt::ee::Stop::unsupported_vector ||
+                batch_owner.state!=before_batch || sink.calls!=3 || !sink.packets.empty())
+                throw std::runtime_error("Rejected sequence consumer committed private work");
+            sink.accept=true;
+            if (batch_owner.submit_sequence(1,sequence)!=nt::ee::Stop::budget || sink.calls!=4 || sink.packets.size()!=4 ||
+                sink.packets[0][1]!=std::array<std::uint32_t,4>{11,22,33,44} ||
+                sink.packets[1][1]!=std::array<std::uint32_t,4>{55,66,77,88} ||
+                sink.packets[2][1]!=sink.packets[1][1] || sink.packets[3][1]!=sink.packets[1][1])
+                throw std::runtime_error("Sequence ownership transfer lost immutable packet snapshots");
+        }
         if (graphics_program.run(graphics_state,10).blocks!=0 ||
             nt::vu::submit_graphics(graphics_state,{})!=nt::vu::GraphicsResult::unavailable || graphics_state!=pending_graphics)
             throw std::runtime_error("Unconsumed graphics request advanced native execution");
@@ -1118,4 +1220,9 @@ int main() {
             throw std::runtime_error("Clip threshold, signed zero or equality semantics failed");
         return 0;
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
+}
+int main() {
+    try { test_async_submission(); }
+    catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
+    return run_core_tests();
 }

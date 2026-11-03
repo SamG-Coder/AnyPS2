@@ -117,7 +117,7 @@ private:
     }
     void update_title() const {
         const auto title=L"AnyPS2 - display updates: "+std::to_wstring(frames_)+
-            L" | rendered updates/s: "+std::to_wstring(stopped_ ? 0 : fps_)+
+            L" | presentations/s: "+std::to_wstring(stopped_ ? 0 : fps_)+
             (stopped_ ? L" (execution stopped)" : L" (running)");
         SetWindowTextW(window_.handle,title.c_str());
     }

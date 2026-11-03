@@ -3,6 +3,8 @@
 #include <nt/vu_lower.hpp>
 #include <nt/vu_native.hpp>
 #include <cstddef>
+#include <bit>
+#include <map>
 #include <algorithm>
 #include <sstream>
 #include <stdexcept>
@@ -23,26 +25,38 @@ bool upper_supported(Arithmetic operation) {
 class Writer {
 public:
     std::ostringstream out;
-    bool read_only_data=false;
+    bool sparse_data=false;
     static constexpr auto data_begin=offsetof(State,data);
     static constexpr auto data_size=sizeof(State{}.data);
     static constexpr auto data_end=data_begin+data_size;
     void copy_state(bool commit) {
         const auto destination=commit ? "%output" : "%state",source=commit ? "%state" : "%output";
         out<<"  call void @llvm.memcpy.p0.p0.i64(ptr "<<destination<<", ptr "<<source<<", i64 "
-           <<(read_only_data ? data_begin : sizeof(State))<<", i1 false)\n";
-        if (read_only_data)
+           <<(sparse_data ? data_begin : sizeof(State))<<", i1 false)\n";
+        if (sparse_data)
             out<<"  call void @llvm.memcpy.p0.p0.i64(ptr "<<(commit ? "%output_tail" : "%state_tail")
                <<", ptr "<<(commit ? "%state_tail" : "%output_tail")<<", i64 "<<sizeof(State)-data_end<<", i1 false)\n";
+        if (commit) for (const auto& store:data_stores)
+            out<<"  store "<<store.type<<' '<<store.value<<", ptr "<<store.address<<", align 1\n";
     }
     std::vector<Store> pending;
+    // Compile-time SSA stores, published only after the whole block succeeds.
+    std::vector<Store> data_stores;
+    std::string load_data(const std::string& address) {
+        auto result=value("load i32, ptr "+address+", align 1");
+        for (const auto& store:data_stores) {
+            const auto aliases=value("icmp eq ptr "+address+", "+store.address);
+            result=value("select i1 "+aliases+", i32 "+store.value+", i32 "+result);
+        }
+        return result;
+    }
     std::string value(const std::string& expression) {
         const auto id="%v"+std::to_string(next_++);
         out<<"  "<<id<<" = "<<expression<<'\n'; return id;
     }
     std::string pointer(std::size_t offset) {
-        const bool original=read_only_data && offset>=data_begin && offset<data_end;
-        if (read_only_data && offset>=data_end) offset-=data_size;
+        const bool original=sparse_data && offset>=data_begin && offset<data_end;
+        if (sparse_data && offset>=data_end) offset-=data_size;
         return value(std::string("getelementptr i8, ptr ")+(original ? "%output" : "%state")+", i64 "+std::to_string(offset));
     }
     std::string load(const std::string& type,std::size_t offset) {
@@ -104,6 +118,8 @@ public:
     void advance_mac() {
         const auto mask=load("i32",offsetof(State,pending_mac_mask));
         const auto idle=value("icmp eq i32 "+mask+", 0");
+        const auto label="mac_queue"+std::to_string(next_++);
+        out<<"  br i1 "<<idle<<", label %"<<label<<"_idle, label %"<<label<<"_active\n"<<label<<"_active:\n";
         const auto previous=value("select i1 "+idle+", i32 "+load("i32",offsetof(State,mac))+
             ", i32 "+load("i32",offsetof(State,visible_mac)));
         const auto ready=value("icmp ne i32 "+value("and i32 "+mask+", 1")+", 0");
@@ -120,11 +136,20 @@ public:
         }
         pending.push_back({"i32",value("lshr i32 "+mask+", 1"),offsetof(State,pending_mac_mask)});
         commit();
+        out<<"  br label %"<<label<<"_done\n"<<label<<"_idle:\n";
+        // No queued result can become visible. Stale queue slots are not read
+        // until a producer writes them and sets the corresponding validity bit.
+        pending.push_back({"i32",load("i32",offsetof(State,mac)),offsetof(State,visible_mac)});
+        pending.push_back({"i32",load("i32",offsetof(State,status)),offsetof(State,visible_status)});
+        commit();
+        out<<"  br label %"<<label<<"_done\n"<<label<<"_done:\n";
         advance_visibility(offsetof(State,mac_read_delay));
     }
     void advance_clip() {
         const auto mask=load("i32",offsetof(State,pending_clip_mask));
         const auto idle=value("icmp eq i32 "+mask+", 0");
+        const auto label="clip_queue"+std::to_string(next_++);
+        out<<"  br i1 "<<idle<<", label %"<<label<<"_idle, label %"<<label<<"_active\n"<<label<<"_active:\n";
         const auto previous=value("select i1 "+idle+", i32 "+load("i32",offsetof(State,clip))+
             ", i32 "+load("i32",offsetof(State,visible_clip)));
         const auto ready=value("icmp ne i32 "+value("and i32 "+mask+", 1")+", 0");
@@ -133,6 +158,12 @@ public:
             pending.push_back({"i32",load("i32",offsetof(State,pending_clip)+(i+1)*4),offsetof(State,pending_clip)+i*4});
         pending.push_back({"i32",value("lshr i32 "+mask+", 1"),offsetof(State,pending_clip_mask)});
         commit();
+        out<<"  br label %"<<label<<"_done\n"<<label<<"_idle:\n";
+        // No queued result can become visible. Stale queue slots are not read
+        // until a producer writes them and sets the corresponding validity bit.
+        pending.push_back({"i32",load("i32",offsetof(State,clip)),offsetof(State,visible_clip)});
+        commit();
+        out<<"  br label %"<<label<<"_done\n"<<label<<"_done:\n";
         advance_visibility(offsetof(State,clip_read_delay));
     }
     void clip_result(const std::string& result) {
@@ -143,6 +174,10 @@ public:
     }
     void commit() {
         for (const auto& store:pending) {
+            if (sparse_data && !store.address.empty()) {
+                data_stores.push_back(store);
+                continue;
+            }
             const auto address=store.address.empty() ? pointer(store.offset) : store.address;
             out<<"  store "<<store.type<<' '<<store.value<<", ptr "<<address<<", align 1\n";
         }
@@ -188,30 +223,39 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
     Writer writer;
     // Prove memory effects from the decoded block, never from an observed run.
     // Nested-delay helpers keep the full transaction because they share state.
-    writer.read_only_data=!nested_branch && std::none_of(pairs.begin(),pairs.end(),[unit](const Pair& pair) {
-        const auto operation=decode_lower(pair,unit).operation;
-        return operation==LowerOperation::store_quad || operation==LowerOperation::store_integer;
-    });
+    std::size_t stored_lanes=0,loaded_lanes=0;
+    for (const auto& pair:pairs) {
+        const auto lower=decode_lower(pair,unit);
+        const auto lanes=std::popcount(static_cast<unsigned>(lower.mask)&15U);
+        if (lower.operation==LowerOperation::store_quad || lower.operation==LowerOperation::store_integer)
+            stored_lanes+=lanes;
+        else if (lower.operation==LowerOperation::load_quad || lower.operation==LowerOperation::load_integer)
+            loaded_lanes+=lanes;
+    }
+    // Bound generated alias comparisons; larger transactions retain the snapshot.
+    writer.sparse_data=!nested_branch && stored_lanes<=32 && stored_lanes*loaded_lanes<=512;
+    // Numeric ABI helpers operate only on integer encodings and value arguments.
+    // They cannot read guest state, host memory or the floating-point environment.
     if (declarations) writer.out<<"; AnyPS2 VU ahead-of-time native region\n"
-        <<"declare i32 @nt_ee_integer_to_scaled_scalar(i32, i32)\n"
-        <<"declare i32 @nt_ee_scaled_scalar_to_integer(i32, i32)\n"
-        <<"declare i32 @nt_ee_min_max_scalar(i32, i32, i32)\n"
-        <<"declare i64 @nt_ee_add_finite(i32, i32, i32)\n"
-        <<"declare i64 @nt_ee_multiply_finite(i32, i32)\n"
-        <<"declare i64 @nt_ee_multiply_accumulate_finite(i32, i32, i32, i32)\n"
-        <<"declare i32 @nt_ee_vector_lane_flags(i64, i32)\n"
-        <<"declare i32 @nt_ee_vector_status_flags(i32, i32)\n"
-        <<"declare i64 @nt_vu_divide_finite(i32, i32)\n"
-        <<"declare i64 @nt_vu_square_root_finite(i32)\n"
-        <<"declare i64 @nt_vu_reciprocal_square_root_finite(i32, i32)\n"
-        <<"declare i64 @nt_vu_reciprocal_length_finite(i32, i32, i32)\n"
-        <<"declare i64 @nt_vu_sine_finite(i32)\n"
-        <<"declare i64 @nt_vu_efu_square_root_finite(i32)\n"
-        <<"declare i32 @nt_vu_clip_flags(i32, i32, i32, i32)\n"
+        <<"declare i32 @nt_ee_integer_to_scaled_scalar(i32, i32) nounwind willreturn memory(none)\n"
+        <<"declare i32 @nt_ee_scaled_scalar_to_integer(i32, i32) nounwind willreturn memory(none)\n"
+        <<"declare i32 @nt_ee_min_max_scalar(i32, i32, i32) nounwind willreturn memory(none)\n"
+        <<"declare i64 @nt_ee_add_finite(i32, i32, i32) nounwind willreturn memory(none)\n"
+        <<"declare i64 @nt_ee_multiply_finite(i32, i32) nounwind willreturn memory(none)\n"
+        <<"declare i64 @nt_ee_multiply_accumulate_finite(i32, i32, i32, i32) nounwind willreturn memory(none)\n"
+        <<"declare i32 @nt_ee_vector_lane_flags(i64, i32) nounwind willreturn memory(none)\n"
+        <<"declare i32 @nt_ee_vector_status_flags(i32, i32) nounwind willreturn memory(none)\n"
+        <<"declare i64 @nt_vu_divide_finite(i32, i32) nounwind willreturn memory(none)\n"
+        <<"declare i64 @nt_vu_square_root_finite(i32) nounwind willreturn memory(none)\n"
+        <<"declare i64 @nt_vu_reciprocal_square_root_finite(i32, i32) nounwind willreturn memory(none)\n"
+        <<"declare i64 @nt_vu_reciprocal_length_finite(i32, i32, i32) nounwind willreturn memory(none)\n"
+        <<"declare i64 @nt_vu_sine_finite(i32) nounwind willreturn memory(none)\n"
+        <<"declare i64 @nt_vu_efu_square_root_finite(i32) nounwind willreturn memory(none)\n"
+        <<"declare i32 @nt_vu_clip_flags(i32, i32, i32, i32) nounwind willreturn memory(none)\n"
         <<"declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n";
     writer.out<<"define i32 @"<<symbol<<"(ptr %output) {\nentry:\n"
-        <<"  %state = alloca ["<<sizeof(State)-(writer.read_only_data ? Writer::data_size : 0)<<" x i8], align 8\n";
-    if (writer.read_only_data)
+        <<"  %state = alloca ["<<sizeof(State)-(writer.sparse_data ? Writer::data_size : 0)<<" x i8], align 8\n";
+    if (writer.sparse_data)
         writer.out<<"  %state_tail = getelementptr i8, ptr %state, i64 "<<Writer::data_begin<<"\n"
                   <<"  %output_tail = getelementptr i8, ptr %output, i64 "<<Writer::data_end<<"\n";
     writer.copy_state(false);
@@ -417,7 +461,7 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
                 for (unsigned lane=0;lane<4;++lane) if (lower.mask&(8U>>lane)) {
                     const auto pointer=writer.value("getelementptr i8, ptr "+start+", i64 "+std::to_string(lane*4));
                     if (load) {
-                        const auto value=writer.value("load i32, ptr "+pointer+", align 1");
+                        const auto value=writer.load_data(pointer);
                         if (integer) writer.integer_result(lower.result.index,writer.value("trunc i32 "+value+" to i16"));
                         else writer.vector_result(lower.result.index,lane,value);
                     } else {
@@ -590,6 +634,7 @@ static std::size_t emit_program_module(std::ostream& output,std::span<const Pair
     }
     // Build transactionally: a late unsupported block must not leave a partial module.
     std::ostringstream module;
+    std::map<unsigned,std::array<std::optional<unsigned>,2>> successors;
     for (const auto root:roots) {
         const auto found=std::find_if(pairs.begin(),pairs.end(),[&](const Pair& pair) { return pair.address==root; });
         if (found==pairs.end()) throw std::invalid_argument("Missing VU block entry");
@@ -620,11 +665,31 @@ static std::size_t emit_program_module(std::ostream& output,std::span<const Pair
             throw std::invalid_argument("VU block at pair "+std::to_string(root)+": "+error.what());
         }
         declarations=false;
+        auto& links=successors[root];
+        if (fallthrough) links[0]=(pairs.back().address+1)&(unit ? 2047U : 511U);
+        else if (!graphics && !end->end && !direct_delayed_branch(*end,*(end+1),unit)) {
+            const auto transfer=control(*end,unit);
+            links[0]=transfer.target;
+            if (transfer.branch!=Branch::jump && transfer.branch!=Branch::call &&
+                transfer.branch!=Branch::register_jump && transfer.branch!=Branch::register_call)
+                links[1]=(end->address+2)&(unit ? 2047U : 511U);
+        }
     }
-    module<<"@"<<symbol<<"_table = private constant ["<<roots.size()<<" x { i32, ptr }] [\n";
+    constexpr auto block_type="{ i32, ptr, ptr, ptr }";
+    const auto table_type="["+std::to_string(roots.size())+" x "+block_type+"]";
+    std::map<unsigned,std::size_t> indices;
+    for (const auto root:roots) indices.emplace(root,indices.size());
+    module<<"@"<<symbol<<"_table = private constant "<<table_type<<" [\n";
     std::size_t index=0;
-    for (const auto root:roots)
-        module<<"  { i32, ptr } { i32 "<<root<<", ptr @"<<symbol<<"_"<<root<<" }"<<(++index==roots.size() ? "\n" : ",\n");
+    for (const auto root:roots) {
+        module<<"  "<<block_type<<" { i32 "<<root<<", ptr @"<<symbol<<"_"<<root;
+        for (const auto target:successors.at(root)) {
+            const auto found=target ? indices.find(*target) : indices.end();
+            if (found==indices.end()) module<<", ptr null";
+            else module<<", ptr getelementptr ("<<table_type<<", ptr @"<<symbol<<"_table, i64 0, i64 "<<found->second<<")";
+        }
+        module<<" }"<<(++index==roots.size() ? "\n" : ",\n");
+    }
     module<<"]\ndefine ptr @"<<symbol<<"_blocks() {\n  ret ptr @"<<symbol<<"_table\n}\n"
         <<"define i32 @"<<symbol<<"_count() {\n  ret i32 "<<roots.size()<<"\n}\n";
     module<<"@"<<symbol<<"_identity = private constant ["<<pairs.size()*8<<" x i8] [";
@@ -655,7 +720,7 @@ void emit_catalog(std::ostream& output,std::span<const ArtifactDescription> arti
             <<", i32 "<<artifact.destination<<", ptr @"<<artifact.symbol<<"_identity, i32 "<<artifact.bytes<<" }"
             <<(i+1==artifacts.size() ? "\n" : ",\n");
     }
-    output<<"]\ndefine ptr @"<<symbol<<"_artifacts() {\n  ret ptr @"<<symbol<<"_catalog\n}\n"
+    output<<"]\ndefine ptr @"<<symbol<<"_artifacts_v2() {\n  ret ptr @"<<symbol<<"_catalog\n}\n"
         <<"define i32 @"<<symbol<<"_artifact_count() {\n  ret i32 "<<artifacts.size()<<"\n}\n";
 }
 }

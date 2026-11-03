@@ -3,6 +3,7 @@
 #include <functional>
 #include <optional>
 #include <array>
+#include <limits>
 
 namespace nt::ee {
 inline bool performance_active(std::uint32_t control,unsigned index) {
@@ -12,7 +13,8 @@ inline bool performance_active(std::uint32_t control,unsigned index) {
 }
 
 // Explicit native profiling policies, not an R5900 counter model. Elapsed-time
-// policy replaces cycle/cache profiling with clock ticks, without CPU scaling.
+// policy replaces cycle/cache profiling with host clock ticks. CP0 Count is a
+// distinct elapsed-time interface with fixed 294.912 MHz units.
 class NativePerformanceCounters {
 public:
     using Values=std::array<std::uint64_t,2>;
@@ -21,20 +23,23 @@ public:
     enum class ClockPolicy { cpu_cycles, elapsed_time };
     enum class Error { none, unavailable_event, sample_failed, regressed_sample };
     explicit NativePerformanceCounters(Sample sample,bool cache) : sample_(std::move(sample)),cache_(cache) {}
-    explicit NativePerformanceCounters(CycleSample sample,ClockPolicy policy=ClockPolicy::cpu_cycles) : sample_([sample=std::move(sample)]() -> std::optional<Values> {
+    explicit NativePerformanceCounters(CycleSample sample,ClockPolicy policy=ClockPolicy::cpu_cycles,std::uint64_t frequency=0) : sample_([sample=std::move(sample)]() -> std::optional<Values> {
         const auto value=sample(); if (!value) return {}; return Values{*value,0};
-    }),elapsed_(policy==ClockPolicy::elapsed_time) {}
+    }),elapsed_(policy==ClockPolicy::elapsed_time),frequency_(frequency) {}
     NativePerformanceCounters(const NativePerformanceCounters&)=delete;
     NativePerformanceCounters& operator=(const NativePerformanceCounters&)=delete;
     void attach(Memory& memory) { memory.metrics={this,request}; }
     Error error() const { return error_; }
     std::uint64_t samples() const { return samples_; }
+    std::uint64_t clock_reads() const { return clock_reads_; }
     std::optional<Values> last_sample() const { return previous_; }
 private:
     Sample sample_;
     std::optional<Values> previous_;
     bool cache_=false;
     bool elapsed_=false;
+    static constexpr std::uint64_t count_frequency=294912000;
+    std::uint64_t frequency_=0,clock_reads_=0;
     std::uint8_t unavailable_=0;
     Error error_=Error::none;
     std::uint64_t samples_=0;
@@ -53,7 +58,8 @@ private:
         auto unknown=self.unavailable_;
         const auto next_control=op==PerformanceOperation::write_control ? value : state.control;
         const bool clock_read=op==PerformanceOperation::read_clock;
-        if (clock_read && !self.elapsed_) {
+        if (clock_read && (!self.elapsed_ || !self.frequency_ ||
+            self.frequency_>std::numeric_limits<std::uint64_t>::max()/count_frequency)) {
             self.error_=Error::unavailable_event; return {Stop::unsupported_system};
         }
         bool needs_sample=clock_read;
@@ -77,7 +83,15 @@ private:
         }
         IoRead result{Stop::budget};
         switch (op) {
-        case PerformanceOperation::read_clock: result.value=static_cast<std::uint32_t>((*now)[0]); break;
+        case PerformanceOperation::read_clock: {
+            // Convert absolute monotonic time, so sub-tick remainders are not
+            // discarded repeatedly. Unsigned narrowing preserves Count wrap.
+            const auto sample=(*now)[0];
+            result.value=static_cast<std::uint32_t>((sample/self.frequency_)*count_frequency+
+                ((sample%self.frequency_)*count_frequency)/self.frequency_);
+            ++self.clock_reads_;
+            break;
+        }
         case PerformanceOperation::read_control: result.value=state.control; break;
         case PerformanceOperation::write_control: state.control=value; break;
         case PerformanceOperation::write_counter:

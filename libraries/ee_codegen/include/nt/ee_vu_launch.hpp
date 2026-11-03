@@ -3,6 +3,7 @@
 #include <nt/vu_binding.hpp>
 #include <nt/vu_graphics.hpp>
 #include <chrono>
+#include <future>
 
 namespace nt::ee {
 // Transactional native launch owner. VU0 shares completed vector state with EE
@@ -17,7 +18,10 @@ public:
         if (!block_budget || !sequence_budget || ((binding.unit()==0)!=bool(shared)))
             throw std::invalid_argument("VU0 requires shared EE storage; VU1 requires private storage");
     }
-    struct Profile { std::uint64_t compiled_ns=0,blocks=0; };
+    struct Profile {
+        std::uint64_t compiled_ns=0,blocks=0,jobs=0,job_ns=0,submit_ns=0;
+        std::uint64_t longest_job_ns=0,longest_submit_ns=0;
+    };
     Profile* profile=nullptr;
     unsigned unit() const { return binding_.unit(); }
     vu::State state;
@@ -27,10 +31,42 @@ public:
     // Failure-only diagnostic snapshot; never used to resume execution.
     std::unique_ptr<vu::State> failed_state;
     vu::GraphicsBatchConsumer graphics;
+    void enable_async() {
+        if (unit()!=1 || shared_) throw std::invalid_argument("Asynchronous launches require private VU1 state");
+        asynchronous_=true;
+    }
+    bool pending() const { return busy_; }
+    Stop poll() {
+        if (!busy_) return job_status_;
+        if (job_.wait_for(std::chrono::seconds(0))!=std::future_status::ready) return Stop::budget;
+        auto result=job_.get();
+        busy_=false;
+        last_result=result.last_result; last_entry=result.entry; last_next_pair=result.next;
+        last_sequence=result.sequence; failed_state=std::move(result.failed);
+        if (profile) {
+            profile->compiled_ns+=result.profile.compiled_ns; profile->blocks+=result.profile.blocks;
+            ++profile->jobs; profile->job_ns+=result.profile.job_ns;
+            profile->longest_job_ns=std::max(profile->longest_job_ns,result.profile.job_ns);
+        }
+        job_status_=result.status;
+        if (job_status_!=Stop::budget) return job_status_;
+        const auto began=profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        const auto accepted=accept_packets(result.output);
+        if (profile) {
+            const auto elapsed=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-began).count());
+            profile->submit_ns+=elapsed; profile->longest_submit_ns=std::max(profile->longest_submit_ns,elapsed);
+        }
+        if (!accepted) return job_status_=Stop::unsupported_vector;
+        binding_=std::move(result.binding); state=std::move(result.state); completed_=result.completed;
+        return Stop::budget;
+    }
     Stop submit_sequence(unsigned unit,std::span<const NativeSubmissionStep> steps) {
         last_sequence={};
         if (unit!=binding_.unit() || steps.empty() || steps.size()>NativePacketBatch::maximum_descriptors) return Stop::unsupported_vector;
         if (shared_ && shared_->active) return Stop::vector_pending;
+        if (busy_) return Stop::vector_pending;
+        if (job_status_!=Stop::budget) return job_status_;
+        if (asynchronous_) return begin_sequence(steps);
         // Reuse the ordinary compiled launch path against private candidate
         // state. No graphics or shared EE state is published until every step
         // succeeds, including continuation and code-identity validation.
@@ -40,15 +76,8 @@ public:
         NativeVuLaunch candidate(candidate_binding,block_budget_,shared_ ? &candidate_shared : nullptr);
         candidate.profile=profile;
         candidate.state=state; candidate.completed_=completed_;
-        struct Output { std::vector<graphics::Packet> packets; std::size_t quadwords=0; } output;
-        candidate.graphics={&output,[](void* raw,std::span<const graphics::Packet> packets) {
-            auto& out=*static_cast<Output*>(raw);
-            for (const auto& packet:packets) {
-                if (packet.size()>NativePacketBatch::maximum_bytes/16-out.quadwords) return false;
-                out.quadwords+=packet.size(); out.packets.push_back(packet);
-            }
-            return true;
-        }};
+        SequenceOutput output;
+        candidate.sequence_output_=&output;
         for (const auto& step:steps) {
             candidate.block_budget_=std::min(block_budget_,sequence_budget_-last_sequence.blocks);
             if (step.launch && !candidate.block_budget_) {
@@ -65,8 +94,7 @@ public:
             }
             if (result!=Stop::budget) { failed_state=std::move(candidate.failed_state); return result; }
         }
-        if (!output.packets.empty() && (!graphics.submit || !graphics.submit(graphics.context,output.packets)))
-            return Stop::unsupported_vector;
+        if (!accept_packets(output)) return Stop::unsupported_vector;
         binding_=std::move(candidate_binding); state=std::move(candidate.state); completed_=candidate.completed_;
         if (shared_) *shared_=candidate_shared;
         return Stop::budget;
@@ -74,6 +102,11 @@ public:
     Stop submit_uploaded(unsigned unit,std::span<const NativeUploadView> uploads,
                          std::span<const NativeVectorDataView> data,const NativeLaunchView* request,
                          std::span<const graphics::Packet> prefix={}) {
+        if (asynchronous_) {
+            NativeSubmissionStep step{{uploads.begin(),uploads.end()},{data.begin(),data.end()},{prefix.begin(),prefix.end()},{}};
+            if (request) step.launch=*request;
+            return submit_sequence(unit,std::span(&step,1));
+        }
         std::vector<vu::UploadView> views;
         views.reserve(uploads.size());
         for (const auto& upload:uploads) views.push_back({upload.destination,upload.bytes});
@@ -85,10 +118,15 @@ public:
     }
     Stop submit(unsigned unit,std::span<const NativeVectorDataView> data,const NativeLaunchView* request,
                 std::span<const graphics::Packet> prefix={}) {
+        if (asynchronous_) return submit_uploaded(unit,{},data,request,prefix);
         if (unit!=binding_.unit()) return Stop::unsupported_vector;
         if (shared_ && shared_->active) return Stop::vector_pending;
         if (request && request->continuation && !completed_) return Stop::unsupported_vector;
-        auto next=state;
+        // A sequence already owns private state and publishes only after every
+        // step succeeds. Avoid a second state transaction for each nested launch.
+        std::optional<vu::State> transaction;
+        if (!sequence_output_) transaction.emplace(state);
+        auto& next=transaction ? *transaction : state;
         for (const auto& upload:data) {
             if (!write_vector_data(std::span(next.data).first(unit ? 1024 : 256),upload)) return Stop::invalid_state;
         }
@@ -125,7 +163,7 @@ public:
             last_next_pair=next.next_pair;
             std::uint64_t blocks=last_result.blocks;
             while (last_result.status==vu::RunStatus::graphics_pending) {
-                if (!graphics.submit) return Stop::unsupported_vector;
+                if (!sequence_output_ && !graphics.submit) return Stop::unsupported_vector;
                 vu::GraphicsPacket packet;
                 try { packet=graphics::collect_packet(next.data,next.graphics_address); }
                 catch (const std::invalid_argument&) { return Stop::unsupported_vector; }
@@ -143,12 +181,21 @@ public:
             }
         }
         if (!packets.empty()) {
-            if (!graphics.submit || !graphics.submit(graphics.context,packets)) {
+            bool accepted=true;
+            if (sequence_output_) {
+                auto& output=*sequence_output_;
+                if (quadwords>NativePacketBatch::maximum_bytes/16-output.quadwords) accepted=false;
+                else {
+                    output.quadwords+=quadwords;
+                    for (auto& packet:packets) output.packets.push_back(std::move(packet));
+                }
+            } else accepted=graphics.submit && graphics.submit(graphics.context,packets);
+            if (!accepted) {
                 last_result.status=vu::RunStatus::graphics_pending;
                 return Stop::unsupported_vector;
             }
         }
-        state=std::move(next);
+        if (transaction) state=std::move(*transaction);
         if (request) completed_=true;
         if (request && shared_) {
             shared_->values=state.vectors; shared_->integers=state.integers;
@@ -160,6 +207,8 @@ public:
     }
     void connect(NativePacketSetup& packets) {
         packets.launch_context=this;
+        packets.sequence_pending=[](void* raw,unsigned) { return static_cast<NativeVuLaunch*>(raw)->pending(); };
+        packets.poll_sequence=[](void* raw,unsigned) { return static_cast<NativeVuLaunch*>(raw)->poll(); };
         packets.submit_sequence=[](void* raw,unsigned unit,std::span<const NativeSubmissionStep> steps) {
             return static_cast<NativeVuLaunch*>(raw)->submit_sequence(unit,steps);
         };
@@ -188,9 +237,82 @@ public:
     }
     void connect_data(Memory& memory) {
         memory.vector_data[unit()]={reinterpret_cast<std::uint8_t*>(state.data.data()),
-            unit() ? 16384U : 4096U,shared_ ? &shared_->active : nullptr};
+            unit() ? 16384U : 4096U,shared_ ? &shared_->active : &busy_};
     }
 private:
+    struct SequenceOutput { std::vector<graphics::Packet> packets; std::size_t quadwords=0; };
+    bool accept_packets(SequenceOutput& output) {
+        if (output.packets.empty()) return true;
+        if (!sequence_output_) return graphics.submit && graphics.submit(graphics.context,output.packets);
+        if (output.quadwords>NativePacketBatch::maximum_bytes/16-sequence_output_->quadwords) return false;
+        sequence_output_->quadwords+=output.quadwords;
+        for (auto& packet:output.packets) sequence_output_->packets.push_back(std::move(packet));
+        return true;
+    }
+    struct OwnedStep {
+        std::vector<std::vector<std::uint8_t>> uploads;
+        std::vector<std::vector<NativeVectorWrite>> writes;
+        NativeSubmissionStep view;
+        explicit OwnedStep(const NativeSubmissionStep& source) {
+            view.launch=source.launch; view.drawing=source.drawing;
+            uploads.reserve(source.uploads.size()); view.uploads.reserve(source.uploads.size());
+            for (const auto& upload:source.uploads) {
+                uploads.emplace_back(upload.bytes.begin(),upload.bytes.end());
+                view.uploads.push_back({upload.destination,uploads.back()});
+            }
+            writes.reserve(source.data.size()); view.data.reserve(source.data.size());
+            for (const auto& data:source.data) {
+                if (!data.planned.empty()) writes.emplace_back(data.planned.begin(),data.planned.end());
+                else {
+                    const auto plan=plan_vector_data(1024,data);
+                    if (!plan) throw std::invalid_argument("Invalid native vector job input");
+                    writes.push_back(plan->writes);
+                }
+                NativeVectorDataView owned{}; owned.planned=writes.back();
+                view.data.push_back(owned);
+            }
+        }
+    };
+    struct JobResult {
+        vu::Binding binding;
+        vu::State state;
+        SequenceOutput output;
+        Profile profile;
+        SequenceWork sequence;
+        vu::RunResult last_result;
+        unsigned entry,next;
+        bool completed;
+        Stop status;
+        std::unique_ptr<vu::State> failed;
+    };
+    Stop begin_sequence(std::span<const NativeSubmissionStep> steps) {
+        std::vector<OwnedStep> owned;
+        owned.reserve(steps.size());
+        try { for (const auto& step:steps) owned.emplace_back(step); }
+        catch (const std::invalid_argument&) { return Stop::invalid_state; }
+        // The worker sees only owned input, immutable compiled code and private
+        // candidate state. Vulkan and guest-visible publication stay on the owner.
+        job_=std::async(std::launch::async,[owned=std::move(owned),binding=binding_,initial=state,
+            completed=completed_,block_budget=block_budget_,sequence_budget=sequence_budget_,profiling=profile!=nullptr]() mutable {
+            const auto began=profiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+            NativeVuLaunch worker(binding,block_budget,nullptr,sequence_budget);
+            worker.state=std::move(initial); worker.completed_=completed;
+            SequenceOutput output; Profile profile;
+            worker.sequence_output_=&output; worker.profile=profiling ? &profile : nullptr;
+            std::vector<NativeSubmissionStep> views; views.reserve(owned.size());
+            for (const auto& step:owned) views.push_back(step.view);
+            const auto status=worker.submit_sequence(1,views);
+            if (profiling) profile.job_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-began).count();
+            return JobResult{std::move(binding),std::move(worker.state),std::move(output),profile,worker.last_sequence,
+                worker.last_result,worker.last_entry,worker.last_next_pair,worker.completed_,status,std::move(worker.failed_state)};
+        });
+        busy_=true;
+        return Stop::budget;
+    }
+    SequenceOutput* sequence_output_=nullptr;
+    bool asynchronous_=false,busy_=false;
+    Stop job_status_=Stop::budget;
+    std::future<JobResult> job_;
     vu::Binding& binding_;
     std::uint64_t block_budget_;
     std::uint64_t sequence_budget_;
@@ -208,6 +330,14 @@ public:
     }
     void connect(NativePacketSetup& packets) {
         packets.launch_context=this;
+        packets.sequence_pending=[](void* raw,unsigned unit) {
+            auto& self=*static_cast<NativeVuSubmissions*>(raw);
+            return unit<self.owners_.size() && self.owners_[unit] && self.owners_[unit]->pending();
+        };
+        packets.poll_sequence=[](void* raw,unsigned unit) {
+            auto& self=*static_cast<NativeVuSubmissions*>(raw);
+            return unit<self.owners_.size() && self.owners_[unit] ? self.owners_[unit]->poll() : Stop::unsupported_vector;
+        };
         packets.submit_sequence=[](void* raw,unsigned unit,std::span<const NativeSubmissionStep> steps) {
             auto& self=*static_cast<NativeVuSubmissions*>(raw);
             if (unit>=self.owners_.size() || !self.owners_[unit]) return Stop::unsupported_vector;

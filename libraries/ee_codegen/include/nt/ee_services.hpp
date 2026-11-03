@@ -23,6 +23,8 @@ namespace nt::ee {
 struct MainThread { runtime::InitialStack stack; std::uint32_t global_pointer,root; };
 struct ExecutionProfile {
     std::uint64_t entry_ns=0,service_ns=0,idle_ns=0,entries=0,operations=0;
+    std::uint64_t longest_entry_ns=0;
+    std::uint64_t display_waits=0,job_waits=0,display_sleep_ns=0,job_sleep_ns=0;
 };
 class StartupServices {
 public:
@@ -31,6 +33,8 @@ public:
     // Owner pumps external native completions. A bounded idle wait preserves
     // resumable state and never consumes the compiled operation budget.
     std::function<Stop()> idle_pump;
+    std::function<Stop()> poll_native_jobs;
+    std::function<bool()> native_jobs_pending;
     // Validate and activate an AOT image after arguments/ownership are checked.
     // Failure must preserve image identity and all application state.
     std::function<Stop(Memory&,std::uint32_t)> publish_image;
@@ -258,6 +262,10 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
     std::optional<std::chrono::steady_clock::time_point> idle_since;
     while (budget) {
         if (services.stop_requested && services.stop_requested()) return Stop::host_stop;
+        if (services.poll_native_jobs) {
+            const auto completed=services.poll_native_jobs();
+            if (completed!=Stop::budget) return completed;
+        }
         if (memory.sif_outbound) {
             const auto transfer=memory.sif_outbound->pump(memory);
             if (transfer!=Stop::budget) return transfer;
@@ -291,7 +299,8 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
             }
             if (std::chrono::steady_clock::now()-*idle_since>=services.idle_timeout) return Stop::thread_wait;
             const auto idle_start=services.profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            const auto deadline=memory.graphics ? memory.graphics->event_wait_ns() : std::nullopt;
+            native_service_wait(deadline.value_or(1000000));
             if (services.profile) services.profile->idle_ns+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-idle_start).count();
             continue;
         }
@@ -304,16 +313,26 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
         const auto result=entry(&state,&memory,slice);
         const auto retired=state.executed-before;
         if (services.profile) {
-            services.profile->entry_ns+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-entry_start).count();
+            const auto elapsed=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-entry_start).count());
+            services.profile->entry_ns+=elapsed;
+            services.profile->longest_entry_ns=std::max(services.profile->longest_entry_ns,elapsed);
             ++services.profile->entries; services.profile->operations+=retired;
         }
         if (retired>slice) return Stop::invalid_state;
         budget-=retired;
-        if (result==Stop::display_wait && budget) {
-            if (!memory.graphics) return Stop::invalid_state;
+        const bool job_wait=result==Stop::native_wait || (result==Stop::vector_pending && services.native_jobs_pending && services.native_jobs_pending());
+        if ((result==Stop::display_wait || job_wait) && budget) {
+            if ((!job_wait && !memory.graphics) || (job_wait && (!services.poll_native_jobs || !services.native_jobs_pending))) return Stop::invalid_state;
             const auto waiting_since=std::chrono::steady_clock::now();
+            if (services.profile) {
+                if (job_wait) ++services.profile->job_waits; else ++services.profile->display_waits;
+            }
             for (;;) {
                 if (services.stop_requested && services.stop_requested()) return Stop::host_stop;
+                if (services.poll_native_jobs) {
+                    const auto completed=services.poll_native_jobs();
+                    if (completed!=Stop::budget) return completed;
+                }
                 if (services.idle_pump) {
                     const auto pumped=services.idle_pump();
                     if (pumped!=Stop::budget) return pumped;
@@ -325,15 +344,23 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
                 if (memory.io.poll) memory.io.poll(memory.io.context);
                 if (memory.completions) memory.completions->publish(memory);
                 if (memory.interrupts) memory.interrupts->publish(memory);
-                if ((state.cop0_status&0x10007U)==0x10001U && (state.cop0_status&memory.pending_interrupts&0xff00U)) break;
-                const auto delay=memory.graphics->display_wait_ns();
+                if (!state.delay_slot && (state.cop0_status&0x10007U)==0x10001U && (state.cop0_status&memory.pending_interrupts&0xff00U)) break;
+                auto delay=job_wait ? std::optional<std::uint64_t>(services.native_jobs_pending() ? 100000U : 0U) : memory.graphics->display_wait_ns();
                 if (!delay || !*delay) break;
-                if (std::chrono::steady_clock::now()-waiting_since>=services.idle_timeout) return Stop::display_wait;
+                if (memory.graphics) {
+                    const auto event=memory.graphics->event_wait_ns();
+                    if (event) *delay=std::min(*delay,*event);
+                }
+                if (std::chrono::steady_clock::now()-waiting_since>=services.idle_timeout) return job_wait ? Stop::native_wait : Stop::display_wait;
                 // Bound host sleep by the next display deadline and the existing
                 // native service-pump cadence so input, timers and IOP work run.
                 const auto start=std::chrono::steady_clock::now();
                 native_service_wait(*delay);
-                if (services.profile) services.profile->idle_ns+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count();
+                if (services.profile) {
+                    const auto slept=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count();
+                    services.profile->idle_ns+=slept;
+                    if (job_wait) services.profile->job_sleep_ns+=slept; else services.profile->display_sleep_ns+=slept;
+                }
             }
             continue;
         }

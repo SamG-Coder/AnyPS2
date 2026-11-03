@@ -5,6 +5,7 @@
 #include <fstream>
 #include <span>
 #include <stdexcept>
+#include <chrono>
 
 namespace probe {
 // A bounded tail avoids changing startup timing with synchronous per-call I/O.
@@ -14,32 +15,38 @@ public:
     struct Record {
         std::uint32_t pc,number,thread,status,pending,completion;
         std::array<std::uint32_t,4> arguments;
+        std::uint32_t return_address=0;
+        std::uint64_t nanoseconds=0;
     };
-    void observe(const Record& record) { records_[count_++%records_.size()]=record; }
-    struct Delivery { bool dma; unsigned line; std::uint32_t pc,control; };
-    void deliver(const Delivery& delivery) { deliveries_[delivered_++%deliveries_.size()]=delivery; }
+    void observe(Record record) { record.nanoseconds=elapsed(); records_[count_++%records_.size()]=record; }
+    struct Delivery { bool dma; unsigned line; std::uint32_t pc,control; std::uint64_t nanoseconds=0; };
+    void deliver(Delivery delivery) { delivery.nanoseconds=elapsed(); deliveries_[delivered_++%deliveries_.size()]=delivery; }
     void save(const std::filesystem::path& directory) const {
         std::ofstream output(directory/"services.tsv");
         output.exceptions(std::ios::failbit|std::ios::badbit);
-        output<<"index\tpc\tsyscall\tthread\tstatus\tpending\tcompletion\ta0\ta1\ta2\ta3\n";
+        output<<"index\tpc\tsyscall\tthread\tstatus\tpending\tcompletion\ta0\ta1\ta2\ta3\treturn_address\tnanoseconds\n";
         const auto start=count_>records_.size() ? count_-records_.size() : 0;
         for (auto i=start;i<count_;++i) {
             const auto& r=records_[i%records_.size()];
             output<<std::dec<<i<<std::hex<<'\t'<<r.pc<<'\t'<<r.number<<'\t'<<r.thread
                   <<'\t'<<r.status<<'\t'<<r.pending<<'\t'<<r.completion;
             for (const auto argument:r.arguments) output<<'\t'<<argument;
-            output<<'\n';
+            output<<'\t'<<r.return_address<<std::dec<<'\t'<<r.nanoseconds<<'\n';
         }
         std::ofstream interrupts(directory/"deliveries.tsv");
         interrupts.exceptions(std::ios::failbit|std::ios::badbit);
-        interrupts<<"index\tdma\tline\tpc\tcontrol\n";
+        interrupts<<"index\tdma\tline\tpc\tcontrol\tnanoseconds\n";
         const auto begin=delivered_>deliveries_.size() ? delivered_-deliveries_.size() : 0;
         for (auto i=begin;i<delivered_;++i) {
             const auto& d=deliveries_[i%deliveries_.size()];
-            interrupts<<std::dec<<i<<'\t'<<d.dma<<'\t'<<d.line<<std::hex<<'\t'<<d.pc<<'\t'<<d.control<<'\n';
+            interrupts<<std::dec<<i<<'\t'<<d.dma<<'\t'<<d.line<<std::hex<<'\t'<<d.pc<<'\t'<<d.control<<std::dec<<'\t'<<d.nanoseconds<<'\n';
         }
     }
 private:
+    const std::chrono::steady_clock::time_point epoch_=std::chrono::steady_clock::now();
+    std::uint64_t elapsed() const {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-epoch_).count();
+    }
     std::vector<Record> records_=std::vector<Record>(4096);
     std::uint64_t count_=0;
     std::vector<Delivery> deliveries_=std::vector<Delivery>(4096);

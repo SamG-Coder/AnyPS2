@@ -14,12 +14,22 @@ class NativePlatform {
 public:
     explicit NativePlatform(NativeTimers::Clock clock=nullptr) : graphics(clock),timers(clock) {
         timers.connect_events(); packet_submission.consumer={this,consume_packet,packet_pending,consume_packet_origins};
+        packet_submission.consumer.working=[](void* raw) { return static_cast<NativePlatform*>(raw)->packet_setup.working(); };
         // Application startup owns a usable native submission queue. Explicit
         // guest suspension still gates it; completion requires real consumption.
         packet_submission.policy.enable_native_queue();
     }
     NativePlatform(const NativePlatform&)=delete;
     NativePlatform& operator=(const NativePlatform&)=delete;
+    Stop poll_submissions() {
+        for (unsigned channel=0;channel<2;++channel) {
+            const bool pending=packet_setup.pending(channel);
+            const auto result=packet_setup.poll(channel,vector_owner.storage.active);
+            if (result!=Stop::budget) return result;
+            if (pending && !packet_setup.pending(channel) && memory_) packet_submission.complete(*memory_,channel);
+        }
+        return Stop::budget;
+    }
     static runtime::State initial_state(std::uint32_t entry) {
         runtime::State state; state.pc=entry;
         // Native application context: INTC/DMA classes and global delivery are
@@ -84,7 +94,8 @@ private:
     }
     static Stop write64(void* context,std::uint32_t address,std::uint64_t value) {
         if (address<0x12000000 || address>=0x12002000) return Stop::memory_fault;
-        return static_cast<NativePlatform*>(context)->graphics.write(address,value);
+        auto& self=*static_cast<NativePlatform*>(context);
+        return self.packet_setup.working() ? Stop::native_wait : self.graphics.write(address,value);
     }
     static bool event_address(std::uint32_t address) { return address==0x1000f000 || address==0x1000f010; }
     static IoRead read(void* context,std::uint32_t address) {
@@ -112,7 +123,7 @@ private:
         auto& self=*static_cast<NativePlatform*>(context);
         if (address==0x1000f180)
             return self.debug_byte ? self.debug_byte(self.debug_context,static_cast<std::uint8_t>(value)) : Stop::unsupported_system;
-        if (NativeGraphics::maps(address)) return self.graphics.write(address,value);
+        if (NativeGraphics::maps(address)) return self.packet_setup.working() ? Stop::native_wait : self.graphics.write(address,value);
         if (NativePacketSetup::maps(address)) {
             const auto result=self.packet_setup.write(address,value);
             if (result!=Stop::budget || (address!=0x10003810 && address!=0x10003c10)) return result;

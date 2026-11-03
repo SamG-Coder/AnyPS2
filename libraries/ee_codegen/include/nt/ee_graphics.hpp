@@ -13,6 +13,7 @@ public:
     struct Profile {
         std::uint64_t status_reads=0,finish_not_ready=0,vsync_not_ready=0,buffer_changes=0;
         std::uint64_t vsync_clear_to_observe_ns=0,vsync_observations=0;
+        std::uint64_t vsync_deadlines=0,vsync_coalesced=0,vsync_acknowledged=0,scanout_missed=0;
     };
     Profile* profile=nullptr;
     explicit NativeGraphics(NativeClock clock=nullptr) : clock_(clock ? clock : native_now) {}
@@ -103,7 +104,9 @@ public:
                     return Stop::budget;
                 }
             }
-            advance(); flags_&=~static_cast<std::uint32_t>(value&31);
+            advance();
+            if (profile && (value&8) && (flags_&8)) ++profile->vsync_acknowledged;
+            flags_&=~static_cast<std::uint32_t>(value&31);
             if (profile && (value&8)) vsync_profile_start_=clock_();
             return Stop::budget;
         }
@@ -117,6 +120,24 @@ public:
     std::uint32_t poll() { advance(); const auto result=events_; events_=0; return result; }
     std::uint64_t resets() const { return resets_; }
     bool edge_overflow() const { return edge_lost_; }
+    // The scheduler must wake for VBLANK start as well as GS sync. Waiting a
+    // whole service interval can cross both distinct edges before a callback
+    // runs. A deadline already passed requests an immediate service poll.
+    std::optional<std::uint64_t> event_wait_ns() const {
+        if (!mode_) return {};
+        const std::uint64_t period=mode_->standard==2 ? 525 : 625;
+        const std::uint64_t blank=mode_->standard==2 ? 480 : 576;
+        const std::uint64_t sync=mode_->standard==2 ? 487 : 582;
+        const std::uint64_t numerator=mode_->standard==2 ? 63 : 1;
+        const std::uint64_t denominator=mode_->standard==2 ? 2002000 : 32000;
+        const auto base=(ticks_/period)*period;
+        const auto phase=ticks_%period;
+        const auto target=base+(phase<blank ? blank : phase<sync ? sync : period);
+        const auto deadline=epoch_+(target/numerator)*denominator+
+            ((target%numerator)*denominator+numerator-1)/numerator;
+        const auto now=clock_();
+        return deadline>now ? deadline-now : 0;
+    }
     // Time remaining to the real native display deadline. This does not set a
     // completion bit early, acknowledge it, or advance time by retired operations.
     // Missing configuration leaves the original compiled poll intact.
@@ -183,14 +204,23 @@ private:
         } else delivered_ticks_=ticks;
         if (ticks==ticks_) return;
         if (ticks/2>ticks_/2) event(4);
-        const bool scanout=edges(ticks,period,blank)>edges(ticks_,period,blank);
+        const auto scanouts=edges(ticks,period,blank)-edges(ticks_,period,blank);
+        const bool scanout=scanouts!=0;
+        if (profile && scanouts>1) profile->scanout_missed+=scanouts-1;
         if (scanout) {
             events_|=1U<<2;
             // The completed field is still current at VBLANK start; FIELD
             // toggles at the later GS sync edge (zero denotes the even field).
             scanout_odd_=((edges(ticks,period,blank)-1)&1)!=0;
         }
-        if (edges(ticks,period,sync)>edges(ticks_,period,sync)) event(8);
+        const auto syncs=edges(ticks,period,sync)-edges(ticks_,period,sync);
+        if (syncs) {
+            if (profile) {
+                profile->vsync_deadlines+=syncs;
+                profile->vsync_coalesced+=syncs-((flags_&8) ? 0U : 1U);
+            }
+            event(8);
+        }
         field_=(edges(ticks,period,sync)&1) ? 0x2000 : 0;
         if (ticks/period>ticks_/period) events_|=1U<<3;
         ticks_=ticks;

@@ -32,6 +32,36 @@ int main() {
     try {
         run_scratchpad_tests();
         {
+            struct Job { bool ready=false; unsigned attempts=0,polls=0,writes=0; } job;
+            nt::ee::Memory memory; memory.io.context=&job;
+            memory.io.write64=[](void* raw,std::uint32_t,std::uint64_t value) {
+                auto& job=*static_cast<Job*>(raw); ++job.attempts;
+                if (!job.ready) return nt::ee::Stop::native_wait;
+                check(value==123); ++job.writes; return nt::ee::Stop::budget;
+            };
+            nt::runtime::State state; state.pc=0x4f0020; state.set(4,0x12000080); state.set(8,123);
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap);
+            services.native_jobs_pending=[&] { return !job.ready; };
+            services.poll_native_jobs=[&] {
+                if (job.attempts && !job.ready) {
+                    check(!state.executed && state.pc==0x4f0020);
+                    if (++job.polls==3) job.ready=true;
+                }
+                return nt::ee::Stop::budget;
+            };
+            check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::budget &&
+                state.executed==1 && job.attempts==2 && job.writes==1 && job.polls==3);
+            job={}; state.pc=0x4f0020; state.executed=0;
+            services.poll_native_jobs=[&] { return job.attempts ? nt::ee::Stop::unsupported_vector : nt::ee::Stop::budget; };
+            check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::unsupported_vector &&
+                !state.executed && !job.writes && state.pc==0x4f0020);
+            job={}; services.poll_native_jobs=[] { return nt::ee::Stop::budget; };
+            services.idle_pump=[&] { memory.pending_interrupts=0x400; return nt::ee::Stop::budget; };
+            state.cop0_status=0x10401;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::interrupt_pending &&
+                !state.executed && !job.writes);
+        }
+        {
             struct Device { unsigned calls=0; std::uint32_t address=0; std::uint64_t value=0; } device;
             nt::ee::Memory memory; memory.io.context=&device;
             memory.io.read32=[](void* p,std::uint32_t at) { auto& d=*static_cast<Device*>(p); ++d.calls; d.address=at; return nt::ee::IoRead{nt::ee::Stop::budget,0x87654321}; };
@@ -166,6 +196,26 @@ int main() {
             check(platform.graphics.display_wait_ns()==582ULL*32000);
             timer_now=582ULL*32000;
             check(platform.graphics.display_wait_ns()==0);
+            // A semaphore wait must wake at VBLANK, not skip to the later GS
+            // sync or sleep an extra full field. Both standards share this rule.
+            for (unsigned standard:{2U,3U}) {
+                timer_now=0; platform.graphics.configure(1,standard,0);
+                const auto edge=[&](std::uint64_t halfline) {
+                    return standard==2 ? (halfline*2002000+62)/63 : halfline*32000;
+                };
+                const auto blank=edge(standard==2 ? 480 : 576);
+                const auto sync_edge=edge(standard==2 ? 487 : 582);
+                const auto end=edge(standard==2 ? 525 : 625);
+                check(platform.graphics.event_wait_ns()==blank);
+                timer_now=blank-1; check(platform.graphics.event_wait_ns()==1);
+                timer_now=blank+1; check(platform.graphics.event_wait_ns()==0);
+                check(platform.graphics.poll()&(1U<<2));
+                check(platform.graphics.event_wait_ns()==sync_edge-timer_now);
+                timer_now=sync_edge; platform.graphics.poll();
+                check(platform.graphics.event_wait_ns()==end-sync_edge);
+                timer_now=end; check(platform.graphics.poll()&(1U<<3));
+                check(*platform.graphics.event_wait_ns()>0);
+            }
         }
         for (const bool taken:{false,true}) {
             nt::runtime::State state; state.pc=0x4afffc; state.set(8,!taken); state.set(9,41);
@@ -490,6 +540,26 @@ int main() {
             check(nt_ee_generated_run(&state,&memory,7)==nt::ee::Stop::unsupported_system && state.executed==0);
         }
         {
+            // Compile and execute Count reads against a real-frequency clock
+            // contract, including fractions, 32-bit wrap and absent calibration.
+            std::uint64_t ticks=0;
+            nt::ee::NativePerformanceCounters clock([&] { return std::optional(ticks); },
+                nt::ee::NativePerformanceCounters::ClockPolicy::elapsed_time,10000000);
+            nt::ee::Memory timed; clock.attach(timed);
+            constexpr std::pair<std::uint64_t,std::uint32_t> samples[]{
+                {0,0},{1,29},{2,58},{9999999,294911970},{10000000,294912000},
+                {150000000,128712704},{1000000000000000000,536870912}};
+            for (const auto [sample,expected]:samples) {
+                ticks=sample; nt::runtime::State state; state.pc=0x410028;
+                check(nt_ee_generated_run(&state,&timed,1)==nt::ee::Stop::budget &&
+                    static_cast<std::uint32_t>(state.gpr[8].lo)==expected);
+            }
+            nt::ee::NativePerformanceCounters uncalibrated([&] { return std::optional(ticks); },
+                nt::ee::NativePerformanceCounters::ClockPolicy::elapsed_time);
+            uncalibrated.attach(timed); nt::runtime::State state; state.pc=0x410028;
+            check(nt_ee_generated_run(&state,&timed,1)==nt::ee::Stop::unsupported_system);
+        }
+        {
             std::vector<std::uint8_t> ram(0x10000);
             nt::ee::Memory memory{ram.data(),ram.size()}; nt::runtime::State state;
             nt::ee::NativeInterrupts interrupts; memory.interrupts=&interrupts;
@@ -593,7 +663,7 @@ int main() {
             sample=1000; available=true;
             nt::ee::NativePerformanceCounters clock([&]() -> std::optional<std::uint64_t> {
                 return available ? std::optional(sample) : std::nullopt;
-            },nt::ee::NativePerformanceCounters::ClockPolicy::elapsed_time);
+            },nt::ee::NativePerformanceCounters::ClockPolicy::elapsed_time,294912000);
             nt::ee::Memory timed; clock.attach(timed);
             state={}; state.pc=0x147c; state.gpr[8].lo=0x8003783eU;
             state.gpr[9].lo=0xfffffff0U; state.gpr[10].lo=7;

@@ -13,18 +13,19 @@ extern "C" const std::uint8_t* nt_vu_program1_image();
 extern "C" std::uint32_t nt_vu_program1_size();
 extern "C" std::uint32_t nt_vu_program1_destination();
 extern "C" std::uint32_t nt_vu_program1_unit();
-extern "C" const nt::vu::Artifact* nt_vu_program_artifacts();
+// The versioned export requires regeneration when native block layout changes.
+extern "C" const nt::vu::Artifact* nt_vu_program_artifacts_v2();
 extern "C" std::uint32_t nt_vu_program_artifact_count();
-extern "C" const nt::vu::Artifact* nt_vu_program1_artifacts();
+extern "C" const nt::vu::Artifact* nt_vu_program1_artifacts_v2();
 extern "C" std::uint32_t nt_vu_program1_artifact_count();
 
 namespace nt::vu {
 inline Binding linked_binding() {
     if (nt_vu_program_unit()!=0) throw std::invalid_argument("VU0 artifact reports wrong unit");
-    return Binding(0,{nt_vu_program_artifacts(),nt_vu_program_artifact_count()});
+    return Binding(0,{nt_vu_program_artifacts_v2(),nt_vu_program_artifact_count()});
 }
 inline Binding linked_binding1() {
     if (nt_vu_program1_unit()!=1) throw std::invalid_argument("VU1 artifact reports wrong unit");
-    return Binding(1,{nt_vu_program1_artifacts(),nt_vu_program1_artifact_count()});
+    return Binding(1,{nt_vu_program1_artifacts_v2(),nt_vu_program1_artifact_count()});
 }
 }

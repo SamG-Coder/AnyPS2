@@ -34,6 +34,8 @@ public:
     Stop (*submit_combined)(void*,unsigned,std::span<const NativeUploadView>,
         std::span<const NativeVectorDataView>,const NativeLaunchView*,std::span<const graphics::Packet>)=nullptr;
     Stop (*submit_sequence)(void*,unsigned,std::span<const NativeSubmissionStep>)=nullptr;
+    bool (*sequence_pending)(void*,unsigned)=nullptr;
+    Stop (*poll_sequence)(void*,unsigned)=nullptr;
     // Optional conversion diagnostic, never an execution fallback. The payload
     // view is valid only during the callback, and the batch still fails.
     void* upload_context=nullptr;
@@ -58,7 +60,7 @@ public:
         if (!decode(address,channel,field)) return {Stop::unsupported_system};
         const auto& unit=units_[channel];
         switch (field) {
-        case 0: return {Stop::budget,(unit.stopped ? 0x100U : 0U)|(unit.broken ? 0x200U : 0U)|
+        case 0: return {Stop::budget,(deferred_[channel] ? 4U : 0U)|(unit.stopped ? 0x100U : 0U)|(unit.broken ? 0x200U : 0U)|
             (unit.interrupt_stall ? 0x400U : 0U)|(unit.interrupt ? 0x800U : 0U)|(unit.double_buffer ? 0x80U : 0U)};
         case 2: return {Stop::budget,unit.error_mask};
         case 3: return {Stop::budget,unit.mark};
@@ -78,6 +80,7 @@ public:
     }
     Stop write(std::uint32_t address,std::uint32_t value) {
         if (address%16) return Stop::unsupported_system;
+        if (working()) return Stop::native_wait;
         if (address==0x10003000) {
             if (value&1) { gif_paused_=false; gif_mode_=0; gif_stream_={}; }
             else gif_paused_=(value&8)!=0;
@@ -109,10 +112,25 @@ public:
         }
     }
     unsigned rejected_command() const { return rejected_command_; }
-    bool pending(unsigned channel) const { return channel<2 && !pending_[channel].bytes.empty(); }
+    bool pending(unsigned channel) const { return channel<2 && (deferred_[channel] || !pending_[channel].bytes.empty()); }
+    bool working() const { return bool(deferred_[0]) || bool(deferred_[1]); }
+    Stop poll(unsigned channel,bool vector_active) {
+        if (channel>=2) return Stop::invalid_state;
+        if (deferred_[channel]) {
+            if (!poll_sequence || !sequence_pending) return Stop::invalid_state;
+            const auto result=poll_sequence(launch_context,channel);
+            if (result!=Stop::budget) return result;
+            if (sequence_pending(launch_context,channel)) return Stop::budget;
+            units_[channel]=deferred_[channel]->next;
+            if (deferred_[channel]->notify) interrupt_events_|=1U<<channel;
+            deferred_[channel].reset();
+        }
+        return resume(channel,vector_active);
+    }
     unsigned take_interrupts() { const auto result=interrupt_events_; interrupt_events_=0; return result; }
     Stop consume(unsigned channel,std::span<const std::uint8_t> bytes,bool vector_active,std::span<const NativePacketOrigin> origins={}) {
         std::size_t consumed=0;
+        if (working()) return Stop::native_wait;
         if (channel>=2) return consume_segment(channel,bytes,vector_active,consumed);
         if (pending(channel)) return Stop::unsupported_system;
         if (bytes.size()>NativePacketBatch::maximum_bytes) return Stop::invalid_state;
@@ -131,6 +149,7 @@ public:
     }
     Stop resume(unsigned channel,bool vector_active) {
         if (!pending(channel)) return Stop::budget;
+        if (deferred_[channel]) return Stop::budget;
         if (units_[channel].stopped || units_[channel].broken || units_[channel].interrupt_stall)
             return Stop::budget;
         auto& packet=pending_[channel];
@@ -331,6 +350,10 @@ private:
                     if (uncompiled_upload) uncompiled_upload(upload_context,channel,upload.destination,upload.bytes);
                 return result;
             }
+            if (sequence_pending && sequence_pending(launch_context,channel)) {
+                deferred_[channel]=Deferred{next,notify}; consumed=offset; rejected_command_=0;
+                return Stop::budget;
+            }
             units_[channel]=next; consumed=offset; rejected_command_=0;
             if (notify) interrupt_events_|=1U<<channel;
             return Stop::budget;
@@ -372,6 +395,10 @@ private:
             }
         }
         if (!drawing_vectors && !drawing.empty() && !graphics.submit(graphics.context,drawing)) return Stop::unsupported_system;
+        if (sequence_pending && sequence_pending(launch_context,channel)) {
+            deferred_[channel]=Deferred{next,notify}; consumed=offset; rejected_command_=0;
+            return Stop::budget;
+        }
         units_[channel]=next; consumed=offset; rejected_command_=0;
         if (notify) interrupt_events_|=1U<<channel;
         return Stop::budget;
@@ -392,7 +419,9 @@ private:
         std::array<std::uint32_t,8> row_column{};
     };
     struct Pending { std::vector<std::uint8_t> bytes; std::size_t offset=0; std::vector<NativePacketOrigin> origins; };
+    struct Deferred { Unit next; bool notify; };
     std::array<Unit,2> units_{};
+    std::array<std::optional<Deferred>,2> deferred_{};
     std::array<Pending,2> pending_{};
     unsigned interrupt_events_=0;
     graphics::PacketStream gif_stream_;

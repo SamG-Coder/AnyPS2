@@ -145,6 +145,7 @@ int main(int argc,char** argv) {
     pair((4U<<25)|(10U<<21)|(6U<<16)|1); // ILW.xz, last selected lane wins.
     pair(0x80000000|(15U<<21)|(7U<<16)|(15U<<6)|62); // ILWR all lanes, selects w.
     pair(0x80000000|(1U<<21)|(8U<<16)|(15U<<6)|63); // ISWR.w.
+    pair((15U<<21)|(7U<<16)); // Reload after overlapping quad and integer stores.
     pair((1U<<25)|(8U<<21)|(1U<<11)|(2U<<16),0x400002ff); // Late store may fail.
     pair(0x80000335);
     save_block(".memory","nt_vu_memory",0);

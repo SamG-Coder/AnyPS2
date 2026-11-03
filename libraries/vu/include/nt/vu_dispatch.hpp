@@ -4,12 +4,15 @@
 #include <span>
 #include <stdexcept>
 #include <vector>
+#include <memory>
 
 namespace nt::vu {
 using Entry = Result (*)(State*);
 struct Block {
     std::uint32_t address;
     Entry entry;
+    const Block* target=nullptr;
+    const Block* fallthrough=nullptr;
 };
 enum class RunStatus { complete, unsupported_numeric, unmapped_block, budget_exhausted, unsupported_schedule, unsupported_memory, unsupported_context, unbound_program, graphics_pending };
 struct RunResult {
@@ -21,27 +24,33 @@ struct RunResult {
 // No instruction storage or decoding belongs in this execution interface.
 class Program {
 public:
-    Program(unsigned unit, std::span<const Block> blocks) : unit_(unit),blocks_(blocks.begin(), blocks.end()) {
+    Program(unsigned unit, std::span<const Block> blocks) : unit_(unit),blocks_(std::make_shared<std::vector<Block>>(blocks.begin(),blocks.end())) {
         if (unit > 1) throw std::invalid_argument("Invalid VU unit");
         const auto capacity = unit == 0 ? 512U : 2048U;
-        std::sort(blocks_.begin(), blocks_.end(), [](const Block& a, const Block& b) {
+        std::sort(blocks_->begin(), blocks_->end(), [](const Block& a, const Block& b) {
             return a.address < b.address;
         });
-        for (std::size_t i = 0; i < blocks_.size(); ++i) {
-            const auto& block = blocks_[i];
+        for (std::size_t i = 0; i < blocks_->size(); ++i) {
+            const auto& block = (*blocks_)[i];
             if (block.address >= capacity || !block.entry ||
-                (i != 0 && blocks_[i - 1].address == block.address))
+                (i != 0 && (*blocks_)[i - 1].address == block.address))
                 throw std::invalid_argument("Invalid or duplicate native VU block");
+        }
+        // Rebase linker references into our immutable owned graph. Program copies
+        // share that graph, so callers need not retain their descriptor storage.
+        for (auto& block:*blocks_) for (auto* link:{&block.target,&block.fallthrough}) {
+            if (!*link) continue;
+            const auto source=std::find_if(blocks.begin(),blocks.end(),[&](const Block& candidate) {
+                return &candidate==*link;
+            });
+            if (source==blocks.end()) throw std::invalid_argument("Native VU successor leaves its artifact");
+            *link=find(source->address);
         }
     }
     unsigned unit() const { return unit_; }
-    bool contains(unsigned address) const {
-        const auto found=std::lower_bound(blocks_.begin(),blocks_.end(),address,
-            [](const Block& block,unsigned value) { return block.address<value; });
-        return found!=blocks_.end() && found->address==address;
-    }
+    bool contains(unsigned address) const { return find(address)!=nullptr; }
     bool within(unsigned begin,std::uint64_t end) const {
-        return !blocks_.empty() && blocks_.front().address>=begin && blocks_.back().address<end;
+        return !blocks_->empty() && blocks_->front().address>=begin && blocks_->back().address<end;
     }
 
     // Completed blocks remain committed. A failing generated block is atomic.
@@ -50,10 +59,9 @@ public:
         if (state.graphics_pending) return {RunStatus::graphics_pending,0};
         if (state.graphics_completes) return {RunStatus::complete,0};
         std::uint64_t count = 0;
+        auto found=find(state.next_pair);
         while (count < budget) {
-            const auto found = std::lower_bound(blocks_.begin(), blocks_.end(), state.next_pair,
-                [](const Block& block, std::uint32_t address) { return block.address < address; });
-            if (found == blocks_.end() || found->address != state.next_pair)
+            if (!found)
                 return {RunStatus::unmapped_block, count};
             const auto result = found->entry(&state);
             ++count;
@@ -66,11 +74,21 @@ public:
             case Result::graphics_request: return {RunStatus::graphics_pending, count};
             case Result::transfer: break;
             }
+            // Known control flow follows native linker references. Only genuinely
+            // indirect or unbound exits need the existing address resolver.
+            if (found->target && found->target->address==state.next_pair) found=found->target;
+            else if (found->fallthrough && found->fallthrough->address==state.next_pair) found=found->fallthrough;
+            else found=find(state.next_pair);
         }
         return {RunStatus::budget_exhausted, count};
     }
 private:
     unsigned unit_;
-    std::vector<Block> blocks_;
+    std::shared_ptr<std::vector<Block>> blocks_;
+    const Block* find(unsigned address) const {
+        const auto found=std::lower_bound(blocks_->begin(),blocks_->end(),address,
+            [](const Block& block,unsigned value) { return block.address<value; });
+        return found!=blocks_->end() && found->address==address ? &*found : nullptr;
+    }
 };
 }
