@@ -34,7 +34,8 @@ std::optional<Operation> native_import_operation(const elf::IopImport& import) {
         ((import.ordinal>=4 && import.ordinal<=10) || (import.ordinal>=14 && import.ordinal<=17) || (import.ordinal>=20 && import.ordinal<=23) || import.ordinal==41 || (import.ordinal>=33 && import.ordinal<=40) || (import.ordinal>=24 && import.ordinal<=28)))
         return Operation::native_import;
     if (import.library=="timrman" && (import.version>>8)==1 &&
-        (import.ordinal==4 || (import.ordinal>=6 && import.ordinal<=12) || import.ordinal==16)) return Operation::native_import;
+        (import.ordinal==4 || (import.ordinal>=6 && import.ordinal<=12) || import.ordinal==16 ||
+         import.ordinal==20 || (import.ordinal>=22 && import.ordinal<=24))) return Operation::native_import;
     if (import.library=="vblank" && (import.version>>8)==1 && import.ordinal>=4 && import.ordinal<=9) return Operation::native_import;
     if ((import.library=="thsemap" || import.library=="thmsgbx" || import.library=="thfpool") && (import.version>>8)==1 && ((import.ordinal>=4 && import.ordinal<=9) || import.ordinal==11 || import.ordinal==12)) return Operation::native_import;
     if (import.library=="thevent" && (import.version>>8)==1 &&
@@ -53,7 +54,7 @@ std::optional<Operation> native_import_operation(const elf::IopImport& import) {
          (import.ordinal>=33 && import.ordinal<=35)))
         return Operation::native_import;
     if (import.library=="cdvdman" && (import.version>>8)==1 &&
-        (import.ordinal==6 || import.ordinal==8 || (import.ordinal>=11 && import.ordinal<=14) ||
+        (import.ordinal==6 || import.ordinal==8 || (import.ordinal>=11 && import.ordinal<=15) ||
          import.ordinal==22 || import.ordinal==24 || import.ordinal==28 || import.ordinal==37 || import.ordinal==39 ||
          import.ordinal==74 || import.ordinal==78 || import.ordinal==83))
         return Operation::native_import;
@@ -127,14 +128,28 @@ Instruction decode(std::uint32_t pc,std::uint32_t word) {
         i.target=((pc+4)&0xf0000000U)|((word&0x03ffffff)<<2);
     } else if (op==1 || (op>=4 && op<=7)) {
         if (op==1) {
-            if (i.operand>1) throw std::runtime_error("unsupported REGIMM branch");
-            i.operation=i.operand ? Operation::nonnegative : Operation::negative;
+            switch (i.operand) {
+            case 0: i.operation=Operation::negative; break;
+            case 1: i.operation=Operation::nonnegative; break;
+            case 16: i.operation=Operation::negative_link; break;
+            case 17: i.operation=Operation::nonnegative_link; break;
+            default: throw std::runtime_error("unsupported REGIMM branch");
+            }
+            if (i.operand>=16 && i.source==31)
+                throw std::runtime_error("unpredictable linking branch with r31 source");
         } else if (op<=5) i.operation=op==4 ? Operation::equal : Operation::not_equal;
         else {
             if (i.operand) throw std::runtime_error("invalid signed branch encoding");
             i.operation=op==6 ? Operation::nonpositive : Operation::positive;
         }
         i.flow=Flow::conditional; i.target=pc+4+(i.immediate<<2);
+        // BEQ with identical operands is unconditional, including the usual
+        // B pseudoinstruction. Its nonexistent fallthrough may be an IRX table.
+        if (op==4 && i.source==i.operand) i.flow=Flow::direct;
+        // Conditional calls have both a target and a continuation. The existing
+        // call analysis conservatively invalidates callee-clobbered values at
+        // that continuation, including when the runtime condition is false.
+        if (op==1 && i.operand>=16) i.flow=Flow::call;
     } else {
         switch (op) {
         case 8: i.operation=Operation::add_immediate_checked; break;
@@ -364,6 +379,8 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         return {};
     };
     const auto discover_service_callbacks=[&](std::uint32_t source,std::uint32_t service,const Constants& input,std::uint32_t import_site) {
+        if (service==0x130014 && input.registers[6])
+            for (const auto target:*input.registers[6]) if (target) discover_callback(target,source,false);
         if (const auto offset=callback_stack_slot(service,import_site);offset && input.stack_offsets[29]) {
             const auto slot=std::int64_t(*input.stack_offsets[29])+*offset;
             if (slot<=std::numeric_limits<std::int32_t>::max()) {

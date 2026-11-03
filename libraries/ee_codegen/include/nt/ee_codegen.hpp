@@ -18,7 +18,14 @@ inline constexpr std::uint32_t module_address_span=64*1024;
 // Allow an eight-MiB executable while keeping discovery and emission bounded.
 // Individual native functions and compilation units retain their smaller caps.
 inline constexpr std::size_t program_instruction_limit=2*1024*1024;
-struct PayloadMapping { std::uint32_t source,destination,size; std::vector<std::uint32_t> entry_offsets; };
+struct PayloadCodeRange { std::uint32_t offset,size; };
+struct PayloadMapping {
+    std::uint32_t source,destination,size;
+    std::vector<std::uint32_t> entry_offsets;
+    // Optional input classification for mixed code/data copies. All bytes are
+    // retained; whole-code selection compiles only these declared code extents.
+    std::vector<PayloadCodeRange> code_ranges;
+};
 struct CodePayload { std::uint32_t address; std::vector<std::uint8_t> bytes; };
 using LayoutDeclaration=std::array<std::uint32_t,4>;
 struct CodeRange { std::uint32_t address,size,image=0; }; // image 0 is permanently resident.
@@ -36,13 +43,13 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
                std::span<const ExecutableImage> images = {},
                const std::function<std::ostream&(std::size_t)>& module_output = {},
                std::uint64_t input_identity=0);
-// Discover entry flow and recognized native syscall continuations, then emit a
+// Select whole declared EE sections or entry-flow discovery, then emit a
 // project. Optional native-stop directories supply checked offline call edges;
 // they never become runtime inputs or establish complete indirect coverage.
 void project(const std::filesystem::path& input,const std::filesystem::path& output,
              std::span<const PayloadMapping> payloads = {},
              std::span<const std::filesystem::path> images = {},
-             std::span<const std::filesystem::path> observations = {}, bool function_symbols=false);
+             std::span<const std::filesystem::path> observations = {}, bool function_symbols=false, bool whole_code=false);
 struct FlowVerification {
     std::size_t instructions=0,passes=0,unmapped_targets=0,unresolved_indirect=0;
     std::size_t unclassified_references=0,record_binding_candidates=0,service_boundaries=0;
@@ -58,7 +65,7 @@ struct FlowVerification {
 FlowVerification verify_flow(const std::filesystem::path& input,const std::filesystem::path& output,
                              std::span<const PayloadMapping> payloads = {},
                              std::span<const std::filesystem::path> images = {},
-                             std::span<const std::filesystem::path> observations = {}, bool function_symbols=false);
+                             std::span<const std::filesystem::path> observations = {}, bool function_symbols=false, bool whole_code=false);
 // Unsupported operations and encodings in an already decoded instruction list.
 // Empty means this list can be lowered. No text is emitted.
 struct EeRejection {

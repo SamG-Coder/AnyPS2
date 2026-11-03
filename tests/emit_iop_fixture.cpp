@@ -1237,7 +1237,7 @@ int main(int argc,char** argv) {
             try { nt::iop_codegen::ir::discover(broken); } catch (const std::runtime_error&) { rejected=true; }
             if (!rejected) throw std::runtime_error("Hoisted indexed table accepted a clobbered address register");
         }
-        nt::elf::IopModule network_services{0x17000,0x17014,nt::Bytes(0xc00),0xc00,{}};
+        nt::elf::IopModule network_services{0x17000,0x17014,nt::Bytes(0x1000),0x1000,{}};
         fixture::put32(network_services.memory,0,0x41e00000); fixture::put32(network_services.memory,8,0x104);
         std::copy(std::begin(library),std::end(library),network_services.memory.begin()+12);
         constexpr unsigned network_ordinals[]{16,40,24,31,33,34,10,11,15,4,5,6,7};
@@ -1282,7 +1282,7 @@ int main(int argc,char** argv) {
         bundle_roots.push_back(0x17300);
         network_word(0x17800,0x41e00000); network_word(0x17808,0x101);
         std::copy(disc_library.begin(),disc_library.end(),network_services.memory.begin()+0x80c);
-        constexpr unsigned cdvd_ordinals[]{6,8,11,12,13,14,28,37,39,83,78,74};
+        constexpr unsigned cdvd_ordinals[]{6,8,11,12,13,14,28,37,39,83,78,74,15};
         for (unsigned i=0;i<std::size(cdvd_ordinals);++i) {
             network_word(0x17814+i*8,0x03e00008); network_word(0x17818+i*8,0x24000000|cdvd_ordinals[i]);
             bundle_roots.push_back(0x17814+i*8);
@@ -1309,6 +1309,36 @@ int main(int argc,char** argv) {
         for (unsigned i=0;i<std::size(spilled_switch);++i) network_word(0x17a30+i*4,spilled_switch[i]);
         network_word(0x17b00,0x17a54); network_word(0x17b04,0x17a60);
         bundle_roots.push_back(0x17a00);
+        network_word(0x17b20,0x41e00000); network_word(0x17b28,0x102);
+        const std::string timer_library="timrman";
+        std::copy(timer_library.begin(),timer_library.end(),network_services.memory.begin()+0xb2c);
+        constexpr unsigned timer_ordinals[]{4,6,20,22,23,24,10};
+        for (unsigned i=0;i<std::size(timer_ordinals);++i) {
+            network_word(0x17b34+i*8,0x03e00008); network_word(0x17b38+i*8,0x24000000|timer_ordinals[i]);
+            bundle_roots.push_back(0x17b34+i*8);
+        }
+        constexpr std::uint32_t timer_register[]{0x03e08021,0x24050064,0x3c060001,0x34c67bc0,
+            0x3407c720,0x0c005ed1,0,0x0200f821,0x03e00008,0};
+        for (unsigned i=0;i<std::size(timer_register);++i) network_word(0x17b90+i*4,timer_register[i]);
+        for (unsigned i=0;i<std::size(alarm_once);++i) network_word(0x17bc0+i*4,alarm_once[i]);
+        bundle_roots.push_back(0x17b90); // Handler is discovered only from SetTimerHandler.
+        // Suspend across a blocking call, then verify the resumed mask before
+        // restoring the original caller state. A second worker probes its own mask.
+        constexpr std::uint32_t critical_wait[]{0x03e08021,0x3404c740,0x0c005f45,0,
+            0x0c005f55,0,0x3404c744,0x0c005f45,0,0x3408c740,0x8d040000,0,
+            0x0c005f47,0,0x0200f821,0x03e00008,0};
+        constexpr std::uint32_t mask_probe[]{0x03e08021,0x3404c748,0x0c005f45,0,0x0200f821,0x03e00008,0};
+        for (unsigned i=0;i<std::size(critical_wait);++i) network_word(0x17c00+i*4,critical_wait[i]);
+        for (unsigned i=0;i<std::size(mask_probe);++i) network_word(0x17c80+i*4,mask_probe[i]);
+        bundle_roots.push_back(0x17c00); bundle_roots.push_back(0x17c80);
+        network_word(0x17d00,0x41e00000); network_word(0x17d08,0x102);
+        const std::string interrupt_library="intrman",thread_library="thbase";
+        std::copy(interrupt_library.begin(),interrupt_library.end(),network_services.memory.begin()+0xd0c);
+        network_word(0x17d14,0x03e00008); network_word(0x17d18,0x24000011);
+        network_word(0x17d1c,0x03e00008); network_word(0x17d20,0x24000012);
+        network_word(0x17d40,0x41e00000); network_word(0x17d48,0x101);
+        std::copy(thread_library.begin(),thread_library.end(),network_services.memory.begin()+0xd4c);
+        network_word(0x17d54,0x03e00008); network_word(0x17d58,0x24000018);
         // Original unrolled arithmetic tail, selected as end - index * 4.
         // An out-of-range index must not enter even another compiled word.
         constexpr std::uint32_t inline_tail[]{0x3c080001,0x35087734,0x00044880,0x01094022,
@@ -1417,7 +1447,70 @@ int main(int argc,char** argv) {
         queue_word(0x180,0x03e00008); queue_word(0x184,0x2402005d);
         bundle_roots.push_back(heap_callbacks.entry);
         bundle_roots.push_back(0x2c040);
-        const std::array bundle{module,provider,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services,dev9,fixed_pool,edge_table,rpc_client,heap_callbacks};
+        // Original conditional-call routines. Both outcomes must write r31;
+        // the delay slot observes that link and the callee returns through it.
+        nt::elf::IopModule branch_links{0x2d000,0x2d000,nt::Bytes(0x600),0x600,{}};
+        for (unsigned index=0;index<4;++index) {
+            const auto offset=index*0x40;
+            const auto source=index<2 ? 4U : 0U;
+            const auto kind=16U+(index&1U);
+            const std::uint32_t words[]{0x03e08021,0x04000006U|(source<<21)|(kind<<16),
+                0x03e01821,0x0200f821,0x03e00008,0,0,0,
+                0x2402002a,0x03e00008,0};
+            for (unsigned i=0;i<std::size(words);++i) fixture::put32(branch_links.memory,offset+i*4,words[i]);
+            bundle_roots.push_back(branch_links.base+offset);
+        }
+        for (const auto word : {0x04920006U,0x07f00006U,0x07f10006U}) {
+            auto invalid=branch_links;
+            fixture::put32(invalid.memory,4,word); // Reserved subtype or unpredictable r31 source.
+            bool rejected=false;
+            try { nt::iop_codegen::ir::discover(invalid); }
+            catch (const std::runtime_error&) { rejected=true; }
+            if (!rejected) throw std::runtime_error("Reserved REGIMM subtype accepted as a linking branch");
+        }
+        // A scheduled switch: spills separate guard and branch, and the table
+        // address uses a separate signed low-half addition before indexing.
+        const std::uint32_t scheduled[]{0x2c820003,0xafbf0010,0xafb0000c,0x10400010,0,
+            0x00042080,0x3c020003,0x2442d400,0x00441021,0x8c420000,0,0x00400008,0};
+        for (unsigned i=0;i<std::size(scheduled);++i) fixture::put32(branch_links.memory,0x200+i*4,scheduled[i]);
+        for (unsigned i=0;i<4;++i) {
+            const unsigned offset[]{0x240,0x250,0x260,0x280};
+            const unsigned value[]{11,99,22,33};
+            fixture::put32(branch_links.memory,offset[i],0x03e00008);
+            fixture::put32(branch_links.memory,offset[i]+4,0x24020000|value[i]);
+        }
+        for (unsigned i=0;i<3;++i) {
+            const unsigned offsets[]{0x240,0x260,0x280};
+            fixture::put32(branch_links.memory,0x400+i*4,branch_links.base+offsets[i]);
+        }
+        bundle_roots.push_back(0x2d200);
+        // A stack callback crosses a helper and a non-adjacent forward edge.
+        const std::uint32_t stack_edge[]{0x03e08021,0x3c080003,0x2508d580,0xafa80004,
+            0x0c00b570,0,0x8fa20004,0,0x14a00027,0,0x0200f821,0x03e00008,0};
+        for (unsigned i=0;i<std::size(stack_edge);++i) fixture::put32(branch_links.memory,0x300+i*4,stack_edge[i]);
+        const std::uint32_t invoke[]{0x0040f809,0,0x0200f821,0x03e00008,0};
+        for (unsigned i=0;i<std::size(invoke);++i) fixture::put32(branch_links.memory,0x3c0+i*4,invoke[i]);
+        fixture::put32(branch_links.memory,0x580,0x03e00008);
+        fixture::put32(branch_links.memory,0x584,0x2402004d);
+        fixture::put32(branch_links.memory,0x5c0,0x03e00008);
+        bundle_roots.push_back(0x2d300);
+        // An unconditional branch must not turn following metadata into code.
+        fixture::put32(branch_links.memory,0x500,0x10000003);
+        fixture::put32(branch_links.memory,0x504,0);
+        fixture::put32(branch_links.memory,0x508,0xfc000000);
+        fixture::put32(branch_links.memory,0x510,0x03e00008);
+        fixture::put32(branch_links.memory,0x514,0x24020035);
+        bundle_roots.push_back(0x2d500);
+        {
+            auto missing=branch_links;
+            fixture::put32(missing.memory,0x21c,0x24a2d400); // Unknown base argument.
+            bool rejected=false;
+            const std::uint32_t root=0x2d200;
+            try { nt::iop_codegen::ir::discover(missing,std::span(&root,1)); }
+            catch (const std::runtime_error&) { rejected=true; }
+            if (!rejected) throw std::runtime_error("Unknown switch-table base was treated as a constant");
+        }
+        const std::array bundle{module,provider,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services,dev9,fixed_pool,edge_table,rpc_client,heap_callbacks,branch_links};
         {
             auto overwritten=bundle; fixture::put32(overwritten[3].memory,0x330,0x00a02021);
             bool rejected=false;
@@ -1472,7 +1565,7 @@ int main(int argc,char** argv) {
             if (!failed_bundle || !partial.str().empty()) throw std::runtime_error("Invalid bundle emitted partial native code");
         }
         // Earlier owners must be revisited when a later module discovers a callback.
-        const std::array reversed{provider,module,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services,dev9,fixed_pool,edge_table,rpc_client,heap_callbacks};
+        const std::array reversed{provider,module,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services,dev9,fixed_pool,edge_table,rpc_client,heap_callbacks,branch_links};
         std::ostringstream reverse_code;
         nt::iop_codegen::emit_bundle(reverse_code,reversed,bundle_roots);
         for (const auto target : {0xa061U,0xa080U,0xb800U}) {
@@ -1508,7 +1601,7 @@ int main(int argc,char** argv) {
             put(0x8800,0x00401821);
             put(first+(count-2)*4,0x03e00008); put(first+(count-1)*4,0);
             std::vector<std::uint32_t> roots=bundle_roots; roots.push_back(first);
-            const std::array large_bundle{large,provider,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services,dev9,fixed_pool,edge_table,rpc_client,heap_callbacks};
+            const std::array large_bundle{large,provider,dispatch,factories,pointers,display,registry_client,sound,usb,usb_client,hoisted_table,network_services,dev9,fixed_pool,edge_table,rpc_client,heap_callbacks,branch_links};
             std::ostringstream llvm; nt::iop_codegen::emit_bundle(llvm,large_bundle,roots);
             const auto text=llvm.str();
             nt::write_file(argv[3],nt::ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));

@@ -93,7 +93,9 @@ void publish(nt::ee::Memory& memory,nt::ee::Stop status,std::uint32_t address) {
     if (memory.io.poll) memory.io.poll(memory.io.context);
     if (memory.interrupts) memory.interrupts->publish(memory);
     if (memory.completions) memory.completions->publish(memory);
-    if (status!=nt::ee::Stop::budget) memory.fault_address=address;
+    // A native producer rejecting a code write supplies its actual destination,
+    // which is more useful than the service endpoint that submitted the copy.
+    if (status!=nt::ee::Stop::budget && status!=nt::ee::Stop::code_write) memory.fault_address=address;
 }
 }
 extern "C" std::uint64_t nt_ee_io_read32(nt::ee::Memory* memory,std::uint32_t address) {
@@ -128,6 +130,11 @@ extern "C" std::uint32_t nt_ee_io_read64(nt::runtime::State* state,nt::ee::Memor
 }
 extern "C" std::uint32_t nt_ee_io_write64(nt::ee::Memory* memory,std::uint32_t address,std::uint64_t value) {
     const auto result=memory->io.write64 ? memory->io.write64(memory->io.context,address,value) : nt::ee::Stop::memory_fault;
+    publish(*memory,result,address);
+    return static_cast<std::uint32_t>(result);
+}
+extern "C" std::uint32_t nt_ee_io_write128(nt::ee::Memory* memory,std::uint32_t address,std::uint64_t low,std::uint64_t high) {
+    const auto result=memory->io.write128 ? memory->io.write128(memory->io.context,address,{low,high}) : nt::ee::Stop::memory_fault;
     publish(*memory,result,address);
     return static_cast<std::uint32_t>(result);
 }

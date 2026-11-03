@@ -27,8 +27,84 @@ static std::uint64_t timer_clock() { return timer_now; }
 static std::uint64_t stepping_timer_clock() { timer_now+=1000; return timer_now; }
 void run_ee_batch_tests();
 void run_ee_file_rpc_tests();
+void run_scratchpad_tests();
 int main() {
     try {
+        run_scratchpad_tests();
+        {
+            struct Device { unsigned calls=0; std::uint32_t address=0; std::uint64_t value=0; } device;
+            nt::ee::Memory memory; memory.io.context=&device;
+            memory.io.read32=[](void* p,std::uint32_t at) { auto& d=*static_cast<Device*>(p); ++d.calls; d.address=at; return nt::ee::IoRead{nt::ee::Stop::budget,0x87654321}; };
+            memory.io.read64=[](void* p,std::uint32_t at) { auto& d=*static_cast<Device*>(p); ++d.calls; d.address=at; return nt::ee::IoRead64{nt::ee::Stop::budget,0x1234567887654321ULL}; };
+            memory.io.write32=[](void* p,std::uint32_t at,std::uint32_t v) { auto& d=*static_cast<Device*>(p); ++d.calls; d.address=at; d.value=v; return nt::ee::Stop::budget; };
+            memory.io.write64=[](void* p,std::uint32_t at,std::uint64_t v) { auto& d=*static_cast<Device*>(p); ++d.calls; d.address=at; d.value=v; return nt::ee::Stop::budget; };
+            for (unsigned variant=0;variant<8;++variant) for (auto base:{0x12000080U,0xb2000080U}) {
+                device={}; nt::runtime::State state; state.pc=0x4f0020+variant*8;
+                state.set(4,base); state.set128(8,{0x1234567887654321ULL,99});
+                check(nt_ee_generated_run(&state,&memory,4)==nt::ee::Stop::syscall);
+                check(device.calls==1 && device.address==0x12000080 && state.gpr[8].hi==99);
+                if (variant%4<2) check(device.value==(variant<4 ? 0x1234567887654321ULL : 0x87654321ULL));
+                else check(state.gpr[8].lo==(variant<4 ? 0x1234567887654321ULL : 0xffffffff87654321ULL));
+                device={}; state={}; state.pc=0x4f0020+variant*8; state.set(4,base+1);
+                check(nt_ee_generated_run(&state,&memory,4)==nt::ee::Stop::memory_fault && device.calls==0 && !state.executed);
+            }
+        }
+        {
+            nt::ee::NativePlatform platform; nt::ee::Memory memory; platform.attach(memory);
+            for (const auto address:{0x10004000U,0xb0005000U,0x1000500fU}) {
+                nt::runtime::State state; state.pc=0x4f0000; state.set(4,address);
+                state.set128(6,{0x01000202,0x0700002aULL<<32});
+                check(nt_ee_generated_run(&state,&memory,4)==nt::ee::Stop::syscall);
+                const auto base=address==0x10004000 ? 0x10003800U : 0x10003c00U;
+                check(platform.packet_setup.read(base+0x40).value==0x202);
+                check(platform.packet_setup.read(base+0x30).value==42);
+                check(!platform.completions.status());
+            }
+            nt::runtime::State state; state.pc=0x4f0000; state.set(4,0x10005000);
+            state.set128(6,{0x01000303,0x09000000ULL<<32});
+            check(nt_ee_generated_run(&state,&memory,4)==nt::ee::Stop::unsupported_system);
+            check(state.pc==0x4f0000 && !state.executed && memory.fault_address==0x10005000);
+            check(platform.packet_setup.read(0x10003c40).value==0x202 && !platform.completions.status());
+            unsigned submissions=0;
+            platform.packet_setup.graphics.context=&submissions;
+            platform.packet_setup.graphics.submit=[](void* p,std::span<const nt::graphics::Packet>) { ++*static_cast<unsigned*>(p); return true; };
+            for (const auto masked:{true,false}) {
+                state={}; state.pc=0x4f0000; state.set(4,0x10005000);
+                state.set(6,masked ? 0x06008000 : 0x06000000);
+                check(nt_ee_generated_run(&state,&memory,4)==nt::ee::Stop::syscall);
+                check((platform.packet_setup.read(0x10003020).value&2)==(masked ? 2U : 0U));
+                check(platform.packet_setup.consume(2,{},false)==(masked ? nt::ee::Stop::unsupported_system : nt::ee::Stop::budget));
+                check(!submissions && !platform.completions.status());
+            }
+        }
+        {
+            std::vector<std::uint8_t> ram(0x2100);
+            nt::ee::Memory memory; memory.data=ram.data(); memory.size=ram.size();
+            const auto put=[&](unsigned at,std::uint32_t word) { std::memcpy(ram.data()+at,&word,4); };
+            for (unsigned n=0;n<3;++n) put(0x2004+n*8,0x4e0080+n*16);
+            nt::runtime::State state; state.pc=0x4e0000;
+            check(nt_ee_generated_run(&state,&memory,100)==nt::ee::Stop::syscall && state.gpr[9].lo==6);
+            // Discovery does not freeze writable table contents in native code.
+            put(0x2004,0x4e00a0); state={}; state.pc=0x4e0000;
+            check(nt_ee_generated_run(&state,&memory,100)==nt::ee::Stop::syscall && state.gpr[9].lo==8);
+            put(0x2004,0x4e00c0); state={}; state.pc=0x4e0000;
+            check(nt_ee_generated_run(&state,&memory,100)==nt::ee::Stop::unmapped_code && state.pc==0x4e00c0);
+        }
+        {
+            std::vector<std::uint8_t> ram(0x2100);
+            nt::ee::Memory memory; memory.data=ram.data(); memory.size=ram.size();
+            const auto put=[&](unsigned at,std::uint32_t word) { std::memcpy(ram.data()+at,&word,4); };
+            put(0x2000,0x500060); put(0x2004,0x500070);
+            for (unsigned index=0;index<3;++index) {
+                nt::runtime::State state; state.pc=0x500000; state.set(4,index);
+                check(nt_ee_generated_run(&state,&memory,64)==nt::ee::Stop::syscall && state.gpr[9].lo==(index==0 ? 7 : index==1 ? 9 : 0));
+            }
+            put(0x2000,0x500070);
+            nt::runtime::State state; state.pc=0x500000;
+            check(nt_ee_generated_run(&state,&memory,64)==nt::ee::Stop::syscall && state.gpr[9].lo==9);
+            put(0x2000,0x500080); state={}; state.pc=0x500000;
+            check(nt_ee_generated_run(&state,&memory,64)==nt::ee::Stop::unmapped_code && state.pc==0x500080);
+        }
         // Execute the AOT-recognized wait, retaining state/budget on suspension.
         // Ordinary RAM polls, side effects and other event masks remain code.
         {
@@ -233,8 +309,14 @@ int main() {
             check(execute(14)==nt::ee::Stop::budget && vectors.accumulator==std::array<std::uint32_t,4>{0xc0400000,0xc0000000,0xbf800000,77});
             check(execute(15)==nt::ee::Stop::budget && vectors.accumulator==std::array<std::uint32_t,4>{0x40e00000,0x41100000,0x41300000,77});
             check(execute(16)==nt::ee::Stop::budget && vectors.accumulator==std::array<std::uint32_t,4>{0xc0400000,0xc0400000,0xc0400000,77});
+            // Scalar Q/I operands share the vector arithmetic and preserve masked lanes.
+            check(execute(17)==nt::ee::Stop::budget && vectors.values[2]==std::array<std::uint32_t,4>{0x40a00000,0x40c00000,0x40e00000,88});
+            check(execute(18)==nt::ee::Stop::budget && vectors.values[2]==std::array<std::uint32_t,4>{0xbf800000,0,0x3f800000,88});
+            check(execute(19)==nt::ee::Stop::budget && vectors.values[2]==std::array<std::uint32_t,4>{0x40800000,0x40a00000,0x40c00000,88});
+            check(execute(20)==nt::ee::Stop::budget && vectors.values[2]==std::array<std::uint32_t,4>{0,0x3f800000,0x40000000,88});
             const auto previous=vectors;
             vectors.active=true;
+            check(execute(17)==nt::ee::Stop::vector_pending && !state.executed && vectors.values==previous.values);
             check(execute(7)==nt::ee::Stop::vector_pending && !state.executed && vectors.random==previous.random);
         }
         {
@@ -1363,7 +1445,7 @@ int main() {
                   services.heap() && services.heap()->begin==0x5000 && services.heap()->end==0x6000 &&
                   state.gpr[16].lo==0x6000 && state.gpr[17].lo==0x6000);
             const auto original=ram;
-            for (const auto invalid : {std::array{0xfffffff0U,32U},std::array{0x7000U,0x2000U},std::array{0x9000U,0xffffffffU}}) {
+            for (const auto invalid : {std::array{0xfffffff0U,32U},std::array{0xf000U,0x2000U}}) {
                 state.pc=0x1200; state.gpr[3].lo=0x3d; state.gpr[4].lo=invalid[0]; state.gpr[5].lo=invalid[1];
                 check(nt::ee::run(nt_ee_generated_run,state,memory,8,services)==nt::ee::Stop::invalid_state &&
                       state.pc==0x1200 && state.executed==8 && services.heap()->end==0x6000 && ram==original);
@@ -1374,6 +1456,14 @@ int main() {
             state.pc=0x1200; state.gpr[4].lo=0x8000; state.gpr[5].lo=0;
             check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::budget &&
                   services.heap()->begin==0x8000 && services.heap()->end==0x8000);
+            state.pc=0x1200; state.gpr[4].lo=0x9000; state.gpr[5].lo=0xffffffff;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::budget &&
+                  services.heap()->begin==0x9000 && services.heap()->end==0x8000 && state.gpr[2].lo==0x8000);
+            state.pc=0x1200; state.gpr[5].lo=0x1000;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::budget &&
+                  services.heap()->end==0xa000 && state.gpr[2].lo==0xa000 && ram==original);
+            state.pc=0x120c; state.gpr[3].lo=0x3e;
+            check(nt::ee::run(nt_ee_generated_run,state,memory,1,services)==nt::ee::Stop::budget && state.gpr[2].lo==0xa000);
         }
         for (const auto slice : {1U,511U,512U,513U,10000U}) {
             nt::runtime::State state; state.pc=0x100000;
@@ -2677,6 +2767,22 @@ int main() {
             sink.result=nt::ee::Stop::budget;
             check(read(0x1000e000)==1 && read(0x1000f520)==0x1201);
             check(write(0x1000e000,0)==nt::ee::Stop::budget);
+            for (const auto base:{0x1000b000U,0x1000b400U,0x1000c400U,0x1000c800U}) {
+                for (const auto field:{0U,0x10U,0x20U,0x30U,0x40U,0x50U,0x80U}) {
+                    check(write(base+field,0)==nt::ee::Stop::budget && read(base+field)==0);
+                    check(write(base+field,0x100)==nt::ee::Stop::unsupported_system && read(base+field)==0);
+                }
+                check(!platform.completions.status());
+                check(!nt::ee::NativeSubmissionPolicy::maps(base+0x60));
+                check(!nt::ee::NativeSubmissionPolicy::maps(base+1));
+            }
+            check(write(0x1000c000,0x184)==nt::ee::Stop::budget);
+            for (const auto field:{0x30U,0x40U,0x50U,0x80U}) {
+                check(write(0x1000c000+field,0)==nt::ee::Stop::budget && read(0x1000c000+field)==0);
+                check(write(0x1000c000+field,1)==nt::ee::Stop::unsupported_system);
+                check(platform.sif_receive.accepting() && !platform.completions.status());
+            }
+            check(write(0x1000c000,0)==nt::ee::Stop::budget && !platform.sif_receive.accepting());
             for (const auto address:{0x1000e030U,0x1000e040U,0x1000e050U}) {
                 check(write(address,0)==nt::ee::Stop::budget && read(address)==0);
                 check(write(address,16)==nt::ee::Stop::unsupported_system && read(address)==0);
@@ -2733,15 +2839,15 @@ int main() {
                 return write(0x10008000,control);
             };
             check(write(0x1000e000,1)==nt::ee::Stop::budget);
-            for (const unsigned kind:{0U,1U,2U,3U,7U}) {
+            for (const unsigned kind:{0U,1U,2U,3U,4U,7U}) {
                 ram.fill(0); platform.completions.acknowledge(1);
-                const auto external=kind==0 || kind==3;
+                const auto external=kind==0 || kind==3 || kind==4;
                 put(0,(kind<<28)|1); put(4,kind==2 ? 64 : 128);
                 put(8,0x01000404); put(12,0x0700002a);
                 put(external ? 128 : 16,0x05000002);
                 if (kind==1) put(32,0x70000000);
                 if (kind==2) put(64,0x70000000);
-                if (kind==3) put(16,0x70000000);
+                if (kind==3 || kind==4) put(16,0x70000000);
                 check(submit()==nt::ee::Stop::budget);
                 check(platform.packet_setup.read(0x10003840).value==0x404 && platform.packet_setup.read(0x10003830).value==42);
                 check(platform.packet_setup.read(0x10003850).value==2 && (platform.completions.status()&1));

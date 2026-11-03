@@ -19,6 +19,17 @@ public:
     vu::State state;
     vu::RunResult last_result{vu::RunStatus::unbound_program,0};
     vu::GraphicsBatchConsumer graphics;
+    Stop submit_uploaded(unsigned unit,std::span<const NativeUploadView> uploads,
+                         std::span<const NativeVectorDataView> data,const NativeLaunchView* request) {
+        std::vector<vu::UploadView> views;
+        views.reserve(uploads.size());
+        for (const auto& upload:uploads) views.push_back({upload.destination,upload.bytes});
+        auto previous=binding_;
+        if (!binding_.upload(unit,views)) return Stop::unsupported_vector;
+        const auto result=submit(unit,data,request);
+        if (result!=Stop::budget) binding_=std::move(previous);
+        return result;
+    }
     Stop submit(unsigned unit,std::span<const NativeVectorDataView> data,const NativeLaunchView* request) {
         if (unit!=binding_.unit()) return Stop::unsupported_vector;
         if (shared_ && shared_->active) return Stop::vector_pending;
@@ -78,6 +89,10 @@ public:
         packets.submit_compiled=[](void* raw,unsigned unit,std::span<const NativeVectorDataView> data,const NativeLaunchView* request) {
             return static_cast<NativeVuLaunch*>(raw)->submit(unit,data,request);
         };
+        packets.submit_uploaded=[](void* raw,unsigned unit,std::span<const NativeUploadView> uploads,
+                                   std::span<const NativeVectorDataView> data,const NativeLaunchView* request) {
+            return static_cast<NativeVuLaunch*>(raw)->submit_uploaded(unit,uploads,data,request);
+        };
     }
     void connect_macro(Memory& memory) {
         if (!shared_) throw std::invalid_argument("Macro launch requires VU0 shared state");
@@ -114,6 +129,12 @@ public:
             auto& self=*static_cast<NativeVuSubmissions*>(raw);
             if (unit>=self.owners_.size() || !self.owners_[unit]) return Stop::unsupported_vector;
             return self.owners_[unit]->submit(unit,data,request);
+        };
+        packets.submit_uploaded=[](void* raw,unsigned unit,std::span<const NativeUploadView> uploads,
+                                   std::span<const NativeVectorDataView> data,const NativeLaunchView* request) {
+            auto& self=*static_cast<NativeVuSubmissions*>(raw);
+            if (unit>=self.owners_.size() || !self.owners_[unit]) return Stop::unsupported_vector;
+            return self.owners_[unit]->submit_uploaded(unit,uploads,data,request);
         };
     }
 private:

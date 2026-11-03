@@ -29,15 +29,20 @@ class IopReset {
         std::unique_ptr<nt::ee::NativeIopCommands> incoming;
         std::unique_ptr<nt::ee::NativeCdvdInitRpc> cdvd;
         std::unique_ptr<nt::ee::NativeCdvdScmdRpc> scmd;
+        std::unique_ptr<nt::ee::NativeCdvdSearchRpc> search;
+        std::unique_ptr<nt::ee::NativeCdvdReadRpc> read;
         std::unique_ptr<nt::ee::NativeCdvdReadyRpc> ready,ready_alternate;
         std::unique_ptr<nt::ee::NativeSifCommandPeer> native_rpc;
     };
 public:
     IopReset(const std::filesystem::path& data,const std::filesystem::path& disc,
-             nt::ee::Memory& ee,nt::ee::NativePlatform& platform,nt::ee::CodeOverlap protection,bool session=false)
-        : platform_(platform),module_(nt_iop_generated_module()),session_(session),disc_(disc),data_(data),ee_(ee),protection_(protection),
+             nt::ee::Memory& ee,nt::ee::NativePlatform& platform,nt::ee::CodeOverlap protection,bool session=false,bool default_reset=false,std::uint32_t disc_media=0)
+        : platform_(platform),module_(nt_iop_generated_module()),session_(session),default_reset_(default_reset),disc_(disc),data_(data),ee_(ee),protection_(protection),
           delivery_(ee,protection,platform.sif_receive),
           destination_{{ee.data,ee.size},[protection](auto address,auto size) { return !protection(address,size); }} {
+        disc_media_=disc_media;
+        if (default_reset_ && (!session_ || nt_iop_generated_entries().empty()))
+            throw std::runtime_error("Default reset requires a linked startup module catalog");
         state_=prepare();
         platform_.graphics.edge_context=this;
         platform_.graphics.display_edge=[](void* context,bool end) {
@@ -66,6 +71,7 @@ public:
     bool finished() const { return state_->startup->finished(); }
     bool accepted() const { return accepted_; }
     std::uint32_t last_server() const { return last_server_; }
+    bool interrupts_enabled() const { return state_->services->interrupts.delivery_enabled(); }
     bool cdvd_initialized() const { return state_->cdvd && state_->cdvd->initialized(); }
     const nt::iop::NativeSerialServices& serial() const { return state_->services->serial(); }
     const nt::iop::NativeUsbServices& usb() const { return state_->services->usb; }
@@ -142,15 +148,19 @@ private:
         next->startup=std::make_unique<nt::iop::NativeModuleStartup>(nt::iop::run_llvm,*next->services,next->ram,module_,nt_iop_generated_entries(),0x1ff000);
         next->incoming=std::make_unique<nt::ee::NativeIopCommands>(next->services->sif_control,next->services->inbound);
         if (!disc.empty()) {
-            next->cdvd=std::make_unique<nt::ee::NativeCdvdInitRpc>(disc,0x1ee000,0x1ee010);
+            next->cdvd=std::make_unique<nt::ee::NativeCdvdInitRpc>(disc,0x1ee000,0x1ee010,disc_media_);
             auto* session=next->cdvd.get();
             next->services->cdvdman.attach([session] { return session->volume(); },[session] { return session->media_mode(); });
             next->scmd=std::make_unique<nt::ee::NativeCdvdScmdRpc>(*next->cdvd,0x1ed000,0x1ed010);
+            next->search=std::make_unique<nt::ee::NativeCdvdSearchRpc>(*next->cdvd,0x1ed800,0x1ed810);
+            next->read=std::make_unique<nt::ee::NativeCdvdReadRpc>(*next->cdvd,0x1ec000,0x1ec010);
             next->ready=std::make_unique<nt::ee::NativeCdvdReadyRpc>(*next->cdvd,0x8000059AU,0x1ef000,0x1ef010);
             next->ready_alternate=std::make_unique<nt::ee::NativeCdvdReadyRpc>(*next->cdvd,0x8000059CU,0x1ef800,0x1ef810);
             next->native_rpc=std::make_unique<nt::ee::NativeSifCommandPeer>(platform.sif_link,ee,protection,0x1f0000,&platform.sif_receive);
             if (!next->native_rpc->register_service(*next->cdvd)) throw std::runtime_error("Cannot register reset-session CD/DVD service");
             if (!next->native_rpc->register_service(*next->scmd)) throw std::runtime_error("Cannot register reset-session CD/DVD command service");
+            if (!next->native_rpc->register_service(*next->search)) throw std::runtime_error("Cannot register reset-session disc search service");
+            if (!next->native_rpc->register_service(*next->read)) throw std::runtime_error("Cannot register reset-session disc read service");
             if (!next->native_rpc->register_service(*next->ready) || !next->native_rpc->register_service(*next->ready_alternate))
                 throw std::runtime_error("Cannot register reset-session CD/DVD ready service");
         }
@@ -235,18 +245,25 @@ private:
             if (self.accepted_ && !self.started_) return {nt::ee::Stop::budget,0};
             if (self.platform_.sif_receive.accepting() || self.generations_==0xffffffffU)
                 return {nt::ee::Stop::unsupported_system};
-            constexpr std::string_view loader="rom0:UDNL ";
-            if (!request.arguments.starts_with(loader) || self.disc_.empty()) return {nt::ee::Stop::unsupported_system};
-            nt::disc::Files disc(self.disc_);
-            const auto image=disc.read_file(std::string(request.arguments.substr(loader.size())),16*1024*1024);
-            const auto files=nt::disc::parse_reboot_image(image);
-            const auto sources=nt_iop_generated_source_hashes();
-            if (sources.empty()) return {nt::ee::Stop::unsupported_system};
-            for (const auto source:sources) {
-                const auto match=std::find_if(files.begin(),files.end(),[&](const auto& file) {
-                    return nt::fingerprint(nt::ByteView(image).subspan(file.offset,file.size))==source;
-                });
-                if (match==files.end()) return {nt::ee::Stop::unsupported_system};
+            if (self.default_reset_) {
+                // The launcher explicitly selected this linked bundle as the
+                // default environment. Empty arguments restart its real module
+                // initializers; no ROM image or synthetic completion is used.
+                if (!request.arguments.empty()) return {nt::ee::Stop::unsupported_system};
+            } else {
+                constexpr std::string_view loader="rom0:UDNL ";
+                if (!request.arguments.starts_with(loader) || self.disc_.empty()) return {nt::ee::Stop::unsupported_system};
+                nt::disc::Files disc(self.disc_);
+                const auto image=disc.read_file(std::string(request.arguments.substr(loader.size())),16*1024*1024);
+                const auto files=nt::disc::parse_reboot_image(image);
+                const auto sources=nt_iop_generated_source_hashes();
+                if (sources.empty()) return {nt::ee::Stop::unsupported_system};
+                for (const auto source:sources) {
+                    const auto match=std::find_if(files.begin(),files.end(),[&](const auto& file) {
+                        return nt::fingerprint(nt::ByteView(image).subspan(file.offset,file.size))==source;
+                    });
+                    if (match==files.end()) return {nt::ee::Stop::unsupported_system};
+                }
             }
             // Allocate and validate before retiring the old serialized lifetime.
             // Its workers, handles, callbacks and pending replies are destroyed
@@ -267,8 +284,9 @@ private:
     }
     nt::ee::NativePlatform& platform_;
     nt::iop::NativeModule module_;
-    bool session_=false,accepted_=false;
+    bool session_=false,default_reset_=false,accepted_=false;
     std::filesystem::path disc_,data_;
+    std::uint32_t disc_media_=0;
     nt::ee::Memory& ee_;
     nt::ee::CodeOverlap protection_;
     nt::ee::NativeIopDelivery delivery_;

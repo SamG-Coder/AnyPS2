@@ -58,6 +58,11 @@ See [the testing ladder](ps2-test-programs.md#larger-homebrew-tests).
 
 ## Conversion format and rendering references
 
+The pinned PS2SDK `ee/rpc/cdvd/src/scmd.c` supplies the public disc-type and
+drive-status RPC method numbers and four-byte response shapes. The native
+implementation reports the explicitly configured ISO mount and synchronous
+storage state; no optical-drive timing or firmware is synthesized.
+
 ELF `.vutext` classification uses the section convention recorded in PS2SDK's
 [`tools/srxfixup/src/eefixconf.c`](https://github.com/ps2dev/ps2sdk/blob/2a18d15da1332665451a9bcf9a0d4df9029c9490/tools/srxfixup/src/eefixconf.c).
 These VU payload containers can share an executable LOAD with EE code. AnyPS2
@@ -220,10 +225,15 @@ addresses, CTRL reset/pause, MODE path-3 masking/intermittent mode, and STAT
 readback. The independent initialization model accepts no packets and does not
 reset DMA or GS display configuration when GIF is reset.
 PCSX2 `Dmac.cpp` and `Hw.h` supply the VIF0/VIF1/GIF DMA register layout,
-16-bit QWC storage and CHCR start bit. Idle setup is shared across these three
-channels; starting a transfer remains an explicit unsupported boundary.
+16-bit QWC storage and CHCR start bit. Native packet consumers handle supported
+VIF/GIF submissions. Unimplemented IPU, SIF-send and scratchpad transfer endpoints
+accept only zero initialization; configuring or starting work stops explicitly,
+and initialization never produces completion notifications.
 PS2SDK `ee/dma/src/dma.c` also initializes the offset-0x80 scratchpad slots on
 these channels to zero; that initialization is accepted, while nonzero setup stops.
+Direct 128-bit VIF/GIF writes use the same native packet consumers. The public
+`Vif_Codes.cpp` MSKPATH3 flag and GIF STAT M3P bit define the independently
+implemented path-3 mask; masked submissions stop without consuming packets.
 `Dmac.h` defines the D_PCR CPC/CDE fields and PCE enable bit. Configuration
 readback is supported with PCE disabled; priority-controlled arbitration stops.
 PCSX2 `VUops.cpp`, `VUflags.cpp`, `VU0.cpp` and the public COP2 opcode tables
@@ -368,6 +378,10 @@ The original diagnostic IOP integer core implements public MIPS-I encodings;
 PCSX2 `R3000AInterpreter.cpp` was consulted for conditional link and branch
 behavior. No upstream interpreter or firmware routine is copied or linked.
 Execution tests contain independently constructed instruction sequences.
+The LLVM IOP backend independently implements BLTZAL/BGEZAL, including the
+unconditional link write and delay slot. Source-register r31 is rejected as
+unpredictable, following the [MIPS instruction-set manual, revision 2.00](https://gamingdoc.org/wp-content/uploads/2020/07/mips_instruction_set_reference.pdf).
+No manual text or reference implementation is incorporated into generated code.
 An unbounded store through a fixed slot may call any instruction compiled into
 that program, and every other address stops as unmapped code; proved loaded
 pointers stay on their smaller set. A path that skips the load does not keep
@@ -470,6 +484,24 @@ code was copied. Timer gate/external-clock/toggle modes remain explicit unsuppor
 requests. Display callbacks use the native graphics owner's nominal display edges,
 not physical monitor timing. Suspended thread register-frame exposure is not yet
 implemented and stops rather than returning a fabricated pointer.
+The same pinned `xtimrman.h` and `timrman.c` define handler/setup/start/stop
+ordinals 20 and 22–24 and callback-return repeat periods. These use native
+monotonic deadlines and compiled callbacks; unsupported external clocks/gates
+still stop. The pinned CD/DVD header and `sceCdStop` define stop completion
+reason 6; native file reads complete synchronously while drive status and queued
+completion remain explicit state. No reference implementation code was copied.
+The pinned public threadman `thcommon.c` saves/restores each continuation's
+interrupt-delivery state and initializes new workers and idle with delivery
+enabled. Native scheduling retains this ownership without a hardware register
+bank, so a sleeping worker's critical section cannot mask another worker.
+The pinned `libcdvd-rpc.h`, `libcdvd.c` and `cdvdfsv.c` identify the file-search
+server and 292/296/300-byte request layouts. Native searches use the mounted ISO
+directory and validate both result destinations before publishing either.
+Second-layer searches remain unsupported; no directory record is synthesized.
+The same public NCMD read packet uses 2048-byte ISO sectors, an EE destination,
+edge-fixup record and progress destination. Native copies support unaligned
+destinations directly and publish zero deferred-edge lengths before completion.
+Raw/audio-sector patterns remain unsupported; read failures retain an error code.
 The same pinned vblank source documents ordinals 4–7, edge versus phase event
 bits, multi-waiter semantics and base-handler priority. The independent native
 implementation reuses AnyPS2 event objects and scheduled continuations; it does
@@ -1886,6 +1918,11 @@ delivery from interrupt context. Native IOP disc services share the already
 initialized ISO session with the EE RPC service. Host file reads finish before
 publication; completion callbacks are deferred through the existing compiled
 callback scheduler. Optical seek/spin timing is not reproduced. The pinned
+implementation's `sceCdSync` modes 0/1, 3–6 and 16/17 describe command and
+RPC completion waits/queries. Accepted native reads complete synchronously;
+these queries preserve separately queued callbacks. Streaming and the distinct
+mode-32 event wait remain unsupported rather than reporting invented completion.
+The pinned
 PCSX2 `CDVDisoReader.cpp` documents the PS2 ISO convention in which the first
 volume's block count points at the next volume descriptor. AnyPS2 independently
 validates that metadata; an unrecognized layout is not reported as single-layer.
@@ -2203,6 +2240,8 @@ Point rounding and non-antialiased line coverage were checked against
 `GS/Renderers/SW/GSRasterizer.cpp` at the PCSX2 revision pinned above.
 AnyPS2 independently evaluates the endpoint diamond-exit rule and rational
 interpolation in Vulkan shaders; no rasterizer implementation is copied.
+The same pin's `GSState::IsCoverageAlpha` limits AA1 coverage to
+lines and triangles; point and sprite draws retain ordinary coverage and alpha.
 
 The local graphics examples use [ps2dev/gsKit](https://github.com/ps2dev/gsKit)
 at `8ef73d05f022d14b3ded7c70cba670fe333ed61a` (AFL-2.0 and per-file notices),
@@ -2214,3 +2253,28 @@ The Windows wait follows Microsoft's public [CreateWaitableTimerExW](https://lea
 and [SetWaitableTimer](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-setwaitabletimer)
 contracts. It uses an unnamed, thread-owned high-resolution timer, with standard
 host sleep if unavailable; no timer sample code is copied.
+
+## Tyra integration input
+
+The local full-demo input uses [Tyra](https://github.com/h4570/tyra) at
+`b4be27a2f6f9bde4f3240cb3f3bfb70f18c1e050` (Apache-2.0 source notices).
+Its PS2 build uses the public PS2DEV toolchain above,
+[OpenVCL](https://github.com/ps2dev/openvcl) at
+`a5e9dbee6c0f2033403ee846fcc8565f17a0840d` (AFL-2.0), and
+[vclpp](https://github.com/glampert/vclpp) at
+`95911cd3f6842978b403b6f3a9d1dbcdfe21f09e` (MIT).
+The local build supplies a missing `<functional>` include and excludes the
+standalone banner-data object already included by its caller. It does not use
+the bundled proprietary VCL executable. Upstream assets have separate provenance;
+the release asset archive, source checkouts, PS2 ELF and conversion output remain
+ignored and are not distributed with AnyPS2. Preparation is not compatibility proof.
+
+The pinned Play! `PS2OS.cpp` SetupHeap/EndOfHeap interface behavior informs the
+native startup boundary service: size `-1` selects the main stack base regardless
+of the supplied heap start; an explicit size selects start plus size. This records
+a boundary rather than allocating a heap. Native memory bounds remain checked.
+
+The pinned PCSX2 `SPR.cpp` and `Dmac.cpp` were consulted for scratchpad transfer
+direction, 16 KiB wrap, descriptor ordering and full-quadword tag transfer. The
+native implementation uses independently written validated buffer-copy batches;
+it does not copy the emulator's channel scheduling or timing implementation.

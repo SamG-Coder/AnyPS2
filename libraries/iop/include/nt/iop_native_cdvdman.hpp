@@ -102,9 +102,13 @@ private:
         case 6: return read(request,ram,volume);
         case 8: return returned(error_);
         case 11:
-            // All accepted native reads have already completed. The callback
-            // may remain queued, independently of storage completion.
-            if (args[0]>4 || args[0]==2) return {};
+            // Both IOP reads and the native EE read RPC publish their bytes
+            // synchronously. Modes 16/17 also include RPC/stream work: no
+            // streaming request is accepted by these providers yet. Callback
+            // delivery is independent and must not be consumed by this query.
+            // Timed waits (3/4/6) also finish immediately for completed I/O.
+            if (args[0]!=0 && args[0]!=1 && args[0]!=3 && args[0]!=4 &&
+                args[0]!=5 && args[0]!=6 && args[0]!=16 && args[0]!=17) return {};
             return returned(0);
         case 12:
             if (!volume) return returned(0);
@@ -124,7 +128,16 @@ private:
             store_native_word(ram,*ram_offset(args[1],4,ram.size()),0);
             return returned(1);
         }
-        case 28: return returned(volume ? 0x0aU : 0U);
+        case 15:
+            if (pending_) return returned(0);
+            if (!volume) { error_=0x12; return returned(0); }
+            // Reads are synchronous native file operations, so no transfer is
+            // outstanding. Retain the public stopped state and completion edge;
+            // a later read resumes the mounted volume without optical timing.
+            stopped_=true; error_=0;
+            if (callback_) pending_=NativeCallback{callback_,6,{}};
+            return returned(1);
+        case 28: return returned(volume ? (stopped_ ? 0U : 0x0aU) : 0U);
         case 37: {
             if (pending_) return returned(0);
             if (args[0]) {
@@ -185,6 +198,7 @@ private:
             error_=0x20; return {NativeServiceStatus::returned,0};
         }
         try {
+            stopped_=false;
             const auto data=volume->read_sectors(first,args[1]);
             std::copy(data.begin(),data.end(),ram.begin()+*ram_offset(args[2],4,ram.size()));
             error_=0;
@@ -206,6 +220,6 @@ private:
     std::optional<NativeCallback> pending_;
     std::optional<NativeCallback> power_callback_,power_pending_;
     bool application_exit_enabled_=false,close_requested_=false,exit_requested_=false;
-    bool active_=false;
+    bool active_=false,stopped_=false;
 };
 }

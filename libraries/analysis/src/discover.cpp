@@ -8,6 +8,44 @@
 #include <tuple>
 
 namespace nt::analysis {
+Program whole_code(ByteView bytes,const elf::Executable& executable,std::size_t limit) {
+    if (executable.inferred_permissions || executable.code_sections.empty())
+        throw std::runtime_error("Whole-code conversion requires declared EE instruction sections; classify code/data for this image first");
+    Program result;
+    result.entries.insert(executable.entry);
+    result.entries.insert(executable.function_entries.begin(),executable.function_entries.end());
+    result.entries.insert(executable.lifecycle_entries.begin(),executable.lifecycle_entries.end());
+    for (const auto& range:executable.code_sections) {
+        if (!range.size || range.address%4 || range.size%4 ||
+            std::uint64_t(range.address)+range.size>0x100000000ULL)
+            throw std::runtime_error("Invalid whole-code instruction extent");
+        const auto segment=std::find_if(executable.segments.begin(),executable.segments.end(),[&](const auto& s) {
+            return (s.flags&1) && range.address>=s.address &&
+                std::uint64_t(range.address)+range.size<=std::uint64_t(s.address)+s.file_size;
+        });
+        if (segment==executable.segments.end()) throw std::runtime_error("Whole-code section has no file-backed executable segment");
+        const auto offset=std::uint64_t(segment->offset)+range.address-segment->address;
+        require_range(bytes,static_cast<std::size_t>(offset),range.size);
+        for (std::uint32_t n=0;n<range.size;n+=4) {
+            const auto pc=range.address+n;
+            if (!elf::executable_address(executable,pc))
+                throw std::runtime_error("Whole-code section overlaps non-EE contents at "+hex32(pc));
+            if (!result.instructions.emplace(pc,r5900::decode(pc,le32(bytes,static_cast<std::size_t>(offset+n)))).second)
+                throw std::runtime_error("Overlapping whole-code sections at "+hex32(pc));
+            result.ordinary.insert(pc);
+            if (result.instructions.size()>limit) throw std::runtime_error("Whole-code instruction limit exceeded");
+        }
+    }
+    for (const auto entry:result.entries)
+        if (!result.instructions.contains(entry)) result.unresolved.insert(entry);
+    for (const auto& [pc,instruction]:result.instructions) {
+        if (!instruction.branch()) continue;
+        if (!result.instructions.contains(pc+4)) result.unresolved.insert(pc+4);
+        if (!instruction.indirect() && !result.instructions.contains(instruction.target()))
+            result.unresolved.insert(instruction.target());
+    }
+    return result;
+}
 std::set<std::uint32_t> syscall_wrappers(ByteView bytes,const elf::Executable& executable) {
     std::set<std::uint32_t> result;
     for (const auto& segment:executable.segments) {
@@ -425,6 +463,8 @@ ArgumentUses argument_uses(const Program& program,std::uint32_t entry,const Boun
 // reads the initial ELF image, not a claim that writable data stays constant.
 std::optional<std::uint32_t> leaf_return_value(ByteView bytes,const elf::Executable& elf,
     const Program& program,std::uint32_t entry,unsigned& fuel);
+std::optional<std::uint32_t> candidate_memory(ByteView bytes,const elf::Executable& elf,const Program& program,
+    std::uint32_t before,std::uint32_t address,unsigned width,bool sign,unsigned& fuel,std::uint32_t call_site);
 std::optional<std::uint32_t> candidate(ByteView bytes,const elf::Executable& elf,const Program& program,
                                      std::uint32_t before,unsigned reg,unsigned& fuel,std::uint32_t call_site,bool layout_candidate=false,
                                      std::uint32_t conditional_store=0,bool follow_returns=false) {
@@ -482,33 +522,8 @@ std::optional<std::uint32_t> candidate(ByteView bytes,const elf::Executable& elf
         if (i.op==Op::ori) return *a|static_cast<std::uint16_t>(i.immediate);
         if (i.op==Op::lw || i.op==Op::lwu || i.op==Op::lb || i.op==Op::lbu || i.op==Op::lh || i.op==Op::lhu) {
             const auto width=i.op==Op::lb || i.op==Op::lbu ? 1U : i.op==Op::lh || i.op==Op::lhu ? 2U : 4U;
-            const auto normalize=[](std::uint32_t address) {
-                return address>=0x80000000U && address<0xc0000000U ? address&0x1fffffffU : address;
-            };
-            const auto address=normalize(*a+static_cast<std::uint32_t>(i.immediate));
-            // Initial file bytes are not valid after a definite overlapping
-            // write in this setup block. Recover a complete word store, or
-            // leave partial/unknown replacement contents unresolved.
-            for (auto prior=before;prior>=4 && fuel;) {
-                --fuel; prior-=4;
-                const auto previous=program.instructions.find(prior);
-                if (previous==program.instructions.end()) break;
-                const auto& store=previous->second;
-                if (store.branch() || store.terminal() || store.op==Op::syscall) break;
-                const auto extent=pointer_store_width(store.op);
-                if (!extent) continue;
-                const auto base=candidate(bytes,elf,program,prior,store.rs,fuel,call_site);
-                if (!base) continue;
-                auto at=normalize(*base+std::uint32_t(store.immediate));
-                if (partial_store(store.op)) at&=~(extent-1);
-                if (address-at<extent || at-address<width) {
-                    if (width==4 && store.op==Op::sw && at==address)
-                        return candidate(bytes,elf,program,prior,store.rt,fuel,call_site);
-                    return {};
-                }
-            }
-            if (!fuel) return {};
-            return initial_word(bytes,elf,address,width,i.op==Op::lb || i.op==Op::lh);
+            return candidate_memory(bytes,elf,program,before,*a+std::uint32_t(i.immediate),width,
+                i.op==Op::lb || i.op==Op::lh,fuel,call_site);
         }
         const auto b=candidate(bytes,elf,program,before,i.rt,fuel,call_site,layout_candidate,conditional_store,follow_returns);
         if (!b) return {};
@@ -517,6 +532,38 @@ std::optional<std::uint32_t> candidate(ByteView bytes,const elf::Executable& elf
     }
     return {};
 }
+std::optional<std::uint32_t> candidate_memory(ByteView bytes,const elf::Executable& elf,const Program& program,
+    std::uint32_t before,std::uint32_t address,unsigned width,bool sign,unsigned& fuel,std::uint32_t call_site) {
+    using r5900::Op;
+    const auto normalize=[](std::uint32_t address) {
+        return address>=0x80000000U && address<0xc0000000U ? address&0x1fffffffU : address;
+    };
+    address=normalize(address);
+    // Initial file bytes are not valid after a definite overlapping
+    // write in this setup block. Recover a complete word store, or
+    // leave partial/unknown replacement contents unresolved.
+    for (auto prior=before;prior>=4 && fuel;) {
+        --fuel; prior-=4;
+        const auto previous=program.instructions.find(prior);
+        if (previous==program.instructions.end()) break;
+        const auto& store=previous->second;
+        if (store.branch() || store.terminal() || store.op==Op::syscall) break;
+        const auto extent=pointer_store_width(store.op);
+        if (!extent) continue;
+        const auto base=candidate(bytes,elf,program,prior,store.rs,fuel,call_site);
+        if (!base) continue;
+        auto at=normalize(*base+std::uint32_t(store.immediate));
+        if (partial_store(store.op)) at&=~(extent-1);
+        if (address-at<extent || at-address<width) {
+            if (width==4 && store.op==Op::sw && at==address)
+                return candidate(bytes,elf,program,prior,store.rt,fuel,call_site);
+            return {};
+        }
+    }
+    if (!fuel) return {};
+    return initial_word(bytes,elf,address,width,sign);
+}
+
 std::optional<std::uint32_t> leaf_return_value(ByteView bytes,const elf::Executable& elf,
     const Program& program,std::uint32_t entry,unsigned& fuel) {
     std::deque<std::uint32_t> pending{entry};
@@ -1036,6 +1083,19 @@ std::set<std::uint32_t> object_callback_stores(ByteView bytes,const elf::Executa
     }
     return result;
 }
+std::set<std::uint32_t> frame_reference_values(ByteView bytes,const elf::Executable& elf,
+    const Program& program,const pointer_flow::Graph& graph,std::uint32_t call,unsigned reg,std::uint32_t displacement,
+    bool call_delay=true,unsigned limit=512,bool require_complete=false,std::set<std::uint32_t>* definitions=nullptr);
+std::optional<std::uint32_t> scalar_with_stack(ByteView bytes,const elf::Executable& elf,
+    const Program& program,const pointer_flow::Graph& graph,std::uint32_t pc,unsigned reg) {
+    const auto recovered=pointer_flow::constant_gpr(program,graph,pc,reg,[&](const auto& load)
+        -> std::optional<std::uint32_t> {
+        const auto words=frame_reference_values(bytes,elf,program,graph,load.pc,load.rs,
+            std::uint32_t(load.immediate),false,512,true);
+        return words.size()==1 ? std::optional{*words.begin()} : std::nullopt;
+    });
+    return recovered ? std::optional{std::uint32_t(*recovered)} : std::nullopt;
+}
 struct CallConsumers {
     struct Slot {
         PointerLoad load;
@@ -1056,6 +1116,7 @@ struct CallConsumers {
     std::map<std::uint32_t,std::set<unsigned>> global_fields;
     std::map<std::uint32_t,std::set<std::uint32_t>> returned_fields;
     std::set<std::uint32_t> object_initializers;
+    std::set<std::uint32_t> frame_stores;
     BoundCalls bindings;
     pointer_flow::Graph graph;
     static const r5900::Instruction* definition(const Program& program,std::uint32_t before,unsigned reg) {
@@ -1073,6 +1134,48 @@ struct CallConsumers {
             if (*effect==reg) return &found->second;
         }
         return nullptr;
+    }
+    struct ScaledIndex { unsigned reg,stride; std::uint32_t first; };
+    static std::optional<ScaledIndex> shifted_index(const Program& program,const r5900::Instruction& scale) {
+        using r5900::Op;
+        if (scale.op!=Op::sll || scale.sa>8) return {};
+        ScaledIndex result{scale.rt,1U<<scale.sa,scale.pc};
+        const auto* add=definition(program,scale.pc,scale.rt);
+        if (!add || add->op!=Op::addu) return result;
+        // Compilers express non-power-of-two record sizes as (i + (i << n)) << m.
+        // Both operands must refer to the same, unmodified input index.
+        for (unsigned side=0;side<2;++side) {
+            const auto input=side ? add->rs : add->rt;
+            const auto* inner=definition(program,add->pc,side ? add->rt : add->rs);
+            if (!inner || inner->op!=Op::sll || inner->rt!=input || inner->rd==input || inner->sa>6) continue;
+            bool preserved=true;
+            for (auto pc=inner->pc+4;pc<add->pc;pc+=4) {
+                const auto found=program.instructions.find(pc);
+                if (found==program.instructions.end()) { preserved=false; break; }
+                const auto effect=pointer_write(found->second);
+                if (!effect || *effect==input || found->second.branch()) { preserved=false; break; }
+            }
+            const auto stride=((1U<<inner->sa)+1U)<<scale.sa;
+            if (preserved && stride<=256) return ScaledIndex{input,stride,inner->pc};
+        }
+        return result;
+    }
+    static bool returns_before_load(const Program& program,std::uint32_t pc,std::uint32_t load) {
+        // A bounds failure can branch backwards to a shared return epilogue.
+        // Accept only a straight, known return path, not a loop or another call.
+        for (unsigned n=0;n<32;++n,pc+=4) {
+            if (pc==load) return false;
+            const auto found=program.instructions.find(pc);
+            if (found==program.instructions.end()) return false;
+            const auto& i=found->second;
+            if (i.op==r5900::Op::jr && i.rs==31) {
+                const auto slot=program.instructions.find(pc+4);
+                return pc+4!=load && slot!=program.instructions.end() &&
+                    !slot->second.branch() && !slot->second.terminal() && pointer_write(slot->second).has_value();
+            }
+            if (i.branch() || i.terminal() || !pointer_write(i)) return false;
+        }
+        return false;
     }
     static std::optional<std::pair<std::uint32_t,std::uint32_t>> indexed_layout(
             const Program& program,std::uint32_t before,unsigned reg,std::uint32_t offset=0) {
@@ -1094,13 +1197,25 @@ struct CallConsumers {
         }
         return {};
     }
-    CallConsumers(ByteView bytes,const elf::Executable& elf,const Program& program) : graph(program) {
+    static pointer_flow::Graph discovery_graph(ByteView bytes,const elf::Executable& elf,const Program& program) {
+        // These edges reconnect recovered switch cases for callback discovery.
+        // They are candidates, never proofs for folding runtime table loads or
+        // pruning conditional execution in the generated program.
+        auto edges=program.indirect_candidates;
+        bounded_switch_entries(bytes,elf,program,&edges);
+        return pointer_flow::Graph(program,edges);
+    }
+    CallConsumers(ByteView bytes,const elf::Executable& elf,const Program& program) : graph(discovery_graph(bytes,elf,program)) {
         using r5900::Op;
         object_initializers=object_callback_stores(bytes,elf,program);
         std::set<std::pair<std::uint32_t,std::uint32_t>> bound_layouts;
         for (const auto& [pc,i]:program.instructions) {
             if (!i.indirect() || !call_transfer(i)) continue;
             for (const auto& load:called_loads(program,graph,i)) {
+                // Local callback choices can survive long parser/control-flow
+                // paths. Follow the frame identity, not a byte-distance window.
+                frame_reference_values(bytes,elf,program,graph,load.pc,load.base,load.offset,
+                    false,4096,false,&frame_stores);
                 unsigned fuel=128;
                 const auto base=candidate(bytes,elf,program,load.pc,load.base,fuel,0xffffffffU);
                 std::optional<std::pair<bool,std::uint32_t>> address;
@@ -1200,7 +1315,7 @@ struct CallConsumers {
         const auto scalar=[&](std::uint32_t pc,unsigned reg) {
             unsigned fuel=128;
             auto value=candidate(bytes,elf,program,pc,reg,fuel,0xffffffffU);
-            return value ? value : pointer_flow::constant(program,graph,pc,reg);
+            return value ? value : scalar_with_stack(bytes,elf,program,graph,pc,reg);
         };
         std::map<std::uint32_t,std::set<std::uint32_t>> assigned;
         bool indexed=false;
@@ -1214,7 +1329,7 @@ struct CallConsumers {
             const auto address=physical(*base+std::uint32_t(load->immediate));
             if (!indexed) {
                 indexed=true;
-                for (const auto& [at,store]:program.instructions) if (store.op==Op::sw) {
+                for (const auto& [at,store]:program.instructions) if (store.op==Op::sw || store.op==Op::sd || store.op==Op::sq) {
                     const auto destination=scalar(at,store.rs);
                     if (!destination) continue;
                     const auto value=scalar(at,store.rt);
@@ -1233,6 +1348,37 @@ struct CallConsumers {
                 const auto found=program.instructions.find(at);
                 if (found==program.instructions.end()) break;
                 const auto& latch=found->second;
+                // Ascending, fixed-count callback walks. Recover the initial
+                // cursor from incoming paths, excluding only this back edge;
+                // prove the same index/cursor updates on every body path.
+                if (latch.op==Op::bne && !latch.rt && latch.rs && at>=4 &&
+                    latch.target()<=load.pc && at-latch.target()<=128) {
+                    const auto compare=program.instructions.find(at-4);
+                    const auto slot=program.instructions.find(at+4);
+                    if (compare!=program.instructions.end() && slot!=program.instructions.end()) {
+                        const auto& limit=compare->second;
+                        const auto effect=pointer_write(slot->second);
+                        if (limit.op==Op::sltiu && limit.rt==latch.rs && limit.rs!=load.base &&
+                            limit.immediate>0 && limit.immediate<=4096 && effect &&
+                            *effect!=limit.rs && *effect!=load.base && !slot->second.branch() &&
+                            pointer_flow::path_delta(program,graph,latch.target(),at-4,limit.rs)==1) {
+                            const auto stride=pointer_flow::path_delta(program,graph,latch.target(),at-4,load.base);
+                            if (stride && *stride>=4 && *stride<=256 && *stride%4==0 && load.offset<std::uint64_t(*stride) &&
+                                pointer_flow::path_delta(program,graph,load.pc,at-4,load.base)==stride) {
+                                auto incoming=graph;
+                                auto& edges=incoming.previous[latch.target()];
+                                std::erase_if(edges,[&](const auto& edge) { return edge.from==at; });
+                                const auto base=pointer_flow::constant(program,incoming,latch.target(),load.base);
+                                const auto initial=pointer_flow::constant(program,incoming,latch.target(),limit.rs);
+                                if (base && initial && *initial<std::uint32_t(limit.immediate)) {
+                                    const auto count=std::uint32_t(limit.immediate)-*initial;
+                                    if (std::uint64_t(physical(*base))+std::uint64_t(count)* *stride<=0x100000000ULL)
+                                        tables.push_back({physical(*base),count,std::uint32_t(*stride),load.offset,load.pc,{}});
+                                }
+                            }
+                        }
+                    }
+                }
                 if ((latch.op!=Op::bgez && latch.op!=Op::bgtz && latch.op!=Op::bne) ||
                     (latch.op==Op::bne && latch.rt) || latch.target()>load.pc || latch.target()+128<at ||
                     latch.rs==load.base) continue;
@@ -1256,20 +1402,24 @@ struct CallConsumers {
                 const auto* scale=definition(add->pc,side ? add->rt : add->rs);
                 if (!scale) continue;
                 unsigned index=0; std::optional<std::uint32_t> stride;
+                auto first=scale->pc;
                 if ((scale->op==Op::mult || scale->op==Op::multu) && scale->rd) {
                     index=scale->rs; stride=scalar(scale->pc,scale->rt);
-                } else if (scale->op==Op::sll && scale->sa<=8) { index=scale->rt; stride=1U<<scale->sa; }
+                } else if (const auto shifted=shifted_index(program,*scale)) {
+                    index=shifted->reg; stride=shifted->stride; first=shifted->first;
+                }
                 if (!stride || *stride<4 || *stride>256 || *stride%4 || load.offset>=*stride) continue;
-                for (auto at=scale->pc;at>=4 && scale->pc-at<128;) {
+                for (auto at=first;at>=4 && first-at<128;) {
                     at-=4; const auto found=program.instructions.find(at);
                     if (found==program.instructions.end()) break;
                     const auto& compare=found->second;
                     if ((compare.op!=Op::slt && compare.op!=Op::sltu) || compare.rs!=index || !compare.rd) continue;
                     const auto guard=program.instructions.find(at+4);
                     if (guard==program.instructions.end() || guard->second.op!=Op::beq ||
-                        guard->second.rs!=compare.rd || guard->second.rt || guard->second.target()<=load.pc) continue;
+                        guard->second.rs!=compare.rd || guard->second.rt ||
+                        (guard->second.target()<=load.pc && !returns_before_load(program,guard->second.target(),load.pc))) continue;
                     bool preserved=true;
-                    for (auto between=compare.pc+8;between<scale->pc;between+=4) {
+                    for (auto between=compare.pc+8;between<first;between+=4) {
                         const auto step=program.instructions.find(between);
                         const auto effect=step==program.instructions.end() ? std::nullopt : pointer_write(step->second);
                         if (!effect || *effect==index || step->second.branch()) { preserved=false; break; }
@@ -1469,7 +1619,7 @@ struct CallConsumers {
             std::optional<std::uint32_t> stride;
             if ((scale->op==Op::mult || scale->op==Op::multu) && scale->rd)
                 stride=candidate(bytes,elf,program,scale->pc,scale->rt,fuel,0xffffffffU);
-            else if (scale->op==Op::sll && scale->sa<=8) stride=1U<<scale->sa;
+            else if (const auto shifted=shifted_index(program,*scale)) stride=shifted->stride;
             fuel=128;
             const auto direct=candidate(bytes,elf,program,add->pc,side ? add->rs : add->rt,fuel,0xffffffffU);
             std::optional<std::uint32_t> slot;
@@ -1488,9 +1638,10 @@ struct CallConsumers {
     bool contains(ByteView bytes,const elf::Executable& elf,const Program& program,
                   std::uint32_t after,unsigned base,std::uint32_t offset,std::uint32_t call_site=0xffffffffU) const {
         if (after>=4 && object_initializers.contains(after-4)) return true;
+        if (after>=4 && frame_stores.contains(after-4)) return true;
         unsigned fuel=128;
         auto address=candidate(bytes,elf,program,after,base,fuel,call_site);
-        if (!address) address=pointer_flow::constant(program,graph,after,base);
+        if (!address) address=scalar_with_stack(bytes,elf,program,graph,after,base);
         if (address && slots.contains({false,physical(*address+offset)})) return true;
         if (!address && base==28 && slots.contains({true,offset})) return true;
         fuel=256;
@@ -1545,7 +1696,7 @@ std::optional<std::uint32_t> stack_argument(ByteView bytes,const elf::Executable
 }
 std::set<std::uint32_t> frame_reference_values(ByteView bytes,const elf::Executable& elf,
     const Program& program,const pointer_flow::Graph& graph,std::uint32_t call,unsigned reg,std::uint32_t displacement,
-    bool call_delay=true,unsigned limit=512) {
+    bool call_delay,unsigned limit,bool require_complete,std::set<std::uint32_t>* definitions) {
     using r5900::Op;
     if (call_delay) {
         const auto slot=program.instructions.find(call+4);
@@ -1564,14 +1715,15 @@ std::set<std::uint32_t> frame_reference_values(ByteView bytes,const elf::Executa
     auto target=pointer_flow::frame_address(program,graph,call,reg,limit);
     if (!target) return {};
     target->offset+=displacement;
-    std::set<std::uint32_t> result,visited;
+    std::set<std::uint32_t> result,visited,stores;
     std::deque<std::uint32_t> pending{call};
     unsigned budget=limit;
+    bool unknown=false;
     // Stop each path at its most recent overlapping store. A partial or unknown
     // replacement cannot resurrect an older callback value.
     const auto store=[&](std::uint32_t pc,std::uint32_t before) {
         const auto found=program.instructions.find(pc);
-        if (found==program.instructions.end()) return true;
+        if (found==program.instructions.end()) { unknown=true; return true; }
         const auto& i=found->second;
         const auto width=pointer_store_width(i.op);
         if (!width) return false;
@@ -1582,16 +1734,41 @@ std::set<std::uint32_t> frame_reference_values(ByteView bytes,const elf::Executa
         if (partial_store(i.op)) address->offset&=~std::uint32_t(width-1);
         const auto delta=std::int32_t(address->offset-target->offset);
         if (std::int64_t(delta)+width<=0 || delta>=4) return false;
-        if (!delta && i.op==Op::sw) {
+        if (delta<=0 && std::int64_t(delta)+width>=4 && (i.op==Op::sw || i.op==Op::sd || i.op==Op::sq)) {
             // A delay-slot store observes registers before the callee runs.
             // The link register itself has already changed and is not an
             // ordinary before-call value.
             if (before!=pc) if (const auto link=link_register(program.instructions.at(before));link && link==i.rt) return true;
             unsigned fuel=128;
-            auto value=candidate(bytes,elf,program,pc,i.rt,fuel,before!=pc ? before : 0xffffffffU);
-            if (!value) value=pointer_flow::constant(program,graph,before,i.rt);
-            if (value) result.insert(*value);
-        }
+            std::optional<std::uint32_t> value;
+            if (!delta && i.op==Op::sw) {
+                value=candidate(bytes,elf,program,pc,i.rt,fuel,before!=pc ? before : 0xffffffffU);
+                if (!value) value=pointer_flow::constant(program,graph,before,i.rt);
+            } else {
+                // A wide assignment can copy several pointer fields at once.
+                // Recover only the word actually consumed by the callee, from
+                // a complete matching load. Runtime loads are never folded.
+                const auto lane=static_cast<std::uint32_t>(-delta);
+                auto origin=CallConsumers::definition(program,pc,i.rt);
+                for (unsigned copies=0;origin && copies<8;++copies) {
+                    const unsigned loaded=origin->op==Op::lq ? 16 : origin->op==Op::ld ? 8 :
+                        (origin->op==Op::lw || origin->op==Op::lwu) ? 4 : 0;
+                    if (loaded) {
+                        if (lane+4<=loaded) {
+                            const auto base=candidate(bytes,elf,program,origin->pc,origin->rs,fuel,0xffffffffU);
+                            if (base) value=candidate_memory(bytes,elf,program,origin->pc,
+                                *base+std::uint32_t(origin->immediate)+lane,4,false,fuel,0xffffffffU);
+                        }
+                        break;
+                    }
+                    const auto copy=copied_register(*origin);
+                    if (!copy || lane>=8) break;
+                    origin=CallConsumers::definition(program,origin->pc,*copy);
+                }
+            }
+            if (value) { result.insert(*value); stores.insert(pc); }
+            else unknown=true;
+        } else unknown=true;
         return true;
     };
     if (call_delay && store(call+4,call)) return result;
@@ -1599,13 +1776,15 @@ std::set<std::uint32_t> frame_reference_values(ByteView bytes,const elf::Executa
         const auto pc=pending.front(); pending.pop_front();
         if (!visited.insert(pc).second) continue;
         const auto edges=graph.previous.find(pc);
-        if (edges==graph.previous.end()) continue;
+        if (edges==graph.previous.end() || edges->second.empty()) { unknown=true; continue; }
         for (const auto& edge:edges->second) {
             if (edge.delay && store(edge.from+4,edge.from)) continue;
             if (!store(edge.from,edge.from)) pending.push_back(edge.from);
         }
     }
-    return pending.empty() ? result : std::set<std::uint32_t>{};
+    if (!pending.empty() || (require_complete && unknown)) return {};
+    if (definitions) definitions->insert(stores.begin(),stores.end());
+    return result;
 }
 // A reference argument may point at a temporary word filled in the call delay
 // slot. Recover only an unchanged SP-relative setup; other alias forms remain
@@ -1815,12 +1994,41 @@ std::vector<CallbackFlowGap> callback_flow_gaps(ByteView bytes,const elf::Execut
     }
     return result;
 }
-std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executable& elf,const Program& program) {
+std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executable& elf,const Program& program,
+    std::map<std::uint32_t,std::set<std::uint32_t>>* candidate_edges) {
     using r5900::Op;
     std::set<std::uint32_t> result;
-    const pointer_flow::Graph graph(program);
+    const pointer_flow::Graph graph(program,program.indirect_candidates);
     for (const auto& [pc,jump]:program.instructions) {
         if (jump.op!=Op::jr || !jump.rs || pc<28) continue;
+        const auto loaded=program.instructions.find(pc-4);
+        if (loaded!=program.instructions.end() && loaded->second.op==Op::lw && loaded->second.rt==jump.rs) {
+            const auto& load=loaded->second;
+            for (auto at=pc-8,steps=0U;at>=4 && steps<64;at-=4,++steps) {
+                const auto found=program.instructions.find(at);
+                if (found==program.instructions.end()) continue;
+                const auto& branch=found->second;
+                if (branch.op!=Op::beq || (branch.rs && branch.rt) || (!branch.rs && !branch.rt) || branch.target()<=pc) continue;
+                const auto guard=branch.rs ? branch.rs : branch.rt;
+                const auto* limit=CallConsumers::definition(program,at,guard);
+                if (!limit || limit->op!=Op::sltiu) continue;
+                const auto bound=pointer_flow::switch_candidate_bound(program,graph,at,guard,limit->rs);
+                if (!bound) continue;
+                const auto address=pointer_flow::guarded_address(program,graph,load.pc,load.rs,at,limit->rs);
+                if (!address || address->scale!=4) continue;
+                const auto base=address->offset+std::uint32_t(load.immediate);
+                std::set<std::uint32_t> entries;
+                for (unsigned n=0;n<*bound;++n) {
+                    if (std::uint64_t(base)+4*n>0xffffffffULL) { entries.clear(); break; }
+                    const auto word=initial_word(bytes,elf,base+4*n);
+                    const auto entry=word ? executable_pointer(elf,*word) : std::nullopt;
+                    if (!entry) { entries.clear(); break; }
+                    entries.insert(*entry);
+                }
+                result.insert(entries.begin(),entries.end());
+                if (candidate_edges) (*candidate_edges)[pc].insert(entries.begin(),entries.end());
+            }
+        }
         std::array<const r5900::Instruction*,6> prior{};
         bool complete=true;
         for (unsigned n=0;n<prior.size();++n) {
@@ -1862,7 +2070,7 @@ std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executa
         if (separate_low && (prior[2]->rs!=high.rt || prior[2]->rt!=high.rt || high.rt==scale.rt)) continue;
         if (branch.op!=Op::beq || (branch.rs && branch.rt) || (!branch.rs && !branch.rt)) continue;
         const auto guard=branch.rs ? branch.rs : branch.rt;
-        const auto bound=pointer_flow::range_bound(program,graph,branch.pc,guard,scale.rt);
+        const auto bound=pointer_flow::switch_candidate_bound(program,graph,branch.pc,guard,scale.rt);
         if (!bound) continue;
         if (load.op!=Op::lw || load.rt!=jump.rs || add.op!=Op::addu || add.rd!=load.rs ||
             (!earlier_base && ((high.op!=Op::lui && high.op!=Op::lw && high.op!=Op::lwu) || !high.rt)) ||
@@ -1901,12 +2109,26 @@ std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executa
                 entries.insert(*entry);
             }
             result.insert(entries.begin(),entries.end());
+            if (candidate_edges) (*candidate_edges)[pc].insert(entries.begin(),entries.end());
         }
     }
     return result;
 }
 std::set<std::uint32_t> initial_indirect_entries(ByteView bytes,const elf::Executable& elf,const Program& program) {
     std::set<std::uint32_t> result;
+    const CallConsumers consumers(bytes,elf,program);
+    for (const auto& table:consumers.tables) {
+        std::set<std::uint32_t> entries;
+        for (std::uint32_t index=0;index<table.count;++index) {
+            const auto word=initial_word(bytes,elf,table.base+index*table.stride+table.field);
+            if (!word) { entries.clear(); break; }
+            if (!*word) continue;
+            const auto target=executable_pointer(elf,*word);
+            if (!target) { entries.clear(); break; }
+            entries.insert(*target);
+        }
+        result.insert(entries.begin(),entries.end());
+    }
     for (const auto& [pc,call]:program.instructions) {
         if (!call.indirect() || !call.rs || (call.op==r5900::Op::jr && call.rs==31)) continue;
         unsigned fuel=128;
@@ -1919,16 +2141,19 @@ std::set<std::uint32_t> referenced_lifecycle_entries(ByteView bytes,const elf::E
     std::set<std::uint32_t> result,visited;
     constexpr unsigned maximum=4096;
     for (const auto& [pc,load]:program.instructions) {
-        if (load.op!=r5900::Op::lw || load.immediate || !load.rs) continue;
+        if (load.op!=r5900::Op::lw || !load.rs) continue;
         unsigned fuel=128;
         const auto base=candidate(bytes,elf,program,pc,load.rs,fuel,0xffffffffU);
-        if (!base || *base%4 || !visited.insert(*base).second) continue;
-        const auto header=initial_word(bytes,elf,*base);
+        if (!base) continue;
+        const auto raw=*base+std::uint32_t(load.immediate);
+        const auto table=raw>=0x80000000U && raw<0xc0000000U ? raw&0x1fffffffU : raw;
+        if (table%4 || !visited.insert(table).second) continue;
+        const auto header=initial_word(bytes,elf,table);
         if (!header || (*header!=0xffffffffU && (!*header || *header>maximum))) continue;
         std::set<std::uint32_t> entries;
         bool terminated=false;
         for (unsigned index=1;index<=maximum+1;++index) {
-            const auto address=std::uint64_t(*base)+4*index;
+            const auto address=std::uint64_t(table)+4*index;
             if (address>0xfffffffcU) break;
             const auto word=initial_word(bytes,elf,static_cast<std::uint32_t>(address));
             if (!word) break;
@@ -1982,6 +2207,23 @@ std::set<std::uint32_t> registered_code_pointers(ByteView bytes,const elf::Execu
             return index<8 ? candidate(bytes,elf,program,pc+8,index+4,fuel,pc,false,0,called) :
                 stack_argument(bytes,elf,program,pc,index-8);
         };
+        // A reference passed through direct helpers can be an I/O vtable or
+        // another callback descriptor copied into a local frame. Only fields
+        // actually called by the bounded callee analysis provide code roots.
+        for (unsigned index=0;index<8;++index) {
+            const auto fields=uses.callable_fields.find(1U<<index);
+            if (fields==uses.callable_fields.end()) continue;
+            for (const auto field:fields->second) {
+                if (field%4 || field>=1024) continue;
+                auto values=frame_reference_values(bytes,elf,program,consumers.graph,pc,index+4,field);
+                if (const auto base=argument(index))
+                    if (const auto value=initial_word(bytes,elf,*base+field)) values.insert(*value);
+                for (const auto value:values) if (const auto target=executable_pointer(elf,value)) {
+                    result.insert(*target);
+                    if (references) references->push_back({pc,*target,true,true,false,*callee,index});
+                }
+            }
+        }
         // A bound callback record contains a function and its opaque context.
         // Recognize reference-taking setters only when an actual indirect call
         // loads the adjacent context into a0, and the setter binds both fields.

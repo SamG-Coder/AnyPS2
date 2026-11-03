@@ -283,10 +283,15 @@ void instruction(Writer& w,const ir::Instruction& i,bool has_successor,bool open
         target=w.select(w.binary(i.operation==Operation::equal ? "icmp eq" : "icmp ne",a,b),
             w.binary("add",pc,std::to_string(4+(i.immediate<<2))),w.binary("add",pc,"8"));
         break;
+    case Operation::negative_link: case Operation::nonnegative_link:
     case Operation::negative: case Operation::nonnegative: case Operation::nonpositive: case Operation::positive: {
-        const auto predicate=i.operation==Operation::negative ? "icmp slt" : i.operation==Operation::nonnegative ? "icmp sge" :
+        const bool link=i.operation==Operation::negative_link || i.operation==Operation::nonnegative_link;
+        const auto predicate=(i.operation==Operation::negative || i.operation==Operation::negative_link) ? "icmp slt" :
+            (i.operation==Operation::nonnegative || i.operation==Operation::nonnegative_link) ? "icmp sge" :
             i.operation==Operation::nonpositive ? "icmp sle" : "icmp sgt";
         target=w.select(w.binary(predicate,a,"0"),w.binary("add",pc,std::to_string(4+(i.immediate<<2))),w.binary("add",pc,"8"));
+        // Link is written on both outcomes, before the delay slot.
+        if (link) write(31,w.binary("add",pc,"8"));
         break;
     }
     default: {

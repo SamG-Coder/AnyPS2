@@ -53,6 +53,7 @@ Entry Iso9660::record(ByteView b) {
         throw std::runtime_error("ISO extent byte orders disagree");
     Entry entry{std::string(b.begin() + 33, b.begin() + 33 + b[32]), le32(b, 2), le32(b, 10), bool(b[25] & 2)};
     std::copy_n(b.begin()+18,7,entry.recorded.begin());
+    entry.flags=b[25];
     return entry;
 }
 Bytes Iso9660::read(const Entry& entry, std::uint64_t limit) {

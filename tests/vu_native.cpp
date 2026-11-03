@@ -371,6 +371,37 @@ int main() {
         if (!binding.upload(0,std::array{nt::vu::UploadView{0,identity}}) || !binding.ready() || !binding1.ready())
             throw std::runtime_error("Both native VU units could not be bound together");
         nt::ee::NativeVuLaunch launch_owner(binding1);
+        {
+            auto combined_binding=nt::vu::linked_binding1();
+            nt::ee::NativeVuLaunch combined_owner(combined_binding);
+            combined_owner.state.integers[0]=combined_owner.state.integers[1]=1;
+            nt::ee::NativePacketSetup combined_packets;
+            nt::ee::bind_uploads(combined_packets,combined_binding);
+            nt::ee::NativeVuSubmissions combined_submissions;
+            combined_submissions.add(combined_owner); combined_submissions.connect(combined_packets);
+            upload_packet.clear(); packet_word(0x0700002a);
+            packet_word(0x4a000000U|(static_cast<unsigned>(identity.size()/8)<<16));
+            upload_packet.insert(upload_packet.end(),identity.begin(),identity.end());
+            packet_word(0x6c010000); for (unsigned lane=0;lane<4;++lane) packet_word(lane+17);
+            packet_word(0x14000001); // Missing native entry must roll back binding and data too.
+            const auto before=combined_owner.state;
+            if (combined_packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_vector ||
+                combined_binding.ready() || combined_owner.state!=before || combined_packets.read(0x10003c30).value)
+                throw std::runtime_error("Combined upload/launch failure partially committed state");
+            upload_packet[upload_packet.size()-4]=0;
+            auto wrong=upload_packet; wrong[8]^=1;
+            if (combined_packets.consume(1,wrong,false)!=nt::ee::Stop::unsupported_vector ||
+                combined_binding.ready() || combined_owner.state!=before)
+                throw std::runtime_error("Combined launch executed mismatched uploaded code");
+            auto trailing=upload_packet; trailing.insert(trailing.end(),{0,0,0,0x7b});
+            if (combined_packets.consume(1,trailing,false)!=nt::ee::Stop::unsupported_system || combined_binding.ready())
+                throw std::runtime_error("Trailing command committed combined upload");
+            if (combined_packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
+                !combined_binding.ready() || combined_owner.state.integers[4]!=1 ||
+                combined_owner.state.data[0]!=std::array<std::uint32_t,4>{17,18,19,20} ||
+                combined_packets.read(0x10003c30).value!=42)
+                throw std::runtime_error("Combined upload/data/launch did not execute compiled VU code");
+        }
         launch_owner.connect(packets);
         launch_owner.state.integers[0]=launch_owner.state.integers[1]=1;
         upload_packet.clear(); packet_word(0x03000020); packet_word(0x02000010); packet_word(0x04000009);

@@ -29,9 +29,63 @@ inline std::optional<std::set<std::uint32_t>> table_targets(std::span<const elf:
 }
 // Initial table contents supply bounded candidates, not immutable-memory proofs.
 // Generated indirect transfers still check their actual runtime destination.
+// Evaluate a bounded straight-line table address expression after a range test.
+// This accepts scheduled spills and split upper/lower address construction,
+// without assuming a fixed instruction count between the guard and the load.
+template<class Decode>
+std::optional<std::set<std::uint32_t>> scheduled_jump_table(const elf::IopModule& module,
+    std::span<const elf::IopModule> data,std::uint32_t pc,Decode decode) {
+    if (pc<module.base+12 || pc-module.base+4>module.initialized_size) return {};
+    const auto read=[&](std::uint32_t at) { return decode(at,le32(module.memory,at-module.base)); };
+    const auto jump=read(pc),load=read(pc-8);
+    if ((jump.flow!=Flow::indirect && jump.flow!=Flow::indirect_call) ||
+        load.operation!=Operation::load_word || jump.source!=load.operand ||
+        le32(module.memory,pc-module.base-4)!=0) return {};
+    const auto first=pc-module.base>128 ? pc-128 : module.base;
+    for (auto at=first;at+12<pc;at+=4) {
+        const auto guard=read(at);
+        if (guard.operation!=Operation::less_immediate_unsigned || !guard.immediate || guard.immediate>256 ||
+            !guard.operand || guard.source==guard.operand) continue;
+        auto branch_pc=at+4;
+        Constants marker;
+        marker.registers[guard.source]=constant(0x6d800001);
+        marker.registers[guard.operand]=constant(0x6d800002);
+        for (;branch_pc<pc-8;branch_pc+=4) {
+            const auto instruction=read(branch_pc);
+            if (instruction.flow!=Flow::sequential) break;
+            marker=transfer(instruction,std::move(marker));
+        }
+        if (branch_pc>=pc-8 || marker.registers[guard.source]!=constant(0x6d800001) ||
+            marker.registers[guard.operand]!=constant(0x6d800002)) continue;
+        const auto branch=read(branch_pc);
+        if (branch.operation!=Operation::equal || branch.source!=guard.operand || branch.operand ||
+            (branch.target>=at && branch.target<=pc+4)) continue;
+        std::set<std::uint32_t> targets;
+        bool valid=true;
+        for (unsigned index=0;valid && index<guard.immediate;++index) {
+            Constants state; state.registers[guard.source]=constant(index);
+            state.registers[guard.operand]=constant(1);
+            for (auto step=branch_pc+4;step<pc-8;step+=4) {
+                const auto instruction=read(step);
+                if (instruction.flow!=Flow::sequential) { valid=false; break; }
+                state=transfer(instruction,std::move(state));
+            }
+            const auto& base=state.registers[load.source];
+            if (!valid || !base || base->size()!=1) { valid=false; break; }
+            const auto values=table_targets(data,*base->begin()+load.immediate,1);
+            if (!values) { valid=false; break; }
+            targets.insert(values->begin(),values->end());
+        }
+        if (valid && !targets.empty()) return targets;
+    }
+    return {};
+}
 template<class Decode>
 std::optional<std::set<std::uint32_t>> initial_jump_table(const elf::IopModule& module,
     std::span<const elf::IopModule> data,const Program& program,std::uint32_t pc,Decode decode) {
+    try {
+        if (const auto scheduled=scheduled_jump_table(module,data,pc,decode)) return scheduled;
+    } catch (const std::runtime_error&) { /* Other bounded patterns may still apply. */ }
     if (pc<module.base || pc-module.base<28 || pc-module.base+4>module.initialized_size) return {};
     std::array<Instruction,8> code;
     Instruction guard,branch;

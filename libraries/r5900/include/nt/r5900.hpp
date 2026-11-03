@@ -24,7 +24,7 @@ enum class Op {
     teqi, tnei, pref, pmfhl, pmthl, sqrt_s,
     pmulth, pmaddh, pmsubh, phmadh, phmsbh, pdivbw, tlbr, tlbwi, tlbwr, tlbp, vcallms, vcallmsr, rsqrt_s, madd_s, msub_s, madda_s, msuba_s, vmula_bc, vmula, vmadd, vmsub, vmadd_bc, vmsub_bc, vmadda, vmsuba, vmadda_bc, vmsuba_bc,
     vdiv, vsqrt, vrsqrt, vwaitq, vclip, vopmula, vopmsub, vrnext, vrget, vrinit, vrxor,
-    vadda, vsuba, vadda_bc, vsuba_bc, vmul_q, vmul_i, bc0f, bc0t, bc0fl, bc0tl
+    vadda, vsuba, vadda_bc, vsuba_bc, vmul_q, vmul_i, bc0f, bc0t, bc0fl, bc0tl, vadd_q, vsub_q, vadd_i, vsub_i
 };
 struct Instruction {
     std::uint32_t pc, word;

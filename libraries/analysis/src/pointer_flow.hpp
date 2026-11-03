@@ -1,6 +1,7 @@
 #pragma once
 #include <nt/analysis.hpp>
 #include <deque>
+#include <functional>
 #include <tuple>
 
 namespace nt::analysis::pointer_flow {
@@ -62,6 +63,7 @@ inline std::optional<unsigned> write(const r5900::Instruction& i) {
     case Op::add_s: case Op::sub_s: case Op::max_s: case Op::min_s: case Op::cvt_s_w: case Op::cvt_w_s:
     case Op::compare_s: case Op::adda_s: case Op::suba_s: case Op::mula_s: case Op::sqrt_s:
     case Op::rsqrt_s: case Op::madd_s: case Op::msub_s: case Op::madda_s: case Op::msuba_s:
+    case Op::vadd_q: case Op::vsub_q: case Op::vadd_i: case Op::vsub_i:
     case Op::vsub: case Op::vadd: case Op::vsub_bc: case Op::vadd_bc: case Op::vmove: case Op::vmr32:
     case Op::vmul: case Op::vmul_bc: case Op::vmax: case Op::vmax_bc: case Op::vmini: case Op::vmini_bc:
     case Op::vabs: case Op::vnop: case Op::vitof0: case Op::vitof4: case Op::vitof12: case Op::vitof15:
@@ -87,7 +89,7 @@ struct Edge {
 // and finally apply a call's ABI clobbers. Likely-false edges omit the slot.
 struct Graph {
     std::map<std::uint32_t,std::vector<Edge>> next,previous;
-    explicit Graph(const Program& program) {
+    explicit Graph(const Program& program,const std::map<std::uint32_t,std::set<std::uint32_t>>& candidate_edges={}) {
         using r5900::Op;
         const auto add=[&](Edge edge) {
             if (!program.instructions.contains(edge.to)) return;
@@ -102,6 +104,10 @@ struct Graph {
             const bool never=(i.op==Op::bne || i.op==Op::bnel) && i.rs==i.rt;
             if (link) add({pc,pc+8,true,true});
             else if (!i.indirect() && !never) add({pc,i.target(),true});
+            else if (i.op==Op::jr && i.rs!=31) {
+                if (const auto targets=candidate_edges.find(pc);targets!=candidate_edges.end())
+                    for (const auto target:targets->second) add({pc,target,true});
+            }
             if (!always && i.op!=Op::j && i.op!=Op::jal && i.op!=Op::jr && i.op!=Op::jalr)
                 add({pc,pc+8,!i.likely()});
         }
@@ -126,10 +132,10 @@ struct Graph {
         }
     }
 };
-// Recover a range predicate hoisted across branches/loops. Both the tested
-// index and predicate must remain unchanged on every incoming path. This is
-// discovery evidence only; generated code still executes the guard and load.
-inline std::optional<std::uint32_t> range_bound(const Program& program,const Graph& graph,
+// Recover switch-table candidates from a range predicate. A masked comparison
+// establishes the low-index subset, not an upper bound on the unmasked runtime
+// index. This is discovery evidence only; execution retains the guard and load.
+inline std::optional<std::uint32_t> switch_candidate_bound(const Program& program,const Graph& graph,
                                                std::uint32_t before,unsigned guard,unsigned index) {
     if (!guard || !index || guard==index) return {};
     std::deque<std::uint32_t> pending{before};
@@ -143,8 +149,25 @@ inline std::optional<std::uint32_t> range_bound(const Program& program,const Gra
         const auto effect=write(i);
         if (!effect || i.terminal()) return -1;
         if (*effect!=guard && *effect!=index) return 0;
-        if (i.op!=r5900::Op::sltiu || i.rt!=guard || i.rs!=index || i.immediate<=0 || i.immediate>4096) return -1;
+        if (i.op!=r5900::Op::sltiu || i.rt!=guard || i.immediate<=0 || i.immediate>4096) return -1;
         const auto bound=static_cast<std::uint32_t>(i.immediate);
+        if (i.rs!=index) {
+            bool matched=false;
+            for (auto at=i.pc,steps=0U;at>=4 && steps<32;++steps) {
+                at-=4;
+                const auto found=program.instructions.find(at);
+                if (found==program.instructions.end()) break;
+                const auto& mask=found->second;
+                const auto effect=write(mask);
+                if (!effect || mask.branch() || mask.terminal() || *effect==index) break;
+                if (*effect!=i.rs) continue;
+                const auto bits=std::uint32_t(std::uint16_t(mask.immediate));
+                matched=mask.op==r5900::Op::andi && mask.rs==index && bits &&
+                    !(bits&(bits+1)) && bound<=bits+1;
+                break;
+            }
+            if (!matched) return -1;
+        }
         if (result && *result!=bound) return -1;
         result=bound; return 1;
     };
@@ -218,7 +241,8 @@ inline std::optional<FrameAddress> frame_address(const Program& program,const Gr
 // Recover one agreed scalar constant across predecessor blocks. Path states
 // stay separate; a clobbered or unknown incoming value makes the result unknown.
 inline std::optional<std::uint64_t> constant_gpr(const Program& program,const Graph& graph,
-                                                std::uint32_t before,unsigned reg) {
+    std::uint32_t before,unsigned reg,
+    const std::function<std::optional<std::uint32_t>(const r5900::Instruction&)>& stack_word={}) {
     using r5900::Op;
     struct Operation {
         Op op; std::uint64_t value;
@@ -265,6 +289,11 @@ inline std::optional<std::uint64_t> constant_gpr(const Program& program,const Gr
             state.reg=i.rs ? i.rs : i.rt; return true;
         }
         if (i.op==Op::sll && !i.sa) { state.operations.push_back({Op::sll,0}); state.reg=i.rt; return true; }
+        if (stack_word && (i.op==Op::lw || i.op==Op::lwu)) {
+            if (const auto value=stack_word(i)) {
+                accept(state,i.op==Op::lw ? word(*value) : std::uint64_t(*value)); return false;
+            }
+        }
         unknown=true; return false;
     };
     while (!pending.empty() && budget-- && !unknown) {
@@ -287,6 +316,83 @@ inline std::optional<std::uint32_t> constant(const Program& program,const Graph&
                                             std::uint32_t before,unsigned reg) {
     const auto value=constant_gpr(program,graph,before,reg);
     return value ? std::optional{static_cast<std::uint32_t>(*value)} : std::nullopt;
+}
+struct AffineIndex {
+    std::uint32_t scale=0,offset=0;
+    auto operator<=>(const AffineIndex&) const=default;
+};
+// Recover a low-word address expression relative to an index at a range guard.
+// Every incoming path must agree. The bounded slice follows scheduled copies
+// and earlier switch edges but rejects calls, cycles and unknown definitions.
+inline std::optional<AffineIndex> guarded_address(const Program& program,const Graph& graph,
+    std::uint32_t before,unsigned reg,std::uint32_t guard,unsigned index) {
+    using r5900::Op;
+    using Key=std::pair<std::uint32_t,unsigned>;
+    std::map<Key,std::optional<AffineIndex>> cache;
+    std::set<Key> active;
+    unsigned fuel=512;
+    std::function<std::optional<AffineIndex>(std::uint32_t,unsigned)> read;
+    const auto step=[&](const r5900::Instruction& i,unsigned target,std::uint32_t input)->std::optional<AffineIndex> {
+        const auto effect=write(i);
+        if (!effect || i.terminal() || i.op==Op::syscall) return {};
+        if (*effect!=target) return read(input,target);
+        if (i.op==Op::lui) return AffineIndex{0,std::uint32_t(i.immediate)<<16};
+        if (i.op==Op::addiu || i.op==Op::daddiu) {
+            auto value=read(input,i.rs);
+            if (value) value->offset+=std::uint32_t(i.immediate);
+            return value;
+        }
+        if ((i.op==Op::addu || i.op==Op::daddu || i.op==Op::bit_or) && (!i.rs || !i.rt))
+            return read(input,i.rs ? i.rs : i.rt);
+        if (i.op==Op::addu || i.op==Op::daddu) {
+            const auto left=read(input,i.rs),right=read(input,i.rt);
+            if (left && right) return AffineIndex{left->scale+right->scale,left->offset+right->offset};
+        }
+        if (i.op==Op::sll && i.sa<=8) {
+            const auto value=read(input,i.rt);
+            if (value) return AffineIndex{value->scale<<i.sa,value->offset<<i.sa};
+        }
+        if (i.op==Op::ori) {
+            const auto value=read(input,i.rs);
+            if (value && !value->scale) return AffineIndex{0,value->offset|std::uint16_t(i.immediate)};
+        }
+        return {};
+    };
+    read=[&](std::uint32_t pc,unsigned target)->std::optional<AffineIndex> {
+        if (!target) return AffineIndex{};
+        if (pc==guard) {
+            if (target==index) return AffineIndex{1,0};
+            const auto value=constant(program,graph,pc,target);
+            return value ? std::optional{AffineIndex{0,*value}} : std::nullopt;
+        }
+        const Key key{pc,target};
+        if (const auto found=cache.find(key);found!=cache.end()) return found->second;
+        if (!fuel || active.contains(key)) return {};
+        --fuel; active.insert(key);
+        std::optional<AffineIndex> result;
+        bool valid=true;
+        const auto incoming=graph.previous.find(pc);
+        if (incoming==graph.previous.end() || incoming->second.empty()) valid=false;
+        else for (const auto& edge:incoming->second) {
+            if (edge.call) { valid=false; break; }
+            const auto from=program.instructions.find(edge.from);
+            if (from==program.instructions.end()) { valid=false; break; }
+            std::optional<AffineIndex> value;
+            if (edge.delay) {
+                const auto slot=program.instructions.find(edge.from+4);
+                const auto effect=write(from->second);
+                // Ordinary conditional/indirect branches do not write GPRs.
+                if (!effect || *effect || slot==program.instructions.end()) { valid=false; break; }
+                value=step(slot->second,target,edge.from);
+            } else value=step(from->second,target,edge.from);
+            if (!value || (result && *result!=*value)) { valid=false; break; }
+            result=value;
+        }
+        active.erase(key);
+        if (!valid) result.reset();
+        cache.emplace(key,result); return result;
+    };
+    return read(before,reg);
 }
 // Prove one affine update on every forward path through a bounded loop body.
 // Nested loops, unknown writes and volatile values across calls are rejected.

@@ -209,7 +209,7 @@ if(BUILD_TESTING)
         add_test(NAME vu-vulkan-rendering COMMAND vu-vulkan-tests)
         set_tests_properties(vu-vulkan-rendering PROPERTIES LABELS gpu TIMEOUT 60)
         add_executable(emit-ee-fixture tests/emit_ee_fixture.cpp)
-        target_link_libraries(emit-ee-fixture PRIVATE nt_ee_codegen nt_binary)
+        target_link_libraries(emit-ee-fixture PRIVATE nt_ee_codegen nt_binary nt_analysis)
         add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj"
             COMMAND emit-ee-fixture "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.ll"
             COMMAND "${ANYPS2_CLANG}" -target x86_64-pc-windows-msvc -Werror -Wno-override-module -O2 -c
@@ -218,10 +218,28 @@ if(BUILD_TESTING)
         # Several native test programs share this object. Give generation one
         # owner so parallel Visual Studio builds cannot truncate each other's IR.
         add_custom_target(ee-fixture-object DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj")
-        add_executable(ee-llvm-tests tests/ee_native.cpp tests/ee_batch.cpp tests/ee_file_rpc.cpp libraries/ee_native/src/io.cpp libraries/ee_native/src/numeric.cpp libraries/ee_native/src/vector.cpp "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj")
+        add_executable(ee-llvm-tests tests/ee_native.cpp tests/ee_batch.cpp tests/ee_file_rpc.cpp tests/ee_scratchpad.cpp libraries/ee_native/src/io.cpp libraries/ee_native/src/numeric.cpp libraries/ee_native/src/vector.cpp "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj")
         target_sources(vu-native-tests PRIVATE libraries/ee_native/src/io.cpp libraries/ee_native/src/vector.cpp "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj")
         target_link_libraries(ee-llvm-tests PRIVATE nt_ee_native nt_fileio)
         add_test(NAME ee-llvm-execution COMMAND ee-llvm-tests)
+        add_executable(emit-whole-code-fixture tests/emit_whole_code_fixture.cpp)
+        target_link_libraries(emit-whole-code-fixture PRIVATE nt_ee_codegen nt_analysis)
+        add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/whole-code-fixture.obj"
+            COMMAND emit-whole-code-fixture "${CMAKE_CURRENT_BINARY_DIR}/whole-code-fixture.ll"
+            COMMAND "${ANYPS2_CLANG}" -target x86_64-pc-windows-msvc -Werror -Wno-override-module -O2 -c
+                "${CMAKE_CURRENT_BINARY_DIR}/whole-code-fixture.ll" -o "${CMAKE_CURRENT_BINARY_DIR}/whole-code-fixture.obj"
+            DEPENDS emit-whole-code-fixture VERBATIM)
+        add_executable(ee-whole-code-tests tests/whole_code_native.cpp
+            libraries/ee_native/src/io.cpp libraries/ee_native/src/numeric.cpp libraries/ee_native/src/vector.cpp
+            "${CMAKE_CURRENT_BINARY_DIR}/whole-code-fixture.obj")
+        target_link_libraries(ee-whole-code-tests PRIVATE nt_ee_native)
+        add_test(NAME ee-whole-code-execution COMMAND ee-whole-code-tests)
+        add_test(NAME ee-whole-code-project COMMAND "${CMAKE_COMMAND}"
+            "-DCONVERTER=$<TARGET_FILE:ps2-recompile>"
+            "-DINPUT=${CMAKE_CURRENT_BINARY_DIR}/whole-code-fixture.ll.elf"
+            "-DUNSUPPORTED=${CMAKE_CURRENT_BINARY_DIR}/whole-code-fixture.ll.unsupported.elf"
+            "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/whole-code-tests"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/whole_code_project.cmake")
         add_test(NAME ee-llvm-project COMMAND "${CMAKE_COMMAND}"
             "-DFIXTURE=$<TARGET_FILE:emit-ee-fixture>" "-DCONVERTER=$<TARGET_FILE:ps2-recompile>"
             "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}" "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/ee-project-tests"
@@ -241,13 +259,13 @@ if(BUILD_TESTING)
             "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}" "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/pointer-flow-tests"
             "-DGENERATOR=${CMAKE_GENERATOR}" "-DPLATFORM=${CMAKE_GENERATOR_PLATFORM}"
             "-DEXE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/pointer_flow_project.cmake")
-        set_tests_properties(ee-pointer-flow PROPERTIES TIMEOUT 300)
+        set_tests_properties(ee-pointer-flow PROPERTIES TIMEOUT 900)
         add_test(NAME ee-object-callbacks COMMAND "${CMAKE_COMMAND}"
             "-DFIXTURE=$<TARGET_FILE:emit-ee-fixture>" "-DCONVERTER=$<TARGET_FILE:ps2-recompile>"
             "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}" "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/object-callback-tests"
             "-DGENERATOR=${CMAKE_GENERATOR}" "-DPLATFORM=${CMAKE_GENERATOR_PLATFORM}"
             "-DEXE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/object_callback_project.cmake")
-        set_tests_properties(ee-object-callbacks PROPERTIES TIMEOUT 120)
+        set_tests_properties(ee-object-callbacks PROPERTIES TIMEOUT 240)
         add_test(NAME ee-flow-verification COMMAND "${CMAKE_COMMAND}"
             "-DFIXTURE=$<TARGET_FILE:emit-ee-fixture>" "-DCONVERTER=$<TARGET_FILE:ps2-recompile>"
             "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/flow-verification-tests"

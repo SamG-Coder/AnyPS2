@@ -98,7 +98,7 @@ bool Kernel::service(runtime::State& state, runtime::Bus& memory) {
     case 0x3d: { // SetupHeap(begin, size), -1 extends up to the main stack.
         if (!thread_.id) return false;
         const auto heap=runtime::initial_heap(arg(0),arg(1),thread_.stack_base);
-        require(heap.has_value(),"SetupHeap: heap overlaps stack or wraps");
+        require(heap.has_value() && heap->end<=ram_size,"SetupHeap: boundary exceeds memory or wraps");
         thread_.heap_begin = heap->begin;
         thread_.heap_end = heap->end;
         thread_.heap_ready = true;

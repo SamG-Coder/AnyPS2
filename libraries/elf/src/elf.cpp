@@ -51,6 +51,18 @@ void read_sections(ByteView bytes,Executable& executable) {
             section_name.assign(names.begin()+name,end);
         }
         const bool vector_code=type==1 && section_name==".vutext";
+        if (section_size && (flags&4) && !vector_code) {
+            if (type!=1 || section_address%4 || section_size%4)
+                throw std::runtime_error("Invalid ELF EE instruction section layout");
+            require_range(bytes,section_offset,section_size);
+            const auto mapped=std::any_of(executable.segments.begin(),executable.segments.end(),[&](const auto& segment) {
+                return (segment.flags&1) && section_address>=segment.address &&
+                    std::uint64_t(section_address)+section_size<=std::uint64_t(segment.address)+segment.file_size &&
+                    std::uint64_t(segment.offset)+section_address-segment.address==section_offset;
+            });
+            if (!mapped) throw std::runtime_error("ELF EE instruction section is not mapped executable file data");
+            executable.code_sections.push_back({section_address,section_size});
+        }
         if (section_size && (!(flags&4) || vector_code)) {
             const auto end=std::uint64_t(section_address)+section_size;
             const auto mapped=std::any_of(executable.segments.begin(),executable.segments.end(),[&](const auto& segment) {

@@ -7,6 +7,7 @@ inline bool vector_operation(Op op) {
     case Op::vcallms: case Op::vcallmsr: return true;
     case Op::vdiv: case Op::vsqrt: case Op::vrsqrt: case Op::vwaitq: case Op::vclip:
     case Op::vopmula: case Op::vopmsub: case Op::vrnext: case Op::vrget: case Op::vrinit: case Op::vrxor: return true;
+    case Op::vadd_q: case Op::vsub_q: case Op::vadd_i: case Op::vsub_i:
     case Op::vadd: case Op::vsub: case Op::vadd_bc: case Op::vsub_bc:
     case Op::vadda: case Op::vsuba: case Op::vadda_bc: case Op::vsuba_bc: case Op::vmul_q: case Op::vmul_i:
     case Op::vmadd: case Op::vmsub: case Op::vmadd_bc: case Op::vmsub_bc:
@@ -45,15 +46,17 @@ inline void emit_vector(Writer& w,const r5900::Instruction& i) {
     const bool accumulator=i.op==Op::vmula || i.op==Op::vmula_bc || i.op==Op::vmadda || i.op==Op::vmsuba ||
         i.op==Op::vmadda_bc || i.op==Op::vmsuba_bc || i.op==Op::vadda || i.op==Op::vsuba || i.op==Op::vadda_bc || i.op==Op::vsuba_bc;
     const bool multiply=i.op==Op::vmul || i.op==Op::vmul_bc || i.op==Op::vmula || i.op==Op::vmula_bc || i.op==Op::vmul_q || i.op==Op::vmul_i;
-    const bool add_subtract=i.op==Op::vadd || i.op==Op::vsub || i.op==Op::vadd_bc || i.op==Op::vsub_bc ||
+    const bool scalar_q=i.op==Op::vmul_q || i.op==Op::vadd_q || i.op==Op::vsub_q;
+    const bool scalar_i=i.op==Op::vmul_i || i.op==Op::vadd_i || i.op==Op::vsub_i;
+    const bool add_subtract=i.op==Op::vadd_q || i.op==Op::vsub_q || i.op==Op::vadd_i || i.op==Op::vsub_i || i.op==Op::vadd || i.op==Op::vsub || i.op==Op::vadd_bc || i.op==Op::vsub_bc ||
         i.op==Op::vadda || i.op==Op::vsuba || i.op==Op::vadda_bc || i.op==Op::vsuba_bc;
     if (multiply || add_subtract || accumulate) {
-        const bool subtract=i.op==Op::vsub || i.op==Op::vsub_bc || i.op==Op::vmsub || i.op==Op::vmsub_bc ||
+        const bool subtract=i.op==Op::vsub_q || i.op==Op::vsub_i || i.op==Op::vsub || i.op==Op::vsub_bc || i.op==Op::vmsub || i.op==Op::vmsub_bc ||
             i.op==Op::vmsuba || i.op==Op::vmsuba_bc || i.op==Op::vsuba || i.op==Op::vsuba_bc;
         const bool broadcast=i.op==Op::vadd_bc || i.op==Op::vsub_bc || i.op==Op::vmul_bc || i.op==Op::vmula_bc ||
             i.op==Op::vmadd_bc || i.op==Op::vmsub_bc || i.op==Op::vmadda_bc || i.op==Op::vmsuba_bc || i.op==Op::vadda_bc || i.op==Op::vsuba_bc;
         auto arguments="ptr %memory, i32 "+std::to_string(accumulator ? 32 : i.sa)+", i32 "+std::to_string(i.rd)+
-            ", i32 "+std::to_string(i.op==Op::vmul_q ? 32 : i.op==Op::vmul_i ? 33 : i.rt)+", i32 "+std::to_string(i.rs&15);
+            ", i32 "+std::to_string(scalar_q ? 32 : scalar_i ? 33 : i.rt)+", i32 "+std::to_string(i.rs&15);
         if (!multiply) arguments+=std::string(", i32 ")+(subtract ? "1" : "0");
         arguments+=", i32 "+std::to_string(broadcast ? i.word&3U : 4U);
         const auto outcome=w.value(std::string("call i32 @nt_ee_vector_")+

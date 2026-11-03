@@ -128,21 +128,30 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
     w.out<<"  br i1 "<<available<<", label %region_ready"<<suffix<<", label %vu_stop"<<suffix<<"\nvu_stop"<<suffix<<":\n";
     w.store("i32",address,offsetof(ee::Memory,fault_address),"%memory");
     w.out<<"  ret i32 "<<ownership<<"\nregion_ready"<<suffix<<":\n";
-    const bool native_io=(access.bytes==4 || access.bytes==8 || (access.bytes==1 && access.write)) && access.bank==RegisterBank::integer && access.merge==Merge::none;
+    const bool native_io=(access.bytes==4 || access.bytes==8 || ((access.bytes==1 || access.bytes==16) && access.write)) && access.bank==RegisterBank::integer;
     if (native_io) {
         const auto device_address=w.binary("and","i1",w.value("icmp uge i32 "+physical+", 268435456"),
             w.value("icmp ult i32 "+physical+", 536870912"));
-        const auto aligned=w.value("icmp eq i32 "+w.binary("and","i32",address,std::to_string(access.bytes-1))+", 0");
+        // A merge access that covers the complete word is an ordinary native
+        // device access. Partial device updates require a byte-enable contract;
+        // never synthesize a read/modify/write on a side-effecting register.
+        const auto alignment=access.merge==Merge::left ? access.bytes-1 : 0;
+        const auto aligned=access.bytes==16 ? "true" : w.value("icmp eq i32 "+w.binary("and","i32",address,std::to_string(access.bytes-1))+", "+std::to_string(alignment));
         const auto native_address=w.binary("and","i1",w.binary("and","i1",device_address,main_memory),aligned);
         w.out<<"  br i1 "<<native_address<<", label %io"<<suffix<<", label %ram"<<suffix
              <<"\nio"<<suffix<<":\n";
         std::string status;
-        if (access.bytes==8) {
-            status=access.write ? w.value("call i32 @nt_ee_io_write64(ptr %memory, i32 "+physical+", i64 "+w.reg(i.rt)+")") :
-                w.value("call i32 @nt_ee_io_read64(ptr %state, ptr %memory, i32 "+physical+", i32 "+std::to_string(i.rt)+")");
-        } else if (access.write) status=w.value(std::string("call i32 @nt_ee_io_write")+(access.bytes==1 ? "8" : "32")+"(ptr %memory, i32 "+physical+", i32 "+w.narrow(w.reg(i.rt))+")");
+        const auto io_address=access.merge==Merge::none ? physical : w.binary("and","i32",physical,std::to_string(~std::uint32_t(access.bytes-1)));
+        if (access.bytes==16) {
+            const auto packet_address=w.binary("and","i32",physical,"4294967280");
+            const auto high=i.rt ? w.load("i64",offsetof(runtime::State,gpr)+i.rt*sizeof(runtime::Register)+offsetof(runtime::Register,hi)) : "0";
+            status=w.value("call i32 @nt_ee_io_write128(ptr %memory, i32 "+packet_address+", i64 "+w.reg(i.rt)+", i64 "+high+")");
+        } else if (access.bytes==8) {
+            status=access.write ? w.value("call i32 @nt_ee_io_write64(ptr %memory, i32 "+io_address+", i64 "+w.reg(i.rt)+")") :
+                w.value("call i32 @nt_ee_io_read64(ptr %state, ptr %memory, i32 "+io_address+", i32 "+std::to_string(i.rt)+")");
+        } else if (access.write) status=w.value(std::string("call i32 @nt_ee_io_write")+(access.bytes==1 ? "8" : "32")+"(ptr %memory, i32 "+io_address+", i32 "+w.narrow(w.reg(i.rt))+")");
         else {
-            const auto packed=w.value("call i64 @nt_ee_io_read32(ptr %memory, i32 "+physical+")");
+            const auto packed=w.value("call i64 @nt_ee_io_read32(ptr %memory, i32 "+io_address+")");
             status=w.narrow(w.binary("lshr","i64",packed,"32"));
             const auto ready=w.value("icmp eq i32 "+status+", 0");
             w.out<<"  br i1 "<<ready<<", label %io_read"<<suffix<<", label %io_stop"<<suffix<<"\nio_read"<<suffix<<":\n";

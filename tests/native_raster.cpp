@@ -68,6 +68,7 @@ int main(int argc,char** argv) {
             const std::array point{RasterVertex{24,39,0x80402010}};
             const std::array point_pixels{std::pair{2U,2U}};
             verify(packet_for(0,point),point_pixels);
+            verify(packet_for(0|128,point),point_pixels);
             const std::array strip{RasterVertex{16,16,0x80402010},RasterVertex{64,16,0x80402010},RasterVertex{64,64,0x80402010}};
             const std::array strip_pixels{std::pair{1U,1U},std::pair{2U,1U},std::pair{3U,1U},
                 std::pair{4U,1U},std::pair{4U,2U},std::pair{4U,3U}};
@@ -218,6 +219,13 @@ int main(int argc,char** argv) {
             {31<<16,31<<16,0x40,0},{0x80402010,0,1,0},{0,0,5,0},{256|(256<<16),0,5,0}};
         nd.submit(native,std::array{packet}); rd.submit(reference,std::array{packet});
         if (nd.pixels()!=rd.pixels()) throw std::runtime_error("Native packet pipeline differs");
+        {
+            const auto ordinary=nd.pixels();
+            auto retained_aa=packet; retained_aa[2][0]|=128;
+            nd.submit(native,std::array{retained_aa}); rd.submit(reference,std::array{retained_aa});
+            if (nd.pixels()!=ordinary || rd.pixels()!=ordinary)
+                throw std::runtime_error("Retained AA1 changed sprite coverage or alpha");
+        }
         // Cross the CPU command-batch bound. A FINISH in the middle and a
         // subsequent overlapping write must retain their original ordering.
         {

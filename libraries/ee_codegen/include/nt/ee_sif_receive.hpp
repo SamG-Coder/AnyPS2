@@ -10,7 +10,8 @@ namespace nt::ee {
 class NativeSifReceive {
 public:
     static bool maps(std::uint32_t address) {
-        return address==0x1000c000 || address==0x1000c010 || address==0x1000c020;
+        return address>=0x1000c000 && address<=0x1000c080 &&
+            (((address&0xff)<=0x50 && address%16==0) || (address&0xff)==0x80);
     }
     void stop() { control_&=~0x100U; }
     bool accepting() const { return (control_&0x100)!=0; }
@@ -18,6 +19,7 @@ public:
         if (address==0x1000c000) return {Stop::budget,control_};
         if (address==0x1000c010) return {Stop::budget,destination_};
         if (address==0x1000c020) return {Stop::budget,count_};
+        if (maps(address)) return {Stop::budget,0};
         return {Stop::memory_fault};
     }
     Stop write(std::uint32_t address,std::uint32_t value) {
@@ -29,6 +31,9 @@ public:
             control_=value; return Stop::budget;
         }
         if (!maps(address)) return Stop::memory_fault;
+        // Source-chain stack/tag/scratch fields are not used by a destination
+        // receiver. SDK whole-channel initialization clears them as well.
+        if (address>0x1000c020) return value ? Stop::unsupported_system : Stop::budget;
         if (accepting()) return Stop::unsupported_system;
         if (address==0x1000c010) destination_=value;
         else count_=value&0xffffU;

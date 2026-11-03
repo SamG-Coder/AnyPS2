@@ -2,6 +2,33 @@
 #include "constants.hpp"
 
 namespace nt::iop_codegen::ir {
+// Follow explicit forward edges carrying one loaded value. Untaken code in
+// the byte interval cannot invalidate it or supply a spurious definition.
+inline bool loaded_value_reaches(const Program& program,const Instruction& load,const Instruction& call) {
+    Constants marker; marker.registers[load.operand]=constant(0x6d800001);
+    std::vector<std::pair<std::uint32_t,Constants>> pending{{load.address+4,marker}};
+    unsigned steps=0;
+    while (!pending.empty() && ++steps<=256) {
+        auto [pc,state]=std::move(pending.back()); pending.pop_back();
+        if (pc==call.address) {
+            if (state.registers[call.source]==constant(0x6d800001)) return true;
+            continue;
+        }
+        if (pc<=load.address || pc>call.address) continue;
+        const auto found=program.instructions.find(pc);
+        if (found==program.instructions.end()) continue;
+        const auto& instruction=found->second;
+        auto after=transfer(instruction,std::move(state));
+        if (instruction.flow==Flow::sequential) pending.emplace_back(pc+4,std::move(after));
+        if (instruction.flow!=Flow::conditional && instruction.flow!=Flow::direct) continue;
+        const auto delay=program.instructions.find(pc+4);
+        if (delay==program.instructions.end() || delay->second.flow!=Flow::sequential) continue;
+        after=transfer(delay->second,std::move(after));
+        if (instruction.target>pc) pending.emplace_back(instruction.target,after);
+        if (instruction.flow==Flow::conditional) pending.emplace_back(pc+8,std::move(after));
+    }
+    return false;
+}
 // A normal higher-order function can keep its function argument in a saved
 // register across calls (for example, a collection visitor). This identifies
 // candidate call sites only; emitted code still checks the actual destination.
@@ -38,20 +65,12 @@ inline bool argument_callback_call(const Program& program,const Instruction& cal
 // actual pointer and reject any destination outside the compiled set.
 inline bool stack_callback_call(const Program& program,const Instruction& call) {
     if (call.flow!=Flow::indirect_call) return false;
-    for (unsigned distance=8;distance<=128 && distance<=call.address;distance+=4) {
+    for (unsigned distance=8;distance<=512 && distance<=call.address;distance+=4) {
         const auto found=program.instructions.find(call.address-distance);
         if (found==program.instructions.end()) continue;
         const auto& load=found->second;
         if (load.operation!=Operation::load_word || load.source!=29 || load.operand!=call.source) continue;
-        Constants marker; marker.registers[call.source]=constant(1);
-        bool valid=true;
-        for (auto pc=load.address+4;pc<call.address;pc+=4) {
-            const auto at=program.instructions.find(pc);
-            if (at==program.instructions.end() ||
-                (at->second.flow!=Flow::sequential && at->second.flow!=Flow::conditional)) { valid=false; break; }
-            marker=transfer(at->second,std::move(marker));
-        }
-        if (valid && marker.registers[call.source]==constant(1)) return true;
+        if (loaded_value_reaches(program,load,call)) return true;
     }
     return false;
 }
@@ -103,35 +122,10 @@ inline bool indexed_load_reaches(const Program& program,std::uint32_t address,un
 inline bool loaded_callback_call(const Program& program,const Instruction& call) {
     if (call.flow!=Flow::indirect_call) return false;
     if (indexed_load_reaches(program,call.address,call.source,8,true)) return true;
-    // A nullable descriptor callback can cross a conditional/direct branch
-    // before invocation. Follow bounded forward paths instead of scanning the
-    // intervening bytes as though the untaken branch also executed.
     for (unsigned distance=8;distance<=512 && distance<=call.address;distance+=4) {
         const auto load=program.instructions.find(call.address-distance);
-        if (load==program.instructions.end() || load->second.operation!=Operation::load_word ||
-            load->second.source==29) continue;
-        Constants marker; marker.registers[load->second.operand]=constant(0x6d800001);
-        std::vector<std::pair<std::uint32_t,Constants>> pending{{load->first+4,marker}};
-        unsigned steps=0;
-        while (!pending.empty() && ++steps<=256) {
-            auto [pc,state]=std::move(pending.back()); pending.pop_back();
-            if (pc==call.address) {
-                if (state.registers[call.source]==constant(0x6d800001)) return true;
-                continue;
-            }
-            if (pc<=load->first || pc>call.address) continue;
-            const auto found=program.instructions.find(pc);
-            if (found==program.instructions.end()) continue;
-            const auto& instruction=found->second;
-            auto after=transfer(instruction,std::move(state));
-            if (instruction.flow==Flow::sequential) pending.emplace_back(pc+4,std::move(after));
-            if (instruction.flow!=Flow::conditional && instruction.flow!=Flow::direct) continue;
-            const auto delay=program.instructions.find(pc+4);
-            if (delay==program.instructions.end() || delay->second.flow!=Flow::sequential) continue;
-            after=transfer(delay->second,std::move(after));
-            if (instruction.target>pc) pending.emplace_back(instruction.target,after);
-            if (instruction.flow==Flow::conditional) pending.emplace_back(pc+8,std::move(after));
-        }
+        if (load!=program.instructions.end() && load->second.operation==Operation::load_word &&
+            load->second.source!=29 && loaded_value_reaches(program,load->second,call)) return true;
     }
     return false;
 }

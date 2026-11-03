@@ -227,7 +227,7 @@ inline LoadedPointerResult recoverable_loaded_pointers(
         case Operation::shift_left_variable: case Operation::shift_right_variable: case Operation::shift_arithmetic_variable:
         case Operation::read_hi: case Operation::read_lo: case Operation::call_register:
             return instruction.destination;
-        case Operation::call: return 31;
+        case Operation::call: case Operation::negative_link: case Operation::nonnegative_link: return 31;
         default: return 0;
         }
     };

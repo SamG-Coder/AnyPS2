@@ -101,6 +101,8 @@ inline Constants transfer(const Instruction& i,Constants state) {
         break;
     }
     case Operation::call: write(31); break;
+    case Operation::negative_link: case Operation::nonnegative_link:
+        write(31,constant(i.address+8)); break;
     case Operation::call_register: write(i.destination); break;
     case Operation::native_import: case Operation::syscall: case Operation::memory_fill: case Operation::memory_copy: case Operation::memory_move: return Constants{};
     case Operation::shift_left: case Operation::shift_right: case Operation::shift_arithmetic:

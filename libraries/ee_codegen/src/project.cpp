@@ -43,9 +43,11 @@ private:
 };
 struct Prepared {
     struct Pass { unsigned image=1; std::size_t index,instructions,new_roots,new_registrations; };
+    bool whole_code=false;
     elf::Executable executable;
     analysis::Program discovered;
     std::vector<CodeRange> ranges;
+    std::vector<CodeRange> selected_regions;
     std::vector<CodePayload> payloads;
     Bytes image;
     std::vector<LayoutDeclaration> layouts;
@@ -88,9 +90,15 @@ std::vector<CodeRange> declared_code_ranges(const elf::Executable& executable) {
     return result;
 }
 Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings,bool diagnose_flow=false,
-                 std::span<const observation::Edge> observations={},bool function_symbols=false) {
+                 std::span<const observation::Edge> observations={},bool function_symbols=false,bool whole_code=false) {
     auto executable=elf::parse(bytes);
     auto ranges=declared_code_ranges(executable);
+    if (whole_code) {
+        if (executable.inferred_permissions || executable.code_sections.empty())
+            throw std::runtime_error("Whole-code conversion requires declared EE instruction sections; classify code/data for this image first");
+        ranges.clear();
+        for (const auto& range:executable.code_sections) ranges.push_back({range.address,range.size});
+    }
     std::vector<std::pair<std::uint32_t,std::uint32_t>> extents;
     std::uint32_t end=0;
     for (const auto& segment:executable.segments) {
@@ -121,9 +129,29 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings,bool di
         const auto offset=source->offset+mapping.source-source->address;
         payloads.push_back({destination,std::vector<std::uint8_t>(bytes.begin()+offset,bytes.begin()+offset+mapping.size)});
         executable.segments.push_back({offset,destination,mapping.size,mapping.size,5,4});
+        auto code=mapping.code_ranges;
+        if (code.empty()) code.push_back({0,mapping.size});
+        std::sort(code.begin(),code.end(),[](const auto& a,const auto& b) { return a.offset<b.offset; });
+        std::uint32_t cursor=0;
+        for (const auto& region:code) {
+            const auto end=std::uint64_t(region.offset)+region.size;
+            if (!region.size || region.offset%4 || region.size%4 || region.offset<cursor || end>mapping.size)
+                throw std::runtime_error("Invalid copied payload code classification");
+            if (region.offset>cursor) executable.non_executable_sections.push_back({destination+cursor,region.offset-cursor});
+            if (whole_code) executable.code_sections.push_back({destination+region.offset,region.size});
+            cursor=static_cast<std::uint32_t>(end);
+        }
+        if (cursor<mapping.size) executable.non_executable_sections.push_back({destination+cursor,mapping.size-cursor});
+        const auto code_entry=[&](std::uint32_t offset) {
+            return std::any_of(code.begin(),code.end(),[&](const auto& region) {
+                return offset>=region.offset && std::uint64_t(offset)+4<=std::uint64_t(region.offset)+region.size;
+            });
+        };
+        if (!code_entry(0)) throw std::runtime_error("Copied payload entry is outside declared code");
         payload_entries.push_back(destination);
         for (const auto entry_offset:mapping.entry_offsets) {
             if (entry_offset%4 || entry_offset>=mapping.size) throw std::runtime_error("Payload entry offset is outside its extent or unaligned");
+            if (!code_entry(entry_offset)) throw std::runtime_error("Copied payload entry is outside declared code");
             payload_entries.push_back(destination+entry_offset);
         }
         extents.emplace_back(destination,static_cast<std::uint32_t>(finish));
@@ -145,12 +173,20 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings,bool di
     analysis::Program discovered;
     std::vector<analysis::PointerReference> pointers;
     std::set<std::uint32_t> registered_calls;
+    std::map<std::uint32_t,std::set<std::uint32_t>> switch_edges;
     std::vector<Prepared::Pass> passes;
     std::vector<bool> accepted(observations.size(),false);
-    while (true) {
+    if (whole_code) {
+        discovered=analysis::whole_code(bytes,executable,program_instruction_limit);
+        passes.push_back({1,1,discovered.instructions.size(),0,0});
+    }
+    while (!whole_code) {
         const auto previous_roots=continuations.size();
         pointers.clear();
         discovered=analysis::discover(bytes,executable,program_instruction_limit,continuations,true);
+        discovered.indirect_candidates=switch_edges;
+        const auto switch_entries=analysis::bounded_switch_entries(bytes,executable,discovered,&switch_edges);
+        discovered.indirect_candidates=switch_edges;
         bool added=false;
         for (const auto& [pc,instruction]:discovered.instructions) {
             if (instruction.op!=r5900::Op::syscall || pc<4 || pc>0xfffffffbU) continue;
@@ -186,7 +222,7 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings,bool di
                 std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;
             continuations.push_back(address); added=true;
         }
-        for (const auto address:analysis::bounded_switch_entries(bytes,executable,discovered)) {
+        for (const auto address:switch_entries) {
             if (discovered.instructions.contains(address) ||
                 std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;
             continuations.push_back(address); added=true;
@@ -246,6 +282,9 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings,bool di
         else ranges.push_back({pc,4});
     }
     Prepared result;
+    result.whole_code=whole_code;
+    if (whole_code) for (const auto& region:executable.code_sections)
+        result.selected_regions.push_back({region.address,region.size,1});
     if (function_symbols) for (const auto entry:executable.function_entries) result.function_roots.emplace_back(1,entry);
     result.observations.assign(observations.begin(),observations.end());
     result.passes=std::move(passes);
@@ -267,7 +306,9 @@ Prepared prepare(ByteView bytes,std::span<const PayloadMapping> mappings,bool di
 }
 Prepared prepare_project(const std::filesystem::path& input,std::span<const PayloadMapping> mappings,
                          std::span<const std::filesystem::path> images,bool diagnose_flow=false,
-                         std::span<const std::filesystem::path> observation_paths={},bool function_symbols=false) {
+                         std::span<const std::filesystem::path> observation_paths={},bool function_symbols=false,bool whole_code=false) {
+    if (whole_code && !observation_paths.empty())
+        throw std::invalid_argument("Whole-code conversion does not use runtime observations");
     if (images.size()>31) throw std::invalid_argument("Too many secondary executable images");
     if (observation_paths.size()>64) throw std::invalid_argument("Too many native observations");
     const auto bytes=read_file(input);
@@ -278,10 +319,12 @@ Prepared prepare_project(const std::filesystem::path& input,std::span<const Payl
     std::ostringstream identity;
     std::vector<std::pair<std::size_t,std::uint64_t>> image_identities;
     identity<<"anyps2-ee-input-v1\n"<<bytes.size()<<' '<<fingerprint(bytes)<<'\n';
+    if (whole_code) identity<<"whole-code\n";
     if (function_symbols) identity<<"function-symbols\n";
     for (const auto& mapping:mappings) {
         identity<<"payload "<<mapping.source<<' '<<mapping.destination<<' '<<mapping.size;
         for (const auto offset:mapping.entry_offsets) identity<<' '<<offset;
+        for (const auto& region:mapping.code_ranges) identity<<" code="<<region.offset<<':'<<region.size;
         identity<<'\n';
     }
     for (const auto& path:images) {
@@ -299,7 +342,7 @@ Prepared prepare_project(const std::filesystem::path& input,std::span<const Payl
         if (edge.image>images.size()+1) throw std::runtime_error("Native observation refers to an unknown executable image");
         observed[edge.image-1].push_back(std::move(edge));
     }
-    auto prepared=prepare(bytes,mappings,diagnose_flow,observed[0],function_symbols);
+    auto prepared=prepare(bytes,mappings,diagnose_flow,observed[0],function_symbols,whole_code);
     prepared.input_identity=input_identity;
     if (!images.empty()) {
         const auto snapshot=[](ByteView source,const elf::Executable& executable,std::uint32_t id) {
@@ -316,7 +359,7 @@ Prepared prepare_project(const std::filesystem::path& input,std::span<const Payl
             const auto id=static_cast<std::uint32_t>(prepared.images.size()+1);
             if (source.size()!=image_identities[id-2].first || fingerprint(source)!=image_identities[id-2].second)
                 throw std::runtime_error("Executable image changed during conversion; retry with stable input files");
-            auto extra=prepare(source,{},diagnose_flow,observed[id-1],function_symbols);
+            auto extra=prepare(source,{},diagnose_flow,observed[id-1],function_symbols,whole_code);
             for (const auto& [image,entry]:extra.function_roots) prepared.function_roots.emplace_back(id,entry);
             for (const auto& section:extra.executable.segments) {
                 for (const auto& old:occupied)
@@ -340,6 +383,7 @@ Prepared prepare_project(const std::filesystem::path& input,std::span<const Payl
             prepared.observations.insert(prepared.observations.end(),extra.observations.begin(),extra.observations.end());
             for (auto pass:extra.passes) { pass.image=id; prepared.passes.push_back(pass); }
             for (auto range:extra.ranges) { range.image=id; prepared.ranges.push_back(range); }
+            for (auto region:extra.selected_regions) { region.image=id; prepared.selected_regions.push_back(region); }
             prepared.layouts.insert(prepared.layouts.end(),extra.layouts.begin(),extra.layouts.end());
             prepared.images.push_back(snapshot(source,extra.executable,id));
         }
@@ -348,6 +392,16 @@ Prepared prepare_project(const std::filesystem::path& input,std::span<const Payl
     return prepared;
 }
 void write_discovery_reports(const std::filesystem::path& output,const Prepared& prepared,bool verification=false) {
+    std::ostringstream coverage;
+    coverage<<"selection="<<(prepared.whole_code ? "whole-declared-EE-code" : "reachable-flow")<<"\n"
+        <<"selected_instructions="<<prepared.discovered.instructions.size()<<"\n"
+        <<"runtime_target_selection=dynamic\n";
+    save(output/"code-coverage.txt",coverage.str());
+    std::ostringstream regions;
+    regions<<"image\taddress\tbytes\tselected_words\n";
+    for (const auto& range:prepared.selected_regions)
+        regions<<range.image<<'\t'<<hex32(range.address)<<'\t'<<range.size<<'\t'<<range.size/4<<'\n';
+    save(output/"code-regions.tsv",regions.str());
     std::ostringstream functions;
     functions<<"image\tentry\tevidence\n";
     for (const auto& [image,entry]:prepared.function_roots) functions<<image<<'\t'<<hex32(entry)<<"\tELF-STT_FUNC\n";
@@ -396,8 +450,8 @@ void write_discovery_reports(const std::filesystem::path& output,const Prepared&
 }
 }
 void project(const std::filesystem::path& input,const std::filesystem::path& destination,std::span<const PayloadMapping> mappings,
-             std::span<const std::filesystem::path> images,std::span<const std::filesystem::path> observations,bool function_symbols) {
-    auto prepared=prepare_project(input,mappings,images,false,observations,function_symbols);
+             std::span<const std::filesystem::path> images,std::span<const std::filesystem::path> observations,bool function_symbols,bool whole_code) {
+    auto prepared=prepare_project(input,mappings,images,false,observations,function_symbols,whole_code);
     if (!prepared.discovered.unresolved.empty())
         throw std::runtime_error("EE discovery reached unmapped code at "+hex32(*prepared.discovered.unresolved.begin()));
     std::vector<r5900::Instruction> instructions;
@@ -495,6 +549,7 @@ target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codeg
         for (const auto& mapping:mappings) {
             plan<<mapping.source<<' '<<mapping.destination<<' '<<mapping.size;
             for (const auto offset:mapping.entry_offsets) plan<<' '<<offset;
+            for (const auto& region:mapping.code_ranges) plan<<" code="<<region.offset<<':'<<region.size;
             plan<<'\n';
         }
         save(output/"payloads.txt",plan.str());
@@ -512,8 +567,8 @@ target_include_directories(ps2-native PRIVATE "${ANYPS2_ROOT}/libraries/ee_codeg
 }
 FlowVerification verify_flow(const std::filesystem::path& input,const std::filesystem::path& destination,
                              std::span<const PayloadMapping> mappings,std::span<const std::filesystem::path> images,
-                             std::span<const std::filesystem::path> observations,bool function_symbols) {
-    const auto prepared=prepare_project(input,mappings,images,true,observations,function_symbols);
+                             std::span<const std::filesystem::path> observations,bool function_symbols,bool whole_code) {
+    const auto prepared=prepare_project(input,mappings,images,true,observations,function_symbols,whole_code);
     FlowVerification result;
     result.instructions=prepared.discovered.instructions.size(); result.passes=prepared.passes.size();
     result.unmapped_targets=prepared.discovered.unresolved.size();
@@ -563,6 +618,8 @@ FlowVerification verify_flow(const std::filesystem::path& input,const std::files
     save(output/"layout-diagnostics.txt",layout_error);
     std::ostringstream summary;
     summary<<"known_flow="<<(result.closed() ? "closed" : "incomplete")<<'\n'
+        <<"code_selection="<<(whole_code ? "whole-declared-EE-code" : "reachable-flow")<<'\n'
+        <<"pointer_analysis="<<(whole_code ? "not-required-for-code-selection" : "bounded-discovery")<<'\n'
         <<"discovered_instructions="<<result.instructions<<"\ndiscovery_passes="<<result.passes
         <<"\nunmapped_targets="<<result.unmapped_targets<<"\nunresolved_indirect="<<result.unresolved_indirect
         <<"\nunclassified_pointer_references="<<result.unclassified_references
@@ -570,7 +627,8 @@ FlowVerification verify_flow(const std::filesystem::path& input,const std::files
         <<"\nvalidated_observed_edges="<<prepared.observations.size()
         <<"\nlowering_supported="<<result.lowering_supported<<"\nlayout_supported="<<result.layout_supported
         <<"\nLLVM_emitted=0\nnative_compilation_performed=0\nruntime_executed=0\n"
-        <<"Discovery closure means the implemented rules found no additional roots, not complete game coverage.\n"
+        <<(whole_code ? "Every declared EE code word was selected independently of runtime targets; dynamic target values remain unproven.\n" :
+            "Discovery closure means the implemented rules found no additional roots, not complete game coverage.\n")
         <<"Callback layout matches are diagnostics only and never promote a pointer to executable code.\n"
         <<"Unknown dynamic content, native service behavior, rendering and gameplay require separate validation.\n";
     save(output/"flow-verification.txt",summary.str());

@@ -164,6 +164,61 @@ int main() {
         using namespace nt::iop;
         {
             std::vector<std::uint8_t> data(0x30000);
+            for (unsigned i=0;i<3;++i) {
+                const unsigned targets[]{0x2d240,0x2d260,0x2d280};
+                store_native_word(data,0x2d400+i*4,targets[i]);
+            }
+            for (const auto input : {0U,1U,2U,3U,0xffffffffU}) {
+                auto cpu=initial(); cpu.pc=0x2d200; cpu.registers[4]=input; cpu.registers[29]=0x2f000;
+                const auto result=run_native(nt_iop_generated_run,cpu,data,128);
+                check(result.reason==NativeStop::unmapped_code && cpu.pc==0x5000 &&
+                      cpu.registers[2]==(input<3 ? (input+1)*11 : 99),
+                      "Scheduled switch did not execute its actual indexed table target");
+            }
+            store_native_word(data,0x2d400,0x2d280);
+            auto changed=initial(); changed.pc=0x2d200; changed.registers[4]=0; changed.registers[29]=0x2f000;
+            auto result=run_native(nt_iop_generated_run,changed,data,128);
+            check(result.reason==NativeStop::unmapped_code && changed.pc==0x5000 && changed.registers[2]==33,
+                  "Scheduled switch folded a mutable table entry");
+            store_native_word(data,0x2d400,0x2d480);
+            changed=initial(); changed.pc=0x2d200; changed.registers[4]=0; changed.registers[29]=0x2f000;
+            result=run_native(nt_iop_generated_run,changed,data,128);
+            check(result.reason==NativeStop::unmapped_code && result.address==0x2d480 && changed.pc==0x2d22c,
+                  "Scheduled switch accepted an uncompiled target");
+            auto branch=initial(); branch.pc=0x2d500;
+            result=run_native(nt_iop_generated_run,branch,data,16);
+            check(result.reason==NativeStop::unmapped_code && branch.pc==0x5000 && branch.registers[2]==53,
+                  "Unconditional branch compiled or executed unreachable payload bytes");
+            for (const auto choice : {0U,1U}) {
+                auto cpu=initial(); cpu.pc=0x2d300; cpu.registers[5]=choice; cpu.registers[29]=0x2f000;
+                result=run_native(nt_iop_generated_run,cpu,data,128);
+                check(result.reason==NativeStop::unmapped_code && cpu.pc==0x5000 &&
+                      (choice==0 || cpu.registers[2]==77),
+                      "Stack callback did not survive a helper and forward branch");
+            }
+        }
+        for (const auto alias : {0U,0x80000000U,0xa0000000U})
+            for (const auto slice : {1U,2U,64U}) for (unsigned index=0;index<4;++index)
+                for (const auto input : {0U,1U,0x7fffffffU,0x80000000U,0xffffffffU}) {
+                    std::vector<std::uint8_t> data(0x30000);
+                    auto cpu=initial(alias); cpu.pc=alias|(0x2d000+index*0x40);
+                    cpu.registers[4]=input;
+                    const auto original_return=cpu.registers[31];
+                    const auto source=index<2 ? input : 0U;
+                    const bool taken=(index&1U) ? !(source&0x80000000U) : bool(source&0x80000000U);
+                    const auto link=cpu.pc+12;
+                    NativeResult result{};
+                    for (unsigned attempts=0;attempts<32;++attempts) {
+                        result=run_native(nt_iop_generated_run,cpu,data,slice);
+                        if (result.reason!=NativeStop::budget) break;
+                    }
+                    check(result.reason==NativeStop::unmapped_code && cpu.pc==original_return &&
+                          cpu.registers[31]==original_return && cpu.registers[3]==link &&
+                          cpu.registers[2]==(taken ? 42U : 99U) && cpu.executed==(taken ? 9U : 6U),
+                          "Conditional native call lost its condition, link, delay slot or return continuation");
+                }
+        {
+            std::vector<std::uint8_t> data(0x30000);
             auto cpu=initial(); cpu.pc=0x2c000; cpu.registers[29]=0x2f000; cpu.registers[16]=0x2c200;
             const auto result=run_native(nt_iop_generated_run,cpu,data,128);
             if (!(result.reason==NativeStop::unmapped_code && cpu.pc==0x5000 && cpu.registers[2]==87 &&
@@ -387,6 +442,8 @@ int main() {
             NativeInterruptServices interrupts(0x1f000);
             NativeThreadServices threads(interrupts);
             NativeServiceRouter services({&threads,&interrupts});
+            // Admitted continuations inherit their interrupt mask at admission.
+            if (interrupt_rotation) interrupts.invoke({9,{},NativeServiceKind::intrman},data);
             auto first=initial(); first.pc=interrupt_rotation ? 0x12080 : 0x17500; first.registers[31]=0xfffffffc;
             auto second=initial(); second.pc=0x12040; second.registers[31]=0xfffffffc;
             const auto first_id=threads.admit(first),second_id=threads.admit(second);
@@ -2152,6 +2209,84 @@ int main() {
             check(separate.invoke({16,{handle},NativeServiceKind::timrman},ram).value==static_cast<std::uint32_t>(-151),"Timer leaked between contexts");
         }
         {
+            std::vector<std::uint8_t> ram(0x20000);
+            std::uint64_t ns=0;
+            NativeHardTimers timers([&] { return ns; });
+            NativeInterruptServices irq(0xf000,&timers); timers.connect(irq);
+            NativeServiceRouter services({&irq,&timers});
+            const auto call=[&](unsigned op,std::array<std::uint32_t,4> args={}) {
+                constexpr unsigned ordinals[]{4,6,20,22,23,24,10};
+                const auto at=std::find(std::begin(ordinals),std::end(ordinals),op)-std::begin(ordinals);
+                auto cpu=initial(); cpu.pc=0x17b34+static_cast<unsigned>(at)*8;
+                std::copy(args.begin(),args.end(),cpu.registers.begin()+4);
+                const auto result=run_native(nt_iop_generated_run,cpu,ram,1,&services);
+                check(result.reason==NativeStop::budget,"Compiled timer import did not return");
+                return cpu.registers[2];
+            };
+            const auto handle=call(4,{1,16,8});
+            check(call(23,{handle})==static_cast<unsigned>(-155),"Unconfigured timer started");
+            auto registration=initial(); registration.pc=0x17b90; registration.registers[4]=handle;
+            const auto registered=run_native(nt_iop_generated_run,registration,ram,64,&services);
+            if (registered.reason!=NativeStop::unmapped_code || registration.registers[2]!=0)
+                throw std::runtime_error("Timer registration failed: stop="+std::to_string(static_cast<unsigned>(registered.reason))+
+                    " pc="+std::to_string(registration.pc)+" value="+std::to_string(registration.registers[2]));
+            check(call(22,{handle,1,0,8})==0,"Native timer setup failed");
+            ns=1000000;
+            check(!timers.take() && call(10,{handle})==0,"Configured timer advanced before start");
+            check(call(23,{handle})==0 && call(23,{handle})==static_cast<unsigned>(-154),"Timer start ownership failed");
+            check(call(20,{handle,100,0x2100,0xc720})==static_cast<unsigned>(-156),"Running timer handler changed");
+            store_native_word(ram,0xc720,0);
+            auto cpu=initial(); cpu.pc=0xfffffffc;
+            ns+=22000;
+            check(irq.run(nt_iop_generated_run,cpu,ram,32,services).reason==NativeStop::unmapped_code &&
+                  !load_native_word(ram,0xc720),"Disabled interrupts delivered timer callback");
+            irq.invoke({9,{},NativeServiceKind::intrman},ram);
+            check(irq.run(nt_iop_generated_run,cpu,ram,32,services).reason==NativeStop::unmapped_code &&
+                  load_native_word(ram,0xc720)==1,"Elapsed native time did not execute compiled timer callback");
+            ns+=1000000;
+            check(!timers.take(),"Zero-return timer callback did not stop");
+            check(call(20,{handle,100,0x2140,0xc720})==0 && call(23,{handle})==0,"Periodic timer did not restart");
+            ns+=22000;
+            check(irq.run(nt_iop_generated_run,cpu,ram,32,services).reason==NativeStop::unmapped_code &&
+                  load_native_word(ram,0xc720)==2,"Periodic compiled handler did not run");
+            ns+=22000; check(!timers.take(),"Callback return period was ignored");
+            ns+=200000;
+            check(irq.run(nt_iop_generated_run,cpu,ram,32,services).reason==NativeStop::unmapped_code &&
+                  load_native_word(ram,0xc720)==3,"Returned timer period did not repeat");
+            check(call(24,{handle})==0,"Timer stop failed");
+            const auto count=call(10,{handle}); ns+=1000000;
+            check(!timers.take() && call(10,{handle})==count,"Stopped timer advanced or delivered callback");
+            check(timers.invoke({22,{handle,2,0,8},NativeServiceKind::timrman},ram).status==NativeServiceStatus::unavailable,
+                  "External timer clock was fabricated");
+            check(timers.invoke({20,{handle,100,0xdead,0},NativeServiceKind::timrman},ram).status==NativeServiceStatus::unmapped_code,
+                  "Timer accepted uncompiled handler");
+            call(23,{handle}); ns+=300000;
+            check(timers.take().has_value(),"Timer callback not pending before release");
+            call(6,{handle});
+            const auto replacement=call(4,{1,16,8});
+            call(22,{replacement,1,0,8}); call(20,{replacement,100,0x2100,0xc720}); call(23,{replacement});
+            timers.finish(0); ns+=22000;
+            check(timers.take().has_value(),"Released callback stopped a new timer owner"); timers.finish(0);
+        }
+        {
+            std::vector<std::uint8_t> context_ram(0x20000);
+            NativeInterruptServices irq(0x1f000);
+            NativeThreadServices threads(irq);
+            NativeServiceRouter services({&threads,&irq});
+            irq.invoke({9,{},NativeServiceKind::intrman},context_ram);
+            auto waiter=initial(); waiter.pc=0x17c00; waiter.registers[31]=0xfffffffc;
+            const auto id=threads.admit(waiter);
+            auto observer=waiter; observer.pc=0x17c80; threads.admit(observer);
+            const auto run=[&] { return threads.run(nt_iop_generated_run,context_ram,256,services,
+                NativeThreadServices::CompletionPolicy::continue_workers); };
+            check(run().reason==NativeStop::thread_wait && load_native_word(context_ram,0xc740)==1 &&
+                  load_native_word(context_ram,0xc748)==1 && irq.delivery_enabled(),
+                  "Suspended worker leaked its interrupt mask to another worker or idle");
+            threads.invoke({25,{id},NativeServiceKind::thbase},context_ram);
+            check(run().reason==NativeStop::thread_wait && load_native_word(context_ram,0xc744)==0 && irq.delivery_enabled(),
+                  "Resumed worker lost its own critical-section state");
+        }
+        {
             std::vector<std::uint8_t> display_ram(0x20000);
             NativeVblankServices blank;
             NativeInterruptServices irq(0xf000,&blank);
@@ -2173,6 +2308,7 @@ int main() {
             std::array<std::uint32_t,4> ids;
             for (unsigned index=0;index<4;++index) ids[index]=workers.admit(waiting(index+4));
             check(run().reason==NativeStop::thread_wait,"Vblank waits did not block before the first display edge");
+            irq.invoke({8,{},NativeServiceKind::intrman},display_ram); // Mask the selected idle continuation.
             blank.post(false);
             check(run().reason==NativeStop::thread_wait && suspended(ids[0]),
                   "Masked vblank edge completed a waiter");
@@ -2833,6 +2969,7 @@ int main() {
                   boot_threads.run(nt_iop_generated_run,ram,32,boot_services).reason==NativeStop::thread_wait,
                   "RPC phase acknowledgement incorrectly satisfied command initialization");
             boot_events.invoke({8,{boot_status,~0x800U,0,0},NativeServiceKind::thevent},ram);
+            boot_interrupts.invoke({8,{},NativeServiceKind::intrman},ram);
             store_native_word(control_packet,0,20); store_native_word(control_packet,12,0); store_native_word(control_packet,16,0x80000200);
             check(inbound.submit(std::span(control_packet).first(20)).value==1 &&
                   boot_threads.run(nt_iop_generated_run,ram,32,boot_services).reason==NativeStop::thread_wait && inbound.busy() &&
@@ -3022,6 +3159,17 @@ int main() {
                   "Duplicate service-ID bind did not respond");
             bind_reply=rpc_peer.take();
             check(bind_reply && load_native_word(*bind_reply,36)==0xe000,"RPC lookup ignored server registration order");
+            std::array<std::uint8_t,64> other_data{};
+            store_native_word(other_data,0,64); store_native_word(other_data,8,0x8000000c);
+            store_native_word(other_data,32,0x800); store_native_word(other_data,36,0x400);
+            store_native_word(other_data,40,48);
+            const auto before_missing_reader=rpc_peer_memory;
+            check(rpc_inbound.submit(other_data).value==1,"Other-data request was not queued");
+            const auto missing_reader=pump_bind();
+            check(missing_reader.reason==NativeStop::service_request && missing_reader.address==0x800 &&
+                  rpc_inbound.failure() && rpc_peer_memory==before_missing_reader && !rpc_peer.take(),
+                  "Missing native other-data reader silently dropped a waiter or fabricated a reply");
+            check(rpc_inbound.discard(),"Unsupported data request could not be retired explicitly");
             store_native_word(ram,0xe500,0x5678);
             protect_rpc_reply=true;
             const auto before_reply_fault=rpc_peer_memory;
@@ -4338,7 +4486,7 @@ int main() {
                 NativeCdvdmanServices cdvd;
                 cdvd.attach([&] { return volume.get(); },[] { return 2U; });
                 const auto call=[&](unsigned ordinal,std::array<std::uint32_t,4> arguments={}) {
-                    constexpr unsigned ordinals[]{6,8,11,12,13,14,28,37,39,83};
+                    constexpr unsigned ordinals[]{6,8,11,12,13,14,28,37,39,83,78,74,15};
                     const auto index=std::find(std::begin(ordinals),std::end(ordinals),ordinal)-std::begin(ordinals);
                     auto cpu=initial(); cpu.pc=0x17814+static_cast<unsigned>(index)*8;
                     std::copy(arguments.begin(),arguments.end(),cpu.registers.begin()+4);
@@ -4359,6 +4507,13 @@ int main() {
                       !load_native_word(data,0x18200) && call(11,{1}).second.registers[2]==0 && !call(8).second.registers[2],
                       "Native sector read did not publish real bytes before deferred completion");
                 check(!call(6,{21,1,0x19000,0x18100}).second.registers[2],"Pending completion was overwritten");
+                for (const auto mode : {0U,1U,3U,4U,5U,6U,16U,17U}) {
+                    const auto sync=call(11,{mode});
+                    check(sync.first.reason==NativeStop::unmapped_code && !sync.second.registers[2] &&
+                          !load_native_word(data,0x18200),"Disc sync lost completed I/O or delivered callback inline");
+                }
+                check(call(11,{32}).first.reason==NativeStop::import_request,
+                      "Disc sync fabricated unsupported event-wait semantics");
                 NativeCallbackMux callbacks({&cdvd}); NativeInterruptServices interrupts(0x1f000,&callbacks);
                 NativeServiceRouter router({&interrupts,&cdvd});
                 interrupts.invoke({9,{},NativeServiceKind::intrman},data);
@@ -4367,6 +4522,15 @@ int main() {
                 do { completed=interrupts.run(nt_iop_generated_run,foreground,data,1,router); } while (completed.reason==NativeStop::budget);
                 check(completed.reason==NativeStop::unmapped_code && foreground.pc==0x5000 &&
                       load_native_word(data,0x18200)==1 && !cdvd.take(),"Compiled disc completion did not run exactly once");
+                check(call(15).second.registers[2]==1 && call(28).second.registers[2]==0 &&
+                      !call(8).second.registers[2],"Disc stop did not publish stopped state");
+                check(call(15).second.registers[2]==0,"Pending stop completion was overwritten");
+                completed=interrupts.run(nt_iop_generated_run,foreground,data,64,router);
+                check(completed.reason==NativeStop::unmapped_code && load_native_word(data,0x18200)==6 && !cdvd.take(),
+                      "Disc stop did not execute compiled completion with reason 6");
+                check(call(6,{21,1,0x19000,0x18100}).second.registers[2]==1 && call(28).second.registers[2]==0x0a,
+                      "Native read did not resume stopped volume");
+                interrupts.run(nt_iop_generated_run,foreground,data,64,router);
                 check(call(37).second.registers[2]==0x17900,"Disc callback removal lost the old pointer");
                 check(call(37,{0x17b80}).first.reason==NativeStop::unmapped_code,
                       "Disc completion accepted an uncompiled callback");

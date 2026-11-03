@@ -5,7 +5,9 @@ namespace nt::runtime {
 struct InitialHeap { std::uint32_t begin,end; };
 inline std::optional<InitialHeap> initial_heap(std::uint32_t begin,std::uint32_t size,std::uint32_t stack_base) {
     const auto end=size==0xffffffffU ? std::uint64_t(stack_base) : std::uint64_t(begin)+size;
-    if (begin>end || end>stack_base) return {};
+    // SetupHeap records a boundary; it does not allocate or validate an arena.
+    // The automatic-size form ignores begin and returns the main stack base.
+    if (end>0xffffffffULL) return {};
     return InitialHeap{begin,static_cast<std::uint32_t>(end)};
 }
 struct InitialStack { std::uint32_t base,size,pointer; };

@@ -35,6 +35,7 @@ public:
         if (threads_.size()>=4096 || next_id_>0x7fffffffU) throw std::length_error("Native thread limit exceeded");
         const auto id=next_id_++;
         Thread thread{state}; thread.entry=state.pc; thread.gp=state.registers[28];
+        thread.delivery_enabled=interrupts_.delivery_enabled();
         threads_.emplace(id,thread); ready_.push_back(id); return id;
     }
     // Serialized foreground work uses a real scheduler continuation and stack,
@@ -189,6 +190,7 @@ public:
             ready_.push_back(id);
             if (source) std::memmove(ram.data()+stack_top,ram.data()+*source,count);
             thread.cpu=next; thread.wakeups=0; thread.wait_id=0; thread.priority=thread.initial_priority; thread.status=Status::ready;
+            thread.delivery_enabled=true;
             return current_ ? NativeServiceReply{NativeServiceStatus::yielded} : returned();
         }
         if (op==8 || op==9) {
@@ -241,6 +243,7 @@ public:
                     return threads_.at(left).priority<threads_.at(right).priority;
                 });
                 current_=*next; ready_.erase(next);
+                interrupts_.select_foreground(threads_.at(*current_).delivery_enabled);
             }
             Cpu& cpu=current_ ? threads_.at(*current_).cpu : idle_;
             const auto before=cpu.executed;
@@ -258,7 +261,7 @@ public:
             if (stop.reason==NativeStop::thread_yield && thread.exit_requested) {
                 thread.cpu.pc=thread_return; thread.exit_requested=false;
                 thread.status=Status::finished;
-                const auto id=*current_; current_.reset();
+                const auto id=*current_; release_foreground();
                 if (thread.delete_on_exit) {
                     const auto released=release_stack(thread.stack,thread.stack_size,thread.attributes,ram);
                     if (released.status!=NativeServiceStatus::returned)
@@ -269,14 +272,14 @@ public:
                 continue;
             }
             if (stop.reason==NativeStop::thread_yield && thread.status==Status::ready) {
-                ready_.push_back(*current_); current_.reset(); continue;
+                ready_.push_back(*current_); release_foreground(); continue;
             }
             if (stop.reason==NativeStop::thread_yield && (thread.status==Status::sleeping || thread.status==Status::waiting || thread.status==Status::delayed)) {
-                current_.reset(); continue;
+                release_foreground(); continue;
             }
             if (stop.reason==NativeStop::unmapped_code && cpu.pc==thread_return && !cpu.delay_slot && !cpu.interrupt_depth) {
                 const auto id=*current_;
-                thread.status=Status::finished; current_.reset();
+                thread.status=Status::finished; release_foreground();
                 if (thread.callback_owner) {
                     if (!thread.jobs.empty()) {
                         ready_.push_back(id); begin_callback(thread,thread.jobs.front()); thread.jobs.pop_front();
@@ -292,6 +295,12 @@ public:
         return {NativeStop::budget,current_ ? threads_.at(*current_).cpu.pc : idle_.pc};
     }
 private:
+    void release_foreground() {
+        threads_.at(*current_).delivery_enabled=interrupts_.delivery_enabled();
+        current_.reset();
+        // The scheduler's idle continuation can receive events that wake workers.
+        interrupts_.select_foreground(true);
+    }
     NativeServiceReply refer_status(const NativeServiceRequest& request,std::span<std::uint8_t> ram) const {
         auto id=request.arguments[0];
         if (!id) {
@@ -427,7 +436,7 @@ private:
         std::uint32_t entry=0,gp=0,stack=0,stack_size=0,attributes=0,priority=8;
         NativeWaitKind wait_kind=NativeWaitKind::event;
         std::uint32_t option=0,initial_priority=8,wait_id=0;
-        bool exit_requested=false,delete_on_exit=false;
+        bool exit_requested=false,delete_on_exit=false,delivery_enabled=true;
         const void* callback_owner=nullptr;
         std::deque<CallbackJob> jobs;
     };
@@ -438,6 +447,7 @@ private:
         thread.cpu.registers[28]=job.gp; thread.cpu.registers[29]=thread.stack+thread.stack_size-16;
         thread.cpu.registers[31]=thread_return; thread.entry=job.address; thread.gp=job.gp;
         thread.status=Status::ready; thread.wakeups=0; thread.wait_id=0; thread.wait_owner=nullptr;
+        thread.delivery_enabled=true;
     }
     NativeInterruptServices& interrupts_;
     NativeHeapServices* heap_;

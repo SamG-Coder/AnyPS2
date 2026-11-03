@@ -8,6 +8,7 @@
 #include <nt/ee_packet_setup.hpp>
 #include <nt/ee_packet_submission.hpp>
 #include <nt/ee_vector_owner.hpp>
+#include <nt/ee_scratchpad_copy.hpp>
 namespace nt::ee {
 class NativePlatform {
 public:
@@ -35,13 +36,14 @@ public:
     NativeGraphics graphics;
     NativePacketSetup packet_setup;
     NativePacketSubmission packet_submission;
+    NativeScratchpadCopy scratchpad_copy;
     NativeInterrupts interrupts;
     NativeTimers timers;
     NativeCompletions completions;
     NativeSifReceive sif_receive;
     NativeSifLink sif_link{sif_receive};
     NativeSifOutbound sif_outbound;
-    void attach(Memory& memory) { memory_=&memory; memory.vector_control=vector_owner.interface(); memory.vectors=&vector_owner.storage; memory.graphics=&graphics; memory.scratchpad=scratchpad_.data(); memory.scratchpad_bytes=scratchpad_.size(); memory.interrupts=&interrupts; memory.completions=&completions; memory.sif_link=&sif_link; memory.sif_outbound=&sif_outbound; memory.io={this,read,write,poll,read64,write64,write8,test_completions}; }
+    void attach(Memory& memory) { memory_=&memory; memory.vector_control=vector_owner.interface(); memory.vectors=&vector_owner.storage; memory.graphics=&graphics; memory.scratchpad=scratchpad_.data(); memory.scratchpad_bytes=scratchpad_.size(); memory.interrupts=&interrupts; memory.completions=&completions; memory.sif_link=&sif_link; memory.sif_outbound=&sif_outbound; memory.io={this,read,write,poll,read64,write64,write8,test_completions,write128}; }
 private:
     static IoRead test_completions(void* context) {
         const auto& self=*static_cast<NativePlatform*>(context);
@@ -68,6 +70,15 @@ private:
         if (address<0x12000000 || address>=0x12002000) return {Stop::memory_fault};
         return static_cast<NativePlatform*>(context)->graphics.read(address);
     }
+    static Stop write128(void* context,std::uint32_t address,runtime::Register value) {
+        // Programmed packet writes share the same native command consumer as
+        // descriptor submissions, without inventing DMA completion events.
+        if (address<0x10004000 || address>=0x10007000 || address%16) return Stop::memory_fault;
+        auto& self=*static_cast<NativePlatform*>(context);
+        const auto channel=(address-0x10004000)/0x1000;
+        const auto bytes=std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(&value),sizeof(value));
+        return self.packet_setup.consume(channel,bytes,self.vector_owner.storage.active);
+    }
     static Stop write64(void* context,std::uint32_t address,std::uint64_t value) {
         if (address<0x12000000 || address>=0x12002000) return Stop::memory_fault;
         return static_cast<NativePlatform*>(context)->graphics.write(address,value);
@@ -81,6 +92,7 @@ private:
             const auto value=self.graphics.read(address); return {value.status,static_cast<std::uint32_t>(value.value)};
         }
         if (NativePacketSetup::maps(address)) return self.packet_setup.read(address);
+        if (NativeScratchpadCopy::maps(address)) return self.scratchpad_copy.read(address);
         if (NativeSubmissionPolicy::maps(address)) return self.packet_submission.policy.read(address);
         if (NativePacketSubmission::maps(address)) return self.packet_submission.read(address);
         if (NativeSifReceive::maps(address)) return self.sif_receive.read(address);
@@ -109,6 +121,7 @@ private:
                 self.packet_submission.complete(*self.memory_,channel);
             return resumed;
         }
+        if (NativeScratchpadCopy::maps(address)) return self.memory_ ? self.scratchpad_copy.write(*self.memory_,self.packet_submission.policy,address,value) : Stop::invalid_state;
         if (NativeSubmissionPolicy::maps(address)) return self.packet_submission.policy.write(address,value);
         if (NativePacketSubmission::maps(address)) return self.memory_ ? self.packet_submission.write(*self.memory_,address,value) : Stop::invalid_state;
         if (NativeSifReceive::maps(address)) return self.sif_receive.write(address,value);

@@ -14,6 +14,8 @@ struct Program {
     std::set<std::uint32_t> unresolved;
     std::set<std::uint32_t> ordinary;
     std::set<std::uint32_t> entries;
+    // Conversion-time evidence only. Never used to fold runtime table values.
+    std::map<std::uint32_t,std::set<std::uint32_t>> indirect_candidates;
 };
 enum class CallKind { direct, conditional, indirect, direct_jump, indirect_jump, return_link, return_exception, service };
 struct CallSite {
@@ -29,6 +31,10 @@ std::string_view name(CallKind kind);
 // Follow direct flow from entry. Indirect targets require explicit future evidence.
 Program discover(ByteView bytes, const elf::Executable& executable, std::size_t limit = 100000,
                  std::span<const std::uint32_t> additional_entries = {}, bool stop_at_syscall = false);
+// Decode every word in declared EE code sections, independently of callers or
+// reachability. Unknown instructions remain in the result for batch rejection.
+// Ambiguous sectionless/inferred images require an explicit code classification.
+Program whole_code(ByteView bytes,const elf::Executable& executable,std::size_t limit=100000);
 // Scan file-backed executable segments for leaf syscall-wrapper candidates.
 // Candidates are not proof that a service is implemented or used at runtime.
 std::set<std::uint32_t> syscall_wrappers(ByteView bytes,const elf::Executable& executable);
@@ -70,7 +76,8 @@ std::set<std::uint32_t> registered_code_pointers(ByteView bytes,const elf::Execu
 // Runtime table reads and indirect dispatch remain dynamic.
 std::set<std::uint32_t> object_table_entries(ByteView bytes,const elf::Executable& executable,const Program& program);
 // Bounded indexed switch-table candidates; no runtime guard is removed.
-std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executable& executable,const Program& program);
+std::set<std::uint32_t> bounded_switch_entries(ByteView bytes,const elf::Executable& executable,const Program& program,
+    std::map<std::uint32_t,std::set<std::uint32_t>>* candidate_edges=nullptr);
 // Initial-data candidates for indirect transfers through any register.
 // Native execution keeps its original loads and indirect branch.
 std::set<std::uint32_t> initial_indirect_entries(ByteView bytes,const elf::Executable&,const Program&);

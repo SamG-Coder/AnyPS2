@@ -93,6 +93,7 @@ bool transfer_candidate(const r5900::Instruction& i,CandidateValues& values,Memo
     case Op::add_s: case Op::sub_s: case Op::max_s: case Op::min_s:
     case Op::cvt_s_w: case Op::cvt_w_s: case Op::compare_s: case Op::sqrt_s:
     case Op::adda_s: case Op::suba_s: case Op::mula_s:
+    case Op::vadd_q: case Op::vsub_q: case Op::vadd_i: case Op::vsub_i:
     case Op::vsub: case Op::vadd: case Op::vsub_bc: case Op::vadd_bc:
     case Op::vmove: case Op::vmr32: case Op::vmul: case Op::vmul_bc:
     case Op::vmax: case Op::vmax_bc: case Op::vmini: case Op::vmini_bc:

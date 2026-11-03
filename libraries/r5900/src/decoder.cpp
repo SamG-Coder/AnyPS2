@@ -91,6 +91,10 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
             if (fn==42) i.op=Op::vmul;
             if (fn==28) i.op=Op::vmul_q;
             if (fn==30) i.op=Op::vmul_i;
+            if (fn==32) i.op=Op::vadd_q;
+            if (fn==34) i.op=Op::vadd_i;
+            if (fn==36) i.op=Op::vsub_q;
+            if (fn==38) i.op=Op::vsub_i;
             if (fn>=24 && fn<28) i.op=Op::vmul_bc;
             if (fn==43) i.op=Op::vmax;
             if (fn>=16 && fn<20) i.op=Op::vmax_bc;
@@ -243,7 +247,7 @@ std::string_view name(Op op) {
     N(qmfc2); N(qmtc2); N(lqc2); N(sqc2); N(vsub);
     N(vmove);
     N(vmr32);
-    N(vadd); N(vadd_bc); N(vsub_bc);
+    N(vadd); N(vadd_bc); N(vsub_bc); N(vadd_q); N(vsub_q); N(vadd_i); N(vsub_i);
     N(mov_s); N(abs_s); N(neg_s); N(mul_s); N(div_s); N(add_s); N(sub_s); N(max_s); N(min_s); N(cvt_s_w);
     N(cvt_w_s);
     N(compare_s); N(bc1f); N(bc1t); N(bc1fl); N(bc1tl);

@@ -155,22 +155,23 @@ nt::ee::Stop execute(nt::runtime::State* state,nt::ee::Memory* memory,std::uint6
 }
 int main(int argc,char** argv) {
     if (argc<2) {
-        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--profile-graphics] [--validate-graphics] [--verify-textures] [--run-seconds N] [--headless | --display-stop | --close-on-stop] [--strict-performance | --native-thread-cycles | --native-pmu] [--disc <image.iso>] [--capture-vu <new-private-directory>] [--capture-stop <new-private-directory>] [--capture-graphics <new-private-directory>]\n";
+        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--profile-graphics] [--validate-graphics] [--verify-textures] [--run-seconds N] [--headless | --display-stop | --close-on-stop] [--strict-performance | --native-thread-cycles | --native-pmu] [--disc <image.iso>] [--disc-media cd|dvd] [--capture-vu <new-private-directory>] [--capture-stop <new-private-directory>] [--capture-graphics <new-private-directory>]\n";
 #ifdef ANYPS2_NATIVE_IOP
         std::cerr<<"Linked IOP investigation: --probe-iop-reset <module.data> (stops without acknowledging reset)\n";
         std::cerr<<"Explicit selected-bundle execution: --iop-reset-session <module.data> --disc <image.iso>\n";
+        std::cerr<<"Explicit default environment: --iop-default-session <module.data> (linked compiled startup modules)\n";
 #endif
         return 2;
     }
     try {
         std::uint64_t budget=1000000;
-        unsigned run_seconds=0;
+        unsigned run_seconds=0,disc_media=0;
         std::filesystem::path disc,capture_directory,stop_directory,graphics_directory;
         bool profile_graphics=false,validate_graphics=false,verify_textures=false;
         bool has_budget=false,native_cycles=false,native_pmu=false,strict_performance=false,show_window=true,hold_window=true;
 #ifdef ANYPS2_NATIVE_IOP
         std::filesystem::path iop_data;
-        bool iop_session=false;
+        bool iop_session=false,iop_default=false;
 #endif
         for (int index=2;index<argc;++index) {
             const std::string_view text=argv[index];
@@ -193,9 +194,10 @@ int main(int argc,char** argv) {
                 continue;
             }
 #ifdef ANYPS2_NATIVE_IOP
-            if (text=="--probe-iop-reset" || text=="--iop-reset-session") {
+            if (text=="--probe-iop-reset" || text=="--iop-reset-session" || text=="--iop-default-session") {
                 if (!iop_data.empty() || index+1==argc) throw std::runtime_error("Expected one linked IOP data path");
-                iop_session=text=="--iop-reset-session";
+                iop_default=text=="--iop-default-session";
+                iop_session=text!="--probe-iop-reset";
                 iop_data=argv[++index]; continue;
             }
 #endif
@@ -223,6 +225,12 @@ int main(int argc,char** argv) {
             if (text=="--disc") {
                 if (!disc.empty() || index+1==argc) throw std::runtime_error("Expected one disc image path");
                 disc=argv[++index]; continue;
+            }
+            if (text=="--disc-media") {
+                if (disc_media || index+1==argc) throw std::runtime_error("Expected one disc media kind: cd or dvd");
+                const std::string_view kind=argv[++index];
+                if (kind!="cd" && kind!="dvd") throw std::runtime_error("Disc media must be cd or dvd");
+                disc_media=kind=="cd" ? 1U : 2U; continue;
             }
             if (has_budget) throw std::runtime_error("Unknown probe option");
             const auto parsed=std::from_chars(text.data(),text.data()+text.size(),budget);
@@ -289,6 +297,7 @@ int main(int argc,char** argv) {
         gpu.verify_textures=verify_textures;
         if (!graphics_directory.empty()) gpu.capture=std::make_unique<probe::GraphicsCapture>(graphics_directory);
         nt::ee::NativePlatform platform; platform.attach(memory);
+        platform.scratchpad_copy.protection=native_code_overlap;
         platform.debug_byte=[](void*,std::uint8_t byte) {
             std::cerr.put(static_cast<char>(byte));
             return std::cerr ? nt::ee::Stop::budget : nt::ee::Stop::unsupported_system;
@@ -354,7 +363,7 @@ int main(int argc,char** argv) {
 #ifdef ANYPS2_NATIVE_IOP
         std::unique_ptr<probe::IopReset> iop_reset;
         if (!iop_data.empty()) {
-            iop_reset=std::make_unique<probe::IopReset>(iop_data,disc,memory,platform,native_code_overlap,iop_session);
+            iop_reset=std::make_unique<probe::IopReset>(iop_data,disc,memory,platform,native_code_overlap,iop_session,iop_default,disc_media);
             if (!command_peer.reset_owner(iop_reset->owner())) throw std::runtime_error("Cannot bind compiled IOP reset probe");
             active_iop=iop_reset.get();
         }
@@ -365,7 +374,7 @@ int main(int argc,char** argv) {
             if (std::fflush(stream)!=0) return std::int32_t{-5};
             return static_cast<std::int32_t>(count);
         });
-        auto cdvd=std::make_unique<nt::ee::NativeCdvdInitRpc>(disc);
+        auto cdvd=std::make_unique<nt::ee::NativeCdvdInitRpc>(disc,0x4000,0x5000,disc_media);
         nt::ee::NativeCdvdScmdRpc scmd(*cdvd,0x6000,0x7000);
         if (!command_peer.register_service(*cdvd) || !command_peer.register_service(scmd))
             throw std::runtime_error("Cannot register native CD/DVD and clock services");
@@ -557,6 +566,8 @@ int main(int argc,char** argv) {
                      <<" reason="<<static_cast<unsigned>(result.reason)<<" pc="<<nt::hex32(result.pc)
                      <<" address="<<nt::hex32(result.address)<<" trap="<<nt::hex32(result.trap_code)
                      <<" generations="<<iop_reset->generations()<<" last_bind="<<nt::hex32(iop_reset->last_server())
+                     <<" interrupts_enabled="<<iop_reset->interrupts_enabled()
+                     <<" ee_receiver_control="<<nt::hex32(platform.sif_receive.read(0x1000c000).value)
                      <<" session_cdvd_initialized="<<iop_reset->cdvd_initialized()
                      <<" serial_failure="<<iop_reset->serial().failure()
                      <<" serial_sent="<<iop_reset->serial().pending_output().size()
@@ -678,9 +689,11 @@ int main(int argc,char** argv) {
                      <<" packet_pending="<<platform.packet_setup.pending(channel)
                      <<" rejected_vif_command="<<platform.packet_setup.rejected_command();
         }
-        if (trace_services) {
+        if (trace_services || stop==nt::ee::Stop::unsupported_vector || stop==nt::ee::Stop::unsupported_numeric) {
 #ifdef ANYPS2_NATIVE_VU
-            std::cout<<" compiled_vu_unit="<<nt_vu_program_unit()<<" compiled_vu_ready="<<compiled_vu.ready();
+            std::cout<<" compiled_vu_unit="<<nt_vu_program_unit()<<" compiled_vu_ready="<<compiled_vu.ready()
+                <<" vu0_run_status="<<static_cast<unsigned>(compiled_vu_launch.last_result.status)
+                <<" vu0_blocks="<<compiled_vu_launch.last_result.blocks;
 #endif
 #ifdef ANYPS2_NATIVE_VU1
             std::cout<<" compiled_vu1_ready="<<compiled_vu1.ready()

@@ -1,4 +1,5 @@
 #include <nt/ee_codegen.hpp>
+#include <nt/analysis.hpp>
 #include "disc_fixture.hpp"
 #include "ee_batch_fixture.hpp"
 #include "vector_section_fixture.hpp"
@@ -9,7 +10,9 @@
 #include <sstream>
 #include <vector>
 #include <stdexcept>
-int main(int argc,char** argv) {
+#include <iostream>
+#include <algorithm>
+int main(int argc,char** argv) try {
     if (argc!=2 && argc!=3) return 1;
     fixture::verify_incremental_ee_modules();
     // Original scalar program: word sign extension, 64-bit addition and syscall.
@@ -350,7 +353,7 @@ int main(int argc,char** argv) {
     }
     code.push_back(nt::r5900::decode(0x440200,(47U<<26)|(4U<<21)|(0x16U<<16)));
     code.push_back(nt::r5900::decode(0x440204,12));
-    const std::array<std::uint32_t,17> vector_special{
+    const std::array<std::uint32_t,21> vector_special{
         (25U<<21)|(2U<<16)|(1U<<11)|0x3bcU, (24U<<21)|(2U<<16)|0x3bdU,
         (25U<<21)|(2U<<16)|(1U<<11)|0x3beU, (16U<<21)|0x3bfU,
         (31U<<21)|(2U<<16)|(1U<<11)|0x1ffU, (30U<<21)|(2U<<16)|(1U<<11)|0x2feU,
@@ -359,7 +362,9 @@ int main(int argc,char** argv) {
         (18U<<21)|(1U<<11)|0x43fU,
         (30U<<21)|(1U<<11)|(3U<<6)|28U, (30U<<21)|(1U<<11)|(3U<<6)|30U,
         (30U<<21)|(2U<<16)|(1U<<11)|0x03fU, (30U<<21)|(2U<<16)|(1U<<11)|0x07fU,
-        (30U<<21)|(2U<<16)|(1U<<11)|0x2bcU, (30U<<21)|(2U<<16)|(1U<<11)|0x2fcU};
+        (30U<<21)|(2U<<16)|(1U<<11)|0x2bcU, (30U<<21)|(2U<<16)|(1U<<11)|0x2fcU,
+        (30U<<21)|(1U<<11)|(3U<<6)|32U, (30U<<21)|(1U<<11)|(3U<<6)|36U,
+        (30U<<21)|(1U<<11)|(3U<<6)|34U, (30U<<21)|(1U<<11)|(3U<<6)|38U};
     for (unsigned n=0;n<vector_special.size();++n) {
         code.push_back(nt::r5900::decode(0x460000+n*8,(18U<<26)|vector_special[n]));
         code.push_back(nt::r5900::decode(0x460004+n*8,12));
@@ -416,7 +421,60 @@ int main(int argc,char** argv) {
         for (unsigned n=0;n<words.size();++n)
             code.push_back(nt::r5900::decode(pc+n*4,variant==5 && n==0 ? 0xdd080010U : words[n]));
     }
+    // Discover the callback roots before compiling this original counted walk.
+    // No callback addresses are supplied as entry points to discovery.
+    {
+        nt::Bytes image(280,0);
+        const auto put=[&](unsigned at,std::uint32_t word) {
+            for (unsigned n=0;n<4;++n) image.at(at+n)=std::uint8_t(word>>(n*8));
+        };
+        nt::elf::Executable executable{0x4e0000,0,{{0,0x4e0000,256,256,5,4},{256,0x2000,24,24,6,4}}};
+        const std::uint32_t words[]{0x24100000,0x24112000,0x8e230004,0x26100001,0x26310008,
+            0x0060f809,0,0x2e020003,0x1440fff9,0,12};
+        for (unsigned n=0;n<std::size(words);++n) put(n*4,words[n]);
+        for (unsigned n=0;n<3;++n) {
+            put(128+n*16,0x03e00008); put(132+n*16,0x25290001+n);
+            put(260+n*8,0x4e0080+n*16);
+        }
+        auto discovered=nt::analysis::discover(image,executable,256,{},true);
+        const auto roots=nt::analysis::initial_indirect_entries(image,executable,discovered);
+        if (roots!=std::set<std::uint32_t>{0x4e0080,0x4e0090,0x4e00a0})
+            throw std::runtime_error("Counted callback walk failed before LLVM compilation");
+        const std::vector<std::uint32_t> entries(roots.begin(),roots.end());
+        discovered=nt::analysis::discover(image,executable,256,entries,true);
+        for (const auto& [pc,instruction]:discovered.instructions) code.push_back(instruction);
+    }
+    {
+        nt::Bytes image(264,0);
+        const auto put=[&](unsigned at,std::uint32_t word) {
+            for (unsigned n=0;n<4;++n) image.at(at+n)=std::uint8_t(word>>(n*8));
+        };
+        nt::elf::Executable executable{0x500000,0,{{0,0x500000,256,256,5,4},{256,0x2000,8,8,6,4}}};
+        const std::uint32_t words[]{0x2c820002,0x10400012,0,0x00041880,0x3c020000,
+            0x24422000,0x0060282d,0x00621821,0x8c640000,0x00800008,0};
+        for (unsigned n=0;n<std::size(words);++n) put(n*4,words[n]);
+        put(0x50,12); put(0x60,0x24090007); put(0x64,12); put(0x70,0x24090009); put(0x74,12);
+        put(256,0x500060); put(260,0x500070);
+        auto discovered=nt::analysis::discover(image,executable,256,{},true);
+        const auto roots=nt::analysis::bounded_switch_entries(image,executable,discovered);
+        if (roots!=std::set<std::uint32_t>{0x500060,0x500070})
+            throw std::runtime_error("Scheduled switch failed before LLVM compilation");
+        const std::vector<std::uint32_t> entries(roots.begin(),roots.end());
+        discovered=nt::analysis::discover(image,executable,256,entries,true);
+        for (const auto& [pc,instruction]:discovered.instructions) code.push_back(instruction);
+    }
+    code.push_back(nt::r5900::decode(0x4f0000,0x7c860000));
+    code.push_back(nt::r5900::decode(0x4f0004,12));
+    {
+        const std::uint32_t merges[]{0xb0880007,0xb4880000,0x68880007,0x6c880000,
+            0xa8880003,0xb8880000,0x88880003,0x98880000};
+        for (unsigned n=0;n<std::size(merges);++n) {
+            code.push_back(nt::r5900::decode(0x4f0020+n*8,merges[n]));
+            code.push_back(nt::r5900::decode(0x4f0024+n*8,12));
+        }
+    }
     code.push_back(nt::r5900::decode(0xfffffffcU,12));
+    std::sort(code.begin(),code.end(),[](const auto& left,const auto& right) { return left.pc<right.pc; });
     auto malformed=images; malformed[1].segments[0].bytes[0]^=1;
     failed=false;
     try { std::ostringstream discard; nt::ee_codegen::emit_llvm(discard,code,owned,payloads,layouts,malformed); }
@@ -452,6 +510,9 @@ int main(int argc,char** argv) {
         nt::write_file(std::string(argv[2])+".observation",fixture::flow_observation_elf());
         nt::write_file(std::string(argv[2])+".vector",fixture::vector_container_elf());
         auto object_callbacks=fixture::object_callback_elf();
+        nt::write_file(std::string(argv[2])+".copied-callbacks",fixture::copied_callback_elf());
+        nt::write_file(std::string(argv[2])+".scaled-callbacks",fixture::scaled_callback_elf());
+        nt::write_file(std::string(argv[2])+".long-frame-callbacks",fixture::long_frame_callback_elf());
         nt::write_file(std::string(argv[2])+".object-callbacks",object_callbacks);
         fixture::put32(object_callbacks,0x114,0x24081270);
         fixture::put32(object_callbacks,0x118,0xac880018);
@@ -964,4 +1025,7 @@ int main(int argc,char** argv) {
         word(92,0x2000); word(0x100,0x4c000000); nt::write_file(std::string(argv[2])+".unsupported",elf);
     }
     return output ? 0 : 1;
+} catch (const std::exception& error) {
+    std::cerr<<"EE fixture generation: "<<error.what()<<'\n';
+    return 1;
 }

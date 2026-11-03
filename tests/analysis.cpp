@@ -14,6 +14,71 @@ void put(nt::Bytes& bytes, std::size_t offset, std::uint32_t word) {
 int main() {
     try {
         {
+            auto image=fixture::long_frame_callback_elf();
+            const auto executable=nt::elf::parse(image);
+            const auto roots=[&] {
+                const auto initial=nt::analysis::discover(image,executable,2000,{},true);
+                std::map<std::uint32_t,std::set<std::uint32_t>> edges;
+                const auto cases=nt::analysis::bounded_switch_entries(image,executable,initial,&edges);
+                const std::vector entries(cases.begin(),cases.end());
+                auto program=nt::analysis::discover(image,executable,2000,entries,true);
+                program.indirect_candidates=edges;
+                return nt::analysis::stored_code_pointers(image,executable,program);
+            };
+            check(roots()==std::set<std::uint32_t>{0x1700,0x1710},"Long frame-local callback choices were lost");
+            put(image,0x188,0x30a300ff);
+            check(roots().empty(),"Unrelated masked predicate established switch destinations");
+            image=fixture::long_frame_callback_elf();
+            put(image,0x560,0xa3c00001);
+            check(roots().empty(),"Partial frame-local overwrite resurrected callback choices");
+            put(image,0x55c,0x03c02821); put(image,0x560,0xa0a00001);
+            check(roots().empty(),"Aliased frame-local overwrite resurrected callback choices");
+        }
+        {
+            auto image=fixture::scaled_callback_elf();
+            const auto executable=nt::elf::parse(image);
+            const auto roots=[&] { return nt::analysis::stored_code_pointers(image,executable,
+                nt::analysis::discover(image,executable,2000,{},true)); };
+            check(roots()==std::set<std::uint32_t>{0x1200,0x1210},
+                  "Shift/add callback table with a wide count and shared epilogue was lost");
+            put(image,0x274,0x00651821);
+            check(roots().empty(),"Different index operands established a callback-table stride");
+            image=fixture::scaled_callback_elf();
+            put(image,0x200,0x0800046c);
+            check(roots().empty(),"Bounds failure reaching the load established a callback table");
+            image=fixture::scaled_callback_elf();
+            put(image,0x268,0x24040003);
+            check(roots().empty(),"Guard delay-slot index overwrite was ignored");
+            image=fixture::scaled_callback_elf();
+            put(image,0x254,0xa3a00001);
+            check(roots().empty(),"Partial stack overwrite retained a table base");
+        }
+        {
+            auto image=fixture::copied_callback_elf();
+            const auto executable=nt::elf::parse(image);
+            const auto roots=[&] {
+                return nt::analysis::registered_code_pointers(image,executable,
+                    nt::analysis::discover(image,executable,2000,{},true));
+            };
+            check(roots()==std::set<std::uint32_t>{0x1200,0x1210},
+                  "Wide stack descriptor copy lost callable fields through a helper");
+            for (unsigned at=0x16c;at>=0x148;at-=4) put(image,at+4,nt::le32(image,at));
+            put(image,0x148,0xac800000);
+            check(roots()==std::set<std::uint32_t>{0x1210},"Wide copy resurrected an overwritten source pointer");
+            put(image,0x148,0xa0800001);
+            check(roots()==std::set<std::uint32_t>{0x1210},"Wide copy ignored a partial source overwrite");
+            image=fixture::copied_callback_elf();
+            put(image,0x158,0xafa00014);
+            check(roots()==std::set<std::uint32_t>{0x1200},"Full overwrite resurrected copied callback");
+            put(image,0x158,0xa3a00015);
+            check(roots()==std::set<std::uint32_t>{0x1200},"Partial overwrite resurrected copied callback");
+            image=fixture::copied_callback_elf();
+            put(image,0x148,0x78880000); put(image,0x150,0x7fa80010); put(image,0x160,0);
+            check(roots()==std::set<std::uint32_t>{0x1200,0x1210},"Quadword descriptor copy lost callbacks");
+            put(image,0x14c,0x24080000);
+            check(roots().empty(),"Overwritten loaded descriptor supplied stale callbacks");
+        }
+        {
             auto image=fixture::object_callback_elf();
             const auto executable=nt::elf::parse(image);
             const auto roots=[&] {
@@ -334,6 +399,17 @@ int main() {
             const auto program=nt::analysis::discover(image,fixture,64,{},true);
             const auto entries=[&] { return nt::analysis::referenced_lifecycle_entries(image,fixture,program); };
             check(entries()==std::set<std::uint32_t>{0x1020,0x1030},"Referenced sentinel lifecycle list lost callbacks");
+            for (const auto [base,offset]:std::array<std::pair<std::uint32_t,int>,4>{{
+                    {0x1ff0,16},{0x2010,-16},{0x80002010U,-16},{0xa0001ff0U,16}}}) {
+                auto displaced=program;
+                displaced.instructions[0x1000]=nt::r5900::decode(0x1000,(15U<<26)|(16U<<16)|(base>>16));
+                displaced.instructions[0x1004]=nt::r5900::decode(0x1004,(13U<<26)|(16U<<21)|(16U<<16)|(base&65535));
+                displaced.instructions[0x1008]=nt::r5900::decode(0x1008,(35U<<26)|(16U<<21)|(2U<<16)|std::uint16_t(offset));
+                check(nt::analysis::referenced_lifecycle_entries(image,fixture,displaced)==std::set<std::uint32_t>{0x1020,0x1030},
+                    "Displaced or aliased lifecycle header lost callbacks");
+                displaced.instructions[0x1008]=nt::r5900::decode(0x1008,(35U<<26)|(16U<<21)|(2U<<16)|std::uint16_t(offset+1));
+                check(nt::analysis::referenced_lifecycle_entries(image,fixture,displaced).empty(),"Misaligned displaced lifecycle list accepted");
+            }
             put(image,64,2); check(entries().size()==2,"Counted lifecycle list lost callbacks");
             put(image,64,1); check(entries().empty(),"Inconsistent lifecycle count accepted");
             put(image,64,0xffffffff); put(image,72,0x2000);
@@ -344,6 +420,29 @@ int main() {
             fixture.segments[1].file_size=16;
             auto unreferenced=program; unreferenced.instructions.erase(0x1000);
             check(nt::analysis::referenced_lifecycle_entries(image,fixture,unreferenced).empty(),"Unreferenced data scanned as callbacks");
+        }
+        {
+            // Original fixed-count callback walk with a conditional helper and
+            // a branch-likely load. Adjacent record payloads are not callbacks.
+            nt::Bytes image(280,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,256,256,5,4},{256,0x2000,24,24,6,4}}};
+            const std::uint32_t words[]{0x24100000,0x24112000,0x2e020001,0x54400004,
+                0x8e230004,0x0c000438,0,0x8e230004,0x26100001,0x26310008,
+                0x0060f809,0,0x2e020003,0x1440fff5,0,12};
+            for (unsigned n=0;n<std::size(words);++n) put(image,n*4,words[n]);
+            for (unsigned at:{128U,144U,160U,224U}) put(image,at,0x03e00008);
+            for (unsigned n=0;n<3;++n) { put(image,256+n*8,0x10c0); put(image,260+n*8,0x1080+n*16); }
+            const auto entries=[&] {
+                const auto program=nt::analysis::discover(image,fixture,256,{},true);
+                return nt::analysis::initial_indirect_entries(image,fixture,program);
+            };
+            check(entries()==std::set<std::uint32_t>{0x1080,0x1090,0x10a0},"Ascending callback walk lost targets or treated payload as code");
+            put(image,24,0x26100001);
+            check(!entries().contains(0x10a0),"Conflicting path increments accepted as a fixed callback count");
+            put(image,24,0); put(image,44,0x26310008);
+            check(!entries().contains(0x10a0),"Call delay-slot cursor update ignored");
+            put(image,44,0); put(image,268,0x2000);
+            check(!entries().contains(0x10a0),"Malformed callback table contributed partial roots");
         }
         {
             // Original synthetic program: indirect initial-data pointer and
@@ -979,6 +1078,16 @@ int main() {
                 return nt::analysis::bounded_switch_entries(image,fixture,nt::analysis::discover(image,fixture,128,{},true));
             };
             check(roots()==std::set<std::uint32_t>{0x1060,0x1070},"Split table-address switch lost");
+            // A scheduled copy between low-half construction and the address
+            // add must not turn a bounded table into an unresolved jump.
+            for (unsigned at=28;at>=20;at-=4) put(image,at+4,nt::le32(image,at));
+            put(image,20,0x0060282d);
+            check(roots()==std::set<std::uint32_t>{0x1060,0x1070},"Scheduled index copy hid switch table");
+            put(image,20,0x24030000);
+            check(roots().empty(),"Clobbered index established scheduled switch table");
+            for (unsigned at=20;at<=28;at+=4) put(image,at,nt::le32(image,at+4));
+            put(image,32,0);
+
             put(image,16,0x24822000);
             check(roots().empty(),"Unrelated table low-address source accepted");
             put(image,16,0x24422000);

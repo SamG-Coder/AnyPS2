@@ -21,6 +21,8 @@ public:
     Stop (*accept_uploads)(void*,unsigned,std::span<const NativeUploadView>)=nullptr;
     void* launch_context=nullptr;
     Stop (*submit_compiled)(void*,unsigned,std::span<const NativeVectorDataView>,const NativeLaunchView*)=nullptr;
+    Stop (*submit_uploaded)(void*,unsigned,std::span<const NativeUploadView>,
+        std::span<const NativeVectorDataView>,const NativeLaunchView*)=nullptr;
     // Optional conversion diagnostic, never an execution fallback. The payload
     // view is valid only during the callback, and the batch still fails.
     void* upload_context=nullptr;
@@ -35,7 +37,7 @@ public:
             case 0x10: return {Stop::budget,gif_mode_};
             case 0x20:
                 if (gif_stream_.pending()) return {Stop::unsupported_system};
-                return {Stop::budget,gif_mode_|(gif_paused_ ? 8U : 0U)};
+                return {Stop::budget,gif_mode_|(gif_paused_ ? 8U : 0U)|(units_[1].path3_masked ? 2U : 0U)};
             case 0x40: case 0x50: case 0x60: case 0x70: case 0x80: case 0x90: case 0xa0:
                 return gif_stream_.pending() ? IoRead{Stop::unsupported_system} : IoRead{Stop::budget,0};
             default: return {Stop::unsupported_system};
@@ -128,7 +130,7 @@ public:
 private:
     Stop consume_segment(unsigned channel,std::span<const std::uint8_t> bytes,bool vector_active,std::size_t& consumed) {
         if (channel==2) {
-            if (gif_paused_ || !graphics.submit) return Stop::unsupported_system;
+            if (gif_paused_ || units_[1].path3_masked || !graphics.submit) return Stop::unsupported_system;
             // Descriptor-only submissions carry no GIF data. They complete
             // without inventing a packet or disturbing a partial stream.
             if (bytes.empty()) return Stop::budget;
@@ -174,6 +176,9 @@ private:
                 next.base=code&1023U; break;
             case 4: next.itops=code&(channel ? 1023U : 255U); break;
             case 5: next.mode=code&3U; break;
+            case 6:
+                if (!channel) return Stop::unsupported_system;
+                next.path3_masked=(code&0x8000U)!=0; break;
             case 7: next.mark=code&0xffffU; break;
             case 0x10: break; // FLUSHE: no outstanding compiled vector work.
             case 0x11: case 0x13:
@@ -181,7 +186,7 @@ private:
                 wait_command=command;
                 break;
             case 0x14: case 0x15: case 0x17:
-                if (!submit_compiled || !uploads.empty() || !drawing.empty()) return Stop::unsupported_vector;
+                if (!submit_compiled || (!uploads.empty() && !submit_uploaded) || !drawing.empty()) return Stop::unsupported_vector;
                 if (command==0x15) {
                     if (!channel || !graphics.wait) return Stop::unsupported_system;
                     wait_command=command;
@@ -230,7 +235,7 @@ private:
                 const auto format=static_cast<NativeVectorFormat>(command&3U);
                 const auto components=((command>>2)&3U)+1;
                 const auto raw_span=next.cycle&255U,raw_writes=(next.cycle>>8)&255U;
-                if (!submit_compiled || !uploads.empty() || !drawing.empty() ||
+                if (!submit_compiled || (!uploads.empty() && !submit_uploaded) || !drawing.empty() ||
                     (!raw_span && raw_writes) || (!raw_writes && raw_span)) return Stop::unsupported_vector;
                 const auto encoded_count=(code>>16)&255U,count=encoded_count ? encoded_count : 256U;
                 const auto span=raw_span ? raw_span : 256U,writes=raw_writes ? raw_writes : 256U;
@@ -286,7 +291,8 @@ private:
             rejected_command_=wait_command;
             return Stop::unsupported_system;
         }
-        if (!uploads.empty()) {
+        const bool combined=!uploads.empty() && (launch || !data.empty());
+        if (!uploads.empty() && !combined) {
             const auto result=accept_uploads(compiled_context,channel,uploads);
             if (result!=Stop::budget) {
                 rejected_command_=0x4a;
@@ -297,8 +303,16 @@ private:
         }
         if (launch || !data.empty()) {
             const NativeLaunchView request{entry,next.top,next.itop,continuation};
-            const auto result=submit_compiled(launch_context,channel,data,launch ? &request : nullptr);
-            if (result!=Stop::budget) { rejected_command_=launch ? launch_command : 0x6c; return result; }
+            const auto result=combined ? submit_uploaded(launch_context,channel,uploads,data,launch ? &request : nullptr) :
+                submit_compiled(launch_context,channel,data,launch ? &request : nullptr);
+            if (result!=Stop::budget) {
+                rejected_command_=launch ? launch_command : 0x6c;
+                if (combined) {
+                    if (uncompiled_packet) uncompiled_packet(upload_context,channel,bytes);
+                    if (uncompiled_upload) uncompiled_upload(upload_context,channel,uploads.front().destination,uploads.front().bytes);
+                }
+                return result;
+            }
         }
         if (!drawing.empty() && !graphics.submit(graphics.context,drawing)) return Stop::unsupported_system;
         units_[channel]=next; consumed=offset; rejected_command_=0;
@@ -315,7 +329,7 @@ private:
     struct Unit {
         bool stopped=false,broken=false;
         bool interrupt=false,interrupt_stall=false;
-        bool double_buffer=false;
+        bool double_buffer=false,path3_masked=false;
         unsigned base=0,offset=0,tops=0,top=0,itops=0,itop=0;
         std::uint32_t error_mask=0,mark=0,mode=0,mask=0,cycle=0,code=0;
         std::array<std::uint32_t,8> row_column{};

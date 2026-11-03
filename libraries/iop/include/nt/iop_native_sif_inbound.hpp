@@ -49,6 +49,11 @@ public:
                 result=rpc_->receive_call(packet,payload_,ram_);
             else if (command>=0x80000000 && command<=0x80000002 && commands_->uses_builtin_handler(command))
                 result=session_->receive_control(packet,ram_);
+            else if (command==0x8000000c && commands_->uses_builtin_handler(command))
+                // Unlike an explicitly removed application handler, this is an
+                // unimplemented built-in request with a waiting RPC caller.
+                // Do not drop it or fabricate a firmware/module-list snapshot.
+                result={NativeServiceStatus::unavailable,0,packet.size()>=36 ? load_native_word(packet,32) : 0};
             else result=commands_->receive(packet,packet_buffer_,ram_);
         }
         if (result.status!=NativeServiceStatus::returned || result.value>1) {

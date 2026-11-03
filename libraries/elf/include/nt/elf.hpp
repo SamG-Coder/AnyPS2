@@ -23,6 +23,9 @@ struct Executable {
     // Defined STT_FUNC symbols validated against file-backed executable sections.
     // Conversion may opt into these roots without promoting object/data symbols.
     std::vector<std::uint32_t> function_entries;
+    // File-backed allocated EE instruction sections, excluding VU containers.
+    // Unlike LOAD permissions, these do not include inter-section padding/data.
+    std::vector<AddressRange> code_sections;
 };
 Executable parse(ByteView bytes);
 bool executable_address(const Executable&,std::uint32_t address,unsigned bytes=4,bool allow_inferred=false);

@@ -11,6 +11,7 @@ struct Entry {
     std::uint32_t sector, size;
     bool directory;
     std::array<std::uint8_t,7> recorded{};
+    std::uint8_t flags=0;
 };
 class Iso9660 {
 public:

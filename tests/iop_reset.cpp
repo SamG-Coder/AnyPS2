@@ -42,12 +42,12 @@ void run_iop_reset_tests() {
     std::copy(bytes.begin(),bytes.end(),archive.begin()+80);
     nt::write_file(data,bytes);
     nt::write_file(disc,fixture::single_file_iso("BOOT.IMG;1",archive));
-    {
+    for (const bool default_reset : {false,true}) {
         nt::Bytes ram(0x10000,0);
         nt::ee::Memory memory{ram.data(),ram.size()};
         nt::ee::NativePlatform platform; platform.attach(memory);
         const auto protection=+[](std::uint32_t,std::uint32_t) { return false; };
-        probe::IopReset reset(data,disc,memory,platform,protection,true);
+        probe::IopReset reset(data,default_reset ? std::filesystem::path{} : disc,memory,platform,protection,true,default_reset);
         nt::ee::NativeSifCommandPeer peer(platform.sif_link,memory,protection,0x1000);
         require(peer.reset_owner(reset.owner()) && peer.connect(platform.sif_outbound));
         platform.sif_link.service(0x79,1,0x6000);
@@ -63,7 +63,11 @@ void run_iop_reset_tests() {
             require(submitted.status==Stop::budget && submitted.value);
             return platform.sif_outbound.pump(memory);
         };
-        constexpr std::string_view arguments="rom0:UDNL cdrom0:\\BOOT.IMG;1";
+        const std::string_view arguments=default_reset ? "" : "rom0:UDNL cdrom0:\\BOOT.IMG;1";
+        const auto initial_owner=reset.owner();
+        const std::string_view wrong_arguments=default_reset ? "rom0:UDNL cdrom0:\\BOOT.IMG;1" : "";
+        require(initial_owner.reset(initial_owner.context,{0,wrong_arguments}).status==Stop::unsupported_system);
+        require(!reset.generations() && !reset.executed());
         require(send(0x1000,0x80000003,arguments)==Stop::budget && reset.generations()==1);
         require(!reset.finished() && !reset.returned() && !reset.executed() && !platform.sif_link.peer_flags());
         require(reset.pump()==Stop::budget && !reset.finished());

@@ -31,9 +31,15 @@ void run_ee_file_rpc_tests() {
     using nt::ee::Stop;
     TemporaryDisc disc;
     const nt::Bytes data{11,22,33,44,55,66,77};
-    nt::write_file(disc.path,fixture::single_file_iso("DATA.BIN;1",data));
+    auto disc_bytes=fixture::single_file_iso("DATA.BIN;1",data);
+    const std::array<std::uint8_t,7> recorded{124,2,29,12,34,56,0};
+    std::copy(recorded.begin(),recorded.end(),disc_bytes.begin()+20*2048+18);
+    disc_bytes[20*2048+25]=1;
+    nt::write_file(disc.path,disc_bytes);
     nt::ee::NativeFileRpc files(disc.path);
     nt::ee::NativeCdvdInitRpc cdvd(disc.path);
+    nt::ee::NativeCdvdSearchRpc search(cdvd,0xa000,0xb000);
+    nt::ee::NativeCdvdReadRpc sectors(cdvd,0xc000,0xd000);
     {
         std::vector<std::uint8_t> reset_ram(0x10000);
         nt::ee::Memory reset_memory{reset_ram.data(),reset_ram.size()};
@@ -62,7 +68,7 @@ void run_ee_file_rpc_tests() {
     nt::ee::Memory memory{ram.data(),ram.size()};
     nt::ee::NativePlatform platform; platform.attach(memory);
     nt::ee::NativeSifCommandPeer peer(platform.sif_link,memory,nt_ee_generated_code_overlap,0x1000,&platform.sif_receive);
-    require(peer.register_service(files) && !peer.register_service(files) && peer.register_service(cdvd) && peer.connect(platform.sif_outbound));
+    require(peer.register_service(files) && !peer.register_service(files) && peer.register_service(cdvd) && peer.register_service(search) && peer.register_service(sectors) && peer.connect(platform.sif_outbound));
     nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
     auto state=nt::ee::NativePlatform::initial_state(0x3a0000);
     state.set(4,5); state.set(5,0x3c0000); state.set(6,0); state.set(7,0); state.set(28,0x7000);
@@ -168,7 +174,88 @@ void run_ee_file_rpc_tests() {
         using namespace std::chrono;
         return sys_seconds{sys_days{year{2024}/February/28}+hours{15}+minutes{4}+seconds{59}};
     };
+    {
+        for (const unsigned length:{292U,296U,300U}) {
+            const unsigned record_size=length==292 ? 32 : 36;
+            nt::Bytes args(length); const std::string path="\\DATA.BIN;1";
+            std::copy(path.begin(),path.end(),args.begin()+record_size);
+            fixture::put32(args,record_size+256,0xa0008200);
+            require(search.call(memory,nt_ee_generated_code_overlap,0,args,0x5080,4)==Stop::budget);
+            require(nt::le32(ram,0x5080)==1 && nt::le32(ram,0x8200)==21 && nt::le32(ram,0x8204)==data.size());
+            require(std::string(reinterpret_cast<const char*>(ram.data()+0x8208))=="DATA.BIN;1");
+            const std::array<std::uint8_t,8> date{1,56,34,12,29,2,0xe8,7};
+            require(std::equal(date.begin(),date.end(),ram.begin()+0x8218));
+            if (record_size==36) require(nt::le32(ram,0x8220)==1);
+            const auto snapshot=ram;
+            fixture::put32(args,record_size+256,0x80001000);
+            require(search.call(memory,nt_ee_generated_code_overlap,0,args,0x5080,4)==Stop::code_write && ram==snapshot);
+            fixture::put32(args,record_size+256,0x8200);
+            require(search.call(memory,nt_ee_generated_code_overlap,0,args,0xffff,4)==Stop::memory_fault && ram==snapshot);
+            std::fill(args.begin()+record_size,args.begin()+record_size+256,'x');
+            require(search.call(memory,nt_ee_generated_code_overlap,0,args,0x5080,4)==Stop::invalid_state && ram==snapshot);
+            std::fill(args.begin()+record_size,args.begin()+record_size+256,0);
+            args[record_size]='X'; std::fill_n(args.begin(),record_size,0x5a);
+            require(search.call(memory,nt_ee_generated_code_overlap,0,args,0x5080,4)==Stop::budget && !nt::le32(ram,0x5080));
+            require(std::equal(args.begin(),args.begin()+record_size,ram.begin()+0x8200));
+            if (length==300) {
+                fixture::put32(args,296,1); const auto before=ram;
+                require(search.call(memory,nt_ee_generated_code_overlap,0,args,0x5080,4)==Stop::unsupported_system && ram==before);
+            }
+        }
+        // Exercise the actual RPC transport and completion ordering as well.
+        endpoint=&search;
+        arm(); submit(words({36,0,0x80000009,0,7,9,11,13,search.id}));
+        require(platform.sif_outbound.pump(memory)==Stop::budget && nt::le32(ram,0x6024)==search.server); finish();
+        nt::Bytes args(292); const std::string path="DATA.BIN;1";
+        std::copy(path.begin(),path.end(),args.begin()+32); fixture::put32(args,288,0x8200);
+        require(call(0,args)==1 && nt::le32(ram,0x8200)==21);
+        endpoint=&cdvd;
+    }
+    {
+        endpoint=&sectors;
+        arm(); submit(words({36,0,0x80000009,0,7,9,11,13,sectors.id}));
+        require(platform.sif_outbound.pump(memory)==Stop::budget && nt::le32(ram,0x6024)==sectors.server); finish();
+        require(call(14,{})==2);
+        const auto args=words({21,1,0xa000a001,0x100,0x8200,0x8300});
+        const auto neighbor=ram[0xa000];
+        require(call(1,args)==2048 && std::equal(data.begin(),data.end(),ram.begin()+0xa001));
+        require(ram[0xa000]==neighbor && nt::le32(ram,0x8300)==2048 && !nt::le32(ram,0x8200) && !nt::le32(ram,0x8204));
+        require(!cdvd.read_error());
+        auto invalid=args; fixture::put32(invalid,16,0x1000); const auto snapshot=ram;
+        require(sectors.call(memory,nt_ee_generated_code_overlap,1,invalid,0x5080,4)==Stop::code_write && ram==snapshot);
+        invalid=args; fixture::put32(invalid,20,0xffff);
+        require(sectors.call(memory,nt_ee_generated_code_overlap,1,invalid,0x5080,4)==Stop::memory_fault && ram==snapshot);
+        invalid=args; fixture::put32(invalid,12,0x10000);
+        require(sectors.call(memory,nt_ee_generated_code_overlap,1,invalid,0x5080,4)==Stop::unsupported_system && ram==snapshot);
+        invalid=args; fixture::put32(invalid,0,0xffffffff);
+        require(sectors.call(memory,nt_ee_generated_code_overlap,1,invalid,0x5080,4)==Stop::budget &&
+                cdvd.read_error()==0x20 && !nt::le32(ram,0x8300) && !nt::le32(ram,0x5080));
+        require(std::equal(snapshot.begin()+0xa001,snapshot.begin()+0xa801,ram.begin()+0xa001));
+        require(sectors.call(memory,nt_ee_generated_code_overlap,1,args,0,0)==Stop::budget && !cdvd.read_error());
+        endpoint=&cdvd;
+    }
     nt::ee::NativeCdvdScmdRpc scmd(cdvd,0xa000,0xb000,fixed_clock);
+    for (const unsigned kind:{1U,2U}) {
+        nt::ee::NativeCdvdInitRpc mounted(disc.path,0x4000,0x5000,kind);
+        nt::ee::NativeCdvdScmdRpc commands(mounted,0xa000,0xb000,fixed_clock);
+        require(commands.call(memory,nt_ee_generated_code_overlap,3,{},0x5070,4)==Stop::budget && nt::le32(ram,0x5070)==0);
+        require(mounted.call(memory,nt_ee_generated_code_overlap,0,words({0}),0x5070,4)==Stop::budget);
+        require(commands.call(memory,nt_ee_generated_code_overlap,3,{},0x5070,4)==Stop::budget);
+        require(nt::le32(ram,0x5070)==(kind==1 ? 0x12U : 0x14U));
+        require(mounted.select_media(kind==1 ? 2U : 1U));
+        require(commands.call(memory,nt_ee_generated_code_overlap,3,{},0x5070,4)==Stop::budget);
+        require(nt::le32(ram,0x5070)==(kind==1 ? 0x12U : 0x14U));
+        require(commands.call(memory,nt_ee_generated_code_overlap,12,{},0x5070,4)==Stop::budget && nt::le32(ram,0x5070)==0x0a);
+        const auto snapshot=ram;
+        require(commands.call(memory,nt_ee_generated_code_overlap,3,words({0}),0x5070,4)==Stop::invalid_state);
+        require(commands.call(memory,nt_ee_generated_code_overlap,3,{},0x5070,16)==Stop::invalid_state);
+        require(commands.call(memory,nt_ee_generated_code_overlap,3,{},0x1000,4)==Stop::code_write);
+        require(commands.call(memory,nt_ee_generated_code_overlap,12,{},0xffff,4)==Stop::memory_fault && ram==snapshot);
+        require(mounted.call(memory,nt_ee_generated_code_overlap,0,words({5}),0x5070,4)==Stop::budget);
+        require(commands.call(memory,nt_ee_generated_code_overlap,3,{},0x5070,4)==Stop::budget && nt::le32(ram,0x5070)==0);
+    }
+    const auto untyped=ram;
+    require(scmd.call(memory,nt_ee_generated_code_overlap,3,{},0x5070,4)==Stop::unsupported_system && ram==untyped);
     require(scmd.call(memory,nt_ee_generated_code_overlap,1,{},0x5004,16)==Stop::budget);
     const std::array<std::uint8_t,16> clock_result{1,0,0,0,0,0x59,0x04,0,0,0x29,0x02,0x24};
     require(std::equal(clock_result.begin(),clock_result.end(),ram.begin()+0x5004));

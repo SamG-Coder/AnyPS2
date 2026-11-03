@@ -209,6 +209,9 @@ private:
         const unsigned x=value&65535,y=(value>>16)&65535;
         const auto z=std::uint32_t(value>>32)&((reg==4 || reg==12) ? 0xffffffU : 0xffffffffU);
         const auto primitive=state.primitive&7;
+        // Coverage antialiasing belongs to lines and triangles only. A caller
+        // may retain AA1 while issuing point draws or rectangular clears.
+        if (primitive==0 || primitive==6) attributes&=~128U;
         if (primitive<=2) {
             state.vertices[state.vertex_count++]={int(x),int(y),state.color,state.uv&16383,(state.uv>>16)&16383,
                 std::bit_cast<float>(state.s),std::bit_cast<float>(state.t),std::bit_cast<float>(state.q),z};
