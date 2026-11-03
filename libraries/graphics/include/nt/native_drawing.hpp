@@ -9,6 +9,7 @@
 #include <bit>
 #include <variant>
 #include <deque>
+#include <chrono>
 
 namespace nt::graphics {
 // Native command planning for a bounded GIF subset. No CPU/VU instruction code
@@ -17,6 +18,8 @@ class NativeDrawing {
 public:
     using Packet=graphics::Packet;
     enum class Completion { synchronous, deferred };
+    struct Profile { std::uint64_t parse_ns=0,validate_ns=0,submit_ns=0; };
+    Profile* profile=nullptr;
     explicit NativeDrawing(bool resident=false,Completion completion=Completion::synchronous):resident_(resident),completion_(completion) {}
     // The renderer must outlive a resident drawing and be exclusively owned by it.
     const std::vector<std::uint32_t>& pixels() const {
@@ -35,6 +38,13 @@ public:
         }
     }
     void submit(VulkanRenderer& renderer,std::span<const Packet> packets) {
+        auto marked=profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        const auto account=[&](std::uint64_t Profile::* member) {
+            if (!profile) return;
+            const auto now=std::chrono::steady_clock::now();
+            profile->*member+=std::chrono::duration_cast<std::chrono::nanoseconds>(now-marked).count();
+            marked=now;
+        };
         auto candidate=state_;
         std::vector<Operation> draws;
         std::size_t total=0;
@@ -43,6 +53,7 @@ public:
                 throw std::invalid_argument("Native graphics batch exceeds bound");
             total+=packet.size(); parse(candidate,packet,draws);
         }
+        account(&Profile::parse_ns);
         if (draws.empty()) { state_=candidate; return; }
         // Validate every draw before recording any part of this submission.
         // Parsing already validated uploads/palette addresses and state changes.
@@ -50,6 +61,7 @@ public:
             const SpriteCommand command{draw->sprite,{},draw->triangle,draw->fog_color,draw->fog};
             VulkanRenderer::validate(std::span(&command,1));
         }
+        account(&Profile::validate_ns);
         if (resident_) {
             if (renderer_ && renderer_!=&renderer) throw std::invalid_argument("Resident drawing renderer changed");
             if (!renderer_) { renderer.upload(pixels_); renderer_=&renderer; }
@@ -88,6 +100,7 @@ public:
             for (const auto& operation:draws) if (const auto* draw=std::get_if<Draw>(&operation)) {
                 ++submitted_draws_; last_draw_=draw->sprite;
             } else if (std::holds_alternative<Finish>(operation) && completion_==Completion::synchronous) ++completed_finishes_;
+            account(&Profile::submit_ns);
             return;
         }
         auto pixels=pixels_;
@@ -114,6 +127,7 @@ public:
         for (const auto& operation:draws) if (const auto* draw=std::get_if<Draw>(&operation)) {
             ++submitted_draws_; last_draw_=draw->sprite;
         } else if (std::holds_alternative<Finish>(operation)) ++completed_finishes_;
+        account(&Profile::submit_ns);
     }
 private:
     using ImageWrites=std::vector<PixelWrite>;

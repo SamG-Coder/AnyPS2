@@ -73,6 +73,7 @@ struct NativeGpu {
     nt::graphics::VulkanRenderer* renderer=nullptr;
     bool verify_textures=false;
     nt::graphics::NativeDrawing drawing{true,nt::graphics::NativeDrawing::Completion::deferred};
+    nt::graphics::NativeDrawing::Profile drawing_profile{};
     void ensure_renderer() {
         if (!renderer) {
             headless_renderer=std::make_unique<nt::graphics::VulkanRenderer>();
@@ -300,6 +301,7 @@ int main(int argc,char** argv) {
             std::cout<<"metrics=native-thread-cycles units=host-cpu-cycles includes=native-services cache-events=unsupported\n";
         }
         NativeGpu gpu;
+        if (profile_graphics) gpu.drawing.profile=&gpu.drawing_profile;
         gpu.verify_textures=verify_textures;
         if (!graphics_directory.empty()) gpu.capture=std::make_unique<probe::GraphicsCapture>(graphics_directory,capture_display_only);
         nt::ee::NativePlatform platform; platform.attach(memory);
@@ -426,6 +428,7 @@ int main(int argc,char** argv) {
         const auto started=std::chrono::steady_clock::now();
         auto next_profile=started+std::chrono::seconds(5);
         nt::graphics::RenderStatistics previous_statistics{};
+        nt::graphics::NativeDrawing::Profile previous_drawing{};
         auto previous_render_time=gpu.render_time;
         double presentation_seconds=0,previous_presentation=0;
         std::vector<double> update_intervals;
@@ -489,6 +492,9 @@ int main(int argc,char** argv) {
                     <<" updates_per_second="<<profile_updates/std::chrono::duration<double>(now-profile_started).count()
                     <<" update_p50_ms="<<percentile(0.50)<<" update_p95_ms="<<percentile(0.95)
                     <<" render_ms="<<std::chrono::duration<double,std::milli>(gpu.render_time-previous_render_time).count()
+                    <<" command_parse_ms="<<(gpu.drawing_profile.parse_ns-previous_drawing.parse_ns)/1e6
+                    <<" command_validate_ms="<<(gpu.drawing_profile.validate_ns-previous_drawing.validate_ns)/1e6
+                    <<" command_submit_ms="<<(gpu.drawing_profile.submit_ns-previous_drawing.submit_ns)/1e6
                     <<" present_ms="<<(presentation_seconds-previous_presentation)*1000
                     <<" compiled_entry_ms="<<(execution_profile.entry_ns-previous_execution.entry_ns)/1e6
                     <<" syscall_ms="<<(execution_profile.service_ns-previous_execution.service_ns)/1e6
@@ -526,6 +532,7 @@ int main(int argc,char** argv) {
                     <<" draw_calls="<<s.draw_calls-p.draw_calls<<" batched_primitives="<<s.batched_primitives-p.batched_primitives<<'\n'<<std::flush;
                 update_intervals.clear(); profile_updates=0; profile_started=now;
                 previous_statistics=s; previous_render_time=gpu.render_time; previous_presentation=presentation_seconds;
+                previous_drawing=gpu.drawing_profile;
                 previous_execution=execution_profile;
                 previous_display=display_profile;
                 next_profile=now+std::chrono::seconds(5);
