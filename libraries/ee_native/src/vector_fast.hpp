@@ -69,6 +69,9 @@ __declspec(noinline) inline bool vector_arithmetic_avx512(numeric::VectorResult&
         }
     }
     auto value=rounded_vector(left,right,multiply);
+    std::uint32_t product_mac=0;
+    if (accumulate) for (unsigned lane=0;lane<4;++lane) if (mask&(8U>>lane))
+        product_mac|=numeric::vector_lane_flags(value[lane],false,lane);
     if (accumulate) {
         auto addend=accumulator;
         for (unsigned lane=0;lane<4;++lane) {
@@ -84,7 +87,8 @@ __declspec(noinline) inline bool vector_arithmetic_avx512(numeric::VectorResult&
         result.value[lane]=value[lane];
         result.mac|=numeric::vector_lane_flags(value[lane],false,lane);
     }
-    result.status=numeric::vector_status_flags(result.mac,status);
+    result.status=numeric::vector_status_flags(result.mac,status)|
+        (numeric::vector_status_flags(product_mac,0)&0x3c0U);
     return true;
 }
 #endif

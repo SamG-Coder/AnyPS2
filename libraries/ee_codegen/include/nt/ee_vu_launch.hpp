@@ -23,7 +23,7 @@ public:
     std::unique_ptr<vu::State> failed_state;
     vu::GraphicsBatchConsumer graphics;
     Stop submit_sequence(unsigned unit,std::span<const NativeSubmissionStep> steps) {
-        if (unit!=binding_.unit() || steps.empty() || steps.size()>256) return Stop::unsupported_vector;
+        if (unit!=binding_.unit() || steps.empty() || steps.size()>NativePacketBatch::maximum_descriptors) return Stop::unsupported_vector;
         if (shared_ && shared_->active) return Stop::vector_pending;
         // Reuse the ordinary compiled launch path against private candidate
         // state. No graphics or shared EE state is published until every step
@@ -37,7 +37,7 @@ public:
         candidate.graphics={&output,[](void* raw,std::span<const graphics::Packet> packets) {
             auto& out=*static_cast<Output*>(raw);
             for (const auto& packet:packets) {
-                if (packet.size()>65536-out.quadwords) return false;
+                if (packet.size()>NativePacketBatch::maximum_bytes/16-out.quadwords) return false;
                 out.quadwords+=packet.size(); out.packets.push_back(packet);
             }
             return true;

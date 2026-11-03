@@ -20,14 +20,16 @@ inline std::uint32_t vector_status_flags(std::uint32_t mac,std::uint32_t previou
 inline FiniteFloatResult vector_multiply_accumulate(std::uint32_t accumulator,std::uint32_t left,
                                                     std::uint32_t right,bool subtract) {
     const auto product=multiply_finite(left,right,true);
-    if (product.underflow) return {0,false,false};
+    const auto product_flags=vector_status_flags(vector_lane_flags(product.bits,product.underflow,0),0)&15U;
     const auto signed_product=product.bits^(subtract ? 0x80000000U : 0U);
     if (product.overflow) {
         if ((accumulator&0x7f800000U) && ((accumulator^signed_product)&0x80000000U))
             return {0,false,false};
-        return {signed_product,false,true,true};
+        return {signed_product,false,true,true,product_flags};
     }
-    return add_subtract_finite(accumulator,product.bits,subtract,true);
+    auto result=add_subtract_finite(accumulator,product.bits,subtract,true);
+    result.product_flags=product_flags;
+    return result;
 }
 
 template<class Arithmetic>
@@ -41,9 +43,10 @@ NT_FORCE_INLINE VectorResult binary_vector(Vector original,Vector left,Vector ri
         const auto value=arithmetic(left[lane],right[broadcast<4 ? broadcast : lane],lane);
         if (!value.supported) { result.supported=false; return result; }
         result.value[lane]=value.bits;
+        result.status|=value.product_flags<<6;
         result.mac|=vector_lane_flags(value.bits,value.underflow,lane);
     }
-    result.status=vector_status_flags(result.mac,previous_status);
+    result.status=vector_status_flags(result.mac,result.status);
     return result;
 }
 inline VectorResult add_subtract_vector(Vector original,Vector left,Vector right,unsigned mask,

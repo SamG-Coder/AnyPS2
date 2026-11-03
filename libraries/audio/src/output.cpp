@@ -6,6 +6,7 @@
 #include <objbase.h>
 #include <xaudio2.h>
 #include "windows_reverb.hpp"
+#include "windows_envelope.hpp"
 #include <array>
 #include <cmath>
 #include <vector>
@@ -65,7 +66,7 @@ public:
             const auto result=engine_->CreateSourceVoice(&pending.streams[core],&stereo,0,1.0f,nullptr,&sends.list);
             if (FAILED(result)) { error_=static_cast<std::uint32_t>(result); return false; }
         }
-        graph_.clear(); graph_.swap(pending); core_mix_={}; voice_mix_={}; error_=0;
+        graph_.clear(); graph_.swap(pending); core_mix_={}; voice_mix_={}; envelopes_={}; envelope_parameters_={}; error_=0;
         return true;
     }
     bool configure_voice(unsigned index,const VoiceMix& mix) override {
@@ -77,6 +78,10 @@ public:
         if (SUCCEEDED(result)) result=voice->SetOutputMatrix(graph_.wet[index/24],1,2,wet);
         // A zero source rate is stationary, not XAudio2's minimum rate.
         if (SUCCEEDED(result)) result=mix.rate==0 ? voice->Stop() : voice->SetFrequencyRatio(mix.rate);
+        if (SUCCEEDED(result) && mix.rate>0 && voice_mix_[index].rate==0) {
+            XAUDIO2_VOICE_STATE state{}; voice->GetState(&state);
+            if (state.BuffersQueued) result=voice->Start();
+        }
         if (SUCCEEDED(result)) voice_mix_[index]=mix;
         error_=static_cast<std::uint32_t>(result);
         return SUCCEEDED(result);
@@ -159,6 +164,70 @@ public:
         if (SUCCEEDED(result) && voice_mix_[index].rate!=0) result=graph_.voices[index]->Start();
         error_=static_cast<std::uint32_t>(result); return SUCCEEDED(result);
     }
+    bool start_voices(std::span<const VoiceSample> samples) override {
+        std::uint64_t mask=0;
+        for (const auto& sample:samples) {
+            if (sample.voice>=48 || !graph_.voices[sample.voice] || sample.pcm.empty() || sample.pcm.size()>4*1024*1024 ||
+                std::uint64_t(sample.loop_begin)+sample.loop_length>sample.pcm.size() || (!sample.loop_length && sample.loop_begin) ||
+                (mask&(1ULL<<sample.voice))) return false;
+            mask|=1ULL<<sample.voice;
+        }
+        if (samples.empty()) return true;
+        auto operation=next_operation_++;
+        if (!next_operation_ || next_operation_==XAUDIO2_COMMIT_ALL) next_operation_=1;
+        HRESULT result=S_OK;
+        for (const auto& sample:samples) {
+            const auto index=sample.voice;
+            if (!stop_voice(index)) { result=E_FAIL; break; }
+            envelopes_[index]=std::make_shared<windows::EnvelopeObservation>();
+            auto* effect=new windows::EnvelopeEffect(envelopes_[index]);
+            XAUDIO2_EFFECT_DESCRIPTOR descriptor{static_cast<IXAPO*>(effect),TRUE,1};
+            const XAUDIO2_EFFECT_CHAIN chain{1,&descriptor};
+            result=graph_.voices[index]->SetEffectChain(&chain); effect->Release();
+            if (FAILED(result)) break;
+            envelope_parameters_[index]={sample.envelope,false};
+            result=graph_.voices[index]->SetEffectParameters(0,&envelope_parameters_[index],sizeof(windows::EnvelopeParameters));
+            if (FAILED(result)) break;
+            auto& storage=graph_.voice_pcm[index]; storage.assign(sample.pcm.begin(),sample.pcm.end());
+            XAUDIO2_BUFFER buffer{};
+            buffer.AudioBytes=static_cast<UINT32>(storage.size()*sizeof(std::int16_t));
+            buffer.pAudioData=reinterpret_cast<const BYTE*>(storage.data());
+            buffer.LoopBegin=sample.loop_begin; buffer.LoopLength=sample.loop_length;
+            buffer.LoopCount=sample.loop_length ? XAUDIO2_LOOP_INFINITE : 0;
+            result=graph_.voices[index]->SubmitSourceBuffer(&buffer);
+            if (SUCCEEDED(result) && voice_mix_[index].rate>0) result=graph_.voices[index]->Start(0,operation);
+            if (FAILED(result)) break;
+        }
+        if (SUCCEEDED(result)) result=engine_->CommitChanges(operation);
+        if (FAILED(result)) for (const auto& sample:samples) stop_voice(sample.voice);
+        error_=static_cast<std::uint32_t>(result); return SUCCEEDED(result);
+    }
+    bool configure_envelope(unsigned index,const EnvelopeSpec& spec) override {
+        if (index>=48 || !graph_.voices[index]) return false;
+        if (!envelopes_[index]) return true;
+        auto parameters=envelope_parameters_[index]; parameters.spec=spec;
+        const auto result=graph_.voices[index]->SetEffectParameters(0,&parameters,sizeof(parameters));
+        if (SUCCEEDED(result)) envelope_parameters_[index]=parameters;
+        error_=static_cast<std::uint32_t>(result); return SUCCEEDED(result);
+    }
+    bool release_voice(unsigned index) override {
+        if (index>=48 || !graph_.voices[index]) return false;
+        if (!envelopes_[index]) return stop_voice(index);
+        auto parameters=envelope_parameters_[index]; parameters.release=true;
+        const auto result=graph_.voices[index]->SetEffectParameters(0,&parameters,sizeof(parameters));
+        if (SUCCEEDED(result)) envelope_parameters_[index]=parameters;
+        error_=static_cast<std::uint32_t>(result); return SUCCEEDED(result);
+    }
+    bool envelope_state(unsigned index,EnvelopeState& state) override {
+        if (index>=48 || !graph_.voices[index]) return false;
+        if (!envelopes_[index]) { state={}; return true; }
+        const auto observed=envelopes_[index]->value.load(std::memory_order_relaxed);
+        state={observed&0xffffU,(observed&0x10000)!=0};
+        StreamState sample;
+        if (!sample_state(index,sample)) return false;
+        if (!sample.queued) state={};
+        return true;
+    }
     bool sample_state(unsigned index,StreamState& state) override {
         if (index>=48 || !graph_.voices[index]) return false;
         XAUDIO2_VOICE_STATE current{}; graph_.voices[index]->GetState(&current);
@@ -168,6 +237,7 @@ public:
         if (index>=48 || !graph_.voices[index]) return false;
         // Wait for the engine before releasing/replacing its sample storage.
         graph_.voices[index]->DestroyVoice(); graph_.voices[index]=nullptr;
+        envelopes_[index].reset(); envelope_parameters_[index]={};
         graph_.voice_pcm[index].clear();
         const WAVEFORMATEX format{WAVE_FORMAT_PCM,1,48000,96000,2,16,0};
         const auto sends=destinations(graph_.mix[index/24],graph_.wet[index/24]);
@@ -176,7 +246,7 @@ public:
         return SUCCEEDED(result) && configure_voice(index,voice_mix_[index]);
     }
     void close() override {
-        graph_.clear();
+        graph_.clear(); envelopes_={};
         if (master_) { master_->DestroyVoice(); master_=nullptr; }
         if (engine_) { engine_->Release(); engine_=nullptr; }
         if (com_) { CoUninitialize(); com_=false; }
@@ -236,6 +306,9 @@ private:
     Graph graph_;
     std::array<CoreMix,2> core_mix_{};
     std::array<VoiceMix,48> voice_mix_{};
+    std::array<std::shared_ptr<windows::EnvelopeObservation>,48> envelopes_;
+    std::array<windows::EnvelopeParameters,48> envelope_parameters_{};
+    std::uint32_t next_operation_=1;
     bool com_=false;
     std::uint32_t error_=0;
 };

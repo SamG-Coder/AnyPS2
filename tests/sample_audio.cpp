@@ -58,6 +58,27 @@ int main() {
         std::fill(bad.begin()+34,bad.end(),0x77);
         check(nt::audio::decode_apcm(bad,decoded)==nt::audio::SampleError::none && decoded.pcm.back()==32767,"Predictor saturation without signed overflow");
 
+        std::array<std::uint8_t,16> raw{}; raw.fill(0x11); raw[0]=0x1c; raw[1]=7;
+        nt::audio::RawSample loop;
+        check(nt::audio::decode_raw_sample(raw,0,0,loop)==nt::audio::SampleError::none &&
+              loop.first_end_frame==28 && loop.sample.loop_begin>0 && loop.sample.loop_length==28,
+              "Predictor-dependent loop did not preserve its transient before a stable PCM cycle");
+        nt::audio::AdpcmHistory history;
+        std::vector<std::int16_t> expanded;
+        for (unsigned i=0;i<100;++i) check(nt::audio::decode_adpcm_block(raw,history,expanded)==nt::audio::SampleError::none,"Raw block decode");
+        for (unsigned i=0;i<expanded.size();++i) {
+            const auto index=i<loop.sample.loop_begin ? i : loop.sample.loop_begin+(i-loop.sample.loop_begin)%loop.sample.loop_length;
+            check(expanded[i]==loop.sample.pcm[index],"Native PCM loop differs from continuous predictor history");
+        }
+        nt::audio::EnvelopeSpec shape{{{{32768,14336,false},{32768,-16384,true},{1,1,false},{32768,-16384,false}}},2048};
+        nt::audio::Envelope envelope; envelope.start();
+        for (unsigned i=0;i<3;++i) envelope.next(shape);
+        check(envelope.state().level==32767 && envelope.state().active,"Native attack did not reach full gain");
+        envelope.release(); envelope.next(shape);
+        check(envelope.state().active && envelope.state().level==16383,"Release did not preserve the previous gain");
+        envelope.next(shape);
+        check(!envelope.state().active && !envelope.state().level,"Native release did not reach silence");
+
         std::vector<std::uint8_t> ram(0x10000);
         Memory memory{}; memory.data=ram.data(); memory.size=ram.size();
         NativeCompletions completions; memory.completions=&completions;

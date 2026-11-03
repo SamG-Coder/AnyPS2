@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <nt/audio_envelope.hpp>
 #include <memory>
 #include <span>
 
@@ -21,6 +22,12 @@ struct CoreMix {
     StereoGain input_direct, input_effect;
     ReverbMix reverb;
 };
+struct VoiceSample {
+    unsigned voice=0;
+    std::span<const std::int16_t> pcm;
+    std::uint32_t loop_begin=0,loop_length=0;
+    EnvelopeSpec envelope;
+};
 struct StreamState { std::uint64_t frames=0; bool queued=false; };
 // Native output ownership. No console register file or instruction interface.
 class Output {
@@ -39,6 +46,10 @@ public:
     // repeats that region; state is measured by the native audio engine.
     virtual bool submit_sample(unsigned,std::span<const std::int16_t>,std::uint32_t,std::uint32_t) { return false; }
     virtual bool sample_state(unsigned,StreamState&) { return false; }
+    virtual bool start_voices(std::span<const VoiceSample>) { return false; }
+    virtual bool configure_envelope(unsigned,const EnvelopeSpec&) { return false; }
+    virtual bool release_voice(unsigned) { return false; }
+    virtual bool envelope_state(unsigned,EnvelopeState&) { return false; }
     virtual bool stop_voice(unsigned voice)=0;
     virtual void close()=0;
     virtual bool ready() const=0;

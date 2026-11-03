@@ -209,7 +209,13 @@ int main(int argc,char** argv) {
     pair((20U<<25)|(1U<<21)|(8U<<16)|0x41,0x400002ff); // FSEQ + E.
     pair(0x80000335);
     std::ostringstream flags_module;
-    const std::array<unsigned,3> flag_entries{0,8,10};
+    pair(0x80000335,(8U<<21)|(2U<<16)|(1U<<11)|(3U<<6)|41); // MADD.x, product underflow with normal ACC.
+    pair((22U<<25)|(1U<<21)|(9U<<16)|0x7ff); // Early FSAND before flags mature.
+    pair((32U<<25)|1); // Split at native block boundary.
+    pair(0x80000335);
+    pair((22U<<25)|(1U<<21)|(10U<<16)|0x7ff,0x400002ff); // Mature FSAND.
+    pair(0x80000335);
+    const std::array<unsigned,4> flag_entries{0,8,10,14};
     nt::vu::emit_program_llvm(flags_module,nt::vu::frame(bytes,1,0),1,flag_entries,"nt_vu_flags");
     const auto flags_text=flags_module.str();
     nt::write_file(std::string(argv[1])+".flags",nt::ByteView(reinterpret_cast<const std::uint8_t*>(flags_text.data()),flags_text.size()));

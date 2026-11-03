@@ -83,7 +83,27 @@ public:
     }
     bool stream_state(unsigned core,nt::audio::StreamState& state) override { if (core>=2) return false; state=streams[core]; return true; }
     bool stop_stream(unsigned core) override { if (core>=2) return false; streams[core]={}; pcm[core].clear(); return true; }
-    bool stop_voice(unsigned voice) override { return voice<48 && opened; }
+    std::array<nt::audio::StreamState,48> samples{};
+    std::array<nt::audio::EnvelopeState,48> envelopes{};
+    std::array<std::vector<std::int16_t>,48> sample_pcm;
+    std::array<nt::audio::EnvelopeSpec,48> specs{};
+    unsigned starts=0,releases=0;
+    bool start_voices(std::span<const nt::audio::VoiceSample> voices) override {
+        if (!allow_configure) return false;
+        for (const auto& voice:voices) {
+            samples[voice.voice]={0,true}; envelopes[voice.voice]={0,true}; specs[voice.voice]=voice.envelope;
+            sample_pcm[voice.voice].assign(voice.pcm.begin(),voice.pcm.end()); ++starts;
+        }
+        return true;
+    }
+    bool sample_state(unsigned index,nt::audio::StreamState& state) override { state=samples.at(index); return opened; }
+    bool configure_envelope(unsigned index,const nt::audio::EnvelopeSpec& spec) override { specs.at(index)=spec; return allow_configure; }
+    bool envelope_state(unsigned index,nt::audio::EnvelopeState& state) override { state=envelopes.at(index); return opened; }
+    bool release_voice(unsigned index) override { if (index>=48) return false; ++releases; return opened; }
+    bool stop_voice(unsigned voice) override {
+        if (voice>=48 || !opened) return false;
+        samples[voice]={}; envelopes[voice]={}; return true;
+    }
     bool open() override { return opened=allow_open; }
     bool initialize(bool) override {
         if (!allow_initialize || !open()) return false;
@@ -813,6 +833,21 @@ int main() {
             store_native_word(data,0x13008,0x104);
             check(call(0).first.reason==NativeStop::unmapped_code && output.ready() && !output.voices() &&
                   libraries.resolve("libsd",0x104,4)==0x13120,"Native sound startup failed to register after opening its device");
+            // Pure conversions execute through compiled LIBSD imports, before
+            // sound initialization, with no device or voice side effects.
+            for (const auto [note,pitch]:std::array<std::pair<unsigned,unsigned>,5>{{{48,2048},{60,4096},{72,8192},{61,4340},{59,3866}}}) {
+                const auto forward=call(13,60,0,note);
+                check(forward.first.reason==NativeStop::unmapped_code && forward.second.registers[2]==pitch,
+                      "Compiled note-to-pitch quantization failed");
+                const auto reverse=call(14,60,0,pitch);
+                check(reverse.first.reason==NativeStop::unmapped_code && (reverse.second.registers[2]>>8)==note,
+                      "Compiled pitch-to-note octave mapping failed");
+            }
+            check(call(13,60,64,60,64).second.registers[2]==4340 &&
+                  call(13,60,0,60,static_cast<unsigned>(-128)).second.registers[2]==3866 &&
+                  call(13,60,0,84).first.reason==NativeStop::import_request &&
+                  call(14,60,0,0).first.reason==NativeStop::import_request && !output.initializations,
+                  "Pitch conversion lost fine carry, negative offsets or unsupported-input boundary");
             check(call(4).first.reason==NativeStop::unmapped_code && output.voices()==48 && output.initializations==1,
                   "Compiled sound initialization did not allocate native voices");
             check(call(4,1).first.reason==NativeStop::unmapped_code && output.initializations==2,"Warm initialization did not reset native voices");
@@ -925,6 +960,49 @@ int main() {
             check(call(5,0x980,0).first.reason==NativeStop::import_request &&
                   call(6,0x980).second.registers[2]==0x2000,"Failed native volume update reported success");
             output.allow_configure=true;
+            // Uploaded raw samples start together through compiled key-on;
+            // completion and envelope reads are observations of the provider.
+            std::fill_n(data.begin()+0x19000,64,0);
+            data[0x19000]=12; data[0x19001]=1; data[0x19002]=0x21;
+            check(call(17,0,8,0x19000,0x1000,64).first.reason==NativeStop::unmapped_code,"Raw sample upload failed");
+            for (unsigned voice=0;voice<2;++voice) {
+                check(call(9,0x2000|voice*2,0x1000).first.reason==NativeStop::unmapped_code &&
+                      call(5,0x300|voice*2,0).first.reason==NativeStop::unmapped_code &&
+                      call(5,0x400|voice*2,0).first.reason==NativeStop::unmapped_code,"Sample configuration failed");
+            }
+            check(call(7,0x1500,3).first.reason==NativeStop::unmapped_code && output.starts==2 &&
+                  output.sample_pcm[0].size()==28 && output.sample_pcm[1][0]==1 && output.sample_pcm[1][1]==2,
+                  "Compiled key-on did not publish real PCM voices");
+            check(call(8,0x1700).second.registers[2]==0,"Queued samples fabricated completion");
+            output.envelopes[0].level=12345;
+            check(call(6,0x500).second.registers[2]==12345,"ENVX did not read the native envelope");
+            check(call(17,0,8,0x19000,0x1000,64).first.reason==NativeStop::import_request,
+                  "An active immutable sample accepted silent source mutation");
+            check(call(7,0x1600,1).first.reason==NativeStop::unmapped_code && output.releases==1 && output.samples[0].queued,
+                  "Key-off discarded the sample instead of starting release");
+            output.samples[1]={28,false}; output.envelopes[1]={};
+            check(call(8,0x1700).second.registers[2]==2,"Native sample completion did not latch ENDX");
+            output.envelopes[0]={}; sound.take();
+            check(!output.samples[0].queued && call(8,0x1700).second.registers[2]==2,
+                  "Envelope release completion fabricated a source-end event");
+            check(call(7,0x1700,0).first.reason==NativeStop::unmapped_code && call(8,0x1700).second.registers[2]==0,
+                  "ENDX acknowledge did not clear the latch");
+            // A malformed second voice must leave the entire key-on batch idle.
+            data[0x19000]=0xfc;
+            check(call(17,0,8,0x19000,0x2000,64).first.reason==NativeStop::unmapped_code &&
+                  call(9,0x2002,0x2000).first.reason==NativeStop::unmapped_code &&
+                  call(7,0x1500,3).first.reason==NativeStop::import_request && output.starts==2,
+                  "Invalid trailing sample partially started the batch");
+            data[0x19000]=12; data[0x19001]=7;
+            check(call(17,0,8,0x19000,0x1000,64).first.reason==NativeStop::unmapped_code &&
+                  call(7,0x1500,1).first.reason==NativeStop::unmapped_code,"Looping voice did not start");
+            output.samples[0].frames=28;
+            check(call(8,0x1700).second.registers[2]==1,"First loop end was not observed");
+            call(7,0x1700,0);
+            check(call(8,0x1700).second.registers[2]==0,"Acknowledged loop completion reappeared without progress");
+            output.samples[0].frames=56;
+            check(call(8,0x1700).second.registers[2]==1,"Subsequent loop end did not relatch completion");
+            output.envelopes[0]={}; sound.take();
             const auto snapshot=data;
             check(call(5,0x980,0x8000).first.reason==NativeStop::import_request && data==snapshot && output.initializations==2,
                   "Unimplemented sound operation returned success or changed state");

@@ -76,6 +76,7 @@ public:
     const nt::iop::NativeSerialServices& serial() const { return state_->services->serial(); }
     const nt::iop::NativeUsbServices& usb() const { return state_->services->usb; }
     const nt::iop::NativeDev9Services& dev9() const { return state_->services->dev9; }
+    const nt::iop::NativeSoundServices& sound() const { return state_->services->sound; }
     const nt::audio::Output& audio() const { return *state_->services->audio_output; }
     const auto& rejected_transfer() const { return state_->services->sif.rejected_transfer(); }
     auto pending_iop_packet() const { return state_->services->inbound.pending_packet(); }

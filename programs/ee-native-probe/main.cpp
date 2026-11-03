@@ -603,6 +603,8 @@ int main(int argc,char** argv) {
                      <<" native_usb_drivers="<<iop_reset->usb().driver_count()
                      <<" native_usb_error="<<iop_reset->usb().error()
                      <<" native_dev9_unavailable="<<iop_reset->dev9().unavailable_initializations()
+                     <<" native_sample_error="<<static_cast<unsigned>(iop_reset->sound().sample_error())
+                     <<" native_sample_voice="<<iop_reset->sound().rejected_voice()
                      <<" native_audio_error="<<iop_reset->audio().error()<<'\n';
             for (const auto& thread:iop_reset->thread_snapshot())
                 std::cout<<"iop_thread="<<thread.id<<" status="<<thread.status<<" pc="<<nt::hex32(thread.pc)

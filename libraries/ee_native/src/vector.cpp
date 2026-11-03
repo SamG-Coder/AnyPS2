@@ -64,7 +64,7 @@ extern "C" std::uint32_t nt_ee_vector_outer(nt::ee::Memory* memory,std::uint32_t
     result.mac|=vectors->mac&0x1111U;
     if (destination==32) vectors->accumulator=result.value;
     else if (destination) vectors->values[destination-1]=result.value;
-    vectors->mac=result.mac; vectors->status=nt::numeric::vector_status_flags(result.mac,vectors->status);
+    vectors->mac=result.mac; vectors->status=nt::numeric::vector_status_flags(result.mac,result.status);
     return std::uint32_t(Stop::budget);
 }
 

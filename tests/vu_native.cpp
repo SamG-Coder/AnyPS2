@@ -57,6 +57,8 @@ extern "C" nt::vu::Result nt_vu_flags_0(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_flags_3(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_flags_8(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_flags_10(nt::vu::State*);
+extern "C" nt::vu::Result nt_vu_flags_14(nt::vu::State*);
+extern "C" nt::vu::Result nt_vu_flags_18(nt::vu::State*);
 extern "C" const nt::vu::Block* nt_vu_graphics_blocks();
 extern "C" std::uint32_t nt_vu_graphics_count();
 extern "C" const nt::vu::Block* nt_vu_graphics_end_blocks();
@@ -200,13 +202,26 @@ int main() {
             throw std::runtime_error("Compiled VU accumulator forms failed");
         }
         if (nt_ee_multiply_accumulate_finite(0xbf800000,0x3f800001,0x3f7ffffe,0)!=0xb3800000ULL ||
-            !(nt_ee_multiply_accumulate_finite(0x3f800000,0x00800000,0x3f000000,0)&(1ULL<<33)))
+            nt_ee_multiply_accumulate_finite(0x3f800000,0x00800000,0x3f000000,0)!=(0x3f800000ULL|(5ULL<<36)))
             throw std::runtime_error("VU multiply/accumulate rounding boundary failed");
         auto underflow=initial;
         underflow.vectors[13][0]=0x00800000; underflow.vectors[14][0]=0x3f000000;
-        const auto before_underflow=underflow;
-        if (nt_vu_generated(&underflow)!=nt::vu::Result::unsupported_numeric || !(underflow==before_underflow))
-            throw std::runtime_error("VU intermediate product underflow was not atomic");
+        if (nt_vu_generated(&underflow)!=nt::vu::Result::complete || underflow.vectors[17][0]!=0 ||
+            underflow.vectors[18][0]!=0 || !(underflow.status&0x100))
+            throw std::runtime_error("VU intermediate product underflow did not retain flags");
+        for (const auto sign:{0U,0x80000000U}) {
+            nt::vu::State product;
+            product.vectors[0][0]=0x00800000U|sign;
+            product.vectors[1][0]=0x3f000000;
+            product.accumulator[0]=0x3f800000;
+            const auto sticky=sign ? 0x1c0U : 0x140U;
+            if (nt_vu_flags_14(&product)!=nt::vu::Result::transfer || product.integers[8] ||
+                product.vectors[2][0]!=0x3f800000 || product.mac || product.status!=sticky)
+                throw std::runtime_error("Product sticky flags published before their compiled boundary");
+            if (nt_vu_flags_18(&product)!=nt::vu::Result::complete || product.integers[9]!=sticky ||
+                product.visible_status!=sticky || product.visible_mac)
+                throw std::runtime_error("Product sticky flags lost across compiled blocks");
+        }
         for (const bool taken:{false,true}) {
             nt::vu::State branch; branch.integers[0]=5; branch.integers[1]=taken ? 5 : 6;
             if (nt_vu_branch(&branch)!=nt::vu::Result::transfer || branch.next_pair!=(taken ? 5U : 3U) ||

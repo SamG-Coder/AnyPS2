@@ -30,6 +30,7 @@ struct FiniteFloatResult {
     bool underflow=false;
     bool supported=true;
     bool overflow=false;
+    uint32_t product_flags=0; // VU multiply stage Z/S/U/O; separate from final flags.
 };
 inline uint64_t shift_jam(uint64_t value, unsigned shift) {
     if (!shift) return value;

@@ -85,10 +85,13 @@ public:
         pending.push_back({"i32",visible,offsetof(State,visible_mac)});
         const auto previous_status=value("select i1 "+idle+", i32 "+load("i32",offsetof(State,status))+
             ", i32 "+load("i32",offsetof(State,visible_status)));
-        const auto published_status=value("call i32 @nt_ee_vector_status_flags(i32 "+load("i32",offsetof(State,pending_mac))+", i32 "+previous_status+")");
+        const auto final_status=value("call i32 @nt_ee_vector_status_flags(i32 "+load("i32",offsetof(State,pending_mac))+", i32 "+previous_status+")");
+        const auto published_status=value("or i32 "+final_status+", "+load("i32",offsetof(State,pending_product_sticky)));
         pending.push_back({"i32",value("select i1 "+ready+", i32 "+published_status+", i32 "+previous_status),offsetof(State,visible_status)});
-        for (unsigned i=0;i<3;++i)
+        for (unsigned i=0;i<3;++i) {
             pending.push_back({"i32",load("i32",offsetof(State,pending_mac)+(i+1)*4),offsetof(State,pending_mac)+i*4});
+            pending.push_back({"i32",load("i32",offsetof(State,pending_product_sticky)+(i+1)*4),offsetof(State,pending_product_sticky)+i*4});
+        }
         pending.push_back({"i32",value("lshr i32 "+mask+", 1"),offsetof(State,pending_mac_mask)});
         commit();
         advance_visibility(offsetof(State,mac_read_delay));
@@ -235,6 +238,7 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         const bool accumulate=upper.operation==Arithmetic::multiply_add || upper.operation==Arithmetic::multiply_subtract || upper.operation==Arithmetic::outer_subtract;
         const bool subtract_product=upper.operation==Arithmetic::multiply_subtract || upper.operation==Arithmetic::outer_subtract;
         const bool arithmetic=outer || accumulate || upper.operation==Arithmetic::add || upper.operation==Arithmetic::subtract || upper.operation==Arithmetic::multiply;
+        std::string product_sticky="0";
         std::string mac=outer ? writer.value("and i32 "+writer.load("i32",offsetof(State,mac))+", 4369") : "0";
         if (!clipping && upper.operation!=Arithmetic::nop && (upper.result || arithmetic)) for (unsigned lane=0;lane<4;++lane) {
             if (!((outer ? 14U : upper.mask)&(8U>>lane))) continue;
@@ -256,6 +260,10 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
                 value=writer.value("trunc i64 "+packed+" to i32");
                 const auto flags=writer.value("call i32 @nt_ee_vector_lane_flags(i64 "+packed+", i32 "+std::to_string(lane)+")");
                 mac=writer.value("or i32 "+mac+", "+flags);
+                if (accumulate) {
+                    const auto product=writer.value("trunc i64 "+writer.value("lshr i64 "+packed+", 36")+" to i32");
+                    product_sticky=writer.value("or i32 "+product_sticky+", "+writer.value("shl i32 "+product+", 6"));
+                }
             } else if (upper.operation==Arithmetic::absolute) value=writer.value("and i32 "+left+", 2147483647");
             else if (upper.operation==Arithmetic::minimum || upper.operation==Arithmetic::maximum) {
                 const auto right=upper.operand==Operand::immediate ? writer.load("i32",offsetof(State,immediate)) :
@@ -272,7 +280,9 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         }
         if (arithmetic) {
             const auto previous=writer.load("i32",offsetof(State,status));
-            const auto status=writer.value("call i32 @nt_ee_vector_status_flags(i32 "+mac+", i32 "+previous+")");
+            const auto final_status=writer.value("call i32 @nt_ee_vector_status_flags(i32 "+mac+", i32 "+previous+")");
+            const auto status=writer.value("or i32 "+final_status+", "+product_sticky);
+            writer.pending.push_back({"i32",product_sticky,offsetof(State,pending_product_sticky)+3*4});
             writer.pending.push_back({"i32",mac,offsetof(State,mac)});
             writer.pending.push_back({"i32",mac,offsetof(State,pending_mac)+3*4});
             writer.pending.push_back({"i32",writer.value("or i32 "+writer.load("i32",offsetof(State,pending_mac_mask))+", 8"),offsetof(State,pending_mac_mask)});

@@ -115,7 +115,7 @@ public:
         std::size_t consumed=0;
         if (channel>=2) return consume_segment(channel,bytes,vector_active,consumed);
         if (pending(channel)) return Stop::unsupported_system;
-        if (bytes.size()>0x100000) return Stop::invalid_state;
+        if (bytes.size()>NativePacketBatch::maximum_bytes) return Stop::invalid_state;
         for (std::size_t i=0;i<origins.size();++i)
             if (origins[i].offset>=bytes.size() || origins[i].offset%4 || origins[i].quadword_offset>=16 || origins[i].quadword_offset%4 ||
                 (i ? origins[i].offset<=origins[i-1].offset : origins[i].offset!=0)) return Stop::invalid_state;
@@ -186,7 +186,7 @@ private:
             rejected_command_=command;
             const bool interrupt=(code&0x80000000U) && !(next.error_mask&1U);
             if (launch && command) {
-                if (!submit_sequence || sequence.size()>=255) return Stop::unsupported_system;
+                if (!submit_sequence || sequence.size()+1>=NativePacketBatch::maximum_descriptors) return Stop::unsupported_system;
                 finish_step();
             }
             switch (command) {

@@ -354,6 +354,18 @@ int main() {
                 const auto& output=n<9 ? vectors.accumulator : vectors.values[2];
                 check(output[0]==expected && output[1]==expected && output[2]==expected && output[3]==(n<9 ? 0x41200000U : 0xdeadbeefU));
             }
+            // Existing compiled MADD/MSUB forms: product flags persist while
+            // final current flags and masked destinations reflect only the sum.
+            for (const auto n:{4U,5U,6U,7U,9U,10U,11U,12U}) for (const auto sign:{0U,0x80000000U}) {
+                vectors={}; vectors.values[0].fill(0x00800000U|sign); vectors.values[1].fill(0x3f000000);
+                vectors.values[2].fill(0xdeadbeef); vectors.accumulator.fill(0x3f800000);
+                state={}; state.pc=0x440100+n*8;
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+                const auto& output=n<9 ? vectors.accumulator : vectors.values[2];
+                check(output[0]==0x3f800000 && output[1]==0x3f800000 && output[2]==0x3f800000 &&
+                    output[3]==(n<9 ? 0x3f800000U : 0xdeadbeefU) && !vectors.mac && vectors.status==(sign ? 0x1c0U : 0x140U));
+            }
+            vectors.values[0].fill(0x40000000); vectors.values[1].fill(0x40400000);
             vectors.values[0][1]=0x7f800000; vectors.accumulator.fill(77);
             const auto previous=vectors.accumulator; const auto mac=vectors.mac,status=vectors.status;
             state={}; state.pc=0x440120;
@@ -2844,7 +2856,8 @@ int main() {
             check(write(0x10008000,0x101)==nt::ee::Stop::memory_fault && !platform.completions.status());
         }
         {
-            std::array<std::uint8_t,1024> ram{};
+            auto owned_ram=std::make_unique<std::array<std::uint8_t,0x210000>>();
+            auto& ram=*owned_ram;
             nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.attach(memory);
             nt::runtime::State state;
             const auto put=[&](unsigned at,std::uint32_t value) { std::memcpy(ram.data()+at,&value,4); };
@@ -2896,7 +2909,7 @@ int main() {
             // Cyclic chains and bad extents are rejected before any consumer call.
             ram.fill(0); put(0,0x20000000);
             check(submit()==nt::ee::Stop::invalid_state && !platform.completions.status());
-            put(0,0x00000001); put(4,1024);
+            put(0,0x00000001); put(4,static_cast<unsigned>(ram.size()));
             check(submit()==nt::ee::Stop::memory_fault && !platform.completions.status());
             put(0,0x50000000); put(4,0); // Recursive CALL exceeds the two return slots.
             check(submit()==nt::ee::Stop::unsupported_system && !platform.completions.status());
@@ -2929,6 +2942,21 @@ int main() {
             check(write(0x10008000,0x155)==nt::ee::Stop::budget && platform.packet_setup.read(0x10003830).value==4);
             ram.fill(0); put(0,0x60000001); put(16,0x07000007);
             check(submit()==nt::ee::Stop::budget && platform.packet_setup.read(0x10003830).value==7);
+            // Many small transfer descriptors are valid within the batch byte
+            // limit; they must not hit the old 256-descriptor cutoff.
+            ram.fill(0); platform.completions.acknowledge(1);
+            for (unsigned i=0;i<320;++i) {
+                put(i*32,(i==319 ? 0x70000000U : 0x10000000U)|1);
+                put(i*32+16,0x07000000U|i);
+            }
+            check(submit()==nt::ee::Stop::budget && platform.packet_setup.read(0x10003830).value==319 &&
+                (platform.completions.status()&1));
+            // A large bounded upload can concatenate multiple full-sized
+            // references; parsing and transport must agree on the byte budget.
+            ram.fill(0); platform.completions.acknowledge(1);
+            put(0,0x3000ffff); put(4,1024); put(16,0x3000ffff); put(20,1024);
+            put(32,0x70000000); put(40,0x07000055);
+            check(submit()==nt::ee::Stop::budget && platform.packet_setup.read(0x10003830).value==0x55);
             // IRQ termination excludes the following bad descriptor.
             put(0,0x90000000); put(8,0x07000033); put(16,0x50000000);
             check(submit(0x1c5)==nt::ee::Stop::budget && platform.packet_setup.read(0x10003830).value==51);

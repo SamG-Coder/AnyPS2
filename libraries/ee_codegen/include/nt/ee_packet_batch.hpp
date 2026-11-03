@@ -11,6 +11,7 @@ struct NativePacketOrigin { std::size_t offset; unsigned quadword_offset; };
 // GIF or VU code, clock a channel, or publish completion.
 class NativePacketBatch {
 public:
+    static constexpr std::size_t maximum_bytes=32*1024*1024,maximum_descriptors=65536;
     std::vector<std::uint8_t> bytes;
     std::vector<NativePacketOrigin> origins;
     std::uint32_t source=0,tag=0,tag_bits=0;
@@ -32,7 +33,8 @@ public:
                unsigned tag_bytes=8,ReadView read=view,bool with_stack=false) {
         if ((tag_bytes!=8 && tag_bytes!=16) || !read || stack.size>stack.returns.size()) return Stop::invalid_state;
         tag=first;
-        for (unsigned count=0;count<256;++count) {
+        // Bound descriptor work independently of payload bytes, including empty chains.
+        for (std::size_t count=0;count<maximum_descriptors;++count) {
             std::span<const std::uint8_t> descriptor;
             auto result=read(memory,tag,16,descriptor);
             if (result!=Stop::budget) return result;
@@ -76,7 +78,5 @@ public:
         }
         return Stop::invalid_state;
     }
-private:
-    static constexpr std::size_t maximum_bytes=0x100000;
 };
 }

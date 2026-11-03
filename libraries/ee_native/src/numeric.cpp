@@ -5,7 +5,7 @@
 #include <nt/vu_clip.hpp>
 namespace {
 std::uint64_t pack(nt::numeric::FiniteFloatResult result) {
-    return result.bits | (std::uint64_t(result.underflow)<<32) | (std::uint64_t(!result.supported)<<33) | (std::uint64_t(result.overflow)<<35);
+    return result.bits | (std::uint64_t(result.underflow)<<32) | (std::uint64_t(!result.supported)<<33) | (std::uint64_t(result.overflow)<<35) | (std::uint64_t(result.product_flags)<<36);
 }
 std::uint64_t pack_flags(nt::numeric::ScalarFlagResult result) {
     return result.bits | (std::uint64_t(result.flags)<<32) | (std::uint64_t(!result.supported)<<63);

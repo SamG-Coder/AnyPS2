@@ -517,6 +517,18 @@ placeholder-handle implementation is not used.
 The same pinned PS2SDK LIBSD export table, `libsd-common.h` and initialization
 interface were consulted for public ordinals, two cores of 24 voices, and voice
 reset on both initialization modes. No sound-hardware implementation is copied.
+The same pinned `libsd/src/freesd.c` defines note/pitch quantization and packed
+note results. Native conversion generates equal-tempered factors mathematically
+instead of copying its lookup data, then uses bounded integer quantization.
+The note-to-pitch provider supports MIDI notes, signed fine offsets within one
+semitone, and playback ratios below four; out-of-range inputs stop explicitly.
+Raw sample playback uses the existing original ADPCM block decoder. The pinned
+PCSX2 `SPU2/ADSR.cpp` and `defs.h` inform envelope phase/rate behavior; no emulator
+scheduler or hardware implementation is linked. Native envelopes run as an
+original XAudio2 effect at 48 kHz after source-rate conversion, using the Windows
+SDK CXAPOParametersBase parameter exchange. Predictor-dependent sample loops are
+decoded until their history repeats, within a bounded PCM budget, before native
+loop submission. Nonconvergent data stops explicitly.
 Windows output uses the Windows SDK XAudio2 API, following Microsoft's
 [initialization contract](https://learn.microsoft.com/en-us/windows/win32/xaudio2/how-to--initialize-xaudio2)
 and [mastering-voice contract](https://learn.microsoft.com/en-us/windows/win32/api/xaudio2/nf-xaudio2-ixaudio2-createmasteringvoice).
@@ -2143,8 +2155,13 @@ status keeps sticky flags and the independent quotient flags.
 
 Multiply-accumulate supports extended operands and unambiguous saturation when
 an overflowing product is added to zero or a same-sign accumulator. Opposing-sign
-accumulation after product overflow and intermediate product underflow remain
-explicit unsupported boundaries pending validation of the internal VU pipeline.
+accumulation after product overflow remains an explicit unsupported boundary.
+Underflowing products flush to signed zero before the separate addition; product
+Z/S/U/O contribute sticky flags independently of the final MAC/current flags.
+The pinned god-of-war-recomp `ps2recomp-vu1-sticky-preserve.patch` and
+`ps2recomp-vu1-blocks.patch` provide public behavioral cross-checks for this
+contract. The original arithmetic and LLVM lowering carry these flags through
+the existing delayed publication path; this is not a hardware accuracy claim.
 This extension does not claim bit-exact multiplier partial-product precision.
 
 ### Highlight texture functions

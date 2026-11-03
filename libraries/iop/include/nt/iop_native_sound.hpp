@@ -1,5 +1,7 @@
 #pragma once
 #include <nt/audio.hpp>
+#include <nt/audio_pitch.hpp>
+#include <nt/adpcm.hpp>
 #include <nt/iop_native_libraries.hpp>
 #include <nt/iop_native_callbacks.hpp>
 #include <nt/iop_native_heap.hpp>
@@ -13,9 +15,14 @@ namespace nt::iop {
 class NativeSoundServices final : public NativeServices,public NativeCallbackSource {
 public:
     NativeSoundServices(NativeLibraryServices& libraries,audio::Output& output) : libraries_(libraries),output_(output) {}
+    unsigned rejected_voice() const { return rejected_voice_; }
+    audio::SampleError sample_error() const { return sample_error_; }
     void connect(NativeHeapServices& heap) { heap_=&heap; }
     std::optional<NativeCallback> take() override {
         if (active_ || failure_) return {};
+        for (unsigned index=0;index<playback_.size();++index) if (playback_[index].active && !refresh_voice(index)) {
+            failure_=NativeResult{NativeStop::service_request,0,0,7}; return {};
+        }
         for (unsigned core=0;core<2;++core) {
             auto& stream=streams_[core];
             if (!stream.active) continue;
@@ -67,12 +74,20 @@ public:
             return {NativeServiceStatus::returned};
         }
         if (!registered_) return {NativeServiceStatus::unavailable};
+        if (request.selector==13 || request.selector==14) {
+            const auto& a=request.arguments;
+            const auto value=request.selector==13 ? audio::note_to_pitch(static_cast<std::uint16_t>(a[0]),
+                static_cast<std::uint16_t>(a[1]),static_cast<std::uint16_t>(a[2]),
+                std::bit_cast<std::int16_t>(static_cast<std::uint16_t>(a[3]))) :
+                audio::pitch_to_note(static_cast<std::uint16_t>(a[0]),static_cast<std::uint16_t>(a[1]),static_cast<std::uint16_t>(a[2]));
+            return value ? returned(*value) : unavailable();
+        }
         if (request.selector==2) { output_.close(); initialized_=false; streams_={}; callbacks_.clear(); return returned(); }
         if (request.selector==4) {
             if (request.interrupt_context || request.arguments[0]>1 || !output_.initialize(request.arguments[0]!=0))
                 return {NativeServiceStatus::unavailable};
             const auto old=cores_;
-            cores_={}; voices_={}; handlers_={}; streams_={}; completed_={true,true}; callbacks_.clear(); failure_.reset(); arena_=ram;
+            cores_={}; voices_={}; playback_={}; handlers_={}; streams_={}; completed_={true,true}; callbacks_.clear(); failure_.reset(); arena_=ram;
             active_=false; active_stream_.reset(); digital_mode_=0;
             if (!request.arguments[0] || samples_.empty()) samples_.assign(sample_capacity,0);
             for (unsigned core=0;core<2;++core) {
@@ -122,11 +137,66 @@ private:
         default: return {}; // Variable echo/delay still needs a native provider.
         }
     }
+    struct Playback {
+        bool active=false;
+        std::uint32_t begin=0,end=0,loop_frames=0;
+        std::uint64_t next_end_frame=0;
+    };
     struct Voice {
         std::array<std::uint16_t,2> volume{},envelope{};
         std::uint16_t pitch=0x3fff;
         std::uint32_t start=0x5000,loop=0;
     };
+    static audio::EnvelopeSpec envelope_spec(const Voice& voice) {
+        const auto a=voice.envelope[0],b=voice.envelope[1];
+        const auto curve=[](unsigned shift,int step,bool exponential) {
+            return audio::GainCurve{32768U>>std::max(0,static_cast<int>(shift)-11),
+                step*(1<<std::max(0,11-static_cast<int>(shift))),exponential};
+        };
+        const auto sustain_step=7-static_cast<int>((b>>6)&3);
+        return {{{curve((a>>10)&31,7-((a>>8)&3),(a&0x8000)!=0),curve((a>>4)&15,-8,true),
+            curve((b>>8)&31,(b&0x4000) ? -sustain_step-1 : sustain_step,(b&0x8000)!=0),
+            curve(b&31,-8,(b&32)!=0)}},static_cast<std::uint32_t>((a&15)+1)<<11};
+    }
+    bool refresh_voice(unsigned index) {
+        auto& playback=playback_[index];
+        if (!playback.active) return true;
+        audio::StreamState stream; audio::EnvelopeState envelope;
+        if (!output_.sample_state(index,stream) || !output_.envelope_state(index,envelope)) return false;
+        if (stream.frames>=playback.next_end_frame) {
+            cores_[index/24].end_mask|=1U<<(index%24);
+            playback.next_end_frame=playback.loop_frames ? playback.next_end_frame+
+                ((stream.frames-playback.next_end_frame)/playback.loop_frames+1)*playback.loop_frames : UINT64_MAX;
+        }
+        if (!stream.queued || !envelope.active) {
+            if (stream.queued && !output_.stop_voice(index)) return false;
+            playback.active=false;
+        }
+        return true;
+    }
+    NativeServiceReply key_on(unsigned core,std::uint32_t mask) {
+        std::array<audio::RawSample,24> decoded;
+        std::vector<audio::VoiceSample> starts;
+        sample_error_=audio::SampleError::none;
+        for (unsigned voice=0;voice<24;++voice) if (mask&(1U<<voice)) {
+            const auto index=core*24+voice; const auto& v=voices_[index];
+            if (!v.pitch) { rejected_voice_=index; sample_error_=audio::SampleError::unsupported; return unavailable(); }
+            const auto error=audio::decode_raw_sample(samples_,v.start,v.loop,decoded[voice]);
+            if (error!=audio::SampleError::none) { rejected_voice_=index; sample_error_=error; return unavailable(); }
+            const auto& sample=decoded[voice].sample;
+            starts.push_back({index,sample.pcm,sample.loop_begin,sample.loop_length,envelope_spec(v)});
+        }
+        if (!output_.start_voices(starts)) return unavailable();
+        for (const auto& start:starts) {
+            const auto& decoded_sample=decoded[start.voice%24];
+            playback_[start.voice]={true,voices_[start.voice].start,decoded_sample.source_end,
+                decoded_sample.sample.loop_length ? (decoded_sample.source_end-decoded_sample.repeat_address)/16*28 : 0,
+                decoded_sample.first_end_frame};
+            if (decoded_sample.sample.loop_length) voices_[start.voice].loop=decoded_sample.repeat_address;
+        }
+        cores_[core].end_mask&=~mask;
+        return returned();
+    }
     struct Core {
         std::array<std::uint16_t,2> master{},depth{},external{},input{};
         std::array<std::uint32_t,4> route{0xffffff,0xffffff,0xffffff,0xffffff};
@@ -181,13 +251,19 @@ private:
             if (kind<2) field=&v.volume[kind];
             else if (kind==2) field=&v.pitch;
             else if (kind<5) field=&v.envelope[kind-3];
-            else if (!writing) return returned(kind==5 ? 0 : static_cast<std::uint16_t>(v.volume[kind-6]<<1));
+            else if (!writing) {
+                if (kind!=5) return returned(static_cast<std::uint16_t>(v.volume[kind-6]<<1));
+                audio::EnvelopeState envelope;
+                if (!refresh_voice(index) || !output_.envelope_state(index,envelope)) return unavailable();
+                return returned(envelope.level);
+            }
             else return unavailable();
             if (!writing) return returned(*field);
             if (kind<2 && (value&0x8000)) return unavailable(); // Dynamic gain sweeps need a timed envelope.
-            if (kind==2 && value>0x3fff) return unavailable();
+            if (kind==2 && (value>0x3fff || (!value && playback_[index].active))) return unavailable();
             if (kind==2 && value>0 && value<4) return unavailable(); // Below the native resampler's range.
             *field=value;
+            if (kind>=3 && !output_.configure_envelope(index,envelope_spec(v))) return unavailable();
             if (!apply_voice(index,v,cores_[core])) return unavailable();
             voices_[index]=v; return returned();
         }
@@ -212,16 +288,17 @@ private:
         const unsigned core=entry&1U,kind=entry>>8; value&=0xffffff;
         if (kind==0x13 || kind==0x14) return (!writing || !value) ? returned() : unavailable();
         if (kind==0x17) {
+            for (unsigned index=core*24;index<(core+1)*24;++index) if (!refresh_voice(index)) return unavailable();
             auto& ended=cores_[core].end_mask;
             if (writing) ended=0; // The public clear operation acknowledges latched endings.
             return returned(ended);
         }
         if (kind==0x16 && writing) {
             for (unsigned voice=0;voice<24;++voice)
-                if ((value&(1U<<voice)) && !output_.stop_voice(core*24+voice)) return unavailable();
+                if ((value&(1U<<voice)) && playback_[core*24+voice].active && !output_.release_voice(core*24+voice)) return unavailable();
             return returned();
         }
-        if (kind==0x15 && writing && !value) return returned();
+        if (kind==0x15 && writing) return value ? key_on(core,value) : returned();
         if (kind<0x18 || kind>0x1b) return unavailable();
         auto c=cores_[core]; auto& field=c.route[kind-0x18];
         if (!writing) return returned(field);
@@ -242,7 +319,7 @@ private:
         else if (kind==0x21) field=&voices_[core*24+voice].loop;
         else return unavailable();
         if (!writing) return returned(*field);
-        if (value>=sample_capacity) return unavailable();
+        if (value>=sample_capacity || (kind==0x21 && playback_[core*24+voice].active)) return unavailable();
         *field=kind==0x1d ? value|0x1ffffU : value&~15U;
         return returned();
     }
@@ -288,7 +365,16 @@ private:
             for (auto word=*source&~3U;word<*source+count;word+=4)
                 if (nt_iop_native_code_word(word)) return {NativeServiceStatus::code_write,0,a[2]};
             std::copy_n(samples_.begin()+destination,count,ram.begin()+*source);
-        } else std::copy_n(ram.begin()+*source,count,samples_.begin()+destination);
+        } else {
+            // Snapshot PCM cannot silently observe later edits to its encoded
+            // source. Explicitly reject active streaming mutation for now.
+            for (unsigned index=0;index<playback_.size();++index) {
+                if (!refresh_voice(index)) return unavailable();
+                const auto& playback=playback_[index];
+                if (playback.active && destination<playback.end && destination+count>playback.begin) return unavailable();
+            }
+            std::copy_n(ram.begin()+*source,count,samples_.begin()+destination);
+        }
         cores_[core].transfer_address=destination+count; completed_[core]=true;
         // The direct native copy has finished. Defer the compiled interrupt
         // callback to the scheduler; polling observes the completed copy.
@@ -421,6 +507,9 @@ private:
     std::array<Core,2> cores_{};
     std::array<Handler,3> handlers_{};
     std::vector<std::uint8_t> samples_;
+    std::array<Playback,48> playback_{};
+    unsigned rejected_voice_=0;
+    audio::SampleError sample_error_=audio::SampleError::none;
     std::array<Stream,2> streams_{};
     std::array<bool,2> completed_{true,true};
     std::deque<NativeCallback> callbacks_;
