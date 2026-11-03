@@ -2361,3 +2361,13 @@ GPL-2.0-or-later respectively). The independent ELF reader uses the table's
 name, load address and VU byte address, and the named shadow section's size.
 Code bytes come from the load image, not the shadow section. No assembler
 implementation is copied.
+
+### Compiled PADMAN native input transactions
+
+The native gamepad transaction service uses the public analog-pad command
+contract documented by [psx-spx](https://psx-spx.consoledev.net/controllersandmemorycards/)
+and the already pinned PS2SDK PADMAN interface (`sio2Cmds.c`, `padCmds.c`).
+The previously pinned PCSX2 SIO2 interface was consulted for completion status
+bits. No implementation was copied. Complete packets from compiled drivers map
+onto the same SDL input/rumble provider as native libpad RPC. The analog-pad
+profile deliberately does not advertise pressure-sensitive face buttons.

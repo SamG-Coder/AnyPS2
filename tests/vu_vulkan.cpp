@@ -143,14 +143,14 @@ void triangles(nt::graphics::VulkanRenderer& renderer) {
     suppressed.submit(renderer,std::array{p});
     if (suppressed.submitted_draws()!=1 || pixel(suppressed,0,0) || pixel(suppressed,3,3)!=d.color)
         throw std::runtime_error("Suppressed triangle kick lost strip continuity");
-    // A later unsupported triangle must not publish any earlier draws or state.
+    // A later invalid graphics state must not publish any earlier draws or state.
     auto good=setup(3); vertex(good,a); vertex(good,b); vertex(good,c); finish(good);
-    auto bad=setup(3|32); vertex(bad,a); vertex(bad,b); vertex(bad,c); finish(bad);
+    auto bad=setup(3); ad(bad,0x22,1); vertex(bad,a); vertex(bad,b); vertex(bad,c); finish(bad);
     const auto before=suppressed.pixels(); bool rejected=false;
     try { suppressed.submit(renderer,std::array{good,bad}); }
     catch (const std::invalid_argument&) { rejected=true; }
     if (!rejected || suppressed.pixels()!=before || suppressed.submitted_draws()!=1)
-        throw std::runtime_error("Unsupported triangle published a partial batch");
+        throw std::runtime_error("Invalid graphics state published a partial batch");
     nt::graphics::NativeDrawing clipped;
     p=setup(3); ad(p,0x18,16ULL|(16ULL<<32));
     ad(p,0x40,1ULL|(2ULL<<16)|(1ULL<<32)|(2ULL<<48));

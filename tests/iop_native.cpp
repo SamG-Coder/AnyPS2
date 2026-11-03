@@ -976,8 +976,12 @@ int main() {
             check(call(8,0x1700).second.registers[2]==0,"Queued samples fabricated completion");
             output.envelopes[0].level=12345;
             check(call(6,0x500).second.registers[2]==12345,"ENVX did not read the native envelope");
-            check(call(17,0,8,0x19000,0x1000,64).first.reason==NativeStop::import_request,
+            check(call(17,0,8,0x19000,0x1000,64).first.reason==NativeStop::unmapped_code && output.starts==2,
+                  "Identical bank re-upload interrupted active native samples");
+            data[0x19002]^=1;
+            check(call(17,0,8,0x19000,0x1000,64).first.reason==NativeStop::import_request && output.starts==2,
                   "An active immutable sample accepted silent source mutation");
+            data[0x19002]^=1;
             check(call(7,0x1600,1).first.reason==NativeStop::unmapped_code && output.releases==1 && output.samples[0].queued,
                   "Key-off discarded the sample instead of starting release");
             output.samples[1]={28,false}; output.envelopes[1]={};
@@ -3896,6 +3900,40 @@ int main() {
                       "Buffered disconnected transaction did not complete");
                 for (unsigned i=0;i<8;++i) check(sio2_ram[0x204+i]==(i<3 ? 255 : 0),
                     "Serial response or block padding was not published");
+                serial.reset();
+                unsigned batches=0;
+                serial.bind_ports([&](std::span<nt::NativePortExchange> batch) {
+                    ++batches;
+                    check(batch.size()==2 && batch[0].port==0 && batch[1].port==1 &&
+                          batch[0].request[0]==1 && batch[1].request[0]==0x81,
+                          "Buffered endpoint requests lost command boundaries");
+                    batch[0].response[0]=0xff; batch[0].response[1]=0x41; batch[0].response[2]=0x5a;
+                    batch[0].acknowledged=true;
+                    return true;
+                });
+                serial.invoke({1,{0x1f808200,(2U<<8)|(3U<<18)},NativeServiceKind::serial},sio2_ram);
+                serial.invoke({1,{0x1f808204,(2U<<8)|(3U<<18)|1U},NativeServiceKind::serial},sio2_ram);
+                sio2_ram[0x124]=1; sio2_ram[0x125]=0x42;
+                sio2_ram[0x12c]=0x81; sio2_ram[0x12d]=0x11;
+                for (unsigned channel=11;channel<=12;++channel) {
+                    store_native_word(sio2_ram,0x110,channel==11 ? 1U : 0U);
+                    NativeServiceRequest configure{28,{channel,channel==11 ? 0x124U : 0x204U,2,2},NativeServiceKind::dmacman};
+                    configure.stack_pointer=0x100;
+                    check(serial.invoke(configure,sio2_ram).value==1,"Configure paired endpoint buffers");
+                    check(serial.invoke({32,{channel},NativeServiceKind::dmacman},sio2_ram).status==NativeServiceStatus::returned,
+                          "Arm paired endpoint buffers");
+                }
+                check(serial.invoke({1,{0x1f808268,1},NativeServiceKind::serial},sio2_ram).status==NativeServiceStatus::returned &&
+                      batches==1 && sio2_ram[0x205]==0x41 && sio2_ram[0x206]==0x5a && sio2_ram[0x207]==0 && sio2_ram[0x20d]==0xff &&
+                      serial.invoke({0,{0x1f80826c},NativeServiceKind::serial},sio2_ram).value==0x2d200,
+                      "Native endpoint response, padding or mixed connection status incorrect");
+                serial.reset();
+                serial.bind_ports([](auto) { return false; });
+                serial.invoke({1,{0x1f808200,(1U<<8)|(1U<<18)},NativeServiceKind::serial},sio2_ram);
+                serial.invoke({1,{0x1f808260,1,1},NativeServiceKind::serial},sio2_ram);
+                check(serial.invoke({1,{0x1f808268,1},NativeServiceKind::serial},sio2_ram).status==NativeServiceStatus::unavailable &&
+                      serial.failure()==5 && serial.invoke({0,{0x1f808280},NativeServiceKind::serial},sio2_ram).value==0,
+                      "Rejected native endpoint fabricated transfer completion");
                 serial.reset();
                 check(serial.invoke({32,{11},NativeServiceKind::dmacman},sio2_ram).status==NativeServiceStatus::unavailable &&
                       configure_buffer(12,0x1ffc,2).status==NativeServiceStatus::address_fault,

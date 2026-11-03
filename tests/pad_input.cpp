@@ -1,4 +1,5 @@
 #include <nt/ee_pad_rpc.hpp>
+#include <nt/pad_transactions.hpp>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -12,6 +13,52 @@ bool protected_code(std::uint32_t address,std::uint32_t size) {
 int main(int argc,char**) {
     try {
         using nt::ee::Stop;
+        {
+            nt::input::PadSnapshot host{true,0x4008,{0,255,32,224},true};
+            std::array<std::uint16_t,2> motors{};
+            bool motor_ok=true;
+            nt::input::PadTransactions pad([&](unsigned port) { return port==0 ? host : nt::input::PadSnapshot{}; },
+                [&](unsigned,std::uint16_t low,std::uint16_t high) { motors={low,high}; return motor_ok; });
+            std::array<std::uint8_t,9> request{1,0x42},response{};
+            nt::NativePortExchange item{0,request,response};
+            auto exchange=[&] { return pad.exchange({&item,1}); };
+            check(exchange() && item.acknowledged && response[1]==0x41 && response[3]==0xf7 && response[4]==0xbf,
+                  "Compiled driver digital report must use host buttons");
+            request[1]=0x43; request[3]=1;
+            check(exchange() && response[1]==0x41,"Configuration entry reports previous mode");
+            request[1]=0x45;
+            check(exchange() && response[1]==0xf3 && response[3]==1 && response[6]==2,
+                  "Native analog profile must not claim pressure sensors");
+            request[1]=0x44; request[3]=1; request[4]=3;
+            check(exchange(),"Select analog mode");
+            request[1]=0x4d; request[3]=1; request[4]=0;
+            std::fill(request.begin()+5,request.end(),0xff);
+            check(exchange() && response[3]==0xff,"Configure native rumble slots");
+            request[1]=0x43; request[3]=0;
+            check(exchange() && response[1]==0xf3,"Exit configuration");
+            request[1]=0x42; request[3]=128; request[4]=1;
+            check(exchange() && response[1]==0x73 && response[5]==0 && response[6]==255 && response[7]==32 && response[8]==224 &&
+                  motors==std::array<std::uint16_t,2>{32896,65535},"Analog polling and swapped actuator mapping");
+            motor_ok=false; response.fill(0xcc);
+            check(!exchange() && response[0]==0xcc,"Rumble failure must not publish a successful packet");
+            motor_ok=true; host.connected=false;
+            check(exchange() && !item.acknowledged && response[1]==255,"Disconnected host must not acknowledge");
+            host.connected=true;
+            check(exchange() && response[1]==0x41,"Reconnect resets negotiated analog mode");
+            request[1]=0x43; request[3]=1; check(exchange(),"Reenter config");
+            auto bad=request; bad[1]=0xee;
+            std::array<std::uint8_t,9> other{};
+            request[1]=0x44; request[3]=1; request[4]=3;
+            std::array<nt::NativePortExchange,2> batch{{{0,request,response},{0,bad,other}}};
+            response.fill(0xcc);
+            check(!pad.exchange(batch) && response[0]==0xcc && pad.rejected_command()==0xee,
+                  "Unsupported batch must not commit earlier commands");
+            request[1]=0x45;
+            check(exchange() && response[5]==0,"Rejected batch changed mode");
+            item.port=1; check(exchange() && !item.acknowledged,"Absent second port must remain absent");
+            item.port=0; request[0]=0x81;
+            check(exchange() && !item.acknowledged,"Controller cannot acknowledge a memory card request");
+        }
         check(nt::input::pad_axis(-32768)==0 && nt::input::pad_axis(0)==128 && nt::input::pad_axis(32767)==255,"Axis normalization");
         std::vector<std::uint8_t> ram(0x10000,0xcc);
         nt::ee::Memory memory{}; memory.data=ram.data(); memory.size=ram.size();

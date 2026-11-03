@@ -20,7 +20,8 @@ function(anyps2_add_input target)
         FetchContent_MakeAvailable(anyps2_sdl)
     endif()
     add_library(${target} "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/src/gamepad.cpp")
-    target_include_directories(${target} PUBLIC "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/include")
+    target_include_directories(${target} PUBLIC "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/include"
+        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../runtime/include")
     target_compile_features(${target} PUBLIC cxx_std_20)
     target_link_libraries(${target} PRIVATE SDL3::SDL3-static)
     configure_file("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../../docs/third-party/SDL-license.txt"

@@ -426,6 +426,9 @@ int main() {
             const std::span alternative(catalog[1].image,catalog[1].image_size);
             const std::array replacement{nt::vu::UploadView{4,alternative.subspan(32,8)}};
             if (!switched.upload(1,replacement)) throw std::runtime_error("Known overlapping VU image was rejected");
+            const auto before_resume=launched;
+            if (switched.resume(launched,10).status!=nt::vu::RunStatus::unbound_program || launched!=before_resume)
+                throw std::runtime_error("Overwritten native VU module retained its active continuation");
             nt::vu::State changed; changed.integers[0]=changed.integers[1]=1;
             if (switched.launch(changed,0,10).status!=nt::vu::RunStatus::complete || changed.integers[4]!=2)
                 throw std::runtime_error("Overlapping upload did not select the newly compiled image");
@@ -553,12 +556,16 @@ int main() {
         if (!data_binding.upload(1,std::array{nt::vu::UploadView{0,{nt_vu_data_image(),nt_vu_data_size()}}}))
             throw std::runtime_error("Synthetic data module did not bind");
         nt::ee::NativeVuLaunch data_owner(data_binding);
+        for (std::size_t q=0;q<data_owner.state.data.size();++q)
+            for (unsigned lane=0;lane<4;++lane) data_owner.state.data[q][lane]=0x12340000U+std::uint32_t(q*4+lane);
+        auto expected_data=data_owner.state.data;
+        expected_data[1023]={1,2,3,4}; expected_data[0]={5,6,7,8};
         data_owner.connect(packets);
         upload_packet.clear(); packet_word(0x6c0203ff);
         for (unsigned value=1;value<=8;++value) packet_word(value);
         packet_word(0x14000000);
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
-            data_owner.state.data[1023]!=std::array<std::uint32_t,4>{1,2,3,4} ||
+            data_owner.state.data!=expected_data ||
             data_owner.state.vectors[0]!=std::array<std::uint32_t,4>{5,6,7,8})
             throw std::runtime_error("Compiled VU did not read wrapped V4-32 upload");
         const auto uploaded_state=data_owner.state;

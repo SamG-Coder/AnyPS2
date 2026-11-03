@@ -75,6 +75,7 @@ public:
     NativeServiceContext& operator=(const NativeServiceContext&)=delete;
     NativeSifCommandEndpoint* endpoint() const { return peer_.get(); }
     const NativeSerialServices& serial() const { return serial_; }
+    void bind_native_ports(NativePortHandler handler) { serial_.bind_ports(std::move(handler)); }
     // Explicit native replacement for command-module startup. The EE owner must
     // publish its link first. This installs our reserved receive mailbox, but
     // neither acknowledges the EE handshake nor declares RPC/reset completion.

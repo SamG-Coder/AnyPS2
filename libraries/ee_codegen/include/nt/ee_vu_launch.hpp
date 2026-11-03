@@ -2,6 +2,7 @@
 #include <nt/ee_packet_setup.hpp>
 #include <nt/vu_binding.hpp>
 #include <nt/vu_graphics.hpp>
+#include <chrono>
 
 namespace nt::ee {
 // Transactional native launch owner. VU0 shares completed vector state with EE
@@ -16,6 +17,8 @@ public:
         if (!block_budget || !sequence_budget || ((binding.unit()==0)!=bool(shared)))
             throw std::invalid_argument("VU0 requires shared EE storage; VU1 requires private storage");
     }
+    struct Profile { std::uint64_t compiled_ns=0,blocks=0; };
+    Profile* profile=nullptr;
     unsigned unit() const { return binding_.unit(); }
     vu::State state;
     vu::RunResult last_result{vu::RunStatus::unbound_program,0};
@@ -35,6 +38,7 @@ public:
         VectorStorage candidate_shared{};
         if (shared_) candidate_shared=*shared_;
         NativeVuLaunch candidate(candidate_binding,block_budget_,shared_ ? &candidate_shared : nullptr);
+        candidate.profile=profile;
         candidate.state=state; candidate.completed_=completed_;
         struct Output { std::vector<graphics::Packet> packets; std::size_t quadwords=0; } output;
         candidate.graphics={&output,[](void* raw,std::span<const graphics::Packet> packets) {
@@ -108,7 +112,16 @@ public:
             // A new submission clears a completed graphics boundary; internal
             // graphics resumes below must retain that boundary instead.
             last_entry=request->continuation ? next.next_pair : request->entry;
-            last_result=binding_.launch(next,last_entry,block_budget_);
+            const auto run_compiled=[&](bool resume,std::uint64_t budget) {
+                const auto began=profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                const auto result=resume ? binding_.resume(next,budget) : binding_.launch(next,last_entry,budget);
+                if (profile) {
+                    profile->compiled_ns+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-began).count();
+                    profile->blocks+=result.blocks;
+                }
+                return result;
+            };
+            last_result=run_compiled(false,block_budget_);
             last_next_pair=next.next_pair;
             std::uint64_t blocks=last_result.blocks;
             while (last_result.status==vu::RunStatus::graphics_pending) {
@@ -119,7 +132,7 @@ public:
                 if (packet.size()>maximum_quadwords-quadwords) return Stop::unsupported_vector;
                 quadwords+=packet.size(); packets.push_back(std::move(packet));
                 next.graphics_pending=0;
-                last_result=binding_.resume(next,block_budget_-blocks);
+                last_result=run_compiled(true,block_budget_-blocks);
                 last_next_pair=next.next_pair;
                 blocks+=last_result.blocks;
                 last_result.blocks=blocks;

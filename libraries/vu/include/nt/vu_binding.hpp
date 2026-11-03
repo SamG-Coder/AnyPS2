@@ -22,7 +22,7 @@ class Binding {
 public:
     Binding(Program program,unsigned destination,std::span<const std::uint8_t> image)
         : catalog_(std::make_shared<const Catalog>(Catalog{Image(std::move(program),destination,image)})),
-          present_{std::vector<bool>(image.size()/8,false)} {}
+          present_{std::vector<bool>(image.size()/8,false)},ready_(1,false) {}
     Binding(unsigned unit,std::span<const Artifact> artifacts) {
         if (artifacts.empty() || artifacts.size()>4096) throw std::invalid_argument("Invalid VU artifact catalog size");
         Catalog catalog;
@@ -32,6 +32,7 @@ public:
             catalog.emplace_back(Program(unit,{artifact.blocks,artifact.block_count}),artifact.destination,
                 std::span<const std::uint8_t>(artifact.image,artifact.image_size));
             present_.emplace_back(artifact.image_size/8,false);
+            ready_.push_back(false);
         }
         catalog_=std::make_shared<const Catalog>(std::move(catalog));
     }
@@ -62,6 +63,10 @@ public:
                     image.bytes.begin()+(at-image.destination)*8);
             }
         }
+        // Coverage changes only here and in reset(). Validate once per upload,
+        // not on every native graphics continuation of an unchanged module.
+        for (std::size_t i=0;i<present_.size();++i)
+            ready_[i]=std::all_of(present_[i].begin(),present_[i].end(),[](bool value) { return value; });
         if (active_ && !ready(*active_)) active_.reset();
         return true;
     }
@@ -72,6 +77,7 @@ public:
     unsigned unit() const { return catalog_->front().program.unit(); }
     void reset() {
         for (auto& coverage:present_) std::fill(coverage.begin(),coverage.end(),false);
+        std::fill(ready_.begin(),ready_.end(),false);
         active_.reset();
     }
     RunResult launch(State& state,unsigned entry,std::uint64_t budget) {
@@ -102,7 +108,7 @@ private:
     };
     using Catalog=std::vector<Image>;
     bool ready(std::size_t index) const {
-        return std::all_of(present_[index].begin(),present_[index].end(),[](bool value) { return value; });
+        return ready_[index];
     }
     std::optional<std::size_t> select(unsigned entry) const {
         std::optional<std::size_t> selected;
@@ -123,6 +129,7 @@ private:
     }
     std::shared_ptr<const Catalog> catalog_;
     std::vector<std::vector<bool>> present_;
+    std::vector<bool> ready_;
     std::optional<std::size_t> active_;
 };
 }

@@ -99,6 +99,7 @@ struct NativeRaster::Impl {
         VkDevice device; VkImage image{}; VkDeviceMemory memory{}; VkImageView view{};
         unsigned width,height,base=0,pitch=0; bool depth=false,dirty=false,valid=true,scratch=false;
         std::uint64_t revision=0; Region region{};
+        VkDeviceSize allocation_bytes=0;
         Image(VkDevice d,unsigned w,unsigned h):device(d),width(w),height(h) {}
         ~Image() {
             if (view) vkDestroyImageView(device,view,nullptr);
@@ -107,7 +108,23 @@ struct NativeRaster::Impl {
         }
     };
     std::map<std::tuple<unsigned,unsigned,bool>,std::unique_ptr<Image>> surfaces;
-    struct Texture { std::unique_ptr<Image> image; Region region; bool valid=true; };
+    struct Texture {
+        std::unique_ptr<Image> image; Region region; bool valid=false;
+        std::uint64_t last_use=0,source_revision=0;
+    };
+    VkDeviceSize texture_bytes=0;
+    std::uint64_t texture_use=0;
+    std::array<std::uint64_t,512> source_revisions{};
+    void touch(Region region) {
+        const auto count=std::min(512U,((region.start%2048)+region.length+2047)/2048);
+        if (region.length) for (unsigned i=0;i<count;++i) source_revisions[(region.start/2048+i)%512]=revision;
+    }
+    std::uint64_t source_revision(Region region) const {
+        std::uint64_t latest=0;
+        const auto count=std::min(512U,((region.start%2048)+region.length+2047)/2048);
+        if (region.length) for (unsigned i=0;i<count;++i) latest=std::max(latest,source_revisions[(region.start/2048+i)%512]);
+        return latest;
+    }
     // Fixed keys avoid a heap allocation for every primitive's texture lookup.
     std::map<std::array<std::uint32_t,261>,Texture> textures;
     std::map<std::pair<Image*,Image*>,VkFramebuffer> framebuffers;
@@ -409,7 +426,7 @@ std::unique_ptr<NativeRaster::Impl::Image> NativeRaster::Impl::image(unsigned wi
     VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO}; ci.imageType=VK_IMAGE_TYPE_2D; ci.format=VK_FORMAT_R32_UINT; ci.extent={width,height,1}; ci.mipLevels=ci.arrayLayers=1; ci.samples=VK_SAMPLE_COUNT_1_BIT; ci.tiling=VK_IMAGE_TILING_OPTIMAL;
     ci.usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     ci.usage|=VK_IMAGE_USAGE_STORAGE_BIT;
-    checked(vkCreateImage(device,&ci,nullptr,&i->image),"Create native image"); VkMemoryRequirements mr{}; vkGetImageMemoryRequirements(device,i->image,&mr); i->memory=allocate(mr,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    checked(vkCreateImage(device,&ci,nullptr,&i->image),"Create native image"); VkMemoryRequirements mr{}; vkGetImageMemoryRequirements(device,i->image,&mr); i->allocation_bytes=mr.size; i->memory=allocate(mr,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     checked(vkBindImageMemory(device,i->image,i->memory,0),"Bind native image");
     VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO}; view.image=i->image; view.viewType=VK_IMAGE_VIEW_TYPE_2D; view.format=VK_FORMAT_R32_UINT; view.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
     checked(vkCreateImageView(device,&view,nullptr,&i->view),"Create native image view");
@@ -442,6 +459,11 @@ void NativeRaster::Impl::export_image(Image& image) {
     std::memcpy(pixels.data(),readback_mapping,pixels.size()*sizeof(pixels[0]));
     for (unsigned y=0;y<image.height;++y) for (unsigned x=0;x<image.width;++x)
         source[rgba_word(image.base,image.pitch,x,y)^(image.depth ? 0x600 : 0)]=pixels[std::size_t(y)*image.width+x];
+    // Once the writer becomes clean, surface() can no longer discover it via
+    // dirty dependencies. Invalidate older aliases before retiring that link.
+    for (auto& [key,other]:surfaces)
+        if (other && other.get()!=&image && other->revision<image.revision && other->region.overlaps(image.region))
+            other->valid=false;
     stats.readback_bytes+=std::size_t(image.width)*image.height*4; image.dirty=false;
 }
 void NativeRaster::Impl::synchronize_source(Region requested) {
@@ -456,6 +478,7 @@ void NativeRaster::Impl::clear_views() {
     checked(vkResetDescriptorPool(device,descriptor_pool,0),"Reset native resource descriptors");
 }
 NativeRaster::Impl::Image& NativeRaster::Impl::surface(unsigned base,unsigned pitch,unsigned height,bool depth,bool scratch,bool display) {
+    Measure timing(stats.surface_lookup_ns);
     const auto key=std::tuple(scratch ? 0x10000U : base|(display ? 0x20000U : 0U),pitch,depth); const unsigned width=pitch*64;
     height=(height+31)&~31U;
     if (!pitch || width>4032 || !height || height>2048) throw std::runtime_error("Invalid native render surface dimensions");
@@ -596,6 +619,7 @@ void NativeRaster::Impl::decode_texture(Image& image,const SpriteCommand& draw,R
 }
 #endif
 NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& command) {
+    Measure timing(stats.texture_lookup_ns);
     const auto& d=command.draw;
     const auto extent=[](unsigned size,unsigned mode,unsigned lo,unsigned hi){ return mode==2 ? hi+1 : mode==3 ? (lo|hi)+1 : size; };
     unsigned width=(d.flags&1) ? extent(d.texture_width,d.clamp_u,d.min_u,d.max_u) : 1;
@@ -610,11 +634,30 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
     }
     std::array<std::uint32_t,261> key{d.texture_base,d.texture_pitch,width,height,d.flags&(65|indexed8_flag)};
     if (d.flags&64) std::copy(command.palette.begin(),command.palette.end(),key.begin()+5);
-    if (!textures.contains(key) && textures.size()>=128) {
-        clear_views(); textures.clear();
-    }
-    auto& tex=textures[key];
     const auto r=(d.flags&1) ? region(d.texture_base,d.texture_pitch,width,height,(d.flags&indexed8_flag) ? 2U : (d.flags&64) ? 1U : 0U) : Region{};
+    auto found_texture=textures.find(key);
+    if (found_texture==textures.end()) {
+        auto allocated=image(width,height);
+        constexpr VkDeviceSize budget=128ULL*1024*1024;
+        if (texture_bytes+allocated->allocation_bytes>budget || textures.size()>=1024) {
+            // Retire GPU users and descriptors before releasing old images.
+            // Keep recent textures instead of discarding the entire working set.
+            clear_views();
+            while (!textures.empty() && (texture_bytes+allocated->allocation_bytes>budget*3/4 || textures.size()>=768)) {
+                const auto oldest=std::min_element(textures.begin(),textures.end(),[](const auto& a,const auto& b) {
+                    return a.second.last_use<b.second.last_use;
+                });
+                texture_bytes-=oldest->second.image->allocation_bytes;
+                textures.erase(oldest); ++stats.texture_evictions;
+            }
+        }
+        texture_bytes+=allocated->allocation_bytes;
+        found_texture=textures.emplace(key,Texture{std::move(allocated),r}).first;
+        ++stats.texture_misses;
+    }
+    auto& tex=found_texture->second; tex.last_use=++texture_use;
+    const auto generation=source_revision(r);
+    if (generation!=tex.source_revision) { tex.valid=false; tex.source_revision=generation; }
     // Identical surface views use an ordered native image copy for feedback.
     // No CPU conversion is involved in the common framebuffer texture path.
     if ((d.flags&1) && !(d.flags&64)) {
@@ -622,7 +665,6 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
         if (found!=surfaces.end() && found->second && found->second->valid &&
             found->second->width>=width && found->second->height>=height) {
             auto& from=*found->second;
-            if (!tex.image) { tex.image=image(width,height); tex.region=r; tex.valid=false; }
             if (!tex.valid || tex.image->revision!=from.revision) {
                 order(); VkImageCopy copy{}; copy.srcSubresource=copy.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; copy.extent={width,height,1};
                 vkCmdCopyImage(this->command,from.image,VK_IMAGE_LAYOUT_GENERAL,tex.image->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
@@ -632,7 +674,6 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
         }
     }
     for (auto& [k,i]:surfaces) if (i && i->dirty && i->region.overlaps(r)) { ++stats.texture_readbacks; synchronize_source(r); tex.valid=false; break; }
-    if (!tex.image) { tex.image=image(width,height); tex.region=r; tex.valid=false; }
     if (!tex.valid) {
 #ifdef ANYPS2_LLVM_TEXTURES
         if (d.flags&1) {
@@ -659,6 +700,8 @@ VkDescriptorSet NativeRaster::Impl::allocate_set(VkDescriptorSetLayout set_layou
     VkDescriptorSet set{}; checked(vkAllocateDescriptorSets(device,&a,&set),"Allocate native resource set"); return set;
 }
 VkDescriptorSet NativeRaster::Impl::bind_target(Image& color,Image& depth,Image& texture,const Sprite& draw) {
+    Measure timing(stats.target_bind_ns);
+    if (sets.size()>=8192) clear_views();
     auto& fb=framebuffers[{&color,&depth}];
     const unsigned height=std::min(color.height,depth.height);
     if (!fb) {
@@ -717,7 +760,7 @@ std::uint64_t NativeRaster::completed_submission() {
 }
 void NativeRaster::upload(std::span<const std::uint32_t> words) {
     if (words.size()!=store_words) throw std::runtime_error("Invalid native resource import");
-    auto& r=*impl_; r.clear_views(); r.surfaces.clear(); r.textures.clear(); std::copy(words.begin(),words.end(),r.source.begin()); r.initialized=true; ++r.revision;
+    auto& r=*impl_; r.clear_views(); r.surfaces.clear(); r.textures.clear(); r.texture_bytes=0; r.source_revisions={}; std::copy(words.begin(),words.end(),r.source.begin()); r.initialized=true; ++r.revision;
     r.field_count=0; r.previous_field=DisplayField::progressive; r.resolved_revision=0;
 }
 void NativeRaster::read(std::span<std::uint32_t> words) {
@@ -747,9 +790,8 @@ void NativeRaster::write(std::span<const PixelWrite> writes) {
         // Conservative changed range; invalidate each view once per upload,
         // not once per pixel. Sparse/overlapping/masked writes stay ordered.
         const Region changed{first,last-first+1};
-        for (auto& [k,t]:r.textures) if (t.region.overlaps(changed)) t.valid=false;
         for (auto& [k,s]:r.surfaces) if (s && s->region.overlaps(changed)) s->valid=false;
-        ++r.revision;
+        ++r.revision; r.touch(changed);
     }
 }
 void NativeRaster::draw(std::span<const SpriteCommand> commands) {
@@ -775,10 +817,12 @@ void NativeRaster::draw(std::span<const SpriteCommand> commands) {
         auto& depth=r.surface((d.flags&depth_test_flag) ? d.depth_base : 0,d.pitch,height,true,!(d.flags&depth_test_flag));
         auto& texture=r.texture(c);
         const auto set=r.bind_target(color,depth,texture,d);
-        r.append_draw(set,c);
+        { Measure timing(r.stats.draw_record_ns); r.append_draw(set,c); }
         color.dirty=true; color.revision=++r.revision;
-        for (auto& [key,t]:r.textures) if (t.region.overlaps(color.region) ||
-            ((d.flags&depth_write_flag) && t.region.overlaps(depth.region))) t.valid=false;
+        { Measure timing(r.stats.invalidate_ns);
+        r.touch(color.region);
+        if (d.flags&depth_write_flag) r.touch(depth.region);
+        }
         if ((d.flags&depth_test_flag) && (d.flags&depth_write_flag)) { depth.dirty=true; depth.revision=r.revision; }
         if (d.flags&triangle_flag) ++r.stats.triangles; else ++r.stats.sprites;
     };

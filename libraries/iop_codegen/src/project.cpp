@@ -183,7 +183,7 @@ anyps2_add_audio(nt_audio)
 include("${ANYPS2_ROOT}/libraries/usb/native.cmake")
 anyps2_add_usb(nt_usb)
 target_link_libraries(iop-native PRIVATE nt_audio nt_usb)
-target_include_directories(iop-native PRIVATE "${ANYPS2_ROOT}/libraries/iop/include"
+target_include_directories(iop-native PRIVATE "${ANYPS2_ROOT}/libraries/runtime/include" "${ANYPS2_ROOT}/libraries/iop/include"
   "${ANYPS2_ROOT}/libraries/disc/include" "${ANYPS2_ROOT}/libraries/binary/include")
 target_sources(iop-native PRIVATE "${ANYPS2_ROOT}/libraries/disc/src/disc_files.cpp"
   "${ANYPS2_ROOT}/libraries/disc/src/iso9660.cpp" "${ANYPS2_ROOT}/libraries/disc/src/reboot_image.cpp" "${ANYPS2_ROOT}/libraries/binary/src/reader.cpp")

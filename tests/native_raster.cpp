@@ -191,6 +191,23 @@ int main(int argc,char** argv) {
             if (a.pixels!=std::vector<std::uint32_t>(4,0xffffffff) || a.pixels!=b.pixels)
                 throw std::runtime_error("RC2-only output incorrectly uses the RC1 blend");
         }
+        // A read-only display view can extend beyond a smaller drawing target.
+        // Exporting newer pixels must invalidate that overlapping cached view.
+        {
+            native.upload(std::vector<std::uint32_t>(actual.size()));
+            SpriteCommand paint{{0,0,64,32,0,1,0x800000ff,0}};
+            native.draw(std::array{paint});
+            const std::array<std::uint64_t,2> displays{63ULL|(65ULL<<44),63ULL|(65ULL<<44)};
+            const auto plan=*plan_display(2,{512,512},displays,true,0,DisplayField::even);
+            if (native.scanout_readback(plan).pixels.front()!=0xff0000ffU)
+                throw std::runtime_error("Extended display view lost initial drawing");
+            paint.draw.color=0x8000ff00;
+            native.draw(std::array{paint});
+            std::vector<std::uint32_t> exported(actual.size()); native.read(exported);
+            if (native.scanout_readback(plan).pixels.front()!=0xff00ff00U)
+                throw std::runtime_error("Exported drawing left a stale overlapping display view");
+            ++checks;
+        }
         // Relative display origins are independent of source buffer origins.
         // Verify both displacement directions, unequal extents and odd field
         // offsets against explicit pixels, not just two matching implementations.
@@ -586,6 +603,36 @@ int main(int argc,char** argv) {
             if (native.statistics().texture_kernel_verified!=before+1 || actual[0]!=write.value)
                 throw std::runtime_error("Explicit LLVM texture verification did not preserve the draw");
             native.verify_texture_kernels(false);
+        }
+        // More than the old 128-entry working set must retain native images.
+        // A later source edit still invalidates precisely the affected views.
+        {
+            std::fill(actual.begin(),actual.end(),0);
+            for (unsigned i=0;i<300;++i) actual[rgba_word(64+i*32,1,0,0)]=0x80001000U+i;
+            native.upload(actual);
+            auto tile=texture; tile.draw.flags=1|4|8;
+            tile.draw.texture_pitch=1; tile.draw.texture_width=tile.draw.texture_height=8;
+            tile.draw.u0=tile.draw.v0=0; tile.draw.du=tile.draw.dv=0;
+            tile.draw.dx=tile.draw.dy=16;
+            const auto draw_tiles=[&] {
+                for (unsigned i=0;i<300;++i) {
+                    tile.draw.texture_base=64+i*32;
+                    tile.draw.left=i%64; tile.draw.top=i/64;
+                    tile.draw.right=tile.draw.left+1; tile.draw.bottom=tile.draw.top+1;
+                    native.draw(std::span(&tile,1));
+                }
+            };
+            draw_tiles();
+            const auto misses=native.statistics().texture_misses;
+            draw_tiles(); native.read(actual);
+            if (native.statistics().texture_misses!=misses)
+                throw std::runtime_error("Stable texture working set was discarded");
+            for (unsigned i=0;i<300;++i) if (actual[rgba_word(0,1,i%64,i/64)]!=0x80001000U+i)
+                throw std::runtime_error("Retained texture cache changed pixels");
+            const PixelWrite edit{rgba_word(64+149*32,1,0,0),0x80abcdef,0xffffffff};
+            native.write(std::span(&edit,1)); draw_tiles(); native.read(actual);
+            if (actual[rgba_word(0,1,149%64,149/64)]!=edit.value)
+                throw std::runtime_error("Retained texture ignored source edit");
         }
         indexed8_textures(native,true);
         if (native.validation_errors()) throw std::runtime_error(native.validation_message());

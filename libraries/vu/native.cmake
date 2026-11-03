@@ -1,3 +1,4 @@
+include("${CMAKE_CURRENT_LIST_DIR}/../ee_native/numeric.cmake")
 function(anyps2_bind_vu target)
     set(ANYPS2_VU_MODULE "" CACHE FILEPATH "Ahead-of-time VU LLVM module to link")
     set(ANYPS2_VU1_MODULE "" CACHE FILEPATH "Ahead-of-time VU1 LLVM module to link")
@@ -15,11 +16,14 @@ function(anyps2_bind_vu target)
         if(NOT EXISTS "${module}")
             message(FATAL_ERROR "Compiled VU${unit} module input does not exist")
         endif()
-        set(object "${CMAKE_CURRENT_BINARY_DIR}/vu${unit}-native.obj")
+        set(object "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/vu${unit}-native.obj")
+        anyps2_numeric_bitcode(numeric_bitcode)
         add_custom_command(OUTPUT "${object}"
         COMMAND "${ANYPS2_CLANG}" -x ir -target x86_64-pc-windows-msvc
-            -Werror -Wno-override-module -O2 -c "${module}" -o "${object}"
-        DEPENDS "${module}" VERBATIM)
+            -Werror -Wno-override-module -O2 -c "${module}"
+            -Xclang -mlink-builtin-bitcode -Xclang "${numeric_bitcode}" -o "${object}"
+        DEPENDS "${module}" "${numeric_bitcode}" VERBATIM)
+        add_dependencies(${target} anyps2-numeric-bitcode)
         target_sources(${target} PRIVATE "${object}")
         target_include_directories(${target} PRIVATE "${ANYPS2_ROOT}/libraries/vu/include")
         target_compile_definitions(${target} PRIVATE ${definition}=1)

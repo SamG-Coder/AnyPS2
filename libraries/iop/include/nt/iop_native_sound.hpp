@@ -15,6 +15,9 @@ namespace nt::iop {
 class NativeSoundServices final : public NativeServices,public NativeCallbackSource {
 public:
     NativeSoundServices(NativeLibraryServices& libraries,audio::Output& output) : libraries_(libraries),output_(output) {}
+    const char* transfer_failure() const { return transfer_failure_; }
+    const auto& transfer_overlap() const { return transfer_overlap_; }
+    const auto& transfer_arguments() const { return transfer_arguments_; }
     unsigned rejected_voice() const { return rejected_voice_; }
     audio::SampleError sample_error() const { return sample_error_; }
     void connect(NativeHeapServices& heap) { heap_=&heap; }
@@ -121,6 +124,9 @@ public:
         }
     }
 private:
+    const char* transfer_failure_="none";
+    std::array<std::uint32_t,5> transfer_arguments_{};
+    std::array<std::uint32_t,3> transfer_overlap_{};
     static constexpr std::uint32_t sample_capacity=2*1024*1024;
     static constexpr std::array<std::uint32_t,10> effect_sizes{16,0x26c0,0x1f40,0x4840,0x6fe0,0xade0,0xf6c0,0x18040,0x18040,0x3c00};
     static std::optional<audio::ReverbSpace> effect_space(unsigned mode) {
@@ -350,11 +356,16 @@ private:
     }
     NativeServiceReply voice_transfer(const NativeServiceRequest& request,std::span<std::uint8_t> ram) {
         const auto& a=request.arguments; const unsigned core=a[0]&1,mode=a[1]&0xffff;
-        if ((mode&~9U) || streams_[core].active || callbacks_.size()>=1024) return unavailable();
+        transfer_failure_="none"; transfer_overlap_={};
+        transfer_arguments_={a[0],a[1],a[2],a[3],0};
+        if (mode&~9U) { transfer_failure_="unsupported-mode"; return unavailable(); }
+        if (streams_[core].active) { transfer_failure_="block-stream-active"; return unavailable(); }
+        if (callbacks_.size()>=1024) { transfer_failure_="callback-capacity"; return unavailable(); }
         if (request.stack_pointer>0xffffffebU) return {NativeServiceStatus::address_fault,0,request.stack_pointer};
         const auto stack=ram_offset(request.stack_pointer+16,4,ram.size());
         if (!stack) return {NativeServiceStatus::address_fault,0,request.stack_pointer};
         const auto requested=load_native_word(ram,*stack);
+        transfer_arguments_[4]=requested;
         if (requested>sample_capacity) return returned(0xffffffff);
         const auto alignment=(mode&8) ? 2U : 64U;
         const auto count=(requested+alignment-1)&~(alignment-1),destination=a[3]&~1U;
@@ -369,9 +380,18 @@ private:
             // Snapshot PCM cannot silently observe later edits to its encoded
             // source. Explicitly reject active streaming mutation for now.
             for (unsigned index=0;index<playback_.size();++index) {
-                if (!refresh_voice(index)) return unavailable();
+                if (!refresh_voice(index)) { transfer_failure_="host-voice-state"; return unavailable(); }
                 const auto& playback=playback_[index];
-                if (playback.active && destination<playback.end && destination+count>playback.begin) return unavailable();
+                if (playback.active && destination<playback.end && destination+count>playback.begin) {
+                    const auto begin=std::max(destination,playback.begin),end=std::min(destination+count,playback.end);
+                    // Re-uploading an unchanged sample preserves the native PCM
+                    // snapshot, even when other samples in the bank change.
+                    const auto bytes=ram.subspan(*source+begin-destination,end-begin);
+                    if (!std::equal(bytes.begin(),bytes.end(),samples_.begin()+begin)) {
+                        transfer_overlap_={playback.begin,playback.end,playback.loop_frames};
+                        rejected_voice_=index; transfer_failure_="active-sample-write"; return unavailable();
+                    }
+                }
             }
             std::copy_n(ram.begin()+*source,count,samples_.begin()+destination);
         }

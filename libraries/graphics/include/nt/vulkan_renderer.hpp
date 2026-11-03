@@ -40,6 +40,8 @@ struct SpriteCommand {
 struct RenderStatistics {
     std::uint64_t submissions=0,sprites=0,upload_bytes=0,readback_bytes=0;
     std::uint64_t triangles=0,texture_snapshot_bytes=0,direct_texture_draws=0;
+    std::uint64_t texture_misses=0,texture_evictions=0;
+    std::uint64_t surface_lookup_ns=0,texture_lookup_ns=0,target_bind_ns=0,draw_record_ns=0,invalidate_ns=0;
     std::uint64_t wait_ns=0,upload_ns=0,write_ns=0,draw_ns=0,texture_decode_ns=0;
     std::uint64_t surface_import_ns=0,surface_export_ns=0;
     std::uint64_t surface_conflicts=0,texture_readbacks=0,palette_readbacks=0;

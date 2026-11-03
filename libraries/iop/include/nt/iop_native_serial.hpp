@@ -1,15 +1,19 @@
 #pragma once
 #include <nt/iop_native_services.hpp>
 #include <nt/iop_native_interrupts.hpp>
+#include <nt/native_port_exchange.hpp>
+#include <algorithm>
 #include <array>
+#include <utility>
 #include <vector>
 
 namespace nt::iop {
-// Session-owned serial transaction adapter. Explicitly disconnected native ports
-// report no acknowledgement; no controller/card is invented or made ready.
+// Session-owned transaction adapter for compiled peripheral drivers. Native
+// endpoints acknowledge completed requests; unbound ports remain disconnected.
 class NativeSerialServices final : public NativeServices {
 public:
     void connect_disconnected_ports(NativeInterruptServices& events) { events_=&events; }
+    void bind_ports(NativePortHandler handler) { handler_=std::move(handler); }
     void reset() {
         commands_={}; ports_={}; control_=0; interrupts_=0; output_.clear(); input_.clear();
         cursor_=0; status_=0; completed_=false;
@@ -88,22 +92,41 @@ public:
                         if (target.offset>ram.size() || extent>ram.size()-target.offset)
                             return {NativeServiceStatus::address_fault,0,target.offset};
                     }
-                    // With no bound endpoints, the line remains high for every
-                    // requested response byte. Status records the ports probed.
-                    input_.assign(received,0xff); cursor_=0; completed_=true;
+                    std::vector<std::uint8_t> response(received,0xff);
+                    std::vector<NativePortExchange> exchanges;
+                    const auto source=std::span<const std::uint8_t>(buffered ? dma_output_ : output_);
+                    std::size_t source_offset=0,response_offset=0;
+                    for (unsigned block=0;block<command_count;++block) {
+                        const auto command=commands_[block];
+                        const unsigned length=(command>>8)&1023U, size=(command>>18)&1023U;
+                        exchanges.push_back({command&1U,source.subspan(source_offset,length),
+                            std::span(response).subspan(response_offset,size)});
+                        source_offset+=buffered ? buffers_[0].block_bytes : length;
+                        response_offset+=size;
+                    }
+                    if (handler_ && !handler_(exchanges)) {
+                        failure_=5;
+                        return {NativeServiceStatus::unavailable};
+                    }
+                    unsigned missing=0;
+                    for (const auto& exchange:exchanges)
+                        if (!exchange.acknowledged) missing|=1U<<exchange.port;
+                    input_=std::move(response); cursor_=0; completed_=true;
                     if (buffers_[1].armed) {
                         auto& target=buffers_[1];
                         // All bounds/code protection were checked while arming.
                         // Publish each device response, then the transport's block padding.
+                        std::size_t offset=0;
                         for (unsigned block=0;block<command_count;++block) {
                             const unsigned response=(commands_[block]>>18)&1023U;
                             auto destination=ram.subspan(target.offset+block*target.block_bytes,target.block_bytes);
                             std::fill(destination.begin(),destination.end(),0);
-                            std::fill_n(destination.begin(),response,0xff);
+                            std::copy_n(input_.begin()+offset,response,destination.begin());
+                            offset+=response;
                         }
                         cursor_=input_.size(); target.armed=false; events_->post(45);
                     }
-                    status_=0xd000U|(ports<<16)|(ports==3 ? 0x200U : 0x100U);
+                    status_=(missing ? 0xd000U : 0x1000U)|(missing<<16)|(ports==3 ? 0x200U : 0x100U);
                     interrupts_=1; control_=value&~1U; events_->post(17);
                     return {NativeServiceStatus::returned,control_};
                 }
@@ -117,7 +140,6 @@ public:
             return {NativeServiceStatus::returned,interrupts_};
         }
         // Port status is readable before a transaction completes. This adapter
-        // binds only disconnected endpoints, whose status is the reset value;
         // reading it must not fabricate FIFO bytes or a completion interrupt.
         if (!write && events_ && address==0x1f808270) return {NativeServiceStatus::returned,0xf};
         if (!write && completed_) {
@@ -169,6 +191,7 @@ private:
     std::uint32_t status_=0;
     bool completed_=false;
     NativeInterruptServices* events_=nullptr;
+    NativePortHandler handler_;
     unsigned failure_=0,expected_output_=0,expected_input_=0;
 };
 }

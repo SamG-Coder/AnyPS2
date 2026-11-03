@@ -7,6 +7,7 @@
 #include <nt/iop_native_startup.hpp>
 #include <nt/iop_llvm.hpp>
 #include <nt/binary.hpp>
+#include <nt/pad_transactions.hpp>
 #include <memory>
 
 nt::iop::NativeModule nt_iop_generated_module();
@@ -23,6 +24,7 @@ namespace probe {
 // workers and services and owns subsequent EE/IOP command delivery.
 class IopReset {
     struct Session {
+        std::unique_ptr<nt::input::PadTransactions> pads;
         std::vector<std::uint8_t> ram=std::vector<std::uint8_t>(0x200000);
         std::unique_ptr<nt::iop::NativeServiceContext> services;
         std::unique_ptr<nt::iop::NativeModuleStartup> startup;
@@ -36,11 +38,13 @@ class IopReset {
     };
 public:
     IopReset(const std::filesystem::path& data,const std::filesystem::path& disc,
-             nt::ee::Memory& ee,nt::ee::NativePlatform& platform,nt::ee::CodeOverlap protection,bool session=false,bool default_reset=false,std::uint32_t disc_media=0)
+             nt::ee::Memory& ee,nt::ee::NativePlatform& platform,nt::ee::CodeOverlap protection,bool session=false,bool default_reset=false,std::uint32_t disc_media=0,
+             nt::input::PadTransactions::Sampler sample={},nt::input::PadTransactions::Rumbler rumble={})
         : platform_(platform),module_(nt_iop_generated_module()),session_(session),default_reset_(default_reset),disc_(disc),data_(data),ee_(ee),protection_(protection),
           delivery_(ee,protection,platform.sif_receive),
           destination_{{ee.data,ee.size},[protection](auto address,auto size) { return !protection(address,size); }} {
         disc_media_=disc_media;
+        pad_sample_=std::move(sample); pad_rumble_=std::move(rumble);
         if (default_reset_ && (!session_ || nt_iop_generated_entries().empty()))
             throw std::runtime_error("Default reset requires a linked startup module catalog");
         state_=prepare();
@@ -74,6 +78,7 @@ public:
     bool interrupts_enabled() const { return state_->services->interrupts.delivery_enabled(); }
     bool cdvd_initialized() const { return state_->cdvd && state_->cdvd->initialized(); }
     const nt::iop::NativeSerialServices& serial() const { return state_->services->serial(); }
+    const nt::input::PadTransactions& pads() const { return *state_->pads; }
     const nt::iop::NativeUsbServices& usb() const { return state_->services->usb; }
     const nt::iop::NativeDev9Services& dev9() const { return state_->services->dev9; }
     const nt::iop::NativeSoundServices& sound() const { return state_->services->sound; }
@@ -143,6 +148,8 @@ private:
             nt::iop::NativeContextLayout{(module_.base+module_.memory_size+255)&~255U,0x1ed000},
             nt_iop_generated_libraries(),nt_iop_generated_imports(),
             [](std::string_view) { return true; },disc,&destination_,0,delivery_);
+        next->pads=std::make_unique<nt::input::PadTransactions>(pad_sample_,pad_rumble_);
+        next->services->bind_native_ports([pads=next->pads.get()](auto batch) { return pads->exchange(batch); });
         next->services->modload.attach_catalog(nt_iop_generated_source_hashes());
         next->services->cdvdman.enable_application_exit();
         install_sealed(data,*next);
@@ -288,6 +295,8 @@ private:
     bool session_=false,default_reset_=false,accepted_=false;
     std::filesystem::path disc_,data_;
     std::uint32_t disc_media_=0;
+    nt::input::PadTransactions::Sampler pad_sample_;
+    nt::input::PadTransactions::Rumbler pad_rumble_;
     nt::ee::Memory& ee_;
     nt::ee::CodeOverlap protection_;
     nt::ee::NativeIopDelivery delivery_;

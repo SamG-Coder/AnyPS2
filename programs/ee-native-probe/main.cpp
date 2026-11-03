@@ -129,11 +129,15 @@ probe::ServiceCapture* service_capture=nullptr;
 nt::ee::StartupServices* active_services=nullptr;
 #ifdef ANYPS2_NATIVE_IOP
 probe::IopReset* active_iop=nullptr;
+bool profile_iop=false;
+std::uint64_t iop_time_ns=0;
 #endif
 nt::ee::Stop execute(nt::runtime::State* state,nt::ee::Memory* memory,std::uint64_t budget) {
 #ifdef ANYPS2_NATIVE_IOP
     if (active_iop) {
+        const auto began=profile_iop ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         const auto result=active_iop->pump();
+        if (profile_iop) iop_time_ns+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-began).count();
         if (result!=nt::ee::Stop::budget) return result;
     }
 #endif
@@ -311,11 +315,13 @@ int main(int argc,char** argv) {
 #if defined(ANYPS2_NATIVE_VU) || defined(ANYPS2_NATIVE_VU1)
         nt::ee::NativeVuUploads compiled_uploads;
         nt::ee::NativeVuSubmissions compiled_submissions;
+        nt::ee::NativeVuLaunch::Profile vector_profile{},previous_vector_profile{};
 #endif
 #ifdef ANYPS2_NATIVE_VU
         auto compiled_vu=nt::vu::linked_binding();
         compiled_uploads.add(compiled_vu);
         nt::ee::NativeVuLaunch compiled_vu_launch(compiled_vu,100000,&platform.vector_owner.storage);
+        if (profile_graphics) compiled_vu_launch.profile=&vector_profile;
         compiled_submissions.add(compiled_vu_launch);
         compiled_vu_launch.connect_macro(memory);
         compiled_vu_launch.connect_data(memory);
@@ -324,6 +330,7 @@ int main(int argc,char** argv) {
         auto compiled_vu1=nt::vu::linked_binding1();
         compiled_uploads.add(compiled_vu1);
         nt::ee::NativeVuLaunch compiled_vu1_launch(compiled_vu1);
+        if (profile_graphics) compiled_vu1_launch.profile=&vector_profile;
         compiled_submissions.add(compiled_vu1_launch);
         compiled_vu1_launch.connect_data(memory);
         compiled_vu1_launch.graphics={&gpu,NativeGpu::submit};
@@ -363,9 +370,13 @@ int main(int argc,char** argv) {
         command_peer.data_reader([&](std::uint32_t source,std::span<std::uint8_t> output) { return bootstrap_modules.snapshot(source,output); });
         if (!command_peer.register_service(bootstrap_modules)) throw std::runtime_error("Cannot register bootstrap module service");
 #ifdef ANYPS2_NATIVE_IOP
+        profile_iop=profile_graphics;
+        std::uint64_t previous_iop_time=0;
         std::unique_ptr<probe::IopReset> iop_reset;
         if (!iop_data.empty()) {
-            iop_reset=std::make_unique<probe::IopReset>(iop_data,disc,memory,platform,native_code_overlap,iop_session,iop_default,disc_media);
+            iop_reset=std::make_unique<probe::IopReset>(iop_data,disc,memory,platform,native_code_overlap,iop_session,iop_default,disc_media,
+                [&](unsigned port) { return gamepads.sample(port); },
+                [&](unsigned port,std::uint16_t low,std::uint16_t high) { return gamepads.rumble(port,low,high); });
             if (!command_peer.reset_owner(iop_reset->owner())) throw std::runtime_error("Cannot bind compiled IOP reset probe");
             active_iop=iop_reset.get();
         }
@@ -465,6 +476,15 @@ int main(int argc,char** argv) {
                 const auto percentile=[&](double fraction) {
                     return update_intervals.empty() ? 0.0 : update_intervals[static_cast<std::size_t>((update_intervals.size()-1)*fraction)];
                 };
+#if defined(ANYPS2_NATIVE_VU) || defined(ANYPS2_NATIVE_VU1)
+                std::cout<<"vector_profile compiled_ms="<<(vector_profile.compiled_ns-previous_vector_profile.compiled_ns)/1e6
+                         <<" blocks="<<(vector_profile.blocks-previous_vector_profile.blocks)<<'\n';
+                previous_vector_profile=vector_profile;
+#endif
+#ifdef ANYPS2_NATIVE_IOP
+                std::cout<<"iop_profile native_ms="<<(iop_time_ns-previous_iop_time)/1e6<<'\n';
+                previous_iop_time=iop_time_ns;
+#endif
                 std::cout<<"graphics_profile seconds="<<std::chrono::duration<double>(now-started).count()
                     <<" updates_per_second="<<profile_updates/std::chrono::duration<double>(now-profile_started).count()
                     <<" update_p50_ms="<<percentile(0.50)<<" update_p95_ms="<<percentile(0.95)
@@ -484,6 +504,12 @@ int main(int argc,char** argv) {
                     <<" draw_ms="<<(s.draw_ns-p.draw_ns)/1e6<<" write_ms="<<(s.write_ns-p.write_ns)/1e6
                     <<" gpu_timing_supported="<<s.gpu_timing_supported<<" gpu_ms="<<(s.gpu_ns-p.gpu_ns)/1e6
                     <<" wait_ms="<<(s.wait_ns-p.wait_ns)/1e6<<" upload_ms="<<(s.upload_ns-p.upload_ns)/1e6
+                    <<" surface_lookup_ms="<<(s.surface_lookup_ns-p.surface_lookup_ns)/1e6
+                    <<" texture_misses="<<(s.texture_misses-p.texture_misses)<<" texture_evictions="<<(s.texture_evictions-p.texture_evictions)
+                    <<" texture_lookup_ms="<<(s.texture_lookup_ns-p.texture_lookup_ns)/1e6
+                    <<" target_bind_ms="<<(s.target_bind_ns-p.target_bind_ns)/1e6
+                    <<" draw_record_ms="<<(s.draw_record_ns-p.draw_record_ns)/1e6
+                    <<" invalidate_ms="<<(s.invalidate_ns-p.invalidate_ns)/1e6
                     <<" decode_ms="<<(s.texture_decode_ns-p.texture_decode_ns)/1e6
                     <<" surface_import_ms="<<(s.surface_import_ns-p.surface_import_ns)/1e6
                     <<" surface_export_ms="<<(s.surface_export_ns-p.surface_export_ns)/1e6
@@ -582,6 +608,8 @@ int main(int argc,char** argv) {
                      <<" interrupts_enabled="<<iop_reset->interrupts_enabled()
                      <<" ee_receiver_control="<<nt::hex32(platform.sif_receive.read(0x1000c000).value)
                      <<" session_cdvd_initialized="<<iop_reset->cdvd_initialized()
+                     <<" native_pad_polls="<<iop_reset->pads().polls()
+                     <<" native_pad_rejected="<<nt::hex32(iop_reset->pads().rejected_command())
                      <<" serial_failure="<<iop_reset->serial().failure()
                      <<" serial_sent="<<iop_reset->serial().pending_output().size()
                      <<" serial_expected="<<iop_reset->serial().expected_output()
@@ -608,7 +636,14 @@ int main(int argc,char** argv) {
                      <<" native_dev9_unavailable="<<iop_reset->dev9().unavailable_initializations()
                      <<" native_sample_error="<<static_cast<unsigned>(iop_reset->sound().sample_error())
                      <<" native_sample_voice="<<iop_reset->sound().rejected_voice()
+                     <<" native_sample_transfer="<<iop_reset->sound().transfer_failure()
                      <<" native_audio_error="<<iop_reset->audio().error()<<'\n';
+            std::cout<<"native_sample_transfer_overlap=";
+            for (auto value:iop_reset->sound().transfer_overlap()) std::cout<<nt::hex32(value)<<' ';
+            std::cout<<'\n';
+            std::cout<<"native_sample_transfer_arguments=";
+            for (auto argument:iop_reset->sound().transfer_arguments()) std::cout<<nt::hex32(argument)<<' ';
+            std::cout<<'\n';
             for (const auto& thread:iop_reset->thread_snapshot())
                 std::cout<<"iop_thread="<<thread.id<<" status="<<thread.status<<" pc="<<nt::hex32(thread.pc)
                          <<" return="<<nt::hex32(thread.return_address)<<" stack="<<nt::hex32(thread.stack_pointer)

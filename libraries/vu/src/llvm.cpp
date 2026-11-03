@@ -23,12 +23,28 @@ bool upper_supported(Arithmetic operation) {
 class Writer {
 public:
     std::ostringstream out;
+    bool read_only_data=false;
+    static constexpr auto data_begin=offsetof(State,data);
+    static constexpr auto data_size=sizeof(State{}.data);
+    static constexpr auto data_end=data_begin+data_size;
+    void copy_state(bool commit) {
+        const auto destination=commit ? "%output" : "%state",source=commit ? "%state" : "%output";
+        out<<"  call void @llvm.memcpy.p0.p0.i64(ptr "<<destination<<", ptr "<<source<<", i64 "
+           <<(read_only_data ? data_begin : sizeof(State))<<", i1 false)\n";
+        if (read_only_data)
+            out<<"  call void @llvm.memcpy.p0.p0.i64(ptr "<<(commit ? "%output_tail" : "%state_tail")
+               <<", ptr "<<(commit ? "%state_tail" : "%output_tail")<<", i64 "<<sizeof(State)-data_end<<", i1 false)\n";
+    }
     std::vector<Store> pending;
     std::string value(const std::string& expression) {
         const auto id="%v"+std::to_string(next_++);
         out<<"  "<<id<<" = "<<expression<<'\n'; return id;
     }
-    std::string pointer(std::size_t offset) { return value("getelementptr i8, ptr %state, i64 "+std::to_string(offset)); }
+    std::string pointer(std::size_t offset) {
+        const bool original=read_only_data && offset>=data_begin && offset<data_end;
+        if (read_only_data && offset>=data_end) offset-=data_size;
+        return value(std::string("getelementptr i8, ptr ")+(original ? "%output" : "%state")+", i64 "+std::to_string(offset));
+    }
     std::string load(const std::string& type,std::size_t offset) {
         return value("load "+type+", ptr "+pointer(offset)+", align 1");
     }
@@ -170,6 +186,12 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         throw std::invalid_argument(diagnostic);
     }
     Writer writer;
+    // Prove memory effects from the decoded block, never from an observed run.
+    // Nested-delay helpers keep the full transaction because they share state.
+    writer.read_only_data=!nested_branch && std::none_of(pairs.begin(),pairs.end(),[unit](const Pair& pair) {
+        const auto operation=decode_lower(pair,unit).operation;
+        return operation==LowerOperation::store_quad || operation==LowerOperation::store_integer;
+    });
     if (declarations) writer.out<<"; AnyPS2 VU ahead-of-time native region\n"
         <<"declare i32 @nt_ee_integer_to_scaled_scalar(i32, i32)\n"
         <<"declare i32 @nt_ee_scaled_scalar_to_integer(i32, i32)\n"
@@ -188,8 +210,11 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         <<"declare i32 @nt_vu_clip_flags(i32, i32, i32, i32)\n"
         <<"declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n";
     writer.out<<"define i32 @"<<symbol<<"(ptr %output) {\nentry:\n"
-        <<"  %state = alloca ["<<sizeof(State)<<" x i8], align 8\n"
-        <<"  call void @llvm.memcpy.p0.p0.i64(ptr %state, ptr %output, i64 "<<sizeof(State)<<", i1 false)\n";
+        <<"  %state = alloca ["<<sizeof(State)-(writer.read_only_data ? Writer::data_size : 0)<<" x i8], align 8\n";
+    if (writer.read_only_data)
+        writer.out<<"  %state_tail = getelementptr i8, ptr %state, i64 "<<Writer::data_begin<<"\n"
+                  <<"  %output_tail = getelementptr i8, ptr %output, i64 "<<Writer::data_end<<"\n";
+    writer.copy_state(false);
     for (std::size_t index=0;index<pairs.size();++index) {
         const auto& pair=pairs[index];
         if (pair.address>=(unit ? 2048U : 512U) || (index && pair.address!=pairs[index-1].address+1) ||
@@ -520,8 +545,8 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         writer.pending.push_back({"i32","0",offsetof(State,mac_read_delay)}); writer.commit();
         writer.pending.push_back({"i32","0",offsetof(State,clip_read_delay)}); writer.commit();
     }
-    writer.out<<"  call void @llvm.memcpy.p0.p0.i64(ptr %output, ptr %state, i64 "<<sizeof(State)<<", i1 false)\n"
-        <<"  ret i32 "<<(graphics_block ? 6 : (branch_block || fallthrough) ? 2 : 0)<<"\nnumeric_failure:\n  ret i32 1\nschedule_failure:\n  ret i32 3\nmemory_failure:\n  ret i32 4\ncontext_failure:\n  ret i32 5\n}\n";
+    writer.copy_state(true);
+    writer.out<<"  ret i32 "<<(graphics_block ? 6 : (branch_block || fallthrough) ? 2 : 0)<<"\nnumeric_failure:\n  ret i32 1\nschedule_failure:\n  ret i32 3\nmemory_failure:\n  ret i32 4\ncontext_failure:\n  ret i32 5\n}\n";
     output<<writer.out.str();
 }
 void emit_llvm(std::ostream& output,std::span<const Pair> pairs,unsigned unit,std::string_view symbol) {
