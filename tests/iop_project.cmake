@@ -15,6 +15,17 @@ if(NOT rejected EQUAL 1 OR EXISTS "${run}/cpp-rejected")
     message(FATAL_ERROR "Removed C++ backend was accepted or left output behind")
 endif()
 checked("${CONVERTER}" "${run}/fixture.irx" "${run}/project" 0x1000)
+file(SHA256 "${run}/project/generated.ll" original_ir)
+file(SHA256 "${run}/project/module.data" original_data)
+execute_process(COMMAND "${CONVERTER}" "${run}/fixture.irx" "${run}/project" 0x1000
+    RESULT_VARIABLE rejected ERROR_VARIABLE diagnostic)
+file(SHA256 "${run}/project/generated.ll" preserved_ir)
+file(SHA256 "${run}/project/module.data" preserved_data)
+file(GLOB pending "${run}/project.pending-*")
+if(NOT rejected EQUAL 1 OR NOT diagnostic MATCHES "already exists" OR pending OR
+   NOT original_ir STREQUAL preserved_ir OR NOT original_data STREQUAL preserved_data)
+    message(FATAL_ERROR "IOP conversion changed existing output or left temporary files: ${diagnostic}")
+endif()
 checked("${CONVERTER}" --bundle "${run}/bundle" 0x1000 "${run}/fixture.irx" 0x3000 "${run}/fixture.irx.client.irx" 0x5000 "${run}/fixture.irx.disc.irx" romdrv@7000 "${run}/fixture.irx.romdrv.irx")
 execute_process(COMMAND "${CONVERTER}" --bundle "${run}/bad-replacement" romdrv@1000 "${run}/fixture.irx"
     RESULT_VARIABLE rejected ERROR_VARIABLE diagnostic)

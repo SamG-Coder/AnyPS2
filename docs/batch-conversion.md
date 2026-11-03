@@ -6,6 +6,11 @@ them with LLVM. Without an output argument it creates
 `work/<ISO filename without extension>-native/` relative to the current directory.
 Existing output directories are rejected; use the generated build to rebuild.
 
+Individual EE and IOP project generators publish their output directory only after
+all artifacts have been written and closed. Failed generation removes the owned
+temporary directory so the destination can be retried; existing output is preserved.
+This does not make the entire disc inventory a single transaction.
+
 The ISO's `SYSTEM.CNF` boot entry selects the executable. Other recognized EE
 ELFs, length-prefixed DEFLATE segmented images and IOP modules become independent static libraries. Filenames alone do
 not select executable content. The source-to-artifact encoding preserves case,

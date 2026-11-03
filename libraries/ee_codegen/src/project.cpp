@@ -1,4 +1,5 @@
 #include <nt/ee_codegen.hpp>
+#include <nt/staged_directory.hpp>
 #include "native_layout.hpp"
 #include "flow_observation.hpp"
 #include <nt/analysis.hpp>
@@ -8,39 +9,10 @@
 #include <sstream>
 #include <stdexcept>
 #include <fstream>
-#include <chrono>
 #include <memory>
 
 namespace nt::ee_codegen {
 namespace {
-// Publish only complete build artifacts. Every temporary directory is created
-// exclusively by this owner; an existing directory is never reused or removed.
-class StagedProject {
-public:
-    StagedProject(const StagedProject&)=delete;
-    StagedProject& operator=(const StagedProject&)=delete;
-    explicit StagedProject(std::filesystem::path destination) : destination_(std::move(destination)) {
-        if (std::filesystem::exists(destination_)) throw std::runtime_error("EE output directory already exists");
-        const auto parent=destination_.parent_path().empty() ? std::filesystem::path(".") : destination_.parent_path();
-        std::filesystem::create_directories(parent);
-        const auto stamp=std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
-        for (unsigned attempt=0;attempt<64;++attempt) {
-            const auto candidate=parent/(destination_.filename().string()+".pending-"+stamp+"-"+std::to_string(attempt));
-            if (std::filesystem::create_directory(candidate)) { path_=candidate; return; }
-        }
-        throw std::runtime_error("Cannot reserve a native conversion output directory");
-    }
-    ~StagedProject() {
-        if (!path_.empty()) { std::error_code error; std::filesystem::remove_all(path_,error); }
-    }
-    const std::filesystem::path& path() const { return path_; }
-    void publish() {
-        if (std::filesystem::exists(destination_)) throw std::runtime_error("EE output directory already exists");
-        std::filesystem::rename(path_,destination_); path_.clear();
-    }
-private:
-    std::filesystem::path destination_,path_;
-};
 struct Prepared {
     struct Pass { unsigned image=1; std::size_t index,instructions,new_roots,new_registrations; };
     bool whole_code=false;
@@ -453,7 +425,7 @@ void project(const std::filesystem::path& input,const std::filesystem::path& des
         throw std::runtime_error("EE discovery reached unmapped code at "+hex32(*prepared.discovered.unresolved.begin()));
     std::vector<r5900::Instruction> instructions;
     for (const auto& [pc,instruction]:prepared.discovered.instructions) instructions.push_back(instruction);
-    StagedProject staged(destination);
+    StagedDirectory staged(destination);
     const auto& output=staged.path();
     std::ofstream llvm(output/"generated.ll",std::ios::binary);
     llvm.exceptions(std::ios::badbit|std::ios::failbit);
@@ -570,7 +542,7 @@ FlowVerification verify_flow(const std::filesystem::path& input,const std::files
     result.instructions=prepared.discovered.instructions.size(); result.passes=prepared.passes.size();
     result.unmapped_targets=prepared.discovered.unresolved.size();
     result.record_binding_candidates=prepared.flow_gaps.size();
-    StagedProject staged(destination);
+    StagedDirectory staged(destination);
     const auto& output=staged.path();
     write_discovery_reports(output,prepared,true);
     std::ostringstream gaps;

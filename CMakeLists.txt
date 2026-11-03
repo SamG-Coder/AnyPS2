@@ -16,7 +16,7 @@ if(WIN32)
     target_link_libraries(anyps2-display PRIVATE nt_vulkan user32)
 endif()
 
-add_library(nt_binary libraries/binary/src/reader.cpp)
+add_library(nt_binary libraries/binary/src/reader.cpp libraries/binary/src/staged_directory.cpp)
 target_include_directories(nt_binary PUBLIC libraries/binary/include)
 add_library(nt_disc libraries/disc/src/disc_files.cpp libraries/disc/src/iso9660.cpp libraries/disc/src/reboot_image.cpp)
 target_include_directories(nt_disc PUBLIC libraries/disc/include)

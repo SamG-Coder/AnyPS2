@@ -1,4 +1,5 @@
 #include <nt/iop_codegen.hpp>
+#include <nt/staged_directory.hpp>
 #include "program.hpp"
 #include <sstream>
 #include <algorithm>
@@ -32,7 +33,7 @@ void project(const std::filesystem::path& input,const std::filesystem::path& out
     const std::array inputs{ModuleSource{input,base}};
     project_bundle(inputs,output);
 }
-void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::path& output) {
+void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::path& destination) {
     if (inputs.empty()) throw std::runtime_error("IOP conversion: empty module bundle");
     std::vector<elf::IopModule> modules;
     std::vector<std::uint64_t> source_hashes;
@@ -150,7 +151,8 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
         code<<"{"<<import.offset<<"U,"<<import.table_offset<<"U,"<<metadata_string(import.library)<<","<<import.version<<"U,"<<import.ordinal<<"U},\n";
     code<<"}; }\n";
     // Finish validation before creating output. Never overwrite a prior conversion.
-    if (!std::filesystem::create_directories(output)) throw std::runtime_error("IOP conversion: output directory already exists");
+    StagedDirectory staged(destination);
+    const auto& output=staged.path();
     write_text_file(output/"module_metadata.cpp",code.str());
     std::ofstream llvm(output/"generated.ll",std::ios::binary);
     llvm.exceptions(std::ios::badbit|std::ios::failbit);
@@ -239,5 +241,6 @@ target_compile_definitions(iop-native PRIVATE ANYPS2_IOP_LLVM=1)
         "Imports, native service bindings and complete game conversion are unfinished.\n"
         "Indirect calls/jumps without bounded AOT candidates are rejected; actual destinations are checked at runtime.\n"
         "Keep commercial converted code and data local and out of source control.\n")+diagnostics.str());
+    staged.publish();
 }
 }
