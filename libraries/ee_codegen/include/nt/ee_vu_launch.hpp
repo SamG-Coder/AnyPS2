@@ -10,19 +10,22 @@ namespace nt::ee {
 // completes, then delivered atomically through a native consumer.
 class NativeVuLaunch {
 public:
-    explicit NativeVuLaunch(vu::Binding& binding,std::uint64_t block_budget=100000,VectorStorage* shared=nullptr)
-        : binding_(binding),block_budget_(block_budget),shared_(shared) {
-        if (!block_budget || ((binding.unit()==0)!=bool(shared)))
+    explicit NativeVuLaunch(vu::Binding& binding,std::uint64_t block_budget=100000,VectorStorage* shared=nullptr,
+                            std::uint64_t sequence_budget=1000000)
+        : binding_(binding),block_budget_(block_budget),sequence_budget_(sequence_budget),shared_(shared) {
+        if (!block_budget || !sequence_budget || ((binding.unit()==0)!=bool(shared)))
             throw std::invalid_argument("VU0 requires shared EE storage; VU1 requires private storage");
     }
     unsigned unit() const { return binding_.unit(); }
     vu::State state;
     vu::RunResult last_result{vu::RunStatus::unbound_program,0};
     unsigned last_entry=0,last_next_pair=0;
+    struct SequenceWork { std::uint64_t launches=0,blocks=0,largest_launch=0; } last_sequence;
     // Failure-only diagnostic snapshot; never used to resume execution.
     std::unique_ptr<vu::State> failed_state;
     vu::GraphicsBatchConsumer graphics;
     Stop submit_sequence(unsigned unit,std::span<const NativeSubmissionStep> steps) {
+        last_sequence={};
         if (unit!=binding_.unit() || steps.empty() || steps.size()>NativePacketBatch::maximum_descriptors) return Stop::unsupported_vector;
         if (shared_ && shared_->active) return Stop::vector_pending;
         // Reuse the ordinary compiled launch path against private candidate
@@ -43,13 +46,20 @@ public:
             return true;
         }};
         for (const auto& step:steps) {
-            if (step.launch && !candidate.block_budget_) return Stop::unsupported_vector;
+            candidate.block_budget_=std::min(block_budget_,sequence_budget_-last_sequence.blocks);
+            if (step.launch && !candidate.block_budget_) {
+                last_result={vu::RunStatus::budget_exhausted,0};
+                return Stop::unsupported_vector;
+            }
             const auto request=step.launch ? &*step.launch : nullptr;
             const auto result=step.uploads.empty() ? candidate.submit(unit,step.data,request,step.drawing) :
                 candidate.submit_uploaded(unit,step.uploads,step.data,request,step.drawing);
             last_result=candidate.last_result; last_entry=candidate.last_entry; last_next_pair=candidate.last_next_pair;
+            if (step.launch) {
+                ++last_sequence.launches; last_sequence.blocks+=last_result.blocks;
+                last_sequence.largest_launch=std::max(last_sequence.largest_launch,last_result.blocks);
+            }
             if (result!=Stop::budget) { failed_state=std::move(candidate.failed_state); return result; }
-            if (step.launch) candidate.block_budget_-=candidate.last_result.blocks;
         }
         if (!output.packets.empty() && (!graphics.submit || !graphics.submit(graphics.context,output.packets)))
             return Stop::unsupported_vector;
@@ -170,6 +180,7 @@ public:
 private:
     vu::Binding& binding_;
     std::uint64_t block_budget_;
+    std::uint64_t sequence_budget_;
     VectorStorage* shared_;
     bool completed_=false;
 };

@@ -94,6 +94,21 @@ int main(int argc,char** argv) {
             const std::array point_pixels{std::pair{2U,2U}};
             verify(packet_for(0,point),point_pixels);
             verify(packet_for(0|128,point),point_pixels);
+            // A large submission of individually bounded packets is validated
+            // atomically, including the final packet after the old 1 MiB cap.
+            Packet padding(32769);
+            padding.front()={32767,0x10000000,15,0}; padding.back()[0]=0x8000;
+            std::array large_batch{padding,padding,packet_for(0,point)};
+            NativeDrawing large(true);
+            large.submit(native,large_batch);
+            const auto large_before=large.pixels();
+            if (large_before[rgba_word(0,1,2,2)]!=0x80402010 || large.submitted_draws()!=1)
+                throw std::runtime_error("Large native graphics batch lost its final draw");
+            large_batch.back().pop_back();
+            bool large_rejected=false;
+            try { large.submit(native,large_batch); } catch (const std::invalid_argument&) { large_rejected=true; }
+            if (!large_rejected || large.pixels()!=large_before || large.submitted_draws()!=1)
+                throw std::runtime_error("Malformed large batch partially published graphics");
             const std::array strip{RasterVertex{16,16,0x80402010},RasterVertex{64,16,0x80402010},RasterVertex{64,64,0x80402010}};
             const std::array strip_pixels{std::pair{1U,1U},std::pair{2U,1U},std::pair{3U,1U},
                 std::pair{4U,1U},std::pair{4U,2U},std::pair{4U,3U}};
@@ -110,10 +125,25 @@ int main(int argc,char** argv) {
             for (unsigned y=1;y<4;++y) wanted[rgba_word(0,1,4,y)]=0x80402010;
             if (split.pixels()!=wanted) throw std::runtime_error("Line strip lost a suppressed or packet-spanning vertex");
             const auto before=split.pixels();
-            auto unsupported=packet_for(1|128,std::span(strip).first(2));
+            auto unsupported=packet_for(1|16,std::span(strip).first(2));
             bool rejected=false;
             try { split.submit(native,std::array{unsupported}); } catch (const std::invalid_argument&) { rejected=true; }
             if (!rejected || split.pixels()!=before) throw std::runtime_error("Unsupported line partially published a batch");
+
+            for (bool vertical:{false,true}) for (bool reverse:{false,true}) for (bool blend:{false,true}) {
+                const unsigned color=blend ? 0x40808080U : 0x80808080U;
+                std::array aa_vertices{RasterVertex{16,20,color},RasterVertex{80,20,color}};
+                if (vertical) for (auto& v:aa_vertices) std::swap(v.x,v.y);
+                if (reverse) std::swap(aa_vertices[0],aa_vertices[1]);
+                NativeDrawing aa(true);
+                aa.submit(native,std::array{packet_for(1|128|(blend ? 64 : 0),aa_vertices)});
+                std::vector<std::uint32_t> wanted_aa(1024*1024);
+                for (unsigned major=reverse ? 2 : 1;major<(reverse ? 6U : 5U);++major)
+                    for (unsigned minor=1;minor<=2;++minor)
+                        wanted_aa[rgba_word(0,1,vertical ? minor : major,vertical ? major : minor)]=
+                            blend ? 0x40404040U : minor==1 ? 0x60606060U : 0x1f1f1f1fU;
+                if (aa.pixels()!=wanted_aa) throw std::runtime_error("Native AA line coverage, endpoint or blend-alpha rule differs");
+            }
 
             auto gradient=*plan_line_or_point(1U<<16,0,(15ULL<<16)|(15ULL<<48),
                 {RasterVertex{16,32,0x80000000,0,0,0,0,1,100},RasterVertex{80,32,0x80808080,0,0,0,0,1,104}},false,true);
@@ -126,6 +156,16 @@ int main(int argc,char** argv) {
                     actual[rgba_word(32,1,x,2)^0x600] != 99+x)
                     throw std::runtime_error("Native line color/depth interpolation differs");
             }
+            auto antialiased=*plan_line_or_point(1U<<16,0,(15ULL<<16)|(15ULL<<48),
+                {RasterVertex{16,36,0x80808080,0,0,0,0,1,100},RasterVertex{80,36,0x80808080,0,0,0,0,1,104}},false,false,true);
+            antialiased.draw.flags|=coverage_flag|256|depth_test_flag|depth_write_flag;
+            antialiased.draw.blend=0x44; antialiased.draw.depth_base=32; antialiased.draw.test=1<<17;
+            actual.assign(actual.size(),0); expected=actual;
+            compare(std::array{antialiased});
+            for (unsigned x=1;x<5;++x) for (unsigned y=2;y<=3;++y)
+                if (actual[rgba_word(0,1,x,y)]!=(y==2 ? 0x60606060U : 0x1f1f1f1fU) ||
+                    actual[rgba_word(32,1,x,y)^0x600])
+                    throw std::runtime_error("AA line coverage changed destination depth or lost its neighboring pixel");
             actual.assign(actual.size(),0); expected=actual;
         }
         // Constant-alpha display composition applies to RC1 even when RC2 is
@@ -203,6 +243,70 @@ int main(int argc,char** argv) {
                 try { plan_display(35,buffers,displays); } catch (const std::invalid_argument&) { rejected=true; }
                 if (!rejected) throw std::runtime_error("Unsupported display mapping was approximated silently");
             }
+        }
+        // A linearly varying image represented by two interlaced fields must
+        // remain aligned. The odd field blends adjacent rows through RC1/RC2;
+        // its samples belong between the even field's rows, not on top of them.
+        {
+            std::vector<std::uint32_t> pixels(actual.size());
+            for (unsigned y=0;y<4;++y) pixels[rgba_word(0,1,0,y)]=y*64;
+            native.upload(pixels); reference.upload(pixels);
+            const std::array<std::uint64_t,2> buffers{(1ULL<<9)|(1ULL<<43),1ULL<<9};
+            const std::array<std::uint64_t,2> displays{5ULL<<44,5ULL<<44};
+            for (auto field:{DisplayField::even,DisplayField::odd}) {
+                const bool odd=field==DisplayField::odd;
+                const auto plan=*plan_display(odd ? 35U|(128U<<8) : 2U,buffers,displays,true,0,field);
+                const std::array<unsigned,6> wanted=odd ? std::array<unsigned,6>{32,32,64,96,128,160}
+                                                       : std::array<unsigned,6>{0,32,64,96,128,128};
+                const auto a=native.scanout_readback(plan),b=reference.scanout_readback(plan);
+                for (unsigned y=0;y<wanted.size();++y)
+                    if (a.pixels[y]!=(0xff000000U|wanted[y]) || b.pixels[y]!=a.pixels[y])
+                        throw std::runtime_error("Interlaced fields are not reconstructed at their actual line positions");
+                const auto progressive=*plan_display(2,buffers,displays,false,0,field);
+                if (progressive.field!=DisplayField::progressive)
+                    throw std::runtime_error("Field reconstruction changed progressive output");
+                ++checks;
+            }
+        }
+        // Static alternating scan lines must stop flickering after history is
+        // established. Changes in either parity must reject stale field data.
+        {
+            std::vector<std::uint32_t> pixels(actual.size());
+            for (unsigned y=0;y<4;++y) pixels[rgba_word(32,1,0,y)]=0x00ffffff;
+            native.upload(pixels);
+            const std::array<std::uint64_t,2> displays{7ULL<<44,7ULL<<44};
+            const auto field_plan=[&](bool odd) {
+                return *plan_display(2,{0,(1ULL<<9)|(odd ? 1U:0U)},displays,true,0,
+                    odd ? DisplayField::odd : DisplayField::even);
+            };
+            for (unsigned field=0;field<8;++field) {
+                const bool odd=field&1;
+                const auto plan=field_plan(odd),copy=plan;
+                const auto frame=native.scanout_readback(plan);
+                if (native.scanout_readback(copy).pixels!=frame.pixels)
+                    throw std::runtime_error("Repeated capture advanced field history");
+                for (unsigned y=1;y<8;++y) {
+                    const auto expected=0xff000000U|((field>=3 ? y&1 : odd) ? 0xffffffU:0U);
+                    if (frame.pixels[y]!=expected)
+                        throw std::runtime_error("Stationary interlaced detail flickers between fields");
+                }
+            }
+            std::vector<PixelWrite> writes;
+            for (unsigned y=0;y<4;++y) writes.push_back({rgba_word(0,1,0,y),0x0000ff00,0xffffffff});
+            native.write(writes);
+            for (bool odd:{false,true}) {
+                const auto frame=native.scanout_readback(field_plan(odd));
+                const auto expected=odd ? 0xffffffffU : 0xff00ff00U;
+                if (!std::all_of(frame.pixels.begin(),frame.pixels.end(),[&](auto p){ return p==expected; }))
+                    throw std::runtime_error("Changed interlaced detail retained temporal trails");
+            }
+            // Repeating a parity is a discontinuity, not another adjacent field.
+            const auto repeated=field_plan(true);
+            native.write(std::array{PixelWrite{rgba_word(32,1,0,0),0x000000ff,0xffffffff}});
+            const auto frame=native.scanout_readback(repeated);
+            if (frame.pixels[2]!=0xff8080ffU)
+                throw std::runtime_error("Repeated field parity reused invalid history");
+            ++checks;
         }
         SpriteCommand quad{{2,2,18,18,0,1,0x80406080,0}};
         compare(std::array{clear,quad});

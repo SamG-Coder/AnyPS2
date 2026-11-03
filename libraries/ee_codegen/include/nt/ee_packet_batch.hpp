@@ -1,5 +1,6 @@
 #pragma once
 #include <nt/ee_native.hpp>
+#include <nt/graphics_packet.hpp>
 #include <array>
 #include <cstring>
 #include <span>
@@ -11,7 +12,7 @@ struct NativePacketOrigin { std::size_t offset; unsigned quadword_offset; };
 // GIF or VU code, clock a channel, or publish completion.
 class NativePacketBatch {
 public:
-    static constexpr std::size_t maximum_bytes=32*1024*1024,maximum_descriptors=65536;
+    static constexpr std::size_t maximum_bytes=graphics::maximum_batch_bytes,maximum_descriptors=65536;
     std::vector<std::uint8_t> bytes;
     std::vector<NativePacketOrigin> origins;
     std::uint32_t source=0,tag=0,tag_bits=0;

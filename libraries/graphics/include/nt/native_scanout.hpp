@@ -8,18 +8,22 @@ struct Scanout {
     std::vector<std::uint32_t> pixels;
 };
 struct DisplaySurface { std::uint32_t base=0,pitch=0,x=0,y=0,width=0,height=0,offset_x=0,offset_y=0; };
+enum class DisplayField : std::uint32_t { progressive,even,odd };
 struct DisplayPlan {
     std::array<DisplaySurface,2> surfaces{};
     std::uint32_t width=0,height=0,control=0,background=0,half_height=0,bgra=0;
+    DisplayField field=DisplayField::progressive;
+    std::uint32_t history_valid=0;
 };
 inline std::optional<DisplayPlan> plan_display(std::uint64_t control,
     const std::array<std::uint64_t,2>& buffers,const std::array<std::uint64_t,2>& displays,
-    bool half_height=false,std::uint32_t background=0) {
+    bool half_height=false,std::uint32_t background=0,DisplayField field=DisplayField::progressive) {
     const auto enabled=control&3;
     if (!enabled) return {};
     if (enabled==3 && !(control&32))
         throw std::invalid_argument("Unsupported native display composition");
     DisplayPlan plan{}; plan.control=std::uint32_t(control); plan.background=background; plan.half_height=half_height;
+    plan.field=half_height ? field : DisplayField::progressive;
     const unsigned first=enabled==2 ? 1 : 0;
     const unsigned scale_x=((displays[first]>>23)&15)+1,scale_y=((displays[first]>>27)&3)+1;
     unsigned origin_x=displays[first]&4095,origin_y=(displays[first]>>12)&2047;
@@ -62,7 +66,7 @@ inline Scanout scanout(std::span<const std::uint32_t> memory,const DisplayPlan& 
         const auto& s=plan.surfaces[circuit]; x-=s.offset_x; y-=s.offset_y;
         return memory[rgba_word(s.base,s.pitch,s.x+x,s.y+(plan.half_height ? y/2 : y))]|0xff000000U;
     };
-    for (unsigned y=0;y<frame.height;++y) for (unsigned x=0;x<frame.width;++x) {
+    const auto compose=[&](unsigned x,unsigned y) {
         auto color=plan.background|0xff000000U;
         if (enabled==3 || (enabled==1 && (plan.control&32))) {
             if ((enabled&2) && !(plan.control&128) && contains(1,x,y)) color=sample(1,x,y);
@@ -77,14 +81,32 @@ inline Scanout scanout(std::span<const std::uint32_t> memory,const DisplayPlan& 
             const unsigned circuit=enabled==2 ? 1:0;
             if (contains(circuit,x,y)) color=sample(circuit,x,y);
         }
+        return color;
+    };
+    // Reconstruct missing lines spatially at the current field's position.
+    // Do not weave different moments together or shift both fields onto row 0.
+    for (unsigned y=0;y<frame.height;++y) for (unsigned x=0;x<frame.width;++x) {
+        std::uint32_t color;
+        if (plan.field!=DisplayField::progressive) {
+            const unsigned phase=plan.field==DisplayField::odd ? 1:0;
+            const unsigned row=(y>phase ? y-phase : 0)/2*2;
+            color=compose(x,row);
+            if (y>=phase && ((y-phase)&1)) {
+                const auto next=compose(x,std::min(row+2,frame.height-1));
+                std::uint32_t blended=0xff000000U;
+                for (unsigned shift=0;shift<24;shift+=8)
+                    blended|=(((((color>>shift)&255)+((next>>shift)&255)+1)/2)<<shift);
+                color=blended;
+            }
+        } else color=compose(x,y);
         frame.pixels[y*frame.width+x]=color;
     }
     return frame;
 }
 inline std::optional<Scanout> scanout(std::span<const std::uint32_t> memory,std::uint64_t control,
     const std::array<std::uint64_t,2>& buffers,const std::array<std::uint64_t,2>& displays,bool half_height=false,
-    std::uint32_t background=0) {
-    const auto plan=plan_display(control,buffers,displays,half_height,background);
+    std::uint32_t background=0,DisplayField field=DisplayField::progressive) {
+    const auto plan=plan_display(control,buffers,displays,half_height,background,field);
     return plan ? std::optional(scanout(memory,*plan)) : std::nullopt;
 }
 }

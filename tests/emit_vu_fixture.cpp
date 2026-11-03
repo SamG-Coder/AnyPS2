@@ -78,7 +78,7 @@ int main(int argc,char** argv) {
     pair(waitq,mulq(6));
     save_block(".q_finish","nt_vu_q_finish",200);
     bytes.clear();
-    pair(0x80000335,0x40000000|mulq(4)); // Reading pending Q without synchronization stops.
+    pair(0x80000335,0x40000000|mulq(4)); // Pending Q reads the previous published value.
     pair(0x80000335);
     save_block(".q_early","nt_vu_q_early",200);
     bytes.clear();
@@ -189,7 +189,19 @@ int main(int argc,char** argv) {
     pair(0x80000000|(30U<<6)|63);
     pair(0x80000000|(8U<<21)|(2U<<16)|(25U<<6)|60,0x400002ff);
     pair(0x80000335);
-    const std::array<unsigned,5> p_entries{0,6,8,12,22};
+    // Automatic scalar publication, without WAITP, on either side of the
+    // latency boundary. Each producer is split across a native block call.
+    for (const auto [operation,latency]:std::array<std::pair<std::uint32_t,unsigned>,3>{{
+        {0x80000000U|(1U<<11)|(28U<<6)|63,24},
+        {0x80000000U|(2U<<21)|(1U<<11)|(31U<<6)|60,29},
+        {0x80000000U|(3U<<21)|(1U<<11)|(30U<<6)|60,12}}}) {
+        pair(operation); pair((32U<<25)|1); pair(0x80000335);
+        for (unsigned i=3;i<latency-1;++i) pair(0x80000335);
+        pair(0x80000000|(8U<<21)|(3U<<16)|(25U<<6)|60);
+        pair(0x80000000|(8U<<21)|(4U<<16)|(25U<<6)|60,0x400002ff);
+        pair(0x80000335);
+    }
+    const std::array<unsigned,8> p_entries{0,6,8,12,22,26,52,83};
     nt::vu::emit_program_llvm(p_module,nt::vu::frame(bytes,1,0),1,p_entries,"nt_vu_p");
     const auto p_text=p_module.str();
     nt::write_file(std::string(argv[1])+".p",nt::ByteView(reinterpret_cast<const std::uint8_t*>(p_text.data()),p_text.size()));

@@ -12,6 +12,9 @@
 namespace nt::graphics {
 using Quadword=std::array<std::uint32_t,4>;
 using Packet=std::vector<Quadword>;
+// Aggregate native submission bound; individual packet framing is bounded
+// separately. A compiled VU batch may contain many complete packets.
+inline constexpr std::size_t maximum_batch_bytes=32U*1024U*1024U;
 namespace detail {
 // Native transport bytes are little endian and may be unaligned. Copy payloads
 // in bulk on little-endian hosts; retain explicit decoding on other hosts.

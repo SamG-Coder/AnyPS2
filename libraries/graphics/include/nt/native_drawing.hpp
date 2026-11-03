@@ -39,7 +39,8 @@ public:
         std::vector<Operation> draws;
         std::size_t total=0;
         for (const auto& packet:packets) {
-            if (packet.size()>65536-total) throw std::invalid_argument("Native graphics batch exceeds bound");
+            if (packet.size()>maximum_batch_bytes/sizeof(Quadword)-total)
+                throw std::invalid_argument("Native graphics batch exceeds bound");
             total+=packet.size(); parse(candidate,packet,draws);
         }
         if (draws.empty()) { state_=candidate; return; }
@@ -222,10 +223,10 @@ private:
             state.vertex_count=primitive==2 ? 1 : 0;
             if (primitive==2) state.vertices[0]=vertices[1];
             if (reg==12 || reg==13) return;
-            if (attributes&~0x34fU)
+            if (attributes&~0x3cfU)
                 throw std::invalid_argument("Unsupported native point/line attributes: "+std::to_string(attributes));
             const auto& context=state.contexts[(attributes>>9)&1];
-            if (auto draw=plan_line_or_point(context.frame,context.offset,context.scissor,vertices,primitive==0,(attributes&8)!=0)) {
+            if (auto draw=plan_line_or_point(context.frame,context.offset,context.scissor,vertices,primitive==0,(attributes&8)!=0,(attributes&128)!=0)) {
                 configure_draw(state,context,attributes,draw->draw);
                 draws.push_back(Draw{draw->draw,0,draw->triangle});
             }

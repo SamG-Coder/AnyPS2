@@ -112,12 +112,14 @@ void main() {
     if (x>=draw.right || y>=draw.bottom) return;
     uint output_address=address(draw.base,draw.pitch,x,y);
     uint color=draw.color;
-    uint depth=draw.depth,coverage=16;
+    uint depth=draw.depth,coverage=16,line_alpha=128;
     bool triangle_interior=true;
     int uf=0,vf=0;
     if ((draw.flags&16777216)!=0) {
         int64_t numerator,denominator;
-        if (!line_sample(ivec2(x,y),vertex_position(0),vertex_position(1),numerator,denominator)) return;
+        bool aa=(draw.flags&1048576)!=0;
+        if (!line_sample(ivec2(x,y),vertex_position(0),vertex_position(1),aa,line_alpha,numerator,denominator)) return;
+        if (aa) triangle_interior=false;
         depth=line_value(memory.pixels[2097416],memory.pixels[2097426],numerator,denominator);
         if ((draw.flags&32768)!=0)
             color=line_color(memory.pixels[2097410],memory.pixels[2097420],numerator,denominator);
@@ -197,7 +199,7 @@ void main() {
         }
     }
     if ((draw.flags&1048576)!=0 && ((draw.flags&2097152)==0 || (color>>24)==128))
-        color=(color&0xffffff)|(coverage*8<<24);
+        color=(color&0xffffff)|(((draw.flags&16777216)!=0 ? line_alpha : coverage*8)<<24);
     uint mask=draw.mask;
     bool write_depth=(draw.flags&262144)!=0 && triangle_interior;
     if((draw.test&1)!=0 && !alpha_pass(color>>24)) {

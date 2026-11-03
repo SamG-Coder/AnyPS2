@@ -121,7 +121,7 @@ int main() {
                 const auto pc=s.pc, before=presentations;
                 check(nt_ee_generated_run(&s,&memory,8)==nt::ee::Stop::display_wait && s.pc==pc && !s.executed && s.gpr[8].lo==77);
                 timer_now=sync-1;
-                check(nt_ee_generated_run(&s,&memory,8)==nt::ee::Stop::display_wait && presentations==before);
+                check(nt_ee_generated_run(&s,&memory,8)==nt::ee::Stop::display_wait && presentations==before+1);
                 timer_now=sync;
                 check(nt_ee_generated_run(&s,&memory,8)==nt::ee::Stop::breakpoint && s.pc==pc+16 &&
                     s.executed==(variant==2 ? 3U : 4U) && s.gpr[8].lo==8 && s.gpr[8].hi==99 && presentations==before+1);
@@ -2689,7 +2689,10 @@ int main() {
             check(platform.interrupts.service(0x10,state,nt_ee_generated_contains).status==nt::ee::Stop::budget);
             platform.interrupts.write(0x1000f010,13);
             timer_now=edge(480)-1; poll(); check(!memory.pending_interrupts);
-            timer_now=edge(480); poll(); check(memory.pending_interrupts==0x400 && presented==0);
+            // Capture the completed image before the compiled VBLANK handler
+            // can publish the next buffers. GS VSINT/FIELD change later.
+            timer_now=edge(480); poll(); check(memory.pending_interrupts==0x400 && presented==1 &&
+                !platform.graphics.scanout_odd() && !(platform.graphics.read(0x12001000).value&0x2008));
             state.pc=0x3a0000; state.cop0_status=0x10c01; state.set(29,0xff00);
             check(nt::ee::run(nt_ee_generated_run,state,memory,3,services)==nt::ee::Stop::budget && state.pc==0x3a0000);
             std::uint32_t line; std::memcpy(&line,ram.data()+0x6000,4); check(line==2 && !memory.pending_interrupts);
@@ -2700,6 +2703,7 @@ int main() {
             platform.graphics.write(0x12001000,8); timer_now=edge(525); poll();
             check(platform.interrupts.read(0x1000f000).value==8 && !(platform.graphics.read(0x12001000).value&8));
             platform.interrupts.write(0x1000f000,8); timer_now=edge(1012); poll();
+            check(presented==2 && platform.graphics.scanout_odd());
             check(edges_seen==std::vector<bool>({false,true,false}));
             check((platform.graphics.read(0x12001000).value&0x2008)==8);
             const auto before=platform.graphics.read(0x12001000).value;

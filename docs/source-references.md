@@ -1839,8 +1839,16 @@ shared vector ownership; no upstream execution loop or instruction interpreter
 is copied into generated output.
 
 At the same PCSX2 pin, `x86/microVU_Lower.inl` provides the DIV/SQRT (7) and
-RSQRT (13) dependency distances. Independent LLVM lowering retains pending Q
-across compiled blocks and publishes it when the scheduled distance has elapsed.
+RSQRT (13), ERLENG (24), ESIN (29) and ESQRT (12) dependency distances.
+Its MFP lowering, `microVU_Analyze.inl` and `microVU_Compile.inl` distinguish
+nonblocking reads of published Q/P from producer and WAIT synchronization.
+Independent LLVM lowering retains pending scalar results across compiled blocks
+and publishes them when the scheduled distance has elapsed; an earlier read
+uses the previous value. This does not claim complete VU dependency-stall timing.
+Finite EFU products retain the shared arithmetic helper's flushed underflow
+result instead of rejecting it; overflow remains unsupported. The existing
+zero-length reciprocal contract follows `VUops.cpp`'s ERLENG path. These bounded
+arithmetic replacements are not a claim of bit-exact EFU hardware behavior.
 
 Native USB enumeration uses Windows SDK SetupAPI, `GUID_DEVINTERFACE_USB_HUB`,
 `IOCTL_USB_GET_NODE_INFORMATION`, `IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX`
@@ -2254,10 +2262,16 @@ composition change and synthetic colour fixtures are original implementations.
 
 ## gsKit integration samples
 
-Point rounding and non-antialiased line coverage were checked against
+Point rounding and line coverage were checked against
 `GS/Renderers/SW/GSRasterizer.cpp` at the PCSX2 revision pinned above.
 AnyPS2 independently evaluates the endpoint diamond-exit rule and rational
 interpolation in Vulkan shaders; no rasterizer implementation is copied.
+Antialiased lines share the endpoint interval and split coverage between the
+nearest minor-axis pixel and its neighbor. The same pin's `GSDrawScanline.cpp`
+informs coverage-alpha quantization, the ABE alpha-selection rule and testing
+depth without writing it for coverage edges. The implementation evaluates each
+fragment directly in the shared Vulkan shader rather than expanding pixels on
+the CPU.
 The same pin's `GSState::IsCoverageAlpha` limits AA1 coverage to
 lines and triangles; point and sprite draws retain ordinary coverage and alpha.
 
@@ -2310,6 +2324,18 @@ readable reset value independently of serial transaction completion.
 The same PCSX2 pin's `GSState.cpp` display-rectangle calculations were consulted
 for relative circuit positioning. AnyPS2 preserves integer circuit displacement
 in native composition; it does not apply the reference renderer's anti-blur adjustment.
+The same pin's `GS.h`, `MTGS.cpp` and `GSRenderer.cpp` were consulted for field
+conventions and interlaced frame-mode placement. `Counters.cpp` distinguishes VBLANK start
+from the later GS VSINT/FIELD transition. Native presentation captures the
+completed field before VBLANK handler delivery can select the next buffers.
+Native Vulkan presentation places each
+half-height field on its own even/odd lines. An original Vulkan compute pass
+retains four GPU field images and weaves missing lines only when both parities
+are unchanged in a vertical neighborhood; moving regions and invalid history
+use spatial interpolation with edge clamping. This is a progressive-display
+reconstruction choice, not a CRT simulation or a copy of the reference's adaptive
+deinterlacer. Repeated parity, mode/size changes and resource resets invalidate
+history. Diagnostic captures read the GPU reconstruction used for presentation.
 
 The pinned PCSX2 `VUops.cpp` FMAC publication and FMAND/FMEQ/FMOR reads were
 consulted for delayed MAC visibility. AnyPS2 emits LLVM value dependencies that

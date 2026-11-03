@@ -1,4 +1,4 @@
-// Non-AA line coverage in 12.4 coordinates. Each fragment independently tests
+// Line coverage in 12.4 coordinates. Each fragment independently tests
 // the major-axis interval and nearest minor coordinate; no CPU pixel expansion.
 int64_t line_floor(int64_t n,int64_t d) { return n/d-((n%d)<0 ? 1 : 0); }
 bool line_endpoint_exits(ivec2 delta,bool horizontal,int direction) {
@@ -7,7 +7,8 @@ bool line_endpoint_exits(ivec2 delta,bool horizontal,int direction) {
     int minor=horizontal ? delta.y : delta.x;
     return direction*major>0 && (distance>8 || (distance==8 && minor>=0));
 }
-bool line_sample(ivec2 pixel,ivec2 a,ivec2 b,out int64_t numerator,out int64_t denominator) {
+bool line_sample(ivec2 pixel,ivec2 a,ivec2 b,bool antialiased,out uint alpha,
+                 out int64_t numerator,out int64_t denominator) {
     ivec2 delta=b-a;
     bool horizontal=abs(delta.x)>=abs(delta.y);
     int major_delta=horizontal ? delta.x : delta.y;
@@ -24,7 +25,17 @@ bool line_sample(ivec2 pixel,ivec2 a,ivec2 b,out int64_t numerator,out int64_t d
     numerator=int64_t((major*16-(horizontal ? a.x : a.y))*direction);
     int64_t minor=int64_t(horizontal ? a.y : a.x)*denominator+numerator*int64_t(minor_delta);
     int rounded=int(line_floor(minor+8*denominator,16*denominator));
-    return (horizontal ? pixel.y : pixel.x)==rounded;
+    int sample_minor=horizontal ? pixel.y : pixel.x;
+    alpha=128;
+    if (!antialiased) return sample_minor==rounded;
+    // Split coverage between the nearest pixel and its neighbor. Preserve the
+    // public 16-bit coverage quantization before conversion to seven-bit alpha.
+    int64_t displacement=minor-int64_t(rounded)*16*denominator;
+    int neighbor=rounded+(displacement>=0 ? 1 : -1);
+    if (sample_minor!=rounded && sample_minor!=neighbor) return false;
+    uint fraction=uint((abs(displacement)*65535)/(16*denominator));
+    alpha=(sample_minor==rounded ? 65535-fraction : fraction)>>9;
+    return true;
 }
 uint line_value(uint a,uint b,int64_t numerator,int64_t denominator) {
     int64_t value=(int64_t(a)*(denominator-numerator)+int64_t(b)*numerator)/denominator;

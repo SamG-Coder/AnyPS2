@@ -150,13 +150,15 @@ void main() {
     if ((draw.flags&4096)!=0 && (y&1)==((draw.flags>>13)&1)) discard;
     if (x<draw.left || y<draw.top || x>=draw.right || y>=draw.bottom) discard;
     uint color=draw.color;
-    uint depth=draw.depth,coverage=16;
+    uint depth=draw.depth,coverage=16,line_alpha=128;
     uint64_t fog_weight=uint64_t(draw.fog),fog_area=uint64_t(1);
     bool triangle_interior=true;
     int uf=0,vf=0;
     if ((draw.flags&16777216)!=0) {
         int64_t numerator,denominator;
-        if (!line_sample(ivec2(x,y),vertex_position(0),vertex_position(1),numerator,denominator)) discard;
+        bool aa=(draw.flags&1048576)!=0;
+        if (!line_sample(ivec2(x,y),vertex_position(0),vertex_position(1),aa,line_alpha,numerator,denominator)) discard;
+        if (aa) triangle_interior=false; // Coverage edges test depth but do not replace it.
         depth=line_value(draw.vertices[0].z,draw.vertices[1].z,numerator,denominator);
         if ((draw.flags&32768)!=0)
             color=line_color(draw.vertices[0].color,draw.vertices[1].color,numerator,denominator);
@@ -266,7 +268,7 @@ void main() {
         color=result;
     }
     if ((draw.flags&1048576)!=0 && ((draw.flags&2097152)==0 || (color>>24)==128))
-        color=(color&0xffffff)|(coverage*8<<24);
+        color=(color&0xffffff)|(((draw.flags&16777216)!=0 ? line_alpha : coverage*8)<<24);
     uint mask=draw.mask;
     bool write_depth=(draw.flags&262144)!=0 && triangle_interior;
     if((draw.test&1)!=0 && !alpha_pass(color>>24)) {

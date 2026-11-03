@@ -30,6 +30,7 @@ struct State {
     std::array<std::uint32_t,4> pending_clip{};
     std::uint32_t pending_clip_mask=0,visible_clip=0;
     std::array<std::uint32_t,4> pending_product_sticky{};
+    std::uint32_t p_read_delay=0;
     bool operator==(const State&) const = default;
 };
 }

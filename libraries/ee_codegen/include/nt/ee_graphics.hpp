@@ -43,12 +43,13 @@ public:
         const auto ready=synchronize(context);
         if (ready!=Stop::budget) return ready;
         mode_=DisplayMode{interlace,standard,frame}; epoch_=clock_(); ticks_=0; delivered_ticks_=0;
-        flags_=0; field_=0; events_=0; edge_lost_=false;
+        flags_=0; field_=0; events_=0; edge_lost_=false; scanout_odd_=false;
         vsync_profile_start_.reset();
         return Stop::budget;
     }
     const std::optional<DisplayMode>& mode() const { return mode_; }
     bool half_height_output() const { return mode_ && mode_->interlace && mode_->frame; }
+    bool scanout_odd() const { return scanout_odd_; }
     static bool maps(std::uint32_t address) {
         return address==0x12000000 || address==0x12000020 ||
             (address>=0x12000070 && address<=0x120000a0 && address%16==0) ||
@@ -98,7 +99,7 @@ public:
                         const auto reset=reset_drawing(context);
                         if (reset!=Stop::budget) return reset;
                     }
-                    mask_=0x7f00; flags_=0; field_=0; events_=0; mode_.reset(); output_={}; ++resets_;
+                    mask_=0x7f00; flags_=0; field_=0; events_=0; scanout_odd_=false; mode_.reset(); output_={}; ++resets_;
                     return Stop::budget;
                 }
             }
@@ -182,9 +183,14 @@ private:
         } else delivered_ticks_=ticks;
         if (ticks==ticks_) return;
         if (ticks/2>ticks_/2) event(4);
-        if (edges(ticks,period,blank)>edges(ticks_,period,blank)) events_|=1U<<2;
-        const bool scanout=edges(ticks,period,sync)>edges(ticks_,period,sync);
-        if (scanout) event(8);
+        const bool scanout=edges(ticks,period,blank)>edges(ticks_,period,blank);
+        if (scanout) {
+            events_|=1U<<2;
+            // The completed field is still current at VBLANK start; FIELD
+            // toggles at the later GS sync edge (zero denotes the even field).
+            scanout_odd_=((edges(ticks,period,blank)-1)&1)!=0;
+        }
+        if (edges(ticks,period,sync)>edges(ticks_,period,sync)) event(8);
         field_=(edges(ticks,period,sync)&1) ? 0x2000 : 0;
         if (ticks/period>ticks_/period) events_|=1U<<3;
         ticks_=ticks;
@@ -194,7 +200,7 @@ private:
     NativeClock clock_;
     std::optional<std::uint64_t> vsync_profile_start_;
     Output output_;
-    bool edge_lost_=false;
+    bool edge_lost_=false,scanout_odd_=false;
     std::optional<DisplayMode> mode_;
     std::uint32_t mask_=0x7f00,flags_=0,field_=0,events_=0;
     std::uint64_t epoch_=0,ticks_=0,delivered_ticks_=0,resets_=0;

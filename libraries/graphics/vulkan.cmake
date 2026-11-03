@@ -38,7 +38,7 @@ function(anyps2_add_vulkan target)
         set(reference_shaders "${CMAKE_CURRENT_BINARY_DIR}/sprite.inc" "${CMAKE_CURRENT_BINARY_DIR}/scanout.inc")
     endif()
     set(native_shaders)
-    foreach(shader native.vert native.frag present.vert present.frag)
+    foreach(shader native.vert native.frag present.vert present.frag field.comp)
         add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${shader}.inc"
             COMMAND Vulkan::glslc -mfmt=c "${renderer_root}/shaders/${shader}"
                 -o "${CMAKE_CURRENT_BINARY_DIR}/${shader}.inc"

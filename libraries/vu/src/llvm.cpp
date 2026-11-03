@@ -66,7 +66,17 @@ public:
             ", i32 "+load("i32",offsetof(State,scalar_p)));
         pending.push_back({"i32",result,offsetof(State,scalar_p)});
         pending.push_back({"i32","0",offsetof(State,p_pending)});
+        pending.push_back({"i32","0",offsetof(State,p_read_delay)});
         commit();
+    }
+    void advance_scalar(bool quotient,std::size_t index) {
+        const auto offset=quotient ? offsetof(State,quotient_read_delay) : offsetof(State,p_read_delay);
+        const auto prefix=std::string(quotient ? "q" : "p")+std::to_string(index);
+        const auto due=value("icmp eq i32 "+load("i32",offset)+", 1");
+        advance_visibility(offset);
+        out<<"  br i1 "<<due<<", label %"<<prefix<<"_publish, label %"<<prefix<<"_elapsed\n"<<prefix<<"_publish:\n";
+        if (quotient) publish_quotient(); else publish_p();
+        out<<"  br label %"<<prefix<<"_elapsed\n"<<prefix<<"_elapsed:\n";
     }
     void advance_visibility(std::size_t offset) {
         const auto delay=load("i32",offset);
@@ -196,22 +206,15 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
             lower.operation==LowerOperation::reciprocal_square_root;
         writer.advance_mac();
         writer.advance_clip();
-        // The compiled schedule can make Q available without an explicit WAITQ.
-        // Preserve the remaining dependency distance across native block calls.
-        const auto q_due=writer.value("icmp eq i32 "+writer.load("i32",offsetof(State,quotient_read_delay))+", 1");
-        writer.advance_visibility(offsetof(State,quotient_read_delay));
-        writer.out<<"  br i1 "<<q_due<<", label %q_publish"<<index<<", label %q_elapsed"<<index<<"\nq_publish"<<index<<":\n";
-        writer.publish_quotient();
-        writer.out<<"  br label %q_elapsed"<<index<<"\nq_elapsed"<<index<<":\n";
+        // Scalar reads use the last published value while a newer result is
+        // pending. Carry publication distance across compiled native blocks.
+        writer.advance_scalar(true,index);
+        writer.advance_scalar(false,index);
         // These lower operations synchronize an earlier quotient before this
         // pair reads Q. Unscheduled visibility is deliberately not approximated.
         if (quotient_producer || lower.operation==LowerOperation::wait_quotient) writer.publish_quotient();
         if (lower.operation==LowerOperation::reciprocal_length || lower.operation==LowerOperation::sine ||
             lower.operation==LowerOperation::efu_square_root || lower.operation==LowerOperation::wait_p) writer.publish_p();
-        if (upper.operand==Operand::quotient) {
-            const auto ready=writer.value("icmp eq i32 "+writer.load("i32",offsetof(State,quotient_pending))+", 0");
-            writer.out<<"  br i1 "<<ready<<", label %q_ready"<<index<<", label %schedule_failure\nq_ready"<<index<<":\n";
-        }
         if (upper.operation!=Arithmetic::nop && upper.destination==Destination::vector && upper.result && lower.result.bank==Bank::vector &&
             lower.result.index==upper.result)
             throw std::invalid_argument("VU simultaneous vector destinations require explicit priority lowering");
@@ -341,8 +344,6 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         case LowerOperation::wait_p: break;
         case LowerOperation::move_p: {
             if (!lower.result.index || !lower.mask) break;
-            const auto ready=writer.value("icmp eq i32 "+writer.load("i32",offsetof(State,p_pending))+", 0");
-            writer.out<<"  br i1 "<<ready<<", label %p_ready"<<index<<", label %schedule_failure\np_ready"<<index<<":\n";
             const auto value=writer.load("i32",offsetof(State,scalar_p));
             for (unsigned lane=0;lane<4;++lane) if (lower.mask&(8U>>lane)) writer.vector_result(lower.result.index,lane,value);
             break;
@@ -357,6 +358,8 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
             writer.out<<"  br i1 "<<ready<<", label %p_numeric"<<index<<", label %numeric_failure\np_numeric"<<index<<":\n";
             writer.pending.push_back({"i32",writer.value("trunc i64 "+packed+" to i32"),offsetof(State,pending_p)});
             writer.pending.push_back({"i32","1",offsetof(State,p_pending)});
+            writer.pending.push_back({"i32",lower.operation==LowerOperation::reciprocal_length ? "24" :
+                lower.operation==LowerOperation::sine ? "29" : "12",offsetof(State,p_read_delay)});
             break;
         }
         case LowerOperation::input_top: case LowerOperation::input_itop: {

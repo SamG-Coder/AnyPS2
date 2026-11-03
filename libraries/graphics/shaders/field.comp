@@ -1,0 +1,40 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x=8,local_size_y=8) in;
+layout(set=0,binding=0) uniform usampler2D surfaces[2];
+// One, two and three fields ago. Never sample the image being written.
+layout(set=0,binding=1) uniform usampler2D previous[3];
+layout(set=0,binding=2,r32ui) writeonly uniform uimage2D current_field;
+layout(set=0,binding=3,r32ui) writeonly uniform uimage2D reconstructed;
+#include "display_composition.glsl"
+uint sample_surface(uint index,uint x,uint y) {
+    Surface s=display.surfaces[index];
+    x-=s.offset_x; y-=s.offset_y;
+    ivec2 p=ivec2(s.x+x,s.y+y/2);
+    return (index==0 ? texelFetch(surfaces[0],p,0).r : texelFetch(surfaces[1],p,0).r)|0xff000000;
+}
+void main() {
+    uvec2 p=gl_GlobalInvocationID.xy;
+    if (p.x>=display.width || p.y>=display.height) return;
+    imageStore(current_field,ivec2(p),uvec4(compose_circuits(p.x,p.y)));
+    uint color=compose_display(p.x,p.y),phase=display.field==2 ? 1:0;
+    if (display.history_valid!=0 && p.y>=phase && ((p.y-phase)&1)!=0) {
+        // Weave only when BOTH parities are unchanged in a small vertical
+        // neighborhood. Motion, fades, startup and discontinuities use the
+        // current field's spatial reconstruction, without temporal trails.
+        bool stable=true;
+        int row=int((p.y-phase)/2*2);
+        for (int offset=-2;offset<=2;offset+=2) {
+            uint y=uint(clamp(row+offset,0,int(display.height)-1));
+            ivec2 q=ivec2(p.x,y);
+            stable=stable && compose_circuits(p.x,y)==texelFetch(previous[1],q,0).r;
+            stable=stable && texelFetch(previous[0],q,0).r==texelFetch(previous[2],q,0).r;
+        }
+        if (stable) {
+            uint previous_phase=1-phase;
+            uint y=p.y>previous_phase ? p.y-previous_phase : 0;
+            color=texelFetch(previous[0],ivec2(p.x,y),0).r;
+        }
+    }
+    imageStore(reconstructed,ivec2(p),uvec4(color));
+}

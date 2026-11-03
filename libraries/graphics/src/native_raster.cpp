@@ -37,6 +37,9 @@ const std::uint32_t present_vertex[]=
 const std::uint32_t present_fragment[]=
 #include "present.frag.inc"
 ;
+const std::uint32_t field_code[]=
+#include "field.comp.inc"
+;
 #ifdef ANYPS2_LLVM_TEXTURES
 const std::uint32_t texture_decode_code[]=
 #include "texture-decode.inc"
@@ -73,6 +76,8 @@ struct NativeRaster::Impl {
     VkRenderPass render_pass{},present_pass{}; VkFormat present_format{};
     VkDescriptorSetLayout descriptors{},present_descriptors{}; VkDescriptorPool descriptor_pool{};
     VkPipelineLayout layout{},present_layout{}; VkPipeline pipeline{},coverage_pipeline{},present_pipeline{};
+    VkDescriptorSetLayout field_descriptors{};
+    VkPipelineLayout field_layout{}; VkPipeline field_pipeline{};
 #ifdef ANYPS2_LLVM_TEXTURES
     VkDescriptorSetLayout decode_descriptors{}; VkDescriptorPool decode_pool{};
     VkPipelineLayout decode_layout{}; VkPipeline decode_pipeline{};
@@ -110,6 +115,13 @@ struct NativeRaster::Impl {
     std::map<std::pair<Image*,Image*>,VkDescriptorSet> present_sets;
     std::map<VkImage,VkFramebuffer> present_framebuffers;
     std::vector<VkImageView> present_views;
+    std::array<std::unique_ptr<Image>,4> fields;
+    std::unique_ptr<Image> display_image;
+    std::map<std::tuple<Image*,Image*,unsigned>,VkDescriptorSet> field_sets;
+    unsigned field_index=0,field_count=0;
+    DisplayField previous_field=DisplayField::progressive;
+    DisplayPlan resolved_plan{};
+    std::uint64_t resolved_revision=0;
     RasterHazards hazards;
     VkFramebuffer current_framebuffer{};
     unsigned current_width=0,current_height=0;
@@ -131,6 +143,7 @@ struct NativeRaster::Impl {
     Image& surface(unsigned base,unsigned pitch,unsigned height,bool depth,bool scratch=false,bool display=false);
     Image& display_surface(unsigned base,unsigned pitch,unsigned height);
     Image& texture(const SpriteCommand&);
+    Image& reconstruct(const DisplayPlan&);
 #ifdef ANYPS2_LLVM_TEXTURES
     void decode_texture(Image&,const SpriteCommand&,Region);
     void initialize_texture_decoder();
@@ -282,7 +295,7 @@ void NativeRaster::Impl::initialize(unsigned family) {
     // Uploads favor sequential host writes; exports need CPU-readable cached
     // memory. Keep a separate bounded allocation rather than reading back from
     // a potentially write-combined upload heap. Every export waits before reuse.
-    bi.size=store_words*sizeof(std::uint32_t); bi.usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bi.size=2048ULL*2048*sizeof(std::uint32_t); bi.usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     checked(vkCreateBuffer(device,&bi,nullptr,&readback),"Create native readback");
     vkGetBufferMemoryRequirements(device,readback,&requirements);
     readback_memory=allocate(requirements,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
@@ -305,13 +318,32 @@ void NativeRaster::Impl::initialize(unsigned family) {
     checked(vkCreateDescriptorSetLayout(device,&dl,nullptr,&descriptors),"Create native descriptors");
     const VkDescriptorSetLayoutBinding pb{0,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,2,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr}; dl.bindingCount=1; dl.pBindings=&pb;
     checked(vkCreateDescriptorSetLayout(device,&dl,nullptr,&present_descriptors),"Create display descriptors");
-    std::array<VkDescriptorPoolSize,3> sizes{{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,32768},{ordered_fragments ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,32768},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,32768}}};
-    VkDescriptorPoolCreateInfo dp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO}; dp.maxSets=32768; dp.poolSizeCount=3; dp.pPoolSizes=sizes.data();
+    std::array<VkDescriptorPoolSize,4> sizes{{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,32768},{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,32768},{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,32768},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,32768}}};
+    VkDescriptorPoolCreateInfo dp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO}; dp.maxSets=32768; dp.poolSizeCount=4; dp.pPoolSizes=sizes.data();
     checked(vkCreateDescriptorPool(device,&dp,nullptr,&descriptor_pool),"Create native descriptor pool");
     VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO}; pl.setLayoutCount=1; pl.pSetLayouts=&descriptors;
     checked(vkCreatePipelineLayout(device,&pl,nullptr,&layout),"Create native layout");
     VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(DisplayPlan)}; pl.pSetLayouts=&present_descriptors; pl.pushConstantRangeCount=1; pl.pPushConstantRanges=&push;
     checked(vkCreatePipelineLayout(device,&pl,nullptr,&present_layout),"Create native display layout");
+    const std::array<VkDescriptorSetLayoutBinding,4> field_bindings{{
+        {0,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,2,VK_SHADER_STAGE_COMPUTE_BIT,nullptr},
+        {1,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,3,VK_SHADER_STAGE_COMPUTE_BIT,nullptr},
+        {2,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,1,VK_SHADER_STAGE_COMPUTE_BIT,nullptr},
+        {3,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,1,VK_SHADER_STAGE_COMPUTE_BIT,nullptr}}};
+    dl.bindingCount=field_bindings.size(); dl.pBindings=field_bindings.data();
+    checked(vkCreateDescriptorSetLayout(device,&dl,nullptr,&field_descriptors),"Create field descriptors");
+    push.stageFlags=VK_SHADER_STAGE_COMPUTE_BIT; pl.pSetLayouts=&field_descriptors;
+    checked(vkCreatePipelineLayout(device,&pl,nullptr,&field_layout),"Create field reconstruction layout");
+    VkShaderModuleCreateInfo field_module_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    field_module_info.codeSize=sizeof(field_code); field_module_info.pCode=field_code;
+    VkShaderModule field_module{};
+    checked(vkCreateShaderModule(device,&field_module_info,nullptr,&field_module),"Create field shader");
+    VkComputePipelineCreateInfo field_create{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    field_create.stage={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,nullptr,0,VK_SHADER_STAGE_COMPUTE_BIT,field_module,"main",nullptr};
+    field_create.layout=field_layout;
+    const auto field_result=vkCreateComputePipelines(device,VK_NULL_HANDLE,1,&field_create,nullptr,&field_pipeline);
+    vkDestroyShaderModule(device,field_module,nullptr);
+    checked(field_result,"Create field reconstruction pipeline");
     std::array<VkAttachmentDescription,2> attachments{};
     for (auto& a:attachments) { a.format=VK_FORMAT_R32_UINT; a.samples=VK_SAMPLE_COUNT_1_BIT; a.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD; a.storeOp=VK_ATTACHMENT_STORE_OP_STORE; a.initialLayout=a.finalLayout=VK_IMAGE_LAYOUT_GENERAL; }
     const std::array<VkAttachmentReference,2> refs{{{0,VK_IMAGE_LAYOUT_GENERAL},{1,VK_IMAGE_LAYOUT_GENERAL}}};
@@ -348,6 +380,9 @@ NativeRaster::Impl::~Impl() {
     if (pipeline) vkDestroyPipeline(device,pipeline,nullptr);
     if (coverage_pipeline) vkDestroyPipeline(device,coverage_pipeline,nullptr);
     if (present_pipeline) vkDestroyPipeline(device,present_pipeline,nullptr);
+    if (field_pipeline) vkDestroyPipeline(device,field_pipeline,nullptr);
+    if (field_layout) vkDestroyPipelineLayout(device,field_layout,nullptr);
+    if (field_descriptors) vkDestroyDescriptorSetLayout(device,field_descriptors,nullptr);
     if (render_pass) vkDestroyRenderPass(device,render_pass,nullptr);
     if (present_pass) vkDestroyRenderPass(device,present_pass,nullptr);
     if (layout) vkDestroyPipelineLayout(device,layout,nullptr);
@@ -373,7 +408,7 @@ std::unique_ptr<NativeRaster::Impl::Image> NativeRaster::Impl::image(unsigned wi
     auto i=std::make_unique<Image>(device,width,height);
     VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO}; ci.imageType=VK_IMAGE_TYPE_2D; ci.format=VK_FORMAT_R32_UINT; ci.extent={width,height,1}; ci.mipLevels=ci.arrayLayers=1; ci.samples=VK_SAMPLE_COUNT_1_BIT; ci.tiling=VK_IMAGE_TILING_OPTIMAL;
     ci.usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    if (ordered_fragments) ci.usage|=VK_IMAGE_USAGE_STORAGE_BIT;
+    ci.usage|=VK_IMAGE_USAGE_STORAGE_BIT;
     checked(vkCreateImage(device,&ci,nullptr,&i->image),"Create native image"); VkMemoryRequirements mr{}; vkGetImageMemoryRequirements(device,i->image,&mr); i->memory=allocate(mr,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     checked(vkBindImageMemory(device,i->image,i->memory,0),"Bind native image");
     VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO}; view.image=i->image; view.viewType=VK_IMAGE_VIEW_TYPE_2D; view.format=VK_FORMAT_R32_UINT; view.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
@@ -417,6 +452,7 @@ void NativeRaster::Impl::synchronize_source(Region requested) {
 }
 void NativeRaster::Impl::clear_views() {
     flush(); for (auto [k,f]:framebuffers) vkDestroyFramebuffer(device,f,nullptr); framebuffers.clear(); sets.clear(); present_sets.clear();
+    field_sets.clear();
     checked(vkResetDescriptorPool(device,descriptor_pool,0),"Reset native resource descriptors");
 }
 NativeRaster::Impl::Image& NativeRaster::Impl::surface(unsigned base,unsigned pitch,unsigned height,bool depth,bool scratch,bool display) {
@@ -682,6 +718,7 @@ std::uint64_t NativeRaster::completed_submission() {
 void NativeRaster::upload(std::span<const std::uint32_t> words) {
     if (words.size()!=store_words) throw std::runtime_error("Invalid native resource import");
     auto& r=*impl_; r.clear_views(); r.surfaces.clear(); r.textures.clear(); std::copy(words.begin(),words.end(),r.source.begin()); r.initialized=true; ++r.revision;
+    r.field_count=0; r.previous_field=DisplayField::progressive; r.resolved_revision=0;
 }
 void NativeRaster::read(std::span<std::uint32_t> words) {
     if (words.size()!=store_words) throw std::runtime_error("Invalid native resource export");
@@ -754,8 +791,67 @@ void NativeRaster::draw(std::span<const SpriteCommand> commands) {
         for (unsigned i=0;i<mapped.count;++i) emit(mapped.commands[i],height);
     }
 }
+NativeRaster::Impl::Image& NativeRaster::Impl::reconstruct(const DisplayPlan& plan) {
+    if (!initialized || !plan.width || !plan.height || plan.width>2048 || plan.height>2048)
+        throw std::runtime_error("Invalid native field output");
+    if (display_image && resolved_revision==revision && std::memcmp(&resolved_plan,&plan,sizeof(plan))==0)
+        return *display_image;
+    if (!display_image || display_image->width!=plan.width || display_image->height!=plan.height) {
+        clear_views();
+        display_image=image(plan.width,plan.height);
+        for (auto& field:fields) field=image(plan.width,plan.height);
+        field_count=0; field_index=0; previous_field=DisplayField::progressive;
+    }
+    Image* inputs[2]{};
+    for (unsigned i=0;i<2;++i) if (plan.control&(1U<<i)) {
+        const auto& s=plan.surfaces[i];
+        inputs[i]=&display_surface(s.base,s.pitch,s.y+(s.height+1)/2);
+    }
+    if (!inputs[0]) inputs[0]=inputs[1];
+    if (!inputs[1]) inputs[1]=inputs[0];
+    if (!inputs[0]) throw std::runtime_error("Field output has no source");
+    if (previous_field==plan.field || previous_field==DisplayField::progressive) field_count=0;
+    auto& set=field_sets[{inputs[0],inputs[1],field_index}];
+    if (!set) {
+        set=allocate_set(field_descriptors);
+        std::array<VkDescriptorImageInfo,7> info{};
+        for (unsigned i=0;i<2;++i) info[i]={sampler,inputs[i]->view,VK_IMAGE_LAYOUT_GENERAL};
+        for (unsigned i=0;i<3;++i) info[2+i]={sampler,fields[(field_index+3-i)%4]->view,VK_IMAGE_LAYOUT_GENERAL};
+        info[5]={VK_NULL_HANDLE,fields[field_index]->view,VK_IMAGE_LAYOUT_GENERAL};
+        info[6]={VK_NULL_HANDLE,display_image->view,VK_IMAGE_LAYOUT_GENERAL};
+        std::array<VkWriteDescriptorSet,4> writes{};
+        const unsigned counts[]{2,3,1,1},offsets[]{0,2,5,6};
+        for (unsigned i=0;i<4;++i) {
+            auto& w=writes[i]; w.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w.dstSet=set; w.dstBinding=i; w.descriptorCount=counts[i]; w.pImageInfo=info.data()+offsets[i];
+            w.descriptorType=i<2 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        }
+        vkUpdateDescriptorSets(device,writes.size(),writes.data(),0,nullptr);
+    }
+    auto constants=plan; constants.history_valid=field_count>=3;
+    order();
+    vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_COMPUTE,field_pipeline);
+    vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_COMPUTE,field_layout,0,1,&set,0,nullptr);
+    vkCmdPushConstants(command,field_layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(constants),&constants);
+    vkCmdDispatch(command,(plan.width+7)/8,(plan.height+7)/8,1);
+    order();
+    field_index=(field_index+1)%4; field_count=std::min(field_count+1,3U); previous_field=plan.field;
+    resolved_plan=plan; resolved_revision=revision;
+    return *display_image;
+}
 Scanout NativeRaster::capture(const DisplayPlan& plan) {
-    auto& r=*impl_; r.synchronize_source({0,store_words});
+    auto& r=*impl_;
+    if (plan.field!=DisplayField::progressive) {
+        auto& output=r.reconstruct(plan); r.order();
+        VkBufferImageCopy copy{}; copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; copy.imageExtent={plan.width,plan.height,1};
+        vkCmdCopyImageToBuffer(r.command,output.image,VK_IMAGE_LAYOUT_GENERAL,r.readback,1,&copy); r.flush();
+        Scanout frame{plan.width,plan.height,std::vector<std::uint32_t>(std::size_t(plan.width)*plan.height)};
+        std::memcpy(frame.pixels.data(),r.readback_mapping,frame.pixels.size()*4);
+        r.stats.readback_bytes+=frame.pixels.size()*4;
+        return frame;
+    }
+    r.field_count=0; r.previous_field=DisplayField::progressive; r.resolved_revision=0;
+    r.synchronize_source({0,store_words});
     return scanout(r.source,plan);
 }
 bool NativeRaster::changed(const DisplayPlan& plan) {
@@ -778,6 +874,7 @@ void NativeRaster::release_presentation() {
     if (r.present_pipeline) vkDestroyPipeline(r.device,r.present_pipeline,nullptr);
     if (r.present_pass) vkDestroyRenderPass(r.device,r.present_pass,nullptr);
     r.present_pipeline={}; r.present_pass={}; r.last_present=0;
+    r.field_count=0; r.previous_field=DisplayField::progressive; r.resolved_revision=0;
 }
 
 void NativeRaster::wait_submission(std::uint64_t token) {
@@ -791,10 +888,18 @@ void NativeRaster::wait_submission(std::uint64_t token) {
     throw std::logic_error("Native graphics submission retired without completion");
 }
 
-std::uint64_t NativeRaster::present(const DisplayPlan& plan,VkImage target,VkFormat format,VkSemaphore acquired,VkSemaphore rendered) {
+std::uint64_t NativeRaster::present(const DisplayPlan& source_plan,VkImage target,VkFormat format,VkSemaphore acquired,VkSemaphore rendered) {
     auto& r=*impl_;
+    auto plan=source_plan;
     Impl::Image* images[2]{};
-    for (unsigned i=0;i<2;++i) if (plan.control&(1U<<i)) { const auto& s=plan.surfaces[i]; images[i]=&r.display_surface(s.base,s.pitch,s.y+(plan.half_height ? (s.height+1)/2 : s.height)); }
+    if (plan.field!=DisplayField::progressive) {
+        images[0]=images[1]=&r.reconstruct(plan);
+        plan.control=2; plan.half_height=0; plan.field=DisplayField::progressive;
+        plan.surfaces[1]={0,0,0,0,plan.width,plan.height,0,0};
+    } else {
+        r.field_count=0; r.previous_field=DisplayField::progressive; r.resolved_revision=0;
+        for (unsigned i=0;i<2;++i) if (plan.control&(1U<<i)) { const auto& s=plan.surfaces[i]; images[i]=&r.display_surface(s.base,s.pitch,s.y+(plan.half_height ? (s.height+1)/2 : s.height)); }
+    }
     if (!images[0]) images[0]=images[1]; if (!images[1]) images[1]=images[0];
     if (!r.present_pass) {
         VkAttachmentDescription a{}; a.format=format; a.samples=VK_SAMPLE_COUNT_1_BIT; a.loadOp=VK_ATTACHMENT_LOAD_OP_DONT_CARE; a.storeOp=VK_ATTACHMENT_STORE_OP_STORE; a.initialLayout=VK_IMAGE_LAYOUT_UNDEFINED; a.finalLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;

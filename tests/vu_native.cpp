@@ -53,6 +53,12 @@ extern "C" nt::vu::Result nt_vu_p_6(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_p_8(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_p_12(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_p_22(nt::vu::State*);
+extern "C" nt::vu::Result nt_vu_p_26(nt::vu::State*);
+extern "C" nt::vu::Result nt_vu_p_29(nt::vu::State*);
+extern "C" nt::vu::Result nt_vu_p_52(nt::vu::State*);
+extern "C" nt::vu::Result nt_vu_p_55(nt::vu::State*);
+extern "C" nt::vu::Result nt_vu_p_83(nt::vu::State*);
+extern "C" nt::vu::Result nt_vu_p_86(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_flags_0(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_flags_3(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_flags_8(nt::vu::State*);
@@ -309,8 +315,10 @@ int main() {
             scheduled_q.vectors[3][0]!=0x40c00000 || scheduled_q.vectors[4][0]!=0x40c00000 ||
             scheduled_q.vectors[5][0]!=0x41400000 || scheduled_q.quotient_pending || scheduled_q.quotient_read_delay)
             throw std::runtime_error("Scheduled DIV/SQRT/RSQRT did not publish Q without WAITQ");
-        if (nt_vu_q_early(&q)!=nt::vu::Result::unsupported_schedule || q!=pending_q)
-            throw std::runtime_error("Unscheduled Q read did not stop atomically");
+        auto early_q=q;
+        if (nt_vu_q_early(&early_q)!=nt::vu::Result::complete || early_q.vectors[3][0]!=0x40400000 ||
+            early_q.quotient!=0x40000000 || early_q.quotient_pending)
+            throw std::runtime_error("Early Q read did not retain the published value before E drains the result");
         if (quotient_program.run(q,1).status!=nt::vu::RunStatus::complete || q.quotient!=0x40800000 ||
             q.quotient_pending || q.vectors[3][0]!=0x40c00000 || q.vectors[4][0]!=0x40c00000 || q.vectors[5][0]!=0x41400000)
             throw std::runtime_error("Native synchronized quotient operations failed");
@@ -474,6 +482,20 @@ int main() {
                 combined_owner.state.data[0]!=std::array<std::uint32_t,4>{17,18,19,20} ||
                 combined_packets.read(0x10003c30).value!=42)
                 throw std::runtime_error("Combined upload/data/launch did not execute compiled VU code");
+            const auto per_launch=combined_owner.last_result.blocks;
+            std::array<nt::ee::NativeSubmissionStep,2> sequence;
+            for (auto& step:sequence) step.launch=nt::ee::NativeLaunchView{0,0,0};
+            nt::ee::NativeVuLaunch bounded(combined_binding,per_launch,nullptr,per_launch*2);
+            bounded.state=combined_owner.state;
+            if (bounded.submit_sequence(1,sequence)!=nt::ee::Stop::budget || bounded.last_sequence.launches!=2 ||
+                bounded.last_sequence.blocks!=per_launch*2 || bounded.last_sequence.largest_launch!=per_launch)
+                throw std::runtime_error("Sequence incorrectly spent its per-launch budget across separate calls");
+            nt::ee::NativeVuLaunch insufficient(combined_binding,per_launch,nullptr,per_launch*2-1);
+            insufficient.state=combined_owner.state;
+            const auto unchanged_sequence=insufficient.state;
+            if (insufficient.submit_sequence(1,sequence)!=nt::ee::Stop::unsupported_vector ||
+                insufficient.last_result.status!=nt::vu::RunStatus::budget_exhausted || insufficient.state!=unchanged_sequence)
+                throw std::runtime_error("Aggregate compiled-work budget failed to roll back the sequence");
         }
         launch_owner.connect(packets);
         launch_owner.state.integers[0]=launch_owner.state.integers[1]=1;
@@ -896,22 +918,41 @@ int main() {
         if (nt_vu_p_0(&p)!=nt::vu::Result::transfer || p.next_pair!=3 || p.scalar_p!=0x3f800000 ||
             p.p_pending!=1 || p.pending_p!=0x3e4ccccd)
             throw std::runtime_error("Native reciprocal length did not preserve pending result");
-        const auto pending_p=p;
-        if (nt_vu_p_6(&p)!=nt::vu::Result::unsupported_schedule || p!=pending_p)
-            throw std::runtime_error("Unscheduled P read was not atomic");
+        auto early_p=p;
+        if (nt_vu_p_6(&early_p)!=nt::vu::Result::complete ||
+            early_p.vectors[1]!=std::array<std::uint32_t,4>{0x3f800000,0x3f800000,0x3f800000,0x3f800000} ||
+            early_p.scalar_p!=0x3e4ccccd || early_p.p_pending || early_p.p_read_delay)
+            throw std::runtime_error("Early P read did not retain the published value before E drains the result");
+        const std::array p_starts{nt_vu_p_26,nt_vu_p_52,nt_vu_p_83};
+        const std::array p_finishes{nt_vu_p_29,nt_vu_p_55,nt_vu_p_86};
+        for (unsigned n=0;n<3;++n) {
+            auto timed=p_initial; timed.vectors[0][3]=0x41800000;
+            if (p_starts[n](&timed)!=nt::vu::Result::transfer || !timed.p_pending)
+                throw std::runtime_error("EFU producer did not carry publication across a native block");
+            const auto expected=timed.pending_p;
+            if (p_finishes[n](&timed)!=nt::vu::Result::complete || timed.vectors[2][0]!=p_initial.scalar_p ||
+                timed.vectors[3][0]!=expected || timed.p_pending || timed.p_read_delay)
+                throw std::runtime_error("EFU publication boundary selected the wrong P value");
+        }
         if (nt_vu_p_3(&p)!=nt::vu::Result::complete || p.p_pending || p.scalar_p!=0x3e4ccccd ||
             p.vectors[1]!=std::array<std::uint32_t,4>{0x3e4ccccd,22,0x3e4ccccd,44} || p.status!=0xabc || p.mac!=0x1234)
             throw std::runtime_error("Native WAITP/MFP result or flags failed");
         auto zero_p=p_initial; zero_p.vectors[0]={};
         if (nt_vu_p_0(&zero_p)!=nt::vu::Result::transfer || nt_vu_p_3(&zero_p)!=nt::vu::Result::complete || zero_p.scalar_p!=0)
             throw std::runtime_error("Zero-length native EFU result failed");
-        for (const auto invalid:{0x7f800000U,0x7f7fffffU,0x00800000U}) {
+        for (const auto tiny:{0x00800000U,0x80800000U,0x10000000U,0x90000000U}) {
+            auto small=p_initial; small.vectors[0]={tiny,tiny,tiny,0};
+            if (nt_vu_p_0(&small)!=nt::vu::Result::transfer || nt_vu_p_3(&small)!=nt::vu::Result::complete ||
+                small.scalar_p || small.status!=p_initial.status || small.mac!=p_initial.mac)
+                throw std::runtime_error("EFU squared underflow did not preserve zero-length and flag semantics");
+        }
+        for (const auto invalid:{0x7f800000U,0x7f7fffffU}) {
             auto bad_p=p_initial; bad_p.vectors[0][0]=invalid;
             const auto before=bad_p;
             if (nt_vu_p_0(&bad_p)!=nt::vu::Result::unsupported_numeric || bad_p!=before)
                 throw std::runtime_error("Unsupported native EFU input did not roll back");
         }
-        for (const auto input:{0U,0x3f800000U,0xbf800000U}) {
+        for (const auto input:{0U,0x00800000U,0x80800000U,0x3f800000U,0xbf800000U}) {
             nt::vu::State sine;
             sine.vectors[0]={0x7f800000,0x7f800000,input,0x7f800000};
             if (nt_vu_p_8(&sine)!=nt::vu::Result::complete || sine.p_pending ||

@@ -63,7 +63,7 @@ constexpr VkDeviceSize display_offset=9*1024*1024+1024;
 constexpr VkDeviceSize display_bytes=2048*2048*4;
 constexpr VkDeviceSize buffer_bytes=display_offset+display_bytes;
 static_assert(writes_offset+max_writes*sizeof(PixelWrite)<display_offset-4);
-static_assert(sizeof(DisplayPlan)==88);
+static_assert(sizeof(DisplayPlan)==96);
 static_assert(sizeof(PixelWrite)==12);
 static_assert(sizeof(RasterVertex)==40);
 static_assert(sizeof(Sprite)==128);
@@ -438,7 +438,7 @@ void validate_sprite(const Sprite& draw) {
     if ((draw.flags&indexed8_flag) && !(draw.flags&64)) throw std::runtime_error("Invalid indexed texture flags");
 
     if (draw.flags&~(((1U<<22)-1)|line_flag|indexed8_flag|fog_flag)) throw std::runtime_error("Unknown Vulkan draw flags");
-    if ((draw.flags&line_flag) && (draw.flags&(1|triangle_flag|coverage_flag|perspective_triangle_flag)))
+    if ((draw.flags&line_flag) && (draw.flags&(1|triangle_flag|perspective_triangle_flag)))
         throw std::runtime_error("Unsupported native line attributes");
     if (draw.right>2048 || draw.bottom>2048 || draw.left>draw.right || draw.top>draw.bottom || !draw.pitch || draw.pitch>63 || draw.base>16383)
         throw std::runtime_error("Invalid Vulkan sprite bounds or GS memory");
