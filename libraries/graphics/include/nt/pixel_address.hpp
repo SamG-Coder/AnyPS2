@@ -9,6 +9,14 @@ inline unsigned rgba_word(unsigned base,unsigned pitch,unsigned x,unsigned y) {
     const auto word=(x&1)|((y&1)<<1)|((x&6)<<1)|((y&6)<<3);
     return (base*64+page*2048+block*64+word)&0xfffff;
 }
+inline unsigned indexed_byte(unsigned base,unsigned pitch,unsigned x,unsigned y) {
+    x&=2047; y&=2047;
+    const auto page=(y/64)*(pitch/2)+x/128;
+    const auto block=((x>>4)&1)|(((y>>4)&1)<<1)|(((x>>5)&1)<<2)|(((y>>5)&1)<<3)|(((x>>6)&1)<<4);
+    const auto column=((x&1)<<2)|((x&2)<<3)|(((x>>2 ^ y>>1 ^ y>>2)&1)<<5)|
+        ((x&8)>>2)|((y&1)<<3)|((y&2)>>1)|((y&4)<<4)|((y&8)<<4);
+    return (base*256+page*8192+block*256+column)&0x3fffff;
+}
 inline unsigned indexed_nibble(unsigned base,unsigned pitch,unsigned x,unsigned y) {
     x&=2047; y&=2047;
     const auto page=(y/128)*(pitch/2)+x/128;

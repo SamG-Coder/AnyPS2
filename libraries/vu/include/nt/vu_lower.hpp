@@ -7,8 +7,9 @@ enum class LowerOperation { unsupported, literal, branch, integer_add, integer_s
     integer_add_immediate, integer_subtract_immediate, integer_and, integer_or,
     move, rotate, vector_to_integer, integer_to_vector, divide, square_root,
     reciprocal_square_root, wait_quotient, load_quad, store_quad, load_integer, store_integer,
-    input_top, input_itop, reciprocal_length, move_p, wait_p, mac_and, mac_or, mac_equal, graphics_kick,
-    clip_and, clip_or, clip_equal, clip_set, clip_get };
+    input_top, input_itop, reciprocal_length, sine, efu_square_root, move_p, wait_p, mac_and, mac_or, mac_equal, graphics_kick,
+    clip_and, clip_or, clip_equal, clip_set, clip_get,
+    status_and, status_or, status_equal };
 enum class AddressUpdate { none, increment, decrement };
 enum class Bank { none, vector, integer, immediate, quotient };
 struct Register {

@@ -15,6 +15,7 @@ struct NativePacketConsumer {
     void* context=nullptr;
     Stop (*consume)(void*,unsigned,std::span<const std::uint8_t>)=nullptr;
     bool (*pending)(void*,unsigned)=nullptr;
+    Stop (*consume_with_origins)(void*,unsigned,std::span<const std::uint8_t>,std::span<const NativePacketOrigin>)=nullptr;
 };
 class NativePacketSubmission {
 public:
@@ -61,7 +62,8 @@ public:
             if (result!=Stop::budget) return result;
             next[1]=config[1]+size; next[0]=value;
         }
-        const auto result=consumer.consume(consumer.context,channel,payload);
+        const auto result=consumer.consume_with_origins ? consumer.consume_with_origins(consumer.context,channel,payload,batch.origins) :
+            consumer.consume(consumer.context,channel,payload);
         if (result!=Stop::budget) return result;
         if (consumer.pending && consumer.pending(consumer.context,channel)) {
             pending_[channel]=next; config[0]=value; return Stop::budget;

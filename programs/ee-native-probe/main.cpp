@@ -100,6 +100,7 @@ struct NativeGpu {
     }
     static nt::ee::Stop poll(void* context) {
         auto& self=*static_cast<NativeGpu*>(context);
+        if (!self.error.empty()) return nt::ee::Stop::unsupported_system;
         if (!self.renderer) return nt::ee::Stop::budget;
         try {
             if (self.renderer->validation_errors()) {
@@ -427,26 +428,28 @@ int main(int argc,char** argv) {
         nt::ee::Stop input_stop=nt::ee::Stop::budget;
         std::array<std::uint16_t,2> last_buttons{};
         std::uint64_t input_button_changes=0;
-        bool timed_out=false,window_closed=false,application_exit=false;
+        bool timed_out=false,window_closed=false,application_exit=false,display_failed=false;
         auto present_output=[&] {
-            if (!window || window_closed) return;
-            const auto& output=platform.graphics.output();
-            if (const auto plan=nt::graphics::plan_display(output.control,output.buffers,output.displays,
-                    platform.graphics.half_height_output(),std::uint32_t(output.background))) {
-                const auto present_started=std::chrono::steady_clock::now();
-                const auto updated=window->present(*plan);
-                if (profile_graphics && updated) {
-                    const auto completed=std::chrono::steady_clock::now();
-                    if (last_update!=std::chrono::steady_clock::time_point{})
-                        update_intervals.push_back(std::chrono::duration<double,std::milli>(completed-last_update).count());
-                    last_update=completed; ++profile_updates;
+            if (!window || window_closed || display_failed) return;
+            try {
+                const auto& output=platform.graphics.output();
+                if (const auto plan=nt::graphics::plan_display(output.control,output.buffers,output.displays,
+                        platform.graphics.half_height_output(),std::uint32_t(output.background))) {
+                    const auto present_started=std::chrono::steady_clock::now();
+                    const auto updated=window->present(*plan);
+                    if (profile_graphics && updated) {
+                        const auto completed=std::chrono::steady_clock::now();
+                        if (last_update!=std::chrono::steady_clock::time_point{})
+                            update_intervals.push_back(std::chrono::duration<double,std::milli>(completed-last_update).count());
+                        last_update=completed; ++profile_updates;
+                    }
+                    presentation_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-present_started).count();
+                    if (gpu.capture) {
+                        const auto frame=gpu.renderer->scanout_readback(*plan);
+                        gpu.capture->present(frame,gpu.drawing.submitted_draws(),output.control,output.buffers,output.displays,platform.graphics.half_height_output());
+                    }
                 }
-                presentation_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-present_started).count();
-                if (gpu.capture) {
-                    const auto frame=gpu.renderer->scanout_readback(*plan);
-                    gpu.capture->present(frame,gpu.drawing.submitted_draws(),output.control,output.buffers,output.displays,platform.graphics.half_height_output());
-                }
-            }
+            } catch (const std::exception& error) { display_failed=true; gpu.error=error.what(); }
         };
         platform.graphics.scanout_context=&present_output;
         platform.graphics.scanout_ready=[](void* raw) { (*static_cast<decltype(present_output)*>(raw))(); };
@@ -479,6 +482,13 @@ int main(int argc,char** argv) {
                     <<" gpu_timing_supported="<<s.gpu_timing_supported<<" gpu_ms="<<(s.gpu_ns-p.gpu_ns)/1e6
                     <<" wait_ms="<<(s.wait_ns-p.wait_ns)/1e6<<" upload_ms="<<(s.upload_ns-p.upload_ns)/1e6
                     <<" decode_ms="<<(s.texture_decode_ns-p.texture_decode_ns)/1e6
+                    <<" surface_import_ms="<<(s.surface_import_ns-p.surface_import_ns)/1e6
+                    <<" surface_export_ms="<<(s.surface_export_ns-p.surface_export_ns)/1e6
+                    <<" surface_conflicts="<<(s.surface_conflicts-p.surface_conflicts)
+                    <<" texture_readbacks="<<(s.texture_readbacks-p.texture_readbacks)
+                    <<" palette_readbacks="<<(s.palette_readbacks-p.palette_readbacks)
+                    <<" conflict_view="<<s.last_surface_conflict[0]<<','<<s.last_surface_conflict[1]<<','<<s.last_surface_conflict[2]<<','<<s.last_surface_conflict[3]
+                    <<" conflict_other="<<s.last_surface_conflict[4]<<','<<s.last_surface_conflict[5]<<','<<s.last_surface_conflict[6]<<','<<s.last_surface_conflict[7]
                     <<" texture_kernels="<<(s.texture_kernel_dispatches-p.texture_kernel_dispatches)
                     <<" texture_kernels_verified="<<(s.texture_kernel_verified-p.texture_kernel_verified)
                     <<" validation_errors="<<gpu.renderer->validation_errors()
@@ -627,10 +637,16 @@ int main(int argc,char** argv) {
                 probe::capture_image(stop_directory/"last-render-target.ppm",draw.right,draw.bottom,
                     [&](unsigned x,unsigned y) { return pixels[nt::graphics::rgba_word(draw.base,draw.pitch,x,y)]; });
                 const auto& output=platform.graphics.output();
-                const auto frame=nt::graphics::scanout(pixels,output.control,output.buffers,output.displays,platform.graphics.half_height_output());
+                const auto frame=display_failed ? std::nullopt : nt::graphics::scanout(pixels,output.control,output.buffers,output.displays,platform.graphics.half_height_output());
                 if (frame) probe::capture_image(stop_directory/"selected-display.ppm",frame->width,frame->height,
                     [&](unsigned x,unsigned y) { return frame->pixels[y*frame->width+x]; });
             }
+        }
+        if (display_failed) {
+            const auto& output=platform.graphics.output();
+            std::cout<<"display_failure_control="<<std::hex<<output.control
+                     <<" buffer0="<<output.buffers[0]<<" buffer1="<<output.buffers[1]
+                     <<" display0="<<output.displays[0]<<" display1="<<output.displays[1]<<std::dec<<'\n';
         }
         std::cout<<"graphics_draws="<<gpu.drawing.submitted_draws()<<" half_height_output="<<platform.graphics.half_height_output()<<'\n';
         std::cout<<"native_completion_status="<<nt::hex32(platform.completions.status())
@@ -640,7 +656,8 @@ int main(int argc,char** argv) {
             std::cout<<"packet_channel="<<channel<<" control="<<nt::hex32(platform.packet_submission.read(0x10008000+channel*0x1000).value)
                      <<" consumer_pending="<<platform.packet_setup.pending(channel)<<'\n';
         std::cout<<"stop="<<static_cast<unsigned>(stop)<<" pc="<<nt::hex32(state.pc)
-                 <<" executed="<<state.executed<<" v0="<<state.gpr[2].lo<<" syscall="<<state.gpr[3].lo;
+                 <<" executed="<<state.executed<<" v0="<<state.gpr[2].lo
+                 <<(stop==nt::ee::Stop::syscall ? " syscall=" : " v1=")<<state.gpr[3].lo;
         if (stop==nt::ee::Stop::memory_fault || stop==nt::ee::Stop::code_write || stop==nt::ee::Stop::unpublished_code || (stop==nt::ee::Stop::unsupported_system && memory.fault_address))
             std::cout<<" address="<<nt::hex32(memory.fault_address);
         if (stop==nt::ee::Stop::unmapped_code) std::cout<<" return_address="<<nt::hex32(static_cast<std::uint32_t>(state.gpr[31].lo));
@@ -693,12 +710,14 @@ int main(int argc,char** argv) {
 #ifdef ANYPS2_NATIVE_VU
             std::cout<<" compiled_vu_unit="<<nt_vu_program_unit()<<" compiled_vu_ready="<<compiled_vu.ready()
                 <<" vu0_run_status="<<static_cast<unsigned>(compiled_vu_launch.last_result.status)
-                <<" vu0_blocks="<<compiled_vu_launch.last_result.blocks;
+                <<" vu0_blocks="<<compiled_vu_launch.last_result.blocks
+                <<" vu0_entry="<<compiled_vu_launch.last_entry<<" vu0_next_pair="<<compiled_vu_launch.last_next_pair;
 #endif
 #ifdef ANYPS2_NATIVE_VU1
             std::cout<<" compiled_vu1_ready="<<compiled_vu1.ready()
                 <<" vu1_run_status="<<static_cast<unsigned>(compiled_vu1_launch.last_result.status)
-                <<" vu1_blocks="<<compiled_vu1_launch.last_result.blocks;
+                <<" vu1_blocks="<<compiled_vu1_launch.last_result.blocks
+                <<" vu1_entry="<<compiled_vu1_launch.last_entry<<" vu1_next_pair="<<compiled_vu1_launch.last_next_pair;
 #endif
             if (gpu.renderer) std::cout<<" graphics_resets="<<platform.graphics.resets()<<" gpu=\""<<gpu.renderer->device_name()<<"\"";
             if (cdvd) std::cout<<" cdvd_initialized="<<cdvd->initialized();
@@ -713,7 +732,7 @@ int main(int argc,char** argv) {
                      <<" a1="<<nt::hex32(static_cast<std::uint32_t>(state.gpr[5].lo));
         }
         std::cout<<'\n';
-        if (window && !application_exit && !window_closed) {
+        if (window && !application_exit && !window_closed && !display_failed) {
             const auto& output=platform.graphics.output();
             const auto frame=nt::graphics::scanout(gpu.drawing.pixels(),output.control,output.buffers,output.displays,platform.graphics.half_height_output(),std::uint32_t(output.background));
             if (frame) {

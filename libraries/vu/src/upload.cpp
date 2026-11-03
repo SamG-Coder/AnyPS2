@@ -5,6 +5,38 @@
 #include <map>
 
 namespace nt::vu {
+std::vector<DeclaredUploadImage> recover_declared_uploads(ByteView file,std::span<const elf::VectorOverlay> overlays) {
+    std::vector<DeclaredUploadImage> result;
+    std::optional<elf::VectorOverlay> previous;
+    for (const auto& overlay:overlays) {
+        require_range(file,overlay.file_offset,overlay.size);
+        if (!overlay.size || overlay.size%8 || overlay.destination%8 ||
+            std::uint64_t(overlay.destination)+overlay.size>16384)
+            throw std::invalid_argument("Invalid declared VU upload range");
+        bool adjacent=false;
+        if (previous && previous->destination+previous->size==overlay.destination) {
+            const auto end=std::uint64_t(previous->file_offset)+previous->size;
+            const auto source_end=std::uint64_t(previous->source_address)+previous->size;
+            if (overlay.file_offset>=end+4 && overlay.file_offset-end<=4096 &&
+                end%4==0 && overlay.file_offset%4==0 && overlay.source_address>=source_end &&
+                overlay.source_address-source_end==overlay.file_offset-end) {
+                const auto command=le32(file,overlay.file_offset-4);
+                const auto count=(command>>16)&255U;
+                adjacent=(command>>24)==0x4a && (command&65535U)==overlay.destination/8 &&
+                    (count ? count : 256U)*8==overlay.size;
+                for (auto at=end;adjacent && at<overlay.file_offset-4;at+=4)
+                    adjacent=le32(file,static_cast<std::size_t>(at))==0;
+            }
+        }
+        if (!adjacent) result.push_back({{overlay.destination/8,{}},{}});
+        auto& group=result.back();
+        const auto payload=file.subspan(overlay.file_offset,overlay.size);
+        group.image.bytes.insert(group.image.bytes.end(),payload.begin(),payload.end());
+        group.sources.push_back(overlay.source_address);
+        previous=overlay;
+    }
+    return result;
+}
 std::vector<Upload> assemble_uploads(std::span<const Upload> uploads,unsigned unit) {
     if (unit>1) throw std::invalid_argument("Invalid VU unit");
     std::map<unsigned,std::array<std::uint8_t,8>> image;

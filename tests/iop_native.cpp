@@ -2185,6 +2185,22 @@ int main() {
             blank.post(true);
             blank.invoke({9,{1,0x2140},NativeServiceKind::vblank},ram);
             check(!blank.take(),"Released display callback remained queued");
+            {
+                NativeVblankServices backlog;
+                NativeInterruptServices backlogged_irq(0xf000,&backlog);
+                NativeServiceRouter backlog_services({&backlogged_irq,&backlog});
+                backlog.invoke({8,{1,16,0x2140,0xc724},NativeServiceKind::vblank},ram);
+                store_native_word(ram,0xc724,0);
+                for (unsigned i=0;i<256;++i) check(backlog.try_post(true),"Vblank queue rejected its bounded capacity");
+                check(!backlog.try_post(true) && !backlog.failure(),"Vblank backpressure became a fatal overflow");
+                backlogged_irq.invoke({9,{},NativeServiceKind::intrman},ram);
+                auto callback_cpu=initial(); callback_cpu.pc=0xfffffffc;
+                check(backlogged_irq.run(nt_iop_generated_run,callback_cpu,ram,100000,backlog_services).reason==NativeStop::unmapped_code &&
+                    load_native_word(ram,0xc724)==256,"Backpressured Vblank callbacks were lost or duplicated");
+                check(backlog.try_post(true),"Drained Vblank queue did not accept a retried edge");
+                check(backlogged_irq.run(nt_iop_generated_run,callback_cpu,ram,1000,backlog_services).reason==NativeStop::unmapped_code &&
+                    load_native_word(ram,0xc724)==257,"Retried Vblank edge did not execute its compiled callback");
+            }
             std::uint64_t ns=0;
             NativeHardTimers timers([&] { return ns; }); timers.connect(irq);
             const auto call=[&](unsigned op,std::uint32_t a=0,std::uint32_t b=0,std::uint32_t c=0) {
@@ -3753,6 +3769,12 @@ int main() {
                 check(serial.pending_output().empty(),"Serial reset retained pending output");
                 NativeInterruptServices serial_events(0x8000);
                 serial.connect_disconnected_ports(serial_events);
+                auto port_status=initial(); port_status.pc=0x101bc; port_status.registers[2]=0x9f808270;
+                check(run_native(nt_iop_generated_run,port_status,sio2_ram,1,&serial).reason==NativeStop::budget &&
+                      port_status.load_register==2 && port_status.load_value==15 &&
+                      serial.invoke({0,{0x1f808280},NativeServiceKind::serial},sio2_ram).value==0 &&
+                      serial.invoke({0,{0x1f808264,0,1},NativeServiceKind::serial},sio2_ram).status==NativeServiceStatus::unavailable,
+                      "Idle native port status fabricated a completed serial transaction");
                 serial.invoke({1,{0x1f808200,(2U<<8)|(2U<<18)},NativeServiceKind::serial},sio2_ram);
                 const auto short_start=serial.invoke({1,{0x1f808268,1},NativeServiceKind::serial},sio2_ram);
                 check(short_start.status==NativeServiceStatus::unavailable &&

@@ -1,11 +1,8 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 layout(local_size_x=8,local_size_y=8) in;
 layout(set=0,binding=0,std430) buffer Memory { uint pixels[]; } memory;
-struct Surface { uint base,pitch,x,y,width,height; };
-layout(push_constant) uniform Display {
-    Surface surfaces[2];
-    uint width,height,control,background,half_height,bgra;
-} display;
+#include "display_composition.glsl"
 uint address(uint base,uint pitch,uint x,uint y) {
     x &= 2047; y &= 2047;
     uint page=(y/32)*pitch+x/64;
@@ -15,23 +12,13 @@ uint address(uint base,uint pitch,uint x,uint y) {
 }
 uint sample_surface(uint index,uint x,uint y) {
     Surface s=display.surfaces[index];
+    x-=s.offset_x; y-=s.offset_y;
     return memory.pixels[address(s.base,s.pitch,s.x+x,s.y+(display.half_height!=0 ? y/2 : y))]|0xff000000;
 }
 void main() {
     uint x=gl_GlobalInvocationID.x,y=gl_GlobalInvocationID.y;
     if (x>=display.width || y>=display.height) return;
-    uint enabled=display.control&3;
-    uint color=display.background|0xff000000;
-    if (enabled==3 || (enabled==1 && (display.control&32)!=0)) {
-        if ((enabled&2)!=0 && (display.control&128)==0 && x<display.surfaces[1].width && y<display.surfaces[1].height)
-            color=sample_surface(1,x,y);
-        if (x<display.surfaces[0].width && y<display.surfaces[0].height) {
-            uint source=sample_surface(0,x,y),alpha=(display.control>>8)&255,blended=0xff000000;
-            for (uint shift=0;shift<24;shift+=8)
-                blended|=((((source>>shift)&255)*alpha+((color>>shift)&255)*(255-alpha)+127)/255)<<shift;
-            color=blended;
-        }
-    } else color=sample_surface(enabled==2 ? 1 : 0,x,y);
+    uint color=compose_display(x,y);
     if (display.bgra!=0) color=(color&0xff00ff00)|((color&255)<<16)|((color>>16)&255);
     uint index=2359552+y*display.width+x;
     if (memory.pixels[index]!=color) atomicOr(memory.pixels[2359551],1);

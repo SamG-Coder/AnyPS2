@@ -12,13 +12,13 @@ struct ImageUpload {
         if (direction==3) return {};
         if (direction) throw std::invalid_argument("Native image upload requires host-to-local direction");
         const unsigned format=(buffer>>56)&63;
-        if ((format>1 && format!=20) || ((position>>59)&3)) throw std::invalid_argument("Unsupported native image format or traversal");
+        if ((format>1 && format!=19 && format!=20) || ((position>>59)&3)) throw std::invalid_argument("Unsupported native image format or traversal");
         ImageUpload upload;
         upload.base=(buffer>>32)&16383; upload.pitch=(buffer>>48)&63;
         upload.x=(position>>32)&2047; upload.y=(position>>48)&2047;
         upload.width=extent&4095; upload.height=(extent>>32)&4095;
         if (!upload.pitch || !upload.width || !upload.height) throw std::invalid_argument("Empty native image upload surface");
-        upload.bits=format==20 ? 4 : format ? 24 : 32;
+        upload.bits=format==20 ? 4 : format==19 ? 8 : format ? 24 : 32;
         return upload;
     }
     void append(const Quadword& value,std::vector<PixelWrite>& writes) {
@@ -26,7 +26,7 @@ struct ImageUpload {
     }
     void append(std::span<const Quadword> values,std::vector<PixelWrite>& writes) {
         if (values.empty()) return;
-        if (bits!=4 && bits!=24 && bits!=32) throw std::invalid_argument("Image payload without active native upload");
+        if (bits!=4 && bits!=8 && bits!=24 && bits!=32) throw std::invalid_argument("Image payload without active native upload");
         // IMAGE packets may contain more data than the declared rectangle.
         // Once it is complete, consume transport padding without writing pixels.
         if (pixel>=width*height) return;
@@ -56,6 +56,9 @@ struct ImageUpload {
                     if (bits==4) {
                         const auto nibble=indexed_nibble(base,pitch,x+column,y+row),shift=(nibble%8)*4;
                         writes.push_back({nibble/8,(std::uint32_t(pending)&15U)<<shift,15U<<shift});
+                    } else if (bits==8) {
+                        const auto byte=indexed_byte(base,pitch,x+column,y+row),shift=(byte%4)*8;
+                        writes.push_back({byte/4,(std::uint32_t(pending)&255U)<<shift,255U<<shift});
                     } else {
                         const auto pixel_mask=bits==32 ? 0xffffffffU : 0xffffffU;
                         writes.push_back({rgba_word(base,pitch,x+column,y+row),std::uint32_t(pending)&pixel_mask,pixel_mask});

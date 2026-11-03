@@ -46,7 +46,7 @@ public:
         // Validate every draw before recording any part of this submission.
         // Parsing already validated uploads/palette addresses and state changes.
         for (const auto& operation:draws) if (const auto* draw=std::get_if<Draw>(&operation)) {
-            const SpriteCommand command{draw->sprite,{},draw->triangle};
+            const SpriteCommand command{draw->sprite,{},draw->triangle,draw->fog_color,draw->fog};
             VulkanRenderer::validate(std::span(&command,1));
         }
         if (resident_) {
@@ -60,8 +60,8 @@ public:
             };
             for (const auto& operation:draws) {
                 if (const auto* draw=std::get_if<Draw>(&operation)) {
-                    SpriteCommand command{draw->sprite,{},draw->triangle};
-                    std::copy_n(candidate.palette.begin()+draw->bank*16,16,command.palette.begin());
+                    SpriteCommand command{draw->sprite,{},draw->triangle,draw->fog_color,draw->fog};
+                    snapshot_palette(std::span(command.palette).first((draw->sprite.flags&indexed8_flag) ? 256 : 16),candidate.palette,draw->bank);
                     pending.push_back(command);
                     if (pending.size()==256) flush();
                     continue;
@@ -69,7 +69,7 @@ public:
                 // Preserve palette, resource-upload and FINISH boundaries.
                 flush();
                 if (const auto* load=std::get_if<PaletteLoad>(&operation)) {
-                    renderer.read_words(load->addresses,std::span(candidate.palette).subspan(load->bank*16,16));
+                    renderer.read_words(load->addresses,std::span(candidate.palette).subspan(load->bank*16,load->addresses.size()));
                 } else if (std::holds_alternative<Finish>(operation)) {
                     // Native queue tokens preserve FINISH ordering without blocking
                     // command consumption on every texture switch.
@@ -96,8 +96,8 @@ public:
         };
         for (const auto& operation:draws) {
             if (const auto* draw=std::get_if<Draw>(&operation)) {
-                SpriteCommand command{draw->sprite,{},draw->triangle};
-                std::copy_n(candidate.palette.begin()+draw->bank*16,16,command.palette.begin());
+                SpriteCommand command{draw->sprite,{},draw->triangle,draw->fog_color,draw->fog};
+                snapshot_palette(std::span(command.palette).first((draw->sprite.flags&indexed8_flag) ? 256 : 16),candidate.palette,draw->bank);
                 sprites.push_back(command);
             } else {
                 flush();
@@ -116,7 +116,7 @@ public:
     }
 private:
     using ImageWrites=std::vector<PixelWrite>;
-    struct Draw { Sprite sprite; unsigned bank; std::array<RasterVertex,3> triangle{}; };
+    struct Draw { Sprite sprite; unsigned bank; std::array<RasterVertex,3> triangle{}; std::uint32_t fog_color=0,fog=0; };
     struct Finish {};
     using Operation=std::variant<Draw,ImageWrites,PaletteLoad,Finish>;
     struct Context {
@@ -130,7 +130,7 @@ private:
         unsigned scan_mask=0;
         std::uint32_t uv=0,first_uv=0,texa=0;
         std::uint32_t s=0,t=0,q=0x3f800000,packed_q=0x3f800000;
-        std::uint32_t fog_color=0;
+        std::uint32_t fog_color=0,fog=0;
         bool use_primitive=false,first=false;
         std::array<RasterVertex,3> vertices{};
         unsigned vertex_count=0;
@@ -161,6 +161,7 @@ private:
         case 1: state.color=std::uint32_t(value); state.q=std::uint32_t(value>>32); return;
         case 2: state.s=std::uint32_t(value); state.t=std::uint32_t(value>>32); return;
         case 3: state.uv=std::uint32_t(value)&0x3fff3fffU; return;
+        case 0xa: state.fog=std::uint32_t(value>>56); return;
         case 6: case 7:
             if (const auto load=plan_palette(value,state.palette_config,state.palette_bases)) draws.push_back(*load);
             state.contexts[reg-6].texture=value; return;
@@ -208,13 +209,14 @@ private:
         auto attributes=state.use_primitive ? state.primitive : state.attributes;
         const unsigned x=value&65535,y=(value>>16)&65535;
         const auto z=std::uint32_t(value>>32)&((reg==4 || reg==12) ? 0xffffffU : 0xffffffffU);
+        if (reg==4 || reg==12) state.fog=std::uint32_t(value>>56);
         const auto primitive=state.primitive&7;
         // Coverage antialiasing belongs to lines and triangles only. A caller
         // may retain AA1 while issuing point draws or rectangular clears.
         if (primitive==0 || primitive==6) attributes&=~128U;
         if (primitive<=2) {
             state.vertices[state.vertex_count++]={int(x),int(y),state.color,state.uv&16383,(state.uv>>16)&16383,
-                std::bit_cast<float>(state.s),std::bit_cast<float>(state.t),std::bit_cast<float>(state.q),z};
+                std::bit_cast<float>(state.s),std::bit_cast<float>(state.t),std::bit_cast<float>(state.q),z,state.fog};
             if (primitive && state.vertex_count<2) return;
             const std::array<RasterVertex,2> vertices{state.vertices[0],state.vertices[primitive ? 1 : 0]};
             state.vertex_count=primitive==2 ? 1 : 0;
@@ -231,14 +233,14 @@ private:
         }
         if (primitive>=3 && primitive<=5) {
             state.vertices[state.vertex_count++]={int(x),int(y),state.color,state.uv&16383,(state.uv>>16)&16383,
-                std::bit_cast<float>(state.s),std::bit_cast<float>(state.t),std::bit_cast<float>(state.q),z};
+                std::bit_cast<float>(state.s),std::bit_cast<float>(state.t),std::bit_cast<float>(state.q),z,state.fog};
             if (state.vertex_count<3) return;
             const auto vertices=state.vertices;
             state.vertex_count=primitive==3 ? 0 : 2;
             if (primitive==4) state.vertices[0]=state.vertices[1];
             if (primitive!=3) state.vertices[1]=state.vertices[2];
             if (reg==12 || reg==13) return;
-            if (attributes&~0x3dfU) throw std::invalid_argument("Unsupported native triangle attributes: "+std::to_string(attributes));
+            if (attributes&~0x3ffU) throw std::invalid_argument("Unsupported native triangle attributes: "+std::to_string(attributes));
             const auto& context=state.contexts[(attributes>>9)&1];
             if (auto draw=plan_triangle(context.frame,context.offset,context.scissor,vertices,(attributes&8)!=0,(attributes&128)!=0)) {
                 configure_draw(state,context,attributes,draw->draw);
@@ -246,14 +248,14 @@ private:
                     plan_texture(draw->draw,context.texture,context.filter,context.clamp,state.texa);
                     if (!(attributes&256)) draw->draw.flags|=perspective_triangle_flag;
                 }
-                draws.push_back(Draw{draw->draw,unsigned((context.texture>>56)&15),draw->triangle});
+                draws.push_back(Draw{draw->draw,unsigned((context.texture>>56)&15),draw->triangle,state.fog_color,state.fog});
             }
             return;
         }
         // Sprites have no edge coverage interpolation; FIX does not alter their
         // fragment values (the SDK uses it for rectangular clears).
         if (primitive==6) attributes&=~1024U;
-        if ((state.primitive&7)!=6 || (attributes&~0x35fU)) {
+        if ((state.primitive&7)!=6 || (attributes&~0x37fU)) {
             if (reg==12 || reg==13) {
                 // Vertex writes with a suppressed kick initialize the latch;
                 // unsupported primitives still stop when a draw is requested.
@@ -274,7 +276,7 @@ private:
                 plan_sprite_texture(*draw,attributes,context.texture,context.filter,context.clamp,state.texa,context.offset,
                     state.x,state.y,x,y,state.first_uv,state.uv);
             }
-            draws.push_back(Draw{*draw,unsigned((context.texture>>56)&15)});
+            draws.push_back(Draw{*draw,unsigned((context.texture>>56)&15),{},state.fog_color,state.fog});
         }
     }
     static void configure_draw(const State& state,const Context& context,unsigned attributes,Sprite& draw) {
@@ -294,6 +296,7 @@ private:
         if (((context.frame>>24)&63)==1) draw.flags|=512;
         if (attributes&128) draw.flags|=coverage_flag;
         if (attributes&64) draw.flags|=alpha_blend_flag;
+        if (attributes&32) draw.flags|=fog_flag;
         if (attributes&(64|128)) {
             for (unsigned shift=0;shift<8;shift+=2)
                 if (((context.alpha>>shift)&3)>2) throw std::invalid_argument("Unsupported native blend selector");
@@ -335,10 +338,12 @@ private:
                     (std::uint64_t(state.packed_q)<<32),draws);
                 else if (reg==2) { state.packed_q=q[2]; command(state,2,half(q,0),draws); }
                 else if (reg==3) command(state,3,(q[0]&16383)|((q[1]&16383)<<16),draws);
+                else if (reg==0xa) command(state,0xa,std::uint64_t((q[3]>>4)&255)<<56,draws);
                 else if (reg==4 || reg==5 || reg==12 || reg==13) {
                     const auto target=reg>=12 || (q[3]&0x8000U) ? (reg&1)+12U : reg;
                     const auto z=(reg&1) ? q[2] : (q[2]>>4)&0xffffffU;
-                    command(state,target,(q[0]&65535)|(std::uint64_t(q[1]&65535)<<16)|(std::uint64_t(z)<<32),draws);
+                    const auto fog=(reg&1) ? 0ULL : (std::uint64_t((q[3]>>4)&255)<<56);
+                    command(state,target,(q[0]&65535)|(std::uint64_t(q[1]&65535)<<16)|(std::uint64_t(z)<<32)|fog,draws);
                 } else throw std::invalid_argument("Unsupported packed native graphics register");
             }
             cursor+=static_cast<std::size_t>(count);

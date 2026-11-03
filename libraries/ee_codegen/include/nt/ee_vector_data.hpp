@@ -43,12 +43,14 @@ struct NativeVectorDataView {
     std::span<const NativeVectorWrite> planned;
     unsigned destination_cycle=256,writes_per_cycle=256;
     unsigned output_count=0;
+    unsigned source_alignment=0; // Payload word position 1..4 in the source quadword; zero means unknown.
+    std::span<const std::uint8_t> following_bytes;
 };
 // Plan bounded data writes and final row values without touching destination storage.
 inline std::optional<NativeVectorPlan> plan_vector_data(std::size_t storage_size,NativeVectorDataView upload) {
     const auto stride=vector_data_stride(upload.format,upload.components);
     if (!storage_size || upload.destination>=storage_size || upload.mode>3 || !stride ||
-        upload.bytes.size()%stride || upload.bytes.size()/stride>256) return {};
+        upload.bytes.size()%stride || upload.bytes.size()/stride>256 || upload.source_alignment>4) return {};
     if (upload.mask && (!upload.mask->cycle || upload.mask->cycle>256)) return {};
     if (!upload.writes_per_cycle || upload.writes_per_cycle>256 || !upload.destination_cycle || upload.destination_cycle>256) return {};
     const bool filling=upload.writes_per_cycle>upload.destination_cycle;
@@ -89,8 +91,29 @@ inline std::optional<NativeVectorPlan> plan_vector_data(std::size_t storage_size
         const auto group=upload.mask ? std::min(unsigned(index)%upload.mask->cycle,3U) : 0U;
         for (unsigned lane=0;lane<4;++lane) {
             const auto selection=upload.mask ? (upload.mask->selectors>>(group*8+lane*2))&3U : 0U;
-            if (upload.components==3 && lane==3 && !selection) return {};
             if (fill && !selection) return {}; // Input-selected fill values require unmodeled lookahead.
+            if (upload.components==3 && lane==3 && !selection) {
+                if (!upload.source_alignment) return {};
+                const auto width=stride/3;
+                const unsigned step=source_index+1;
+                // V3's fourth component follows the source unpack alignment,
+                // not an invented homogeneous coordinate or a retained W lane.
+                const bool peek=width==4 ? (source_index%2)==upload.source_alignment :
+                    width==2 ? !(step%2==0 && ((step/4+5-upload.source_alignment)%4)==0) :
+                    step==upload.source_alignment;
+                auto value=0U;
+                if (peek) {
+                    const auto start=offset+stride;
+                    if (start+width>upload.bytes.size() && start+width-upload.bytes.size()>upload.following_bytes.size()) return {};
+                    for (unsigned byte=0;byte<width;++byte) {
+                        const auto position=start+byte;
+                        const auto part=position<upload.bytes.size() ? upload.bytes[position] : upload.following_bytes[position-upload.bytes.size()];
+                        value|=std::uint32_t(part)<<(byte*8);
+                    }
+                    if (width<4 && !upload.unsigned_values && (value&(1U<<(width*8-1)))) value|=~0U<<(width*8);
+                }
+                write.values[lane]=value;
+            }
             if (selection==1) write.values[lane]=plan.rows[lane];
             else if (selection==2) write.values[lane]=upload.mask->row_column[4+group];
             else if (selection==3) write.lanes&=~(1U<<lane);

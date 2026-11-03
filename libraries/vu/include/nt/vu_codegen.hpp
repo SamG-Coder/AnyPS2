@@ -12,5 +12,11 @@ void emit_llvm(std::ostream& output,std::span<const Pair> pairs,unsigned unit,st
 // block-table and count accessors. Indirect destinations require explicit entries.
 // A bounded number of subsequent E-stop continuations may be discovered offline.
 void emit_program_llvm(std::ostream& output,std::span<const Pair> pairs,unsigned unit,
-    std::span<const unsigned> entries,std::string_view symbol="nt_vu_program",unsigned continuation_depth=0);
+    std::span<const unsigned> entries,std::string_view symbol="nt_vu_program",unsigned continuation_depth=0,
+    bool all_entries=false);
+void emit_catalog_llvm(std::ostream& output,std::span<const std::vector<Pair>> images,
+    unsigned unit,std::string_view symbol);
+// all_entries compiles every pair in the declared image, including independently
+// entered delay pairs. Fallthrough beyond the image remains an unmapped boundary;
+// it is never treated as successful completion or decoded at runtime.
 }

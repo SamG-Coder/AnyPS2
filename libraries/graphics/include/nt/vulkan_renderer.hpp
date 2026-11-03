@@ -22,22 +22,28 @@ inline constexpr std::uint32_t perspective_triangle_flag=1U<<16;
 inline constexpr std::uint32_t depth_test_flag=1U<<17, depth_write_flag=1U<<18;
 inline constexpr std::uint32_t depth_24_flag=1U<<19, coverage_flag=1U<<20, alpha_blend_flag=1U<<21;
 inline constexpr std::uint32_t line_flag=1U<<24;
+inline constexpr std::uint32_t indexed8_flag=1U<<25;
+inline constexpr std::uint32_t fog_flag=1U<<26;
 struct RasterVertex {
     std::int32_t x=0,y=0;
     std::uint32_t color=0;
     std::uint32_t u=0,v=0;
     float s=0,t=0,q=1;
-    std::uint32_t z=0;
+    std::uint32_t z=0,fog=0;
 };
 struct SpriteCommand {
     Sprite draw;
-    std::array<std::uint32_t,16> palette{};
+    std::array<std::uint32_t,256> palette{};
     std::array<RasterVertex,3> triangle{};
+    std::uint32_t fog_color=0,fog=0;
 };
 struct RenderStatistics {
     std::uint64_t submissions=0,sprites=0,upload_bytes=0,readback_bytes=0;
     std::uint64_t triangles=0,texture_snapshot_bytes=0,direct_texture_draws=0;
     std::uint64_t wait_ns=0,upload_ns=0,write_ns=0,draw_ns=0,texture_decode_ns=0;
+    std::uint64_t surface_import_ns=0,surface_export_ns=0;
+    std::uint64_t surface_conflicts=0,texture_readbacks=0,palette_readbacks=0;
+    std::array<std::uint32_t,8> last_surface_conflict{}; // base, pitch, height, depth for each view.
     std::uint64_t uploads=0,feedback_barriers=0,gpu_ns=0;
     std::uint64_t draw_calls=0,batched_primitives=0;
     bool gpu_timing_supported=false;

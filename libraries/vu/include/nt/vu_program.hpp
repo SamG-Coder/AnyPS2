@@ -27,13 +27,14 @@ struct Control {
     std::optional<unsigned> target;
 };
 Control control(const Pair& pair,unsigned unit);
+bool direct_delayed_branch(const Pair& first,const Pair& second,unsigned unit);
 struct Transfer {
     unsigned address,delay_slot;
     Control control;
     bool terminates=false;
 };
 struct Flow {
-    std::set<unsigned> reachable,missing,indirect,complex_delay;
+    std::set<unsigned> reachable,missing,indirect,complex_delay,delayed_continuations;
     std::vector<Transfer> transfers;
 };
 // Discover compilation candidates from explicit entry points. Link continuations

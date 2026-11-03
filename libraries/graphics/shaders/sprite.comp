@@ -29,6 +29,15 @@ uint nibble_address(uint base,uint pitch,uint x,uint y) {
         ((x&8)>>2)|((x&16)>>2)|((y&1)<<4)|((y&2)>>1)|((y&4)<<5)|((y&8)<<5);
     return (base*512+page*16384+block*512+column)&0x7fffff;
 }
+uint byte_address(uint base,uint pitch,uint x,uint y) {
+    x&=2047; y&=2047;
+    uint page=(y/64)*(pitch/2)+x/128;
+    uint block=((x>>4)&1)|(((y>>4)&1)<<1)|(((x>>5)&1)<<2)|(((y>>5)&1)<<3)|(((x>>6)&1)<<4);
+    uint column=((x&1)<<2)|((x&2)<<3)|(((x>>2 ^ y>>1 ^ y>>2)&1)<<5)|
+        ((x&8)>>2)|((y&1)<<3)|((y&2)>>1)|((y&4)<<4)|((y&8)<<4);
+    return (base*256+page*8192+block*256+column)&0x3fffff;
+}
+
 uint wrap(int t,uint size,uint mode,uint low,uint high) {
     if(mode==0) return uint(t)&(size-1);
     if(mode==1) return uint(clamp(t,0,int(size)-1));
@@ -41,8 +50,9 @@ uint texel_at(int u,int v) {
         uint texture_offset=(draw.flags&4194304)!=0 ? 0 : 1048576;
         uint texel=memory.pixels[texture_offset+address(draw.texture_base,draw.texture_pitch,tx,ty)];
         if((draw.flags&64)!=0) {
-            uint nibble=nibble_address(draw.texture_base,draw.texture_pitch,tx,ty);
-            uint index=(memory.pixels[texture_offset+nibble/8]>>((nibble%8)*4))&15;
+            bool eight=(draw.flags&33554432)!=0;
+            uint nibble=eight ? byte_address(draw.texture_base,draw.texture_pitch,tx,ty)*2 : nibble_address(draw.texture_base,draw.texture_pitch,tx,ty);
+            uint index=(memory.pixels[texture_offset+nibble/8]>>((nibble%8)*4))&(eight ? 255 : 15);
             texel=memory.pixels[2097152+index];
         }
         if((draw.flags&2)!=0) {
@@ -75,10 +85,10 @@ int blend_channel(uint select,int source,int destination) {
     return select==0 ? source : select==1 ? destination : 0;
 }
 ivec2 vertex_position(uint index) {
-    return ivec2(memory.pixels[2097168+index*9],memory.pixels[2097169+index*9]);
+    return ivec2(memory.pixels[2097408+index*10],memory.pixels[2097409+index*10]);
 }
 vec3 vertex_stq(uint index) {
-    uint first=2097173+index*9;
+    uint first=2097413+index*10;
     return uintBitsToFloat(uvec3(memory.pixels[first],memory.pixels[first+1],memory.pixels[first+2]));
 }
 int64_t edge(ivec2 a,ivec2 b,ivec2 p) {
@@ -92,7 +102,7 @@ void main() {
     if ((draw.flags&8388608)!=0) {
         uint index=gl_GlobalInvocationID.x+gl_GlobalInvocationID.y*gl_NumWorkGroups.x*8;
         if (index>=draw.right) return;
-        uint entry=2097216+index*3;
+        uint entry=2097472+index*3;
         uint target=memory.pixels[entry], value=memory.pixels[entry+1], mask=memory.pixels[entry+2];
         memory.pixels[target]=(memory.pixels[target]&~mask)|value;
         return;
@@ -108,9 +118,9 @@ void main() {
     if ((draw.flags&16777216)!=0) {
         int64_t numerator,denominator;
         if (!line_sample(ivec2(x,y),vertex_position(0),vertex_position(1),numerator,denominator)) return;
-        depth=line_value(memory.pixels[2097176],memory.pixels[2097185],numerator,denominator);
+        depth=line_value(memory.pixels[2097416],memory.pixels[2097426],numerator,denominator);
         if ((draw.flags&32768)!=0)
-            color=line_color(memory.pixels[2097170],memory.pixels[2097179],numerator,denominator);
+            color=line_color(memory.pixels[2097410],memory.pixels[2097420],numerator,denominator);
     }
     if ((draw.flags&16384)!=0) {
         ivec2 a=vertex_position(0),b=vertex_position(1),c=vertex_position(2),p=ivec2(x,y)*16;
@@ -136,8 +146,8 @@ void main() {
         } else if (!covered(w0,b,c) || !covered(w1,c,a) || !covered(w2,a,b)) return;
         int64_t area=w0+w1+w2;
         if ((draw.flags&131072)!=0)
-            depth=uint((uint64_t(memory.pixels[2097176])*uint64_t(w0)+
-                uint64_t(memory.pixels[2097185])*uint64_t(w1)+uint64_t(memory.pixels[2097194])*uint64_t(w2))/uint64_t(area));
+            depth=uint((uint64_t(memory.pixels[2097416])*uint64_t(w0)+
+                uint64_t(memory.pixels[2097426])*uint64_t(w1)+uint64_t(memory.pixels[2097436])*uint64_t(w2))/uint64_t(area));
         if ((draw.flags&1)!=0) {
             if ((draw.flags&65536)!=0) {
                 vec3 weights=vec3(float(w0),float(w1),float(w2))/float(area);
@@ -145,12 +155,12 @@ void main() {
                 uf=int(floor(stq.x/stq.z*float(draw.texture_width)*16.0));
                 vf=int(floor(stq.y/stq.z*float(draw.texture_height)*16.0));
             } else {
-                uf=int((int64_t(memory.pixels[2097171])*w0+int64_t(memory.pixels[2097180])*w1+int64_t(memory.pixels[2097189])*w2)/area);
-                vf=int((int64_t(memory.pixels[2097172])*w0+int64_t(memory.pixels[2097181])*w1+int64_t(memory.pixels[2097190])*w2)/area);
+                uf=int((int64_t(memory.pixels[2097411])*w0+int64_t(memory.pixels[2097421])*w1+int64_t(memory.pixels[2097431])*w2)/area);
+                vf=int((int64_t(memory.pixels[2097412])*w0+int64_t(memory.pixels[2097422])*w1+int64_t(memory.pixels[2097432])*w2)/area);
             }
         }
         if ((draw.flags&32768)!=0) {
-            uint ca=memory.pixels[2097170],cb=memory.pixels[2097179],cc=memory.pixels[2097188];
+            uint ca=memory.pixels[2097410],cb=memory.pixels[2097420],cc=memory.pixels[2097430];
             color=0;
             for (uint channel=0;channel<4;++channel) {
                 int64_t sum=int64_t((ca>>(8*channel))&255)*w0+

@@ -13,7 +13,7 @@ namespace nt::ee {
 class NativePlatform {
 public:
     explicit NativePlatform(NativeTimers::Clock clock=nullptr) : graphics(clock),timers(clock) {
-        timers.connect_events(); packet_submission.consumer={this,consume_packet,packet_pending};
+        timers.connect_events(); packet_submission.consumer={this,consume_packet,packet_pending,consume_packet_origins};
         // Application startup owns a usable native submission queue. Explicit
         // guest suspension still gates it; completion requires real consumption.
         packet_submission.policy.enable_native_queue();
@@ -50,8 +50,11 @@ private:
         return {Stop::budget,self.completions.contains(self.packet_submission.policy.completion_selection()) ? 1U : 0U};
     }
     static Stop consume_packet(void* context,unsigned channel,std::span<const std::uint8_t> bytes) {
+        return consume_packet_origins(context,channel,bytes,{});
+    }
+    static Stop consume_packet_origins(void* context,unsigned channel,std::span<const std::uint8_t> bytes,std::span<const NativePacketOrigin> origins) {
         auto& self=*static_cast<NativePlatform*>(context);
-        return self.packet_setup.consume(channel,bytes,self.vector_owner.storage.active);
+        return self.packet_setup.consume(channel,bytes,self.vector_owner.storage.active,origins);
     }
     static bool packet_pending(void* context,unsigned channel) {
         return static_cast<NativePlatform*>(context)->packet_setup.pending(channel);

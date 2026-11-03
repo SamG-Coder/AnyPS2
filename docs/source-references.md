@@ -1603,10 +1603,11 @@ Only row/column/protected fill lanes are accepted. Input-selected fill positions
 would require source lookahead beyond nominal consumed data and remain rejected;
 no guessed repeat value or upstream executor is used.
 
-Masked V3 data conversion uses the pinned VIF public component layout and mask
-selection interface. The fourth lane must explicitly select row, column or
-preserved data; input-selected fourth lanes are rejected. No reference's
-out-of-payload fourth-lane read is copied into the native planner.
+V3 data conversion uses the pinned VIF component layout and mask interface,
+plus the hardware-observation rules in `x86/Vif_UnpackSSE.cpp` and
+`Vif_Dynarec.cpp` for fourth-lane alignment. The native planner retains descriptor
+origins and explicitly bounded following bytes. Missing required lookahead
+rejects the complete plan; no unchecked out-of-payload host read is used.
 
 
 Native MSCNT submission behavior was checked against the already pinned PCSX2
@@ -2278,3 +2279,36 @@ The pinned PCSX2 `SPR.cpp` and `Dmac.cpp` were consulted for scratchpad transfer
 direction, 16 KiB wrap, descriptor ordering and full-quadword tag transfer. The
 native implementation uses independently written validated buffer-copy batches;
 it does not copy the emulator's channel scheduling or timing implementation.
+
+The same PCSX2 pin's `GSTables.cpp` and `GSClut.cpp` describe PSMT8 byte
+addressing, CSM1 palette ordering and CSA bank selection. AnyPS2 implements
+these format rules independently in its texture import and Vulkan paths.
+Its `SIO/Sio2.cpp` and `SIO/SioTypes.h` also confirm that port status has a
+readable reset value independently of serial transaction completion.
+
+The same PCSX2 pin's `GSState.cpp` display-rectangle calculations were consulted
+for relative circuit positioning. AnyPS2 preserves integer circuit displacement
+in native composition; it does not apply the reference renderer's anti-blur adjustment.
+
+The pinned PCSX2 `VUops.cpp` FMAC publication and FMAND/FMEQ/FMOR reads were
+consulted for delayed MAC visibility. AnyPS2 emits LLVM value dependencies that
+retain successive flag results across compiled blocks, rather than copying the
+reference interpreter or executing instruction words at runtime.
+Its FSEQ, FSAND and FSOR interfaces also inform the 12-bit immediate and status
+mask rules. Native block dependencies retain older visible status and clip
+results while later results are pending.
+The same pin's `microVU_Lower.inl` and `microVU_Misc.h` inform ESIN's polynomial
+coefficients/rounding sequence and direct branches in branch delay slots. The
+converter emits fixed native calls for the latter's possible delay destinations;
+it does not copy the reference recompiler or translate instructions at runtime.
+The same pin's `GSState.cpp` and Vulkan `tfx.glsl` document XYZF/FOG packing
+and fog's 256 divisor. AnyPS2 passes the factor to its native fragment shader,
+retaining affine interpolation and alpha independently of perspective texturing.
+
+The DVP overlay metadata layout is documented by public
+[PS2DEV binutils](https://github.com/ps2dev/binutils-gdb/tree/3eb45ea37f0efd498d1de3cf9562de07197aefa8),
+`include/elf/mips.h` and `gas/config/tc-dvp.c` (GPL-3.0-or-later and
+GPL-2.0-or-later respectively). The independent ELF reader uses the table's
+name, load address and VU byte address, and the named shadow section's size.
+Code bytes come from the load image, not the shadow section. No assembler
+implementation is copied.

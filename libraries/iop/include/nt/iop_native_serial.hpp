@@ -116,9 +116,12 @@ public:
             if (write) { interrupts_&=~value; if (!interrupts_ && events_) events_->clear_pending(17); }
             return {NativeServiceStatus::returned,interrupts_};
         }
+        // Port status is readable before a transaction completes. This adapter
+        // binds only disconnected endpoints, whose status is the reset value;
+        // reading it must not fabricate FIFO bytes or a completion interrupt.
+        if (!write && events_ && address==0x1f808270) return {NativeServiceStatus::returned,0xf};
         if (!write && completed_) {
             if (address==0x1f80826c) return {NativeServiceStatus::returned,status_};
-            if (address==0x1f808270) return {NativeServiceStatus::returned,0xf}; // No attached port endpoints.
             if (address==0x1f808274) return {NativeServiceStatus::returned,0}; // No device-specific response flags.
         }
         return {NativeServiceStatus::unavailable};

@@ -1,6 +1,6 @@
 #version 450
 #extension GL_ARB_gpu_shader_int64 : require
-struct Vertex { int x,y; uint color,u,v; float s,t,q; uint z; };
+struct Vertex { int x,y; uint color,u,v; float s,t,q; uint z,fog; };
 struct DrawData {
     uint left,top,right,bottom,base,pitch,color,mask;
     uint texture_base,texture_pitch,texture_width,texture_height;
@@ -10,7 +10,7 @@ struct DrawData {
     uint test,blend;
     uint depth_base,depth;
     Vertex vertices[3];
-    uint target_width,target_height;
+    uint target_width,target_height,fog_color,fog;
 };
 layout(std430,set=0,binding=3) readonly buffer DrawRecords { DrawData items[]; } records;
 

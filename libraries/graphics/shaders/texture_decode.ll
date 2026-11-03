@@ -1,5 +1,5 @@
 ; Native texture import: encoded source storage -> GPU-resident linear texels.
-; Header: count, width, base, pitch, indexed, source-start, palette[16], words[].
+; Header: count, width, base, pitch, indexed, source-start, palette[256], words[].
 target triple = "spirv-unknown-vulkan1.3"
 @source_name = private constant [7 x i8] c"source\00"
 @output_name = private constant [7 x i8] c"output\00"
@@ -35,13 +35,15 @@ convert:
   %word = lshr i32 %address, 3
   %relative0 = sub i32 %word, %start
   %relative = and i32 %relative0, 1048575
-  %source_index = add i32 %relative, 22
+  %source_index = add i32 %relative, 262
   %sourcep = call ptr addrspace(11) @llvm.spv.resource.getpointer.p11.tspirv.VulkanBuffer_a0i32_12_0t(target("spirv.VulkanBuffer", [0 x i32], 12, 0) %input, i32 %source_index)
   %source = load i32, ptr addrspace(11) %sourcep, align 4
   %nibble = and i32 %address, 7
   %shift = shl i32 %nibble, 2
   %shifted = lshr i32 %source, %shift
-  %palette_index0 = and i32 %shifted, 15
+  %eight = icmp eq i32 %indexed, 2
+  %index_mask = select i1 %eight, i32 255, i32 15
+  %palette_index0 = and i32 %shifted, %index_mask
   %palette_index = add i32 %palette_index0, 6
   %palettep = call ptr addrspace(11) @llvm.spv.resource.getpointer.p11.tspirv.VulkanBuffer_a0i32_12_0t(target("spirv.VulkanBuffer", [0 x i32], 12, 0) %input, i32 %palette_index)
   %palette = load i32, ptr addrspace(11) %palettep, align 4

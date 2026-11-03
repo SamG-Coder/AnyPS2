@@ -1,15 +1,23 @@
 #pragma once
 #include <nt/ee_native.hpp>
 #include <nt/ee_vector_data.hpp>
+#include <nt/ee_packet_batch.hpp>
 #include <nt/graphics_packet.hpp>
 #include <array>
 #include <span>
 #include <cstring>
+#include <optional>
 #include <vector>
 
 namespace nt::ee {
 struct NativeUploadView { unsigned destination; std::span<const std::uint8_t> bytes; };
 struct NativeLaunchView { unsigned entry,top,itop; bool continuation=false; };
+struct NativeSubmissionStep {
+    std::vector<NativeUploadView> uploads;
+    std::vector<NativeVectorDataView> data;
+    std::vector<graphics::Packet> drawing;
+    std::optional<NativeLaunchView> launch;
+};
 // Native packet configuration. Each segment ending at a callback boundary is
 // atomic; a suspended remainder is owned until the compiled handler releases it.
 class NativePacketSetup {
@@ -23,6 +31,9 @@ public:
     Stop (*submit_compiled)(void*,unsigned,std::span<const NativeVectorDataView>,const NativeLaunchView*)=nullptr;
     Stop (*submit_uploaded)(void*,unsigned,std::span<const NativeUploadView>,
         std::span<const NativeVectorDataView>,const NativeLaunchView*)=nullptr;
+    Stop (*submit_combined)(void*,unsigned,std::span<const NativeUploadView>,
+        std::span<const NativeVectorDataView>,const NativeLaunchView*,std::span<const graphics::Packet>)=nullptr;
+    Stop (*submit_sequence)(void*,unsigned,std::span<const NativeSubmissionStep>)=nullptr;
     // Optional conversion diagnostic, never an execution fallback. The payload
     // view is valid only during the callback, and the batch still fails.
     void* upload_context=nullptr;
@@ -100,15 +111,18 @@ public:
     unsigned rejected_command() const { return rejected_command_; }
     bool pending(unsigned channel) const { return channel<2 && !pending_[channel].bytes.empty(); }
     unsigned take_interrupts() { const auto result=interrupt_events_; interrupt_events_=0; return result; }
-    Stop consume(unsigned channel,std::span<const std::uint8_t> bytes,bool vector_active) {
+    Stop consume(unsigned channel,std::span<const std::uint8_t> bytes,bool vector_active,std::span<const NativePacketOrigin> origins={}) {
         std::size_t consumed=0;
         if (channel>=2) return consume_segment(channel,bytes,vector_active,consumed);
         if (pending(channel)) return Stop::unsupported_system;
         if (bytes.size()>0x100000) return Stop::invalid_state;
+        for (std::size_t i=0;i<origins.size();++i)
+            if (origins[i].offset>=bytes.size() || origins[i].offset%4 || origins[i].quadword_offset>=16 || origins[i].quadword_offset%4 ||
+                (i ? origins[i].offset<=origins[i-1].offset : origins[i].offset!=0)) return Stop::invalid_state;
         // Retain source data independently of subsequent caller writes. No
         // command is re-executed when an interrupt handler releases the suffix.
-        Pending candidate{{bytes.begin(),bytes.end()},0};
-        const auto result=consume_segment(channel,candidate.bytes,vector_active,consumed);
+        Pending candidate{{bytes.begin(),bytes.end()},0,{origins.begin(),origins.end()}};
+        const auto result=consume_segment(channel,candidate.bytes,vector_active,consumed,candidate.origins);
         if (result!=Stop::budget) return result;
         if (consumed<candidate.bytes.size()) {
             candidate.offset=consumed; pending_[channel]=std::move(candidate);
@@ -121,14 +135,15 @@ public:
             return Stop::budget;
         auto& packet=pending_[channel];
         std::size_t consumed=0;
-        const auto result=consume_segment(channel,std::span(packet.bytes).subspan(packet.offset),vector_active,consumed);
+        const auto result=consume_segment(channel,std::span(packet.bytes).subspan(packet.offset),vector_active,consumed,packet.origins,packet.offset);
         if (result!=Stop::budget) return result;
         packet.offset+=consumed;
         if (packet.offset==packet.bytes.size()) packet={};
         return Stop::budget;
     }
 private:
-    Stop consume_segment(unsigned channel,std::span<const std::uint8_t> bytes,bool vector_active,std::size_t& consumed) {
+    Stop consume_segment(unsigned channel,std::span<const std::uint8_t> bytes,bool vector_active,std::size_t& consumed,
+                         std::span<const NativePacketOrigin> origins={},std::size_t source_offset=0) {
         if (channel==2) {
             if (gif_paused_ || units_[1].path3_masked || !graphics.submit) return Stop::unsupported_system;
             // Descriptor-only submissions carry no GIF data. They complete
@@ -151,6 +166,7 @@ private:
         std::vector<NativeVectorDataView> data;
         std::vector<NativeVectorPlan> data_plans;
         std::vector<graphics::Packet> drawing;
+        std::vector<NativeSubmissionStep> sequence;
         std::size_t drawing_bytes=0;
         bool launch=false,continuation=false;
         bool notify=false;
@@ -159,12 +175,20 @@ private:
         const auto word=[&]() {
             std::uint32_t value; std::memcpy(&value,bytes.data()+offset,4); offset+=4; return value;
         };
+        const auto finish_step=[&]() {
+            NativeSubmissionStep step{std::move(uploads),std::move(data),std::move(drawing),{}};
+            if (launch) step.launch=NativeLaunchView{entry,next.top,next.itop,continuation};
+            sequence.push_back(std::move(step));
+            uploads.clear(); data.clear(); drawing.clear(); launch=false;
+        };
         while (offset<bytes.size()) {
             const auto code=word(),command=(code>>24)&127U;
             rejected_command_=command;
             const bool interrupt=(code&0x80000000U) && !(next.error_mask&1U);
-            // Only padding may follow a launch in this atomic submission path.
-            if (launch && command) return Stop::unsupported_system;
+            if (launch && command) {
+                if (!submit_sequence || sequence.size()>=255) return Stop::unsupported_system;
+                finish_step();
+            }
             switch (command) {
             case 0: break; // Padding/NOP.
             case 1: next.cycle=code&0xffffU; break;
@@ -186,7 +210,7 @@ private:
                 wait_command=command;
                 break;
             case 0x14: case 0x15: case 0x17:
-                if (!submit_compiled || (!uploads.empty() && !submit_uploaded) || !drawing.empty()) return Stop::unsupported_vector;
+                if (!submit_compiled || (!uploads.empty() && !submit_uploaded) || (!drawing.empty() && !submit_combined)) return Stop::unsupported_vector;
                 if (command==0x15) {
                     if (!channel || !graphics.wait) return Stop::unsupported_system;
                     wait_command=command;
@@ -206,7 +230,7 @@ private:
                 if (bytes.size()-offset<4) return Stop::invalid_state;
                 next.mask=word(); break;
             case 0x4a: {
-                if (!data.empty() || !drawing.empty()) return Stop::unsupported_vector;
+                if ((!data.empty() && !submit_uploaded) || (!drawing.empty() && !submit_combined)) return Stop::unsupported_vector;
                 const auto encoded=(code>>16)&255U,count=encoded ? encoded : 256U;
                 const auto size=count*8U;
                 if (bytes.size()-offset<size) return Stop::invalid_state;
@@ -231,11 +255,11 @@ private:
             case 0x78: case 0x79: case 0x7a:
             case 0x7c: case 0x7d: case 0x7e: case 0x7f:
             case 0x6c: case 0x6d: case 0x6e: case 0x6f: {
-                // Typed vector data. V3 requires an explicit fourth-lane mask.
+                // Typed vector data, retaining source alignment and bounded lookahead.
                 const auto format=static_cast<NativeVectorFormat>(command&3U);
                 const auto components=((command>>2)&3U)+1;
                 const auto raw_span=next.cycle&255U,raw_writes=(next.cycle>>8)&255U;
-                if (!submit_compiled || (!uploads.empty() && !submit_uploaded) || !drawing.empty() ||
+                if (!submit_compiled || (!uploads.empty() && !submit_uploaded) || (!drawing.empty() && !submit_combined) ||
                     (!raw_span && raw_writes) || (!raw_writes && raw_span)) return Stop::unsupported_vector;
                 const auto encoded_count=(code>>16)&255U,count=encoded_count ? encoded_count : 256U;
                 const auto span=raw_span ? raw_span : 256U,writes=raw_writes ? raw_writes : 256U;
@@ -247,6 +271,13 @@ private:
                     (channel ? 1023U : 255U);
                 data.push_back({destination,bytes.subspan(offset,size),format,(code&0x4000U)!=0,components});
                 auto& view=data.back();
+                const auto command_position=source_offset+offset-4;
+                const auto origin=std::upper_bound(origins.begin(),origins.end(),command_position,
+                    [](std::size_t position,const NativePacketOrigin& item) { return position<item.offset; });
+                const auto aligned=origin==origins.begin() ? command_position :
+                    command_position-(origin-1)->offset+(origin-1)->quadword_offset;
+                view.source_alignment=unsigned((aligned/4)%4)+1;
+                view.following_bytes=bytes.subspan(offset+size);
                 view.destination_cycle=span;
                 view.writes_per_cycle=writes;
                 view.output_count=count;
@@ -265,7 +296,7 @@ private:
                 break;
             }
             case 0x50: case 0x51: {
-                if (!channel || gif_paused_ || !graphics.submit || !uploads.empty() || !data.empty()) return Stop::unsupported_system;
+                if (!channel || gif_paused_ || !graphics.submit || ((!uploads.empty() || !data.empty()) && !submit_combined)) return Stop::unsupported_system;
                 const auto count=code&65535U,size=(count ? count : 65536U)*16U;
                 if (size>bytes.size()-offset) return Stop::invalid_state;
                 if (size>65536U*16U-drawing_bytes) return Stop::unsupported_system;
@@ -286,13 +317,39 @@ private:
         // occurred yet, and a retry cannot replay a previously submitted draw.
         // A fence after DIRECT is coalesced only for a synchronous consumer:
         // the final ordered batch completes before any state is published.
-        // Mixed drawing/vector launches remain rejected above.
+        // DIRECT packets precede a final vector launch in a combined transaction.
         if (wait_command && !graphics.wait(graphics.context)) {
             rejected_command_=wait_command;
             return Stop::unsupported_system;
         }
+        if (!sequence.empty()) {
+            finish_step();
+            const auto result=submit_sequence(launch_context,channel,sequence);
+            if (result!=Stop::budget) {
+                if (uncompiled_packet) uncompiled_packet(upload_context,channel,bytes);
+                for (const auto& step:sequence) for (const auto& upload:step.uploads)
+                    if (uncompiled_upload) uncompiled_upload(upload_context,channel,upload.destination,upload.bytes);
+                return result;
+            }
+            units_[channel]=next; consumed=offset; rejected_command_=0;
+            if (notify) interrupt_events_|=1U<<channel;
+            return Stop::budget;
+        }
         const bool combined=!uploads.empty() && (launch || !data.empty());
-        if (!uploads.empty() && !combined) {
+        const bool drawing_vectors=!drawing.empty() && (launch || !data.empty() || !uploads.empty());
+        if (drawing_vectors) {
+            if (!submit_combined) return Stop::unsupported_vector;
+            const NativeLaunchView request{entry,next.top,next.itop,continuation};
+            const auto result=submit_combined(launch_context,channel,uploads,data,launch ? &request : nullptr,drawing);
+            if (result!=Stop::budget) {
+                if (!uploads.empty()) {
+                    if (uncompiled_packet) uncompiled_packet(upload_context,channel,bytes);
+                    if (uncompiled_upload) uncompiled_upload(upload_context,channel,uploads.front().destination,uploads.front().bytes);
+                }
+                return result;
+            }
+        }
+        if (!drawing_vectors && !uploads.empty() && !combined) {
             const auto result=accept_uploads(compiled_context,channel,uploads);
             if (result!=Stop::budget) {
                 rejected_command_=0x4a;
@@ -301,7 +358,7 @@ private:
                 return result;
             }
         }
-        if (launch || !data.empty()) {
+        if (!drawing_vectors && (launch || !data.empty())) {
             const NativeLaunchView request{entry,next.top,next.itop,continuation};
             const auto result=combined ? submit_uploaded(launch_context,channel,uploads,data,launch ? &request : nullptr) :
                 submit_compiled(launch_context,channel,data,launch ? &request : nullptr);
@@ -314,7 +371,7 @@ private:
                 return result;
             }
         }
-        if (!drawing.empty() && !graphics.submit(graphics.context,drawing)) return Stop::unsupported_system;
+        if (!drawing_vectors && !drawing.empty() && !graphics.submit(graphics.context,drawing)) return Stop::unsupported_system;
         units_[channel]=next; consumed=offset; rejected_command_=0;
         if (notify) interrupt_events_|=1U<<channel;
         return Stop::budget;
@@ -334,7 +391,7 @@ private:
         std::uint32_t error_mask=0,mark=0,mode=0,mask=0,cycle=0,code=0;
         std::array<std::uint32_t,8> row_column{};
     };
-    struct Pending { std::vector<std::uint8_t> bytes; std::size_t offset=0; };
+    struct Pending { std::vector<std::uint8_t> bytes; std::size_t offset=0; std::vector<NativePacketOrigin> origins; };
     std::array<Unit,2> units_{};
     std::array<Pending,2> pending_{};
     unsigned interrupt_events_=0;

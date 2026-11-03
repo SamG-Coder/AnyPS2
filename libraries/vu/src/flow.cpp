@@ -34,6 +34,11 @@ Control control(const Pair& pair,unsigned unit) {
     }
     return result;
 }
+bool direct_delayed_branch(const Pair& first,const Pair& second,unsigned unit) {
+    const auto a=control(first,unit),b=control(second,unit);
+    return !first.end && !second.end && a.target && b.target &&
+        a.branch!=Branch::call && b.branch!=Branch::call;
+}
 Flow discover(std::span<const Pair> pairs,unsigned unit,std::span<const unsigned> entries) {
     if (unit>1 || entries.empty()) throw std::invalid_argument("VU flow needs a unit and entry points");
     const auto mask=unit ? 2047U : 511U;
@@ -61,8 +66,27 @@ Flow discover(std::span<const Pair> pairs,unsigned unit,std::span<const unsigned
         result.transfers.push_back({address,next,branch,pair->end});
         const auto* slot=find(next);
         if (!slot) continue;
-        // These combinations need explicit hardware ordering semantics before
-        // lowering. Do not guess which delayed transfer wins.
+        if (direct_delayed_branch(*pair,*slot,unit)) {
+            // Both branches execute. One pair at the first selected destination
+            // is the second branch's delay slot. If the second is not taken,
+            // execution continues after that pair, not after the original slot.
+            bool supported=true;
+            std::set<unsigned> destinations{*branch.target};
+            if (branch.branch!=Branch::jump) destinations.insert((address+2)&mask);
+            for (const auto destination:destinations) {
+                const auto* delay=find(destination);
+                if (!delay || delay->end || control(*delay,unit).branch!=Branch::none) supported=false;
+                result.delayed_continuations.insert((destination+1)&mask);
+                pending.push_back((destination+1)&mask);
+            }
+            const auto second=control(*slot,unit);
+            result.delayed_continuations.insert(*second.target);
+            pending.push_back(*second.target);
+            if (!supported) result.complex_delay.insert(address);
+            continue;
+        }
+        // More deeply chained transfers and E/branch combinations require
+        // further ordering support; retain explicit diagnostics for those.
         if (slot->end || control(*slot,unit).branch!=Branch::none || (pair->end && branch.branch!=Branch::none)) {
             result.complex_delay.insert(address); continue;
         }

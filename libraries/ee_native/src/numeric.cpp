@@ -18,6 +18,13 @@ extern "C" std::uint32_t nt_vu_clip_flags(std::uint32_t x,std::uint32_t y,std::u
 extern "C" std::uint64_t nt_vu_reciprocal_length_finite(std::uint32_t x,std::uint32_t y,std::uint32_t z) {
     return pack(nt::numeric::reciprocal_length_finite(x,y,z));
 }
+extern "C" std::uint64_t nt_vu_sine_finite(std::uint32_t x) {
+    return pack(nt::numeric::sine_finite(x));
+}
+extern "C" std::uint64_t nt_vu_efu_square_root_finite(std::uint32_t x) {
+    const auto root=nt::numeric::square_root_finite(x&0x7fffffffU);
+    return pack(nt::numeric::FiniteFloatResult{root.bits,false,root.supported && root.flags==0});
+}
 extern "C" std::uint64_t nt_vu_divide_finite(std::uint32_t left,std::uint32_t right) {
     return pack_flags(nt::numeric::vu_divide_finite(left,right));
 }

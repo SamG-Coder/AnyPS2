@@ -154,10 +154,34 @@ captured execution boundary and reports its own error separately.
 Libraries are independent conversion artifacts, not a claim that every module
 has been selected and bound into a working game. Cross-module initialization,
 load order, native service providers and unknown indirect targets still need
-validated linkage. VU code requires a proven upload packet; arbitrary disc bytes
+validated linkage. VU code requires a proven upload packet or declared ELF overlay metadata; arbitrary disc bytes
 are not guessed to be instructions. Packed/encrypted/transformed content that
 the disc walk does not recognize remains explicitly undiscovered. Unsupported
 services are listed, never replaced by generated success stubs.
+
+For a declared contiguous VU program image, `ps2-vu-recompile input.bin output.ll
+0 0 --all-entries` compiles every pair as a possible native entry (the numeric
+arguments select unit and destination pair). This covers indirect launches and
+entries after earlier E stops without execution observations. Unsupported
+instructions or missing branch/E delay pairs reject conversion. A plain tail
+executes its compiled instructions and reports an unmapped boundary if it leaves
+the image; it does not become an invented successful return. Compile and link
+the emitted LLVM module through the existing VU binding configuration.
+
+`ps2-vu-extract program.elf new-output-directory --elf` recovers every region
+declared by a DVP overlay table from its file-backed load address. It writes
+numbered payloads and `overlays.tsv` with source locations, destination byte
+addresses and sizes. Shadow-section contents are not used as instructions.
+`images.tsv` also groups adjacent destination ranges when only NOPs and the
+matching upload command separate their payloads. The table does not identify
+the VU unit; unit selection still requires validation.
+
+For multiple images on one unit, pass `ps2-vu-recompile --catalog images.tsv
+output.ll 1`. This manifest has two tab-separated columns, `file` and
+`destination_pairs`; file paths are relative to the manifest. The generated
+module exports native functions for every declared pair in every image. Link
+it using the existing VU module option. Uploads validate identity and invalidate
+overwritten coverage; unknown images and incomplete programs cannot execute.
 
 Generation time, LLVM compile time, linking, native execution and rendering are
 different measurements. The window's presentation FPS counts successful

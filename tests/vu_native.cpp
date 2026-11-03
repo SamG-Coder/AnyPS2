@@ -10,6 +10,7 @@
 #include <nt/vu_clip.hpp>
 #include <nt/vu_quotient.hpp>
 #include <iostream>
+#include <cmath>
 #include <stdexcept>
 
 extern "C" std::uint64_t nt_ee_multiply_accumulate_finite(std::uint32_t,std::uint32_t,std::uint32_t,std::uint32_t);
@@ -49,9 +50,13 @@ extern "C" nt::vu::Result nt_vu_geometry(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_p_0(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_p_3(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_p_6(nt::vu::State*);
+extern "C" nt::vu::Result nt_vu_p_8(nt::vu::State*);
+extern "C" nt::vu::Result nt_vu_p_12(nt::vu::State*);
+extern "C" nt::vu::Result nt_vu_p_22(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_flags_0(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_flags_3(nt::vu::State*);
 extern "C" nt::vu::Result nt_vu_flags_8(nt::vu::State*);
+extern "C" nt::vu::Result nt_vu_flags_10(nt::vu::State*);
 extern "C" const nt::vu::Block* nt_vu_graphics_blocks();
 extern "C" std::uint32_t nt_vu_graphics_count();
 extern "C" const nt::vu::Block* nt_vu_graphics_end_blocks();
@@ -64,8 +69,33 @@ extern "C" std::uint32_t nt_vu_continuation_count();
 extern "C" const std::uint8_t* nt_vu_continuation_image();
 extern "C" std::uint32_t nt_vu_continuation_size();
 extern "C" nt::vu::Result nt_vu_range(nt::vu::State*);
+extern "C" const nt::vu::Block* nt_vu_whole_blocks();
+extern "C" std::uint32_t nt_vu_whole_count();
+extern "C" const nt::vu::Block* nt_vu_mac_pipeline_blocks();
+extern "C" std::uint32_t nt_vu_mac_pipeline_count();
 int main() {
     try {
+        {
+            if (nt_vu_whole_count()!=8) throw std::runtime_error("Whole VU entry coverage incomplete");
+            nt::vu::Program program(0,{nt_vu_whole_blocks(),nt_vu_whole_count()});
+            for (unsigned entry=0;entry<8;++entry) {
+                nt::vu::State state; state.next_pair=entry; state.integers[1]=0;
+                const auto result=program.run(state,8);
+                const unsigned expected[]={0,3,3,2,1,0,1,1};
+                if (state.integers[0]!=expected[entry] ||
+                    result.status!=(entry>=6 ? nt::vu::RunStatus::unmapped_block : nt::vu::RunStatus::complete) ||
+                    (entry>=6 && state.next_pair!=8))
+                    throw std::runtime_error("Whole VU independent entry/delay/tail execution differs");
+            }
+            for (const unsigned target:{2U,3U,7U,511U}) {
+                nt::vu::State state; state.next_pair=5; state.integers[1]=target;
+                const auto result=program.run(state,8);
+                const unsigned expected=target==2 ? 3 : target==3 ? 2 : target==7 ? 1 : 0;
+                if (state.integers[0]!=expected || result.status!=(target<7 ? nt::vu::RunStatus::complete : nt::vu::RunStatus::unmapped_block) ||
+                    (target>=7 && state.next_pair!=(target==7 ? 8 : target)))
+                    throw std::runtime_error("Whole VU runtime indirect target was replaced or hidden");
+            }
+        }
         {
             nt::vu::Binding binding(nt::vu::Program(1,{nt_vu_continuation_blocks(),nt_vu_continuation_count()}),0,
                 {nt_vu_continuation_image(),nt_vu_continuation_size()});
@@ -125,7 +155,7 @@ int main() {
                 throw std::runtime_error("Native flush did not complete previous graphics");
             if (submit({0x11000000,0x7b000000})!=nt::ee::Stop::unsupported_system || completion.calls!=3)
                 throw std::runtime_error("Invalid trailing command invoked graphics wait");
-            if (submit({0x15000000,0x07000065})!=nt::ee::Stop::unsupported_system ||
+            if (submit({0x15000000,0x7b000000})!=nt::ee::Stop::unsupported_system ||
                 completion.calls!=3 || owner.state!=after_wait)
                 throw std::runtime_error("Invalid post-launch command published native work");
             packets.graphics.wait=nullptr;
@@ -366,6 +396,22 @@ int main() {
         launched={}; launched.integers[0]=launched.integers[1]=1;
         if (binding1.launch(launched,0,10).status!=nt::vu::RunStatus::complete || launched.integers[4]!=1)
             throw std::runtime_error("Routed VU1 artifact did not execute native code");
+        {
+            auto switched=binding1;
+            const auto* catalog=nt_vu_program1_artifacts();
+            if (nt_vu_program1_artifact_count()!=2) throw std::runtime_error("VU catalog did not export both images");
+            const std::span alternative(catalog[1].image,catalog[1].image_size);
+            const std::array replacement{nt::vu::UploadView{4,alternative.subspan(32,8)}};
+            if (!switched.upload(1,replacement)) throw std::runtime_error("Known overlapping VU image was rejected");
+            nt::vu::State changed; changed.integers[0]=changed.integers[1]=1;
+            if (switched.launch(changed,0,10).status!=nt::vu::RunStatus::complete || changed.integers[4]!=2)
+                throw std::runtime_error("Overlapping upload did not select the newly compiled image");
+            if (!switched.upload(1,std::array{nt::vu::UploadView{4,identity.subspan(32,8)}}))
+                throw std::runtime_error("Original VU image could not be restored");
+            changed={}; changed.integers[0]=changed.integers[1]=1;
+            if (switched.launch(changed,0,10).status!=nt::vu::RunStatus::complete || changed.integers[4]!=1)
+                throw std::runtime_error("Stale compiled VU image survived overwrite");
+        }
         if (packets.consume(0,wrong_packet,false)!=nt::ee::Stop::unsupported_vector || binding.ready() || !binding1.ready())
             throw std::runtime_error("Rejected VU0 upload affected VU1 coverage");
         if (!binding.upload(0,std::array{nt::vu::UploadView{0,identity}}) || !binding.ready() || !binding1.ready())
@@ -379,23 +425,35 @@ int main() {
             nt::ee::bind_uploads(combined_packets,combined_binding);
             nt::ee::NativeVuSubmissions combined_submissions;
             combined_submissions.add(combined_owner); combined_submissions.connect(combined_packets);
+            bool accept_drawing=false;
+            const auto drawing_consumer=+[](void* raw,std::span<const nt::graphics::Packet> batch) {
+                return *static_cast<bool*>(raw) && batch.size()==1 && batch[0]==nt::graphics::Packet{{0x8000,0,0,0}};
+            };
+            combined_packets.graphics={&accept_drawing,drawing_consumer};
+            combined_owner.graphics={&accept_drawing,drawing_consumer};
             upload_packet.clear(); packet_word(0x0700002a);
-            packet_word(0x4a000000U|(static_cast<unsigned>(identity.size()/8)<<16));
-            upload_packet.insert(upload_packet.end(),identity.begin(),identity.end());
             packet_word(0x6c010000); for (unsigned lane=0;lane<4;++lane) packet_word(lane+17);
+            packet_word(0x4a000000U|(static_cast<unsigned>(identity.size()/8)<<16));
+            const auto code_offset=upload_packet.size();
+            upload_packet.insert(upload_packet.end(),identity.begin(),identity.end());
+            packet_word(0x50000001); packet_word(0x8000); packet_word(0); packet_word(0); packet_word(0);
             packet_word(0x14000001); // Missing native entry must roll back binding and data too.
             const auto before=combined_owner.state;
             if (combined_packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_vector ||
                 combined_binding.ready() || combined_owner.state!=before || combined_packets.read(0x10003c30).value)
                 throw std::runtime_error("Combined upload/launch failure partially committed state");
             upload_packet[upload_packet.size()-4]=0;
-            auto wrong=upload_packet; wrong[8]^=1;
+            auto wrong=upload_packet; wrong[code_offset]^=1;
             if (combined_packets.consume(1,wrong,false)!=nt::ee::Stop::unsupported_vector ||
                 combined_binding.ready() || combined_owner.state!=before)
                 throw std::runtime_error("Combined launch executed mismatched uploaded code");
             auto trailing=upload_packet; trailing.insert(trailing.end(),{0,0,0,0x7b});
             if (combined_packets.consume(1,trailing,false)!=nt::ee::Stop::unsupported_system || combined_binding.ready())
                 throw std::runtime_error("Trailing command committed combined upload");
+            if (combined_packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_vector ||
+                combined_binding.ready() || combined_owner.state!=before)
+                throw std::runtime_error("Rejected DIRECT prefix published vector state or binding");
+            accept_drawing=true;
             if (combined_packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
                 !combined_binding.ready() || combined_owner.state.integers[4]!=1 ||
                 combined_owner.state.data[0]!=std::array<std::uint32_t,4>{17,18,19,20} ||
@@ -423,11 +481,23 @@ int main() {
             launch_owner.state.input_top!=48 || packets.read(0x10003cc0).value!=32 ||
             (packets.read(0x10003c00).value&0x80))
             throw std::runtime_error("Second native launch did not alternate buffers");
-        const auto completed_launch=launch_owner.state;
-        packet_word(0x07000008);
+        auto completed_launch=launch_owner.state;
+        packet_word(0x7b000000);
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_system || launch_owner.state!=completed_launch)
             throw std::runtime_error("Trailing command executed a partial VU launch");
-        upload_packet.clear(); packet_word(0x07000008); packet_word(0x14000001);
+        upload_packet.clear(); packet_word(0x14000000); packet_word(0x01000000);
+        packet_word(0x6c010000); for (unsigned lane=0;lane<4;++lane) packet_word(90+lane);
+        packet_word(0x14000006); // Outside both complete six-pair artifacts.
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_vector ||
+            launch_owner.state!=completed_launch || packets.read(0x10003cc0).value!=32)
+            throw std::runtime_error("Failed second native launch committed the first launch or data");
+        upload_packet[upload_packet.size()-4]=0;
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
+            launch_owner.state.input_top!=48 || packets.read(0x10003cc0).value!=32 ||
+            launch_owner.state.data[0]!=std::array<std::uint32_t,4>{90,91,92,93})
+            throw std::runtime_error("Ordered native launches lost buffer selection or intervening data");
+        completed_launch=launch_owner.state;
+        upload_packet.clear(); packet_word(0x07000008); packet_word(0x14000006);
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_vector ||
             launch_owner.last_result.status!=nt::vu::RunStatus::unmapped_block ||
             launch_owner.state!=completed_launch || packets.read(0x10003c30).value!=7)
@@ -655,16 +725,31 @@ int main() {
         unpack_and_launch(0x7a014000,{0xde7fff80},{128,255,127,40});
         unpack_and_launch(0x78010000,{1,2,3},{11,22,33,40},2);
         if (packets.read(0x10003d30).value!=40) throw std::runtime_error("Masked V3 W changed row state");
-        const auto before_v3_failure=data_owner.state;
         upload_packet.clear(); packet_word(0x05000000); packet_word(0x68010000);
         packet_word(1); packet_word(2); packet_word(3);
-        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_vector || data_owner.state!=before_v3_failure)
-            throw std::runtime_error("Unmasked V3 invented its fourth input lane");
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget || data_owner.state.data[0]!=std::array<std::uint32_t,4>{1,2,3,0})
+            throw std::runtime_error("Unmasked V3 alignment-selected zero lane differs");
+        unpack_and_launch(0x69010000,{0xffff8000,0xdead7fff},{0xffff8000,0xffffffff,0x7fff,0xffffdead});
+        unpack_and_launch(0x69014000,{0xffff8000,0xdead7fff},{0x8000,0xffff,0x7fff,0xdead});
+        // An eight-byte transferred tag precedes a fresh aligned payload.
+        // W peeks at the following command without consuming it.
+        upload_packet.clear(); packet_word(0); packet_word(0); packet_word(0x68020000);
+        for (unsigned value:{1,2,3,4,5,6}) packet_word(value);
+        packet_word(0x14000000);
+        const std::array<nt::ee::NativePacketOrigin,2> origins{{{0,8},{8,0}}};
+        if (packets.consume(1,upload_packet,false,origins)!=nt::ee::Stop::budget ||
+            data_owner.state.data[1]!=std::array<std::uint32_t,4>{4,5,6,0x14000000})
+            throw std::runtime_error("V3 descriptor alignment or command lookahead changed");
+        const auto before_missing_lookahead=data_owner.state;
+        upload_packet.resize(upload_packet.size()-4);
+        if (packets.consume(1,upload_packet,false,origins)!=nt::ee::Stop::unsupported_vector || data_owner.state!=before_missing_lookahead)
+            throw std::runtime_error("Missing V3 lookahead was read or partially committed");
         upload_packet.clear(); packet_word(0x05000000); packet_word(0x20000000); packet_word(0x40);
         packet_word(0x7a020000); packet_word(0x04030201); packet_word(0xdead0605);
-        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_vector ||
-            data_owner.state!=before_v3_failure || packets.read(0x10003c70).value!=0x40404040)
-            throw std::runtime_error("Later V3 input-selected W published a partial plan");
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
+            data_owner.state.data[1]!=std::array<std::uint32_t,4>{4,5,6,0} || packets.read(0x10003c70).value!=0x40)
+            throw std::runtime_error("V3 input-selected and masked lanes differ");
+        const auto before_v3_failure=data_owner.state;
         upload_packet.clear(); packet_word(0x79010000); packet_word(0);
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::invalid_state || data_owner.state!=before_v3_failure)
             throw std::runtime_error("Truncated V3 consumed beyond its payload");
@@ -811,19 +896,62 @@ int main() {
             if (nt_vu_p_0(&bad_p)!=nt::vu::Result::unsupported_numeric || bad_p!=before)
                 throw std::runtime_error("Unsupported native EFU input did not roll back");
         }
+        for (const auto input:{0U,0x3f800000U,0xbf800000U}) {
+            nt::vu::State sine;
+            sine.vectors[0]={0x7f800000,0x7f800000,input,0x7f800000};
+            if (nt_vu_p_8(&sine)!=nt::vu::Result::complete || sine.p_pending ||
+                std::abs(std::bit_cast<float>(sine.vectors[1][0])-std::sin(std::bit_cast<float>(input)))>0.000002F)
+                throw std::runtime_error("Compiled ESIN/WAITP/MFP pipeline failed");
+        }
+        {
+            nt::vu::State root; root.vectors[0][3]=0xc1800000; root.status=0x345;
+            if (nt_vu_p_22(&root)!=nt::vu::Result::complete || root.vectors[1][0]!=0x40800000 || root.status!=0x345)
+                throw std::runtime_error("EFU square root changed flags or failed magnitude semantics");
+        }
+        for (unsigned first=0;first<2;++first) for (unsigned second=0;second<2;++second) {
+            nt::vu::State chained;
+            chained.integers[0]=static_cast<std::uint16_t>(first);
+            chained.integers[1]=static_cast<std::uint16_t>(second);
+            const auto expected=second ? 20U : first ? 15U : 18U;
+            if (nt_vu_p_12(&chained)!=nt::vu::Result::transfer || chained.next_pair!=expected ||
+                chained.integers[2]!=(first ? 1U : 2U))
+                throw std::runtime_error("Compiled chained branch executed the wrong delay or continuation");
+        }
         nt::vu::State flags;
+        {
+            nt::vu::Program program(0,{nt_vu_mac_pipeline_blocks(),nt_vu_mac_pipeline_count()});
+            nt::vu::State rolling; rolling.integers[0]=0xffff;
+            rolling.vectors[9][0]=0x3f800000; // VF10.x = 1.
+            const auto first=program.run(rolling,1);
+            if (first.status!=nt::vu::RunStatus::budget_exhausted || rolling.next_pair!=4 || rolling.pending_mac_mask!=15)
+                throw std::runtime_error("Outstanding MAC results did not survive compiled branch");
+            const auto next=program.run(rolling,1);
+            if (next.status!=nt::vu::RunStatus::complete || rolling.integers[1]!=8 || rolling.integers[2]!=128 ||
+                rolling.integers[3]!=0 || rolling.integers[4]!=8 || rolling.pending_mac_mask || rolling.visible_mac!=8)
+                throw std::runtime_error("Successive MAC flag reads did not observe their corresponding results");
+        }
         flags.integers[0]=0xffff; flags.integers[2]=0x100;
         if (nt_vu_flags_0(&flags)!=nt::vu::Result::transfer || flags.mac_read_delay!=2 || flags.next_pair!=3)
             throw std::runtime_error("MAC visibility guard did not survive a native branch");
         const auto pending_flags=flags;
-        if (nt_vu_flags_8(&flags)!=nt::vu::Result::unsupported_schedule || flags!=pending_flags)
-            throw std::runtime_error("Unproven MAC visibility was not rejected atomically");
+        if (nt_vu_flags_8(&flags)!=nt::vu::Result::complete || flags.integers[1]!=0 || flags.visible_mac!=8 || flags.pending_mac_mask)
+            throw std::runtime_error("Early MAC read did not preserve the previously visible flags");
+        flags=pending_flags;
         if (nt_vu_flags_3(&flags)!=nt::vu::Result::complete || flags.integers[1]!=8 ||
             flags.integers[3]!=0x108 || flags.integers[4]!=1 || flags.mac_read_delay)
             throw std::runtime_error("Native MAC comparison and bitwise operations failed");
         flags=pending_flags; flags.mac=0x10008;
         if (nt_vu_flags_3(&flags)!=nt::vu::Result::complete || flags.integers[4]!=1)
             throw std::runtime_error("MAC operations did not constrain flags to 16 bits");
+        nt::vu::State status_flags; status_flags.status=0xf841;
+        if (nt_vu_flags_10(&status_flags)!=nt::vu::Result::complete || status_flags.integers[5]!=0x841 ||
+            status_flags.integers[6]!=0x843 || status_flags.integers[7]!=1)
+            throw std::runtime_error("Compiled status operations lost mask, immediate or comparison semantics");
+        status_flags.visible_status=0x402; status_flags.pending_mac_mask=8;
+        status_flags.pending_mac[3]=8; status_flags.mac_read_delay=4;
+        if (nt_vu_flags_10(&status_flags)!=nt::vu::Result::complete || status_flags.integers[5]!=0 ||
+            status_flags.integers[6]!=0xc02 || status_flags.integers[7]!=0)
+            throw std::runtime_error("Status reads used a newer arithmetic result before publication");
         const nt::vu::Program graphics_program(1,{nt_vu_graphics_blocks(),nt_vu_graphics_count()});
         nt::vu::State graphics_state;
         graphics_state.integers[0]=0xffff; // Address masks to final quadword; payload wraps.
@@ -914,8 +1042,9 @@ int main() {
         if (nt_vu_clip_0(&clip)!=nt::vu::Result::transfer || clip.clip!=0x249 || clip.clip_read_delay!=2)
             throw std::runtime_error("Native clip history or branch visibility failed");
         const auto clip_pending=clip;
-        if (nt_vu_clip_18(&clip)!=nt::vu::Result::unsupported_schedule || clip!=clip_pending)
-            throw std::runtime_error("Early clip read did not roll back");
+        if (nt_vu_clip_18(&clip)!=nt::vu::Result::complete || clip.integers[1]!=9 || clip.visible_clip!=0x249)
+            throw std::runtime_error("Early clip read did not preserve the older visible history");
+        clip=clip_pending;
         if (nt_vu_clip_4(&clip)!=nt::vu::Result::complete || clip.integers[1]!=0x249 ||
             clip.integers[2]!=1 || clip.integers[3]!=1 || clip.integers[4]!=1 || clip.integers[5]!=0xdef ||
             clip.clip!=0xabcdef || clip.clip_read_delay || clip.mac!=123 || clip.status!=456)

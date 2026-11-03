@@ -2703,6 +2703,24 @@ int main() {
             check((platform.interrupts.read(0x1000f000).value&12)==12);
             check(platform.graphics.write(0x12001000,0x200)==nt::ee::Stop::budget && !platform.graphics.mode());
             platform.interrupts.write(0x1000f000,15); timer_now+=1000000000; poll(); check(!memory.pending_interrupts);
+            struct Receiver { unsigned capacity=0; std::vector<bool> edges; } receiver;
+            platform.graphics.display_edge=nullptr;
+            platform.graphics.edge_context=&receiver;
+            platform.graphics.try_display_edge=[](void* raw,bool end) {
+                auto& receiver=*static_cast<Receiver*>(raw);
+                if (!receiver.capacity) return false;
+                --receiver.capacity; receiver.edges.push_back(end); return true;
+            };
+            const auto retry_epoch=timer_now;
+            check(configure(3)==nt::ee::Stop::budget);
+            timer_now=retry_epoch+625*32000ULL*300;
+            poll(); check(receiver.edges.empty() && !platform.graphics.edge_overflow());
+            // Keep the clock fixed: retrying must drain the retained deadline
+            // cursor without generating new time or dropping alternating edges.
+            for (unsigned batch=0;batch<36;++batch) { receiver.capacity=17; poll(); }
+            check(receiver.edges.size()==600 && !platform.graphics.edge_overflow());
+            for (unsigned i=0;i<receiver.edges.size();++i) check(receiver.edges[i]==bool(i&1));
+            receiver.capacity=10; poll(); check(receiver.edges.size()==600);
         }
         {
             nt::ee::Memory memory; nt::ee::NativePlatform platform; platform.attach(memory);

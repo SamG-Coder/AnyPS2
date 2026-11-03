@@ -6,7 +6,7 @@
 #extension GL_ARB_fragment_shader_interlock : require
 layout(pixel_interlock_ordered) in;
 #endif
-struct Vertex { int x,y; uint color,u,v; float s,t,q; uint z; };
+struct Vertex { int x,y; uint color,u,v; float s,t,q; uint z,fog; };
 struct DrawData {
     uint left,top,right,bottom,base,pitch,color,mask;
     uint texture_base,texture_pitch,texture_width,texture_height;
@@ -16,7 +16,7 @@ struct DrawData {
     uint test,blend;
     uint depth_base,depth;
     Vertex vertices[3];
-    uint target_width,target_height;
+    uint target_width,target_height,fog_color,fog;
 };
 layout(std430,set=0,binding=3) readonly buffer DrawRecords { DrawData items[]; } records;
 
@@ -151,6 +151,7 @@ void main() {
     if (x<draw.left || y<draw.top || x>=draw.right || y>=draw.bottom) discard;
     uint color=draw.color;
     uint depth=draw.depth,coverage=16;
+    uint64_t fog_weight=uint64_t(draw.fog),fog_area=uint64_t(1);
     bool triangle_interior=true;
     int uf=0,vf=0;
     if ((draw.flags&16777216)!=0) {
@@ -198,6 +199,11 @@ void main() {
             }
         } else if (!covered(w0,b,c) || !covered(w1,c,a) || !covered(w2,a,b)) discard;
         int64_t area=w0+w1+w2;
+        if ((draw.flags&67108864)!=0) {
+            fog_area=uint64_t(area);
+            fog_weight=uint64_t(draw.vertices[0].fog)*uint64_t(w0)+
+                uint64_t(draw.vertices[1].fog)*uint64_t(w1)+uint64_t(draw.vertices[2].fog)*uint64_t(w2);
+        }
         if ((draw.flags&131072)!=0)
             depth=uint((uint64_t(draw.vertices[0].z)*uint64_t(w0)+
                 uint64_t(draw.vertices[1].z)*uint64_t(w1)+uint64_t(draw.vertices[2].z)*uint64_t(w2))/uint64_t(area));
@@ -249,6 +255,15 @@ void main() {
             result=min(result,255);
             color |= result<<(channel*8);
         }
+    }
+    if ((draw.flags&67108864)!=0) {
+        const uint64_t scale=uint64_t(256)*fog_area;
+        uint result=color&0xff000000;
+        for (uint channel=0;channel<3;++channel) {
+            const uint source=(color>>(channel*8))&255, background=(draw.fog_color>>(channel*8))&255;
+            result|=uint(divide_small(uint64_t(source)*fog_weight+uint64_t(background)*(scale-fog_weight),scale))<<(channel*8);
+        }
+        color=result;
     }
     if ((draw.flags&1048576)!=0 && ((draw.flags&2097152)==0 || (color>>24)==128))
         color=(color&0xffffff)|(coverage*8<<24);

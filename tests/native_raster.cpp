@@ -1,3 +1,4 @@
+#include "indexed_textures.hpp"
 #include <nt/vulkan_renderer.hpp>
 #include <nt/native_drawing.hpp>
 #include <chrono>
@@ -22,6 +23,30 @@ int main(int argc,char** argv) {
             ++checks;
         };
         SpriteCommand clear{{0,0,32,32,0,1,0x80203040,0}};
+        {
+            // Fog uses affine vertex factors, a 256 divisor and unchanged alpha.
+            // Exercise packed XYZF and the separate FOG latch through real packets.
+            for (bool packed:{false,true}) {
+                NativeDrawing fogged(true);
+                Packet setup{{0x8007,0x10000000,14,0},{1,0,0x1a,0},{3|8|32,0,0,0},
+                    {1<<16,0,0x4c,0},{15<<16,15<<16,0x40,0},{1,0,0x46,0},
+                    {0x800000ff,0x3f800000,1,0},{0x00ff0000,0,0x3d,0}};
+                Packet vertices{{0x8000,0x10000000,packed ? 4U : 14U,0}};
+                const std::array<std::array<unsigned,3>,3> inputs{{{0,0,0},{256,0,128},{0,256,255}}};
+                for (const auto& v:inputs) {
+                    if (packed) vertices.push_back({v[0],v[1],0,v[2]<<4});
+                    else {
+                        vertices.push_back({0,v[2]<<24,0xa,0});
+                        vertices.push_back({v[0]|(v[1]<<16),0,5,0});
+                    }
+                }
+                vertices[0][0]|=unsigned(vertices.size()-1);
+                fogged.submit(native,std::array{setup,vertices});
+                const auto& pixels=fogged.pixels();
+                if (pixels[rgba_word(0,1,4,4)]!=0x809f005fU || pixels[rgba_word(0,1,1,1)]!=0x80e70017U)
+                    throw std::runtime_error("Native fog packet, interpolation, color or alpha mismatch");
+            }
+        }
         // Original packet fixtures: all octants, fractional positions, endpoint
         // exclusion, packet-spanning strips, suppressed kicks and depth/blending.
         // Explicit pixel expectations are independent of the shared GPU helper.
@@ -126,6 +151,59 @@ int main(int argc,char** argv) {
             if (a.pixels!=std::vector<std::uint32_t>(4,0xffffffff) || a.pixels!=b.pixels)
                 throw std::runtime_error("RC2-only output incorrectly uses the RC1 blend");
         }
+        // Relative display origins are independent of source buffer origins.
+        // Verify both displacement directions, unequal extents and odd field
+        // offsets against explicit pixels, not just two matching implementations.
+        {
+            std::vector<std::uint32_t> pixels(actual.size());
+            for (unsigned y=0;y<8;++y) for (unsigned x=0;x<8;++x) {
+                pixels[rgba_word(0,1,x+2,y+3)]=32+y*16+x;
+                pixels[rgba_word(32,1,x+1,y+2)]=(48+y*16+x)<<8;
+            }
+            native.upload(pixels); reference.upload(pixels);
+            const std::array<std::uint64_t,2> buffers{(1ULL<<9)|(2ULL<<32)|(3ULL<<43),
+                1|(1ULL<<9)|(1ULL<<32)|(2ULL<<43)};
+            for (bool flip:{false,true}) for (bool half:{false,true})
+                for (unsigned alpha:{0U,128U,255U}) for (bool background:{false,true}) {
+                    const unsigned ax=flip ? 0:2,ay=flip ? 0:1,bx=flip ? 2:0,by=flip ? 1:0;
+                    const auto display=[](unsigned x,unsigned y,unsigned w,unsigned h) {
+                        return std::uint64_t(100+x*4)|(std::uint64_t(50+y)<<12)|(3ULL<<23)|
+                            (std::uint64_t(w*4-1)<<32)|(std::uint64_t(h-1)<<44);
+                    };
+                    const std::array<std::uint64_t,2> displays{display(ax,ay,3,3),display(bx,by,4,4)};
+                    const auto plan=*plan_display(35U|(alpha<<8)|(background ? 128:0),buffers,displays,half,0x600000);
+                    const unsigned width=flip ? 6:5,height=flip ? 5:4;
+                    if (plan.width!=width || plan.height!=height)
+                        throw std::runtime_error("Displaced display union has incorrect dimensions");
+                    std::vector<std::uint32_t> wanted(width*height);
+                    for (unsigned y=0;y<height;++y) for (unsigned x=0;x<width;++x) {
+                        unsigned r=0,g=0,b=96;
+                        if (!background && x>=bx && y>=by && x-bx<4 && y-by<4) {
+                            g=48+(half ? (y-by)/2 : y-by)*16+x-bx; b=0;
+                        }
+                        if (x>=ax && y>=ay && x-ax<3 && y-ay<3) {
+                            const unsigned red=32+(half ? (y-ay)/2 : y-ay)*16+x-ax;
+                            r=(red*alpha+127)/255; g=(g*(255-alpha)+127)/255; b=(b*(255-alpha)+127)/255;
+                        }
+                        wanted[y*width+x]=0xff000000U|r|(g<<8)|(b<<16);
+                    }
+                    const auto a=native.scanout_readback(plan),b=reference.scanout_readback(plan);
+                    if (a.pixels!=wanted || b.pixels!=wanted)
+                        throw std::runtime_error("Displaced display composition lost offsets, field phase or background");
+                    ++checks;
+                }
+            const std::array<std::uint64_t,2> aligned{(3ULL<<23)|(15ULL<<32)|(3ULL<<44),
+                (3ULL<<23)|(15ULL<<32)|(3ULL<<44)};
+            for (unsigned malformed:{0U,1U,2U}) {
+                auto displays=aligned;
+                if (malformed==0) displays[1]|=1; // Fractional source-pixel displacement.
+                if (malformed==1) displays[1]^=1ULL<<23; // Different magnification.
+                if (malformed==2) displays[1]|=2047ULL<<12; // Excessive output union.
+                bool rejected=false;
+                try { plan_display(35,buffers,displays); } catch (const std::invalid_argument&) { rejected=true; }
+                if (!rejected) throw std::runtime_error("Unsupported display mapping was approximated silently");
+            }
+        }
         SpriteCommand quad{{2,2,18,18,0,1,0x80406080,0}};
         compare(std::array{clear,quad});
         quad.draw.mask=0xff00ff00; compare(std::array{clear,quad}); quad.draw.mask=0;
@@ -161,6 +239,11 @@ int main(int argc,char** argv) {
         for (unsigned method=0;method<4;++method) {
             quad.draw.test=method<<17; compare(std::array{clear,quad});
         }
+        for (unsigned failure:{1U,3U}) {
+            quad.draw.test=1U|(failure<<12)|(1U<<17);
+            compare(std::array{clear,quad});
+        }
+        quad.draw.test=3U<<17;
         // Exact 32-bit integer depth, including adjacent values beyond float precision.
         auto closer=quad; closer.draw.depth++; closer.draw.test=3<<17; closer.draw.color=0x80808080;
         compare(std::array{quad,closer,quad});
@@ -175,20 +258,28 @@ int main(int argc,char** argv) {
         }
         // Texture conversion preserves packed/indexed addressing across the
         // end of source storage, with a non-page-aligned base and palette data.
-        for (bool indexed:{false,true}) {
+        for (unsigned indexed:{0U,1U,2U}) {
             for (unsigned word=0;word<actual.size();++word)
                 actual[word]=expected[word]=0x80123456U^(word*0x1020305U);
             auto wrapped=texture;
             wrapped.draw.base=4096; wrapped.draw.texture_base=16380;
             wrapped.draw.texture_pitch=2; wrapped.draw.texture_width=128; wrapped.draw.texture_height=128;
-            wrapped.draw.flags=1|4|8|(indexed ? 64U : 0U);
+            wrapped.draw.flags=1|4|8|(indexed ? 64U : 0U)|(indexed==2 ? indexed8_flag : 0U);
             wrapped.draw.du=wrapped.draw.dv=128*16;
-            for (unsigned n=0;n<16;++n) wrapped.palette[n]=0x80000000U|n*0x10101U;
+            for (unsigned n=0;n<256;++n) wrapped.palette[n]=0x80000000U|n*0x10101U;
             compare(std::array{wrapped});
         }
         // Framebuffer textures remain native image snapshots, including overlap.
         texture.draw.texture_base=0; texture.draw.du=-256; texture.draw.u0=256;
         compare(std::array{clear,texture});
+        // Logical texture size may exceed the resident framebuffer; only a
+        // proven sampled footprint can use the smaller native snapshot.
+        auto oversized=texture; oversized.draw.base=64;
+        oversized.draw.texture_width=oversized.draw.texture_height=1024;
+        oversized.draw.flags|=128; oversized.draw.clamp_u=oversized.draw.clamp_v=1;
+        compare(std::array{clear,oversized});
+        oversized.draw.clamp_u=0; oversized.draw.u0=0; // Negative filtered neighbor wraps to 1023.
+        compare(std::array{clear,oversized});
         SpriteCommand triangle{{0,0,24,24,0,1,0,0}};
         triangle.draw.flags=triangle_flag|shaded_triangle_flag;
         triangle.triangle={RasterVertex{16,16,0x80302010},RasterVertex{320,32,0x80604020},RasterVertex{32,320,0x80806040}};
@@ -392,6 +483,7 @@ int main(int argc,char** argv) {
                 throw std::runtime_error("Explicit LLVM texture verification did not preserve the draw");
             native.verify_texture_kernels(false);
         }
+        indexed8_textures(native,true);
         if (native.validation_errors()) throw std::runtime_error(native.validation_message());
         if (reference.validation_errors()) throw std::runtime_error(reference.validation_message());
         if (argc>1 && !native.statistics().texture_kernel_dispatches)

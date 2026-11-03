@@ -166,6 +166,11 @@ int main() {
                 sequence.consumed==boundary && sequence.stopped_command==0x14);
             const auto image=nt::vu::assemble_uploads(sequence.uploads,0);
             check(image.size()==1 && image[0].destination==0 && image[0].bytes.size()==16 && image[0].bytes[3]==0x4a);
+            const std::array<nt::elf::VectorOverlay,3> declared{{
+                {"first",24,0,8,24},{"second",36,8,8,36},{"after-launch",52,16,8,52}}};
+            const auto groups=nt::vu::recover_declared_uploads(packet,declared);
+            check(groups.size()==2 && groups[0].image.bytes==image[0].bytes && groups[0].sources.size()==2 &&
+                groups[1].image.destination==2 && groups[1].image.bytes.size()==8);
             auto overwritten=sequence.uploads;
             overwritten.push_back({0,nt::Bytes(8,0xab)});
             overwritten.push_back({4,nt::Bytes(8,0xcd)});

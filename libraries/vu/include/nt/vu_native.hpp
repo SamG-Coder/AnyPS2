@@ -23,6 +23,12 @@ struct State {
     std::uint32_t clip=0,clip_read_delay=0;
     std::uint32_t random=0x3f800000;
     std::uint32_t quotient_read_delay=0;
+    // Outstanding flag values are native block arguments, not instruction state.
+    std::array<std::uint32_t,4> pending_mac{};
+    std::uint32_t pending_mac_mask=0,visible_mac=0;
+    std::uint32_t visible_status=0;
+    std::array<std::uint32_t,4> pending_clip{};
+    std::uint32_t pending_clip_mask=0,visible_clip=0;
     bool operator==(const State&) const = default;
 };
 }

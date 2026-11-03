@@ -45,9 +45,9 @@ public:
             throw std::runtime_error("Default reset requires a linked startup module catalog");
         state_=prepare();
         platform_.graphics.edge_context=this;
-        platform_.graphics.display_edge=[](void* context,bool end) {
+        platform_.graphics.try_display_edge=[](void* context,bool end) {
             auto& self=*static_cast<IopReset*>(context);
-            if (self.accepted_ && self.started_) self.state_->services->vblank.post(end);
+            return !self.accepted_ || !self.started_ || self.state_->services->vblank.try_post(end);
         };
         platform_.graphics.display_overflow=[](void* context) {
             auto& self=*static_cast<IopReset*>(context);
@@ -57,7 +57,7 @@ public:
     nt::ee::NativeSifResetOwner owner() { return {this,reset,{this,commands}}; }
     ~IopReset() {
         if (platform_.graphics.edge_context==this) {
-            platform_.graphics.display_edge=nullptr; platform_.graphics.display_overflow=nullptr; platform_.graphics.edge_context=nullptr;
+            platform_.graphics.try_display_edge=nullptr; platform_.graphics.display_overflow=nullptr; platform_.graphics.edge_context=nullptr;
         }
     }
     bool invoked() const { return invoked_; }

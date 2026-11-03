@@ -7,7 +7,7 @@ struct Scanout {
     unsigned width=0,height=0;
     std::vector<std::uint32_t> pixels;
 };
-struct DisplaySurface { std::uint32_t base=0,pitch=0,x=0,y=0,width=0,height=0; };
+struct DisplaySurface { std::uint32_t base=0,pitch=0,x=0,y=0,width=0,height=0,offset_x=0,offset_y=0; };
 struct DisplayPlan {
     std::array<DisplaySurface,2> surfaces{};
     std::uint32_t width=0,height=0,control=0,background=0,half_height=0,bgra=0;
@@ -17,9 +17,18 @@ inline std::optional<DisplayPlan> plan_display(std::uint64_t control,
     bool half_height=false,std::uint32_t background=0) {
     const auto enabled=control&3;
     if (!enabled) return {};
-    if (enabled==3 && (!(control&32) || std::uint32_t(displays[0])!=std::uint32_t(displays[1])))
+    if (enabled==3 && !(control&32))
         throw std::invalid_argument("Unsupported native display composition");
     DisplayPlan plan{}; plan.control=std::uint32_t(control); plan.background=background; plan.half_height=half_height;
+    const unsigned first=enabled==2 ? 1 : 0;
+    const unsigned scale_x=((displays[first]>>23)&15)+1,scale_y=((displays[first]>>27)&3)+1;
+    unsigned origin_x=displays[first]&4095,origin_y=(displays[first]>>12)&2047;
+    if (enabled==3) {
+        if ((((displays[1]>>23)&15)+1)!=scale_x || (((displays[1]>>27)&3)+1)!=scale_y)
+            throw std::invalid_argument("Mixed display circuit magnification is unsupported");
+        origin_x=std::min(origin_x,unsigned(displays[1]&4095));
+        origin_y=std::min(origin_y,unsigned((displays[1]>>12)&2047));
+    }
     for (unsigned i=0;i<2;++i) if (enabled&(1U<<i)) {
         const auto b=buffers[i],d=displays[i];
         auto& surface=plan.surfaces[i];
@@ -29,56 +38,53 @@ inline std::optional<DisplayPlan> plan_display(std::uint64_t control,
         if (((b>>15)&31)>1 || !surface.pitch) throw std::invalid_argument("Unsupported native display surface");
         if (!surface.width || !surface.height || surface.width>2048 || surface.height>2048)
             throw std::invalid_argument("Invalid native display extent");
-        plan.width=std::max(plan.width,surface.width); plan.height=std::max(plan.height,surface.height);
+        const unsigned dx=unsigned(d&4095)-origin_x,dy=unsigned((d>>12)&2047)-origin_y;
+        if (dx%scale_x || dy%scale_y)
+            throw std::invalid_argument("Fractional display circuit displacement is unsupported");
+        surface.offset_x=dx/scale_x; surface.offset_y=dy/scale_y;
+        plan.width=std::max(plan.width,surface.offset_x+surface.width);
+        plan.height=std::max(plan.height,surface.offset_y+surface.height);
     }
+    if (plan.width>2048 || plan.height>2048) throw std::invalid_argument("Native display composition exceeds output bounds");
     return plan;
 }
-// Convert one enabled display circuit's 24/32-bit target to a native image.
-// Interlaced frame mode stores half as many source rows. Present each source
-// row twice on a progressive PC display; temporal field blending is separate.
-// RC1 constant alpha also blends against BGCOLOR when RC2 is disabled.
-// Aligned dual-circuit output supports constant-alpha composition, including
-// adjacent-row flicker filters. Dynamic-alpha and displaced outputs stop.
-inline std::optional<Scanout> scanout(std::span<const std::uint32_t> memory,std::uint64_t control,
-    const std::array<std::uint64_t,2>& buffers,const std::array<std::uint64_t,2>& displays,bool half_height=false,
-    std::uint32_t background=0) {
-    const auto enabled=control&3;
-    if (!enabled) return {};
+// Offsets position circuits in a shared output rectangle. Source coordinates
+// remain local to each circuit, including interlaced frame-mode row doubling.
+inline Scanout scanout(std::span<const std::uint32_t> memory,const DisplayPlan& plan) {
     if (memory.size()!=1024*1024) throw std::invalid_argument("Invalid native display memory size");
-    if (enabled==3 || (enabled==1 && (control&32))) {
-        if (!(control&32) || (enabled==3 && std::uint32_t(displays[0])!=std::uint32_t(displays[1])))
-            throw std::invalid_argument("Unsupported native display composition");
-        const auto first=scanout(memory,1,buffers,displays,half_height);
-        const auto second=enabled==3 ? scanout(memory,2,buffers,displays,half_height) : std::nullopt;
-        const unsigned alpha=(control>>8)&255;
-        Scanout frame{second ? std::max(first->width,second->width) : first->width,
-            second ? std::max(first->height,second->height) : first->height,{}};
-        frame.pixels.resize(std::size_t(frame.width)*frame.height);
-        for (unsigned y=0;y<frame.height;++y) for (unsigned x=0;x<frame.width;++x) {
-            auto color=background|0xff000000U;
-            if (second && !(control&128) && x<second->width && y<second->height) color=second->pixels[y*second->width+x];
-            if (x<first->width && y<first->height) {
-                const auto source=first->pixels[y*first->width+x];
+    const auto enabled=plan.control&3;
+    Scanout frame{plan.width,plan.height,std::vector<std::uint32_t>(std::size_t(plan.width)*plan.height)};
+    const auto contains=[&](unsigned circuit,unsigned x,unsigned y) {
+        const auto& s=plan.surfaces[circuit];
+        return x>=s.offset_x && y>=s.offset_y && x-s.offset_x<s.width && y-s.offset_y<s.height;
+    };
+    const auto sample=[&](unsigned circuit,unsigned x,unsigned y) {
+        const auto& s=plan.surfaces[circuit]; x-=s.offset_x; y-=s.offset_y;
+        return memory[rgba_word(s.base,s.pitch,s.x+x,s.y+(plan.half_height ? y/2 : y))]|0xff000000U;
+    };
+    for (unsigned y=0;y<frame.height;++y) for (unsigned x=0;x<frame.width;++x) {
+        auto color=plan.background|0xff000000U;
+        if (enabled==3 || (enabled==1 && (plan.control&32))) {
+            if ((enabled&2) && !(plan.control&128) && contains(1,x,y)) color=sample(1,x,y);
+            if (contains(0,x,y)) {
+                const auto source=sample(0,x,y),alpha=(plan.control>>8)&255;
                 std::uint32_t blended=0xff000000U;
                 for (unsigned shift=0;shift<24;shift+=8)
                     blended|=((((source>>shift)&255)*alpha+((color>>shift)&255)*(255-alpha)+127)/255)<<shift;
                 color=blended;
             }
-            frame.pixels[y*frame.width+x]=color;
+        } else {
+            const unsigned circuit=enabled==2 ? 1:0;
+            if (contains(circuit,x,y)) color=sample(circuit,x,y);
         }
-        return frame;
+        frame.pixels[y*frame.width+x]=color;
     }
-    const unsigned circuit=enabled==2 ? 1:0;
-    const auto buffer=buffers[circuit],display=displays[circuit];
-    const unsigned format=(buffer>>15)&31,pitch=(buffer>>9)&63;
-    if (format>1 || !pitch) throw std::invalid_argument("Unsupported native display surface");
-    const unsigned width=(((display>>32)&4095)+1)/(((display>>23)&15)+1);
-    const unsigned height=(((display>>44)&2047)+1)/(((display>>27)&3)+1);
-    if (!width || !height || width>2048 || height>2048) throw std::invalid_argument("Invalid native display extent");
-    const unsigned x0=(buffer>>32)&2047,y0=(buffer>>43)&2047,base=(buffer&511)*32;
-    Scanout frame{width,height,std::vector<std::uint32_t>(std::size_t(width)*height)};
-    for (unsigned y=0;y<height;++y) for (unsigned x=0;x<width;++x)
-        frame.pixels[y*width+x]=memory[rgba_word(base,pitch,x0+x,y0+(half_height ? y/2 : y))]|0xff000000U;
     return frame;
+}
+inline std::optional<Scanout> scanout(std::span<const std::uint32_t> memory,std::uint64_t control,
+    const std::array<std::uint64_t,2>& buffers,const std::array<std::uint64_t,2>& displays,bool half_height=false,
+    std::uint32_t background=0) {
+    const auto plan=plan_display(control,buffers,displays,half_height,background);
+    return plan ? std::optional(scanout(memory,*plan)) : std::nullopt;
 }
 }

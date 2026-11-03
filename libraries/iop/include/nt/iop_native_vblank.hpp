@@ -52,10 +52,12 @@ public:
         std::stable_sort(handlers_.begin(),handlers_.end(),[](const auto& a,const auto& b) { return a.priority<b.priority; });
         return result();
     }
-    void post(bool end) {
-        if (failed_) return;
+    // A producer that can retain its cursor retries a rejected edge after the
+    // callback owner has drained work. Rejection does not publish partial work.
+    bool try_post(bool end) {
+        if (failed_) return false;
         const auto count=std::count_if(handlers_.begin(),handlers_.end(),[&](const auto& h) { return h.end==end; });
-        if (pending_.size()+count+(events_ ? 1U : 0U)>256) { overflow(); return; }
+        if (pending_.size()+count+(events_ ? 1U : 0U)>256) return false;
         bool publish=events_!=nullptr;
         for (const auto& h:handlers_) if (h.end==end) {
             if (publish && h.priority>=128) {
@@ -64,6 +66,10 @@ public:
             pending_.push_back(h);
         }
         if (publish) pending_.push_back({0,end,128,0,0});
+        return true;
+    }
+    void post(bool end) {
+        if (!try_post(end) && !failed_) overflow();
     }
     std::optional<NativeCallback> take() override {
         if (active_ || failed_) return {};

@@ -46,7 +46,7 @@ StorageRange texture_storage(const Sprite& draw) {
     };
     const auto x=maximum(draw.texture_width,draw.clamp_u,draw.min_u,draw.max_u);
     const auto y=maximum(draw.texture_height,draw.clamp_v,draw.min_v,draw.max_v);
-    const auto page=(draw.flags&64) ? (y/128)*(draw.texture_pitch/2)+x/128
+    const auto page=(draw.flags&64) ? (y/((draw.flags&indexed8_flag) ? 64 : 128))*(draw.texture_pitch/2)+x/128
                                     : (y/32)*draw.texture_pitch+x/64;
     return {VkDeviceSize(draw.texture_base)*256,std::min(memory_bytes,VkDeviceSize(page+1)*8192)};
 }
@@ -56,16 +56,16 @@ StorageRange output_storage(const Sprite& draw,unsigned base) {
     // Include full pages. Depth's XOR swizzle stays inside its aligned page.
     return {VkDeviceSize(base)*256+VkDeviceSize(first)*8192,VkDeviceSize(last-first+1)*8192};
 }
-constexpr VkDeviceSize triangle_offset=memory_bytes*2+16*sizeof(std::uint32_t);
-constexpr VkDeviceSize writes_offset=memory_bytes*2+256;
+constexpr VkDeviceSize triangle_offset=memory_bytes*2+256*sizeof(std::uint32_t);
+constexpr VkDeviceSize writes_offset=memory_bytes*2+1280;
 constexpr unsigned max_writes=65536;
 constexpr VkDeviceSize display_offset=9*1024*1024+1024;
 constexpr VkDeviceSize display_bytes=2048*2048*4;
 constexpr VkDeviceSize buffer_bytes=display_offset+display_bytes;
 static_assert(writes_offset+max_writes*sizeof(PixelWrite)<display_offset-4);
-static_assert(sizeof(DisplayPlan)==72);
+static_assert(sizeof(DisplayPlan)==88);
 static_assert(sizeof(PixelWrite)==12);
-static_assert(sizeof(RasterVertex)==36);
+static_assert(sizeof(RasterVertex)==40);
 static_assert(sizeof(Sprite)==128);
 #if ANYPS2_REFERENCE_RENDERER
 const std::uint32_t shader_code[] =
@@ -371,7 +371,8 @@ struct VulkanRenderer::Impl {
         for (unsigned i=0;i<2;++i) if (plan.control&(1U<<i)) {
             const auto& surface=plan.surfaces[i];
             if (!surface.pitch || surface.pitch>63 || surface.base>16383 || !surface.width || !surface.height ||
-                surface.width>plan.width || surface.height>plan.height)
+                surface.offset_x>plan.width || surface.offset_y>plan.height ||
+                surface.width>plan.width-surface.offset_x || surface.height>plan.height-surface.offset_y)
                 throw std::runtime_error("Invalid resident display surface");
         }
         order();
@@ -434,7 +435,9 @@ void VulkanRenderer::verify_texture_kernels(bool enable) {
 }
 namespace {
 void validate_sprite(const Sprite& draw) {
-    if (draw.flags&~(((1U<<22)-1)|line_flag)) throw std::runtime_error("Unknown Vulkan draw flags");
+    if ((draw.flags&indexed8_flag) && !(draw.flags&64)) throw std::runtime_error("Invalid indexed texture flags");
+
+    if (draw.flags&~(((1U<<22)-1)|line_flag|indexed8_flag|fog_flag)) throw std::runtime_error("Unknown Vulkan draw flags");
     if ((draw.flags&line_flag) && (draw.flags&(1|triangle_flag|coverage_flag|perspective_triangle_flag)))
         throw std::runtime_error("Unsupported native line attributes");
     if (draw.right>2048 || draw.bottom>2048 || draw.left>draw.right || draw.top>draw.bottom || !draw.pitch || draw.pitch>63 || draw.base>16383)
@@ -480,7 +483,9 @@ void validate_sprite(const Sprite& draw) {
 }
 }
 void VulkanRenderer::sprite(std::span<std::uint32_t> memory,const Sprite& draw,std::span<const std::uint32_t> palette) {
-    if ((draw.flags&64) && palette.size()!=16) throw std::runtime_error("PSMT4 requires sixteen palette entries");
+    if ((draw.flags&64) && palette.size()!=((draw.flags&indexed8_flag) ? 256U : 16U) &&
+        !(!(draw.flags&indexed8_flag) && palette.size()==256))
+        throw std::runtime_error("Indexed texture has the wrong palette size");
     SpriteCommand command{draw};
     if (draw.flags&64) std::copy(palette.begin(),palette.end(),command.palette.begin());
     sprites(memory,std::span(&command,1));
@@ -489,6 +494,9 @@ void VulkanRenderer::validate(std::span<const SpriteCommand> commands) {
     if (commands.size()>65536) throw std::runtime_error("Vulkan draw batch exceeds bound");
     for (const auto& command:commands) {
         validate_sprite(command.draw);
+        if (command.fog>255 || command.fog_color>0xffffffU ||
+            std::any_of(command.triangle.begin(),command.triangle.end(),[](const RasterVertex& v) { return v.fog>255; }))
+            throw std::runtime_error("Invalid native fog parameters");
         if (command.draw.flags&line_flag) {
             const auto& v=command.triangle;
             for (unsigned i=0;i<2;++i)
@@ -551,6 +559,8 @@ void VulkanRenderer::draw(std::span<const SpriteCommand> commands) {
 #if ANYPS2_REFERENCE_RENDERER
 
     validate(commands);
+    for (const auto& command:commands) if (command.draw.flags&fog_flag)
+        throw std::runtime_error("Fog requires the native Vulkan image renderer");
     auto& v=*impl_;
     if (!v.initialized) throw std::runtime_error("Graphics storage was not initialized");
     for (const auto& command:commands) {
@@ -580,7 +590,7 @@ void VulkanRenderer::draw(std::span<const SpriteCommand> commands) {
                 v.statistics.texture_snapshot_bytes+=source.length;
             }
         }
-        if (draw.flags&64) vkCmdUpdateBuffer(v.command,v.storage,memory_bytes*2,64,command.palette.data());
+        if (draw.flags&64) vkCmdUpdateBuffer(v.command,v.storage,memory_bytes*2,(draw.flags&indexed8_flag) ? 1024 : 64,command.palette.data());
         if (draw.flags&(triangle_flag|line_flag)) vkCmdUpdateBuffer(v.command,v.storage,triangle_offset,sizeof(command.triangle),command.triangle.data());
         if (draw.flags&(1|64|triangle_flag|line_flag)) {
             VkMemoryBarrier uploaded{VK_STRUCTURE_TYPE_MEMORY_BARRIER};

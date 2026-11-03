@@ -12,6 +12,13 @@ Lower decode_lower(const Pair& pair,unsigned unit) {
     const auto& fields=*pair.lower;
     const auto integer=[](unsigned index) { return Register{Bank::integer,index&15U}; };
     const auto vector=[](unsigned index) { return Register{Bank::vector,index}; };
+    if (fields.primary==20 || fields.primary==22 || fields.primary==23) {
+        result.operation=fields.primary==20 ? LowerOperation::status_equal :
+            fields.primary==22 ? LowerOperation::status_and : LowerOperation::status_or;
+        result.literal=(fields.encoding&0x7ffU)|((fields.encoding>>10)&0x800U);
+        result.result=integer(fields.target);
+        return result;
+    }
     if ((fields.primary>=16 && fields.primary<=19) || fields.primary==28) {
         result.literal=fields.encoding&0xffffffU;
         switch (fields.primary) {
@@ -82,6 +89,12 @@ Lower decode_lower(const Pair& pair,unsigned unit) {
         result.operation=LowerOperation::move_p; result.result=vector(fields.target);
     } else if (fields.subfunction==28 && variant==3 && unit==1) {
         result.operation=LowerOperation::reciprocal_length; result.left=vector(fields.source); result.mask=0;
+    } else if (fields.subfunction==31 && variant==0 && unit==1) {
+        result.operation=LowerOperation::sine;
+        result.left={Bank::vector,fields.source,(fields.encoding>>21)&3U}; result.mask=0;
+    } else if (fields.subfunction==30 && variant==0 && unit==1) {
+        result.operation=LowerOperation::efu_square_root;
+        result.left={Bank::vector,fields.source,(fields.encoding>>21)&3U}; result.mask=0;
     } else if (fields.subfunction==30 && variant==3 && unit==1) {
         result.operation=LowerOperation::wait_p; result.mask=0;
     } else if (fields.subfunction==26 && variant<2) {
@@ -150,6 +163,8 @@ std::string_view name(LowerOperation operation) {
     case LowerOperation::input_top: return "input_top";
     case LowerOperation::input_itop: return "input_itop";
     case LowerOperation::reciprocal_length: return "reciprocal_length";
+    case LowerOperation::sine: return "sine";
+    case LowerOperation::efu_square_root: return "efu_square_root";
     case LowerOperation::move_p: return "move_p";
     case LowerOperation::wait_p: return "wait_p";
     case LowerOperation::mac_and: return "mac_and";
@@ -161,6 +176,9 @@ std::string_view name(LowerOperation operation) {
     case LowerOperation::clip_equal: return "clip_equal";
     case LowerOperation::clip_set: return "clip_set";
     case LowerOperation::clip_get: return "clip_get";
+    case LowerOperation::status_and: return "status_and";
+    case LowerOperation::status_or: return "status_or";
+    case LowerOperation::status_equal: return "status_equal";
     default: return "unsupported";
     }
 }

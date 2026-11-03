@@ -96,6 +96,24 @@ void test_vector_section() {
     }
     auto bad=bytes; std::fill(bad.begin()+0x2a0,bad.begin()+0x2b3,'x');
     rejects([&] { nt::elf::parse(bad); });
+    auto overlays=make_elf(); overlays.resize(0x400,0);
+    put32(overlays,68,16); put32(overlays,72,16);
+    put32(overlays,32,0x200); overlays[46]=40; overlays[48]=4; overlays[50]=1;
+    constexpr char names[]="\0.shstrtab\0.DVP.overlay.synthetic";
+    std::copy(std::begin(names),std::end(names),overlays.begin()+0x300);
+    put32(overlays,0x228,1); put32(overlays,0x22c,3); put32(overlays,0x238,0x300); put32(overlays,0x23c,sizeof(names));
+    put32(overlays,0x254,0x7ffff420); put32(overlays,0x260,0x380); put32(overlays,0x264,12);
+    put32(overlays,0x268,1); put32(overlays,0x274,12);
+    put32(overlays,0x278,11); put32(overlays,0x27c,0x7ffff421); put32(overlays,0x28c,8);
+    put32(overlays,0x380,11); put32(overlays,0x384,0x100008); put32(overlays,0x388,8);
+    const auto recovered=nt::elf::parse(overlays).vector_overlays;
+    check(recovered.size()==1 && recovered[0].source_address==0x100008 && recovered[0].destination==8 &&
+        recovered[0].size==8 && recovered[0].file_offset==0x108,"DVP metadata did not resolve load-image bytes");
+    for (const auto [at,value]:std::initializer_list<std::pair<unsigned,unsigned>>{
+            {0x264,11},{0x268,4},{0x380,999},{0x384,0x100010},{0x388,16384},{0x28c,7}}) {
+        auto invalid=overlays; put32(invalid,at,value);
+        rejects([&] { nt::elf::parse(invalid); });
+    }
 }
 void test_function_symbols() {
     auto image=make_elf(); image.resize(0x340,0);

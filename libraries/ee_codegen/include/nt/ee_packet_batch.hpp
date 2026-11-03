@@ -5,11 +5,13 @@
 #include <vector>
 
 namespace nt::ee {
+struct NativePacketOrigin { std::size_t offset; unsigned quadword_offset; };
 // Resolve data descriptors into an owned native batch. This does not execute VIF,
 // GIF or VU code, clock a channel, or publish completion.
 class NativePacketBatch {
 public:
     std::vector<std::uint8_t> bytes;
+    std::vector<NativePacketOrigin> origins;
     std::uint32_t source=0,tag=0,tag_bits=0;
     static Stop view(const Memory& memory,std::uint32_t raw,std::uint32_t size,
                      std::span<const std::uint8_t>& result) {
@@ -50,8 +52,14 @@ public:
             result=read(memory,source,size,payload);
             if (result!=Stop::budget) return result;
             if (size+(transfer_tags ? tag_bytes : 0U)>maximum_bytes-bytes.size()) return Stop::invalid_state;
-            if (transfer_tags) bytes.insert(bytes.end(),descriptor.end()-tag_bytes,descriptor.end());
-            bytes.insert(bytes.end(),payload.begin(),payload.end());
+            if (transfer_tags) {
+                origins.push_back({bytes.size(),16-tag_bytes});
+                bytes.insert(bytes.end(),descriptor.end()-tag_bytes,descriptor.end());
+            }
+            if (!payload.empty()) {
+                origins.push_back({bytes.size(),0});
+                bytes.insert(bytes.end(),payload.begin(),payload.end());
+            }
             source+=size; tag=next;
             if (kind==0 || kind==7 || (interrupt_tags && (words[0]&0x80000000U))) return Stop::budget;
         }

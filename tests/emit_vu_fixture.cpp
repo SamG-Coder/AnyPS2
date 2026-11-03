@@ -108,7 +108,10 @@ int main(int argc,char** argv) {
     const auto module_text=module.str();
     nt::write_file(std::string(argv[1])+".program",nt::ByteView(reinterpret_cast<const std::uint8_t*>(module_text.data()),module_text.size()));
     std::ostringstream module1;
-    nt::vu::emit_program_llvm(module1,nt::vu::frame(bytes,1,0),1,entries,"nt_vu_program1");
+    auto alternative=bytes;
+    alternative[4*8]^=0xc0; // VI5 increment immediate 1 -> 2, same destination.
+    const std::array images{nt::vu::frame(bytes,1,0),nt::vu::frame(alternative,1,0)};
+    nt::vu::emit_catalog_llvm(module1,images,1,"nt_vu_program1");
     const auto module1_text=module1.str();
     nt::write_file(std::string(argv[1])+".program1",nt::ByteView(reinterpret_cast<const std::uint8_t*>(module1_text.data()),module1_text.size()));
     auto invalid_multi=multi;
@@ -170,8 +173,23 @@ int main(int argc,char** argv) {
     pair(0x80000335);
     pair(0x80000000|(15U<<21)|(2U<<16)|(25U<<6)|60,0x400002ff); // Unsynchronized alternative entry.
     pair(0x80000335);
+    pair(0x80000000|(2U<<21)|(1U<<11)|(31U<<6)|60); // ESIN VF1.z.
+    pair(0x80000000|(30U<<6)|63); // WAITP.
+    pair(0x80000000|(8U<<21)|(2U<<16)|(25U<<6)|60,0x400002ff);
+    pair(0x80000335);
+    pair((40U<<25)|(1U<<11)|4); // Pair 12: VI1==0 selects delay pair 17, otherwise 14.
+    pair((41U<<25)|(2U<<11)|6); // Pair 13: VI2!=0 selects 20 after the selected delay.
+    pair((8U<<25)|(3U<<11)|(3U<<16)|1); // Pair 14 increments VI3 by 1.
+    pair(0x80000335,0x400002ff); pair(0x80000335);
+    pair((8U<<25)|(3U<<11)|(3U<<16)|2); // Pair 17 increments VI3 by 2.
+    pair(0x80000335,0x400002ff); pair(0x80000335);
+    pair(0x80000335,0x400002ff); pair(0x80000335);
     std::ostringstream p_module;
-    const std::array<unsigned,2> p_entries{0,6};
+    pair(0x80000000|(3U<<21)|(1U<<11)|(30U<<6)|60); // ESQRT VF1.w.
+    pair(0x80000000|(30U<<6)|63);
+    pair(0x80000000|(8U<<21)|(2U<<16)|(25U<<6)|60,0x400002ff);
+    pair(0x80000335);
+    const std::array<unsigned,5> p_entries{0,6,8,12,22};
     nt::vu::emit_program_llvm(p_module,nt::vu::frame(bytes,1,0),1,p_entries,"nt_vu_p");
     const auto p_text=p_module.str();
     nt::write_file(std::string(argv[1])+".p",nt::ByteView(reinterpret_cast<const std::uint8_t*>(p_text.data()),p_text.size()));
@@ -186,11 +204,27 @@ int main(int argc,char** argv) {
     pair(0x80000335);
     pair((26U<<25)|(1U<<11)|(2U<<16),0x400002ff); // Too-early alternative.
     pair(0x80000335);
+    pair((22U<<25)|(1U<<21)|(6U<<16)|0x41); // FSAND, split 12-bit immediate.
+    pair((23U<<25)|(1U<<21)|(7U<<16)|2); // FSOR.
+    pair((20U<<25)|(1U<<21)|(8U<<16)|0x41,0x400002ff); // FSEQ + E.
+    pair(0x80000335);
     std::ostringstream flags_module;
-    const std::array<unsigned,2> flag_entries{0,8};
+    const std::array<unsigned,3> flag_entries{0,8,10};
     nt::vu::emit_program_llvm(flags_module,nt::vu::frame(bytes,1,0),1,flag_entries,"nt_vu_flags");
     const auto flags_text=flags_module.str();
     nt::write_file(std::string(argv[1])+".flags",nt::ByteView(reinterpret_cast<const std::uint8_t*>(flags_text.data()),flags_text.size()));
+    bytes.clear();
+    pair(0x80000335,(8U<<21)|(1U<<6)|40); // zero, negative, positive, zero: four independent producers.
+    pair(0x80000335,(8U<<21)|(10U<<16)|(2U<<6)|44);
+    pair((32U<<25)|1,(8U<<21)|(10U<<11)|(10U<<16)|(3U<<6)|40);
+    pair(0x80000335,(8U<<21)|(4U<<6)|40); // Branch delay pair publishes the fourth result later.
+    for (unsigned destination=2;destination<=5;++destination)
+        pair((26U<<25)|(1U<<11)|(destination<<16),destination==5 ? 0x400002ff : 0x2ff);
+    pair(0x80000335);
+    std::ostringstream mac_module;
+    nt::vu::emit_program_llvm(mac_module,nt::vu::frame(bytes,0,0),0,entries,"nt_vu_mac_pipeline");
+    const auto mac_text=mac_module.str();
+    nt::write_file(std::string(argv[1])+".mac_pipeline",nt::ByteView(reinterpret_cast<const std::uint8_t*>(mac_text.data()),mac_text.size()));
     bytes.clear();
     pair(0x80000000|(1U<<11)|(27U<<6)|60); // XGKICK: split before following store.
     pair((1U<<25)|(15U<<21)|(1U<<11),0x400002ff);
@@ -280,5 +314,24 @@ int main(int argc,char** argv) {
     if (!missing_rejected || !missing_continuation.str().empty()) return 1;
     const auto continuation_text=continuation_module.str();
     nt::write_file(std::string(argv[1])+".continuation",nt::ByteView(reinterpret_cast<const std::uint8_t*>(continuation_text.data()),continuation_text.size()));
+    bytes.clear();
+    const auto increment=0x80000000U|(1U<<11)|(1U<<16)|(1U<<6)|50;
+    pair(0x80000335,0x400002ff); pair(0x80000335);
+    pair(increment); pair(increment,0x400002ff); pair(increment);
+    pair((36U<<25)|(2U<<11)); pair(0x80000335); // Runtime VI2 chooses a compiled entry.
+    pair(increment); // Unterminated tail must execute, then report the image boundary.
+    std::ostringstream whole_module;
+    nt::vu::emit_program_llvm(whole_module,nt::vu::frame(bytes,0,0),0,{},"nt_vu_whole",0,true);
+    const auto whole_text=whole_module.str();
+    nt::write_file(std::string(argv[1])+".whole",nt::ByteView(reinterpret_cast<const std::uint8_t*>(whole_text.data()),whole_text.size()));
+    for (const bool missing_delay:{false,true}) {
+        bytes.clear(); pair(0x80000335,0x400002ff); pair(0x80000335);
+        pair(missing_delay ? (36U<<25) : 0x80000033); // Invalid code after a completed routine is not hidden.
+        std::ostringstream invalid;
+        bool rejected=false;
+        try { nt::vu::emit_program_llvm(invalid,nt::vu::frame(bytes,0,0),0,{},"nt_vu_invalid_whole",0,true); }
+        catch (const std::invalid_argument&) { rejected=true; }
+        if (!rejected || !invalid.str().empty()) return 1;
+    }
     nt::write_file(argv[1],nt::ByteView(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));
 }

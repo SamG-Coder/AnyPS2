@@ -7,7 +7,7 @@ namespace nt::graphics {
 inline void plan_texture(Sprite& draw,std::uint64_t texture,
     std::uint64_t filter,std::uint64_t clamp,std::uint32_t texa) {
     const unsigned format=(texture>>20)&63,function=(texture>>35)&3;
-    if (format>1 && format!=20)
+    if (format>1 && format!=19 && format!=20)
         throw std::invalid_argument("Unsupported texture format PSM="+std::to_string(format)+" TFX="+std::to_string(function));
     const unsigned magnify=(filter>>5)&1,minify=(filter>>6)&7;
     if (((filter>>2)&7) || minify>1 || minify!=magnify) throw std::invalid_argument("Unsupported mipmap or mixed sprite filtering");
@@ -17,10 +17,11 @@ inline void plan_texture(Sprite& draw,std::uint64_t texture,
     draw.texture_base=texture&16383; draw.texture_pitch=(texture>>14)&63;
     draw.texture_width=1U<<tw; draw.texture_height=1U<<th;
     draw.flags|=1|(format==1 ? 2U : 0U)|(((texture>>34)&1) ? 4U : 0U)|(function<<3);
-    if (format==20) {
+    if (format==19 || format==20) {
         const unsigned palette_format=(texture>>51)&15;
         if (palette_format>1) throw std::invalid_argument("Unsupported 16-bit palette sampling");
         draw.flags|=64|(palette_format==1 ? 2U : 0U);
+        if (format==19) draw.flags|=indexed8_flag;
     }
     draw.clamp_u=clamp&3; draw.clamp_v=(clamp>>2)&3;
     draw.min_u=(clamp>>4)&1023; draw.max_u=(clamp>>14)&1023;

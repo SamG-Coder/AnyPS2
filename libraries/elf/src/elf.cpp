@@ -1,6 +1,7 @@
 #include <nt/elf.hpp>
 #include <algorithm>
 #include <array>
+#include <optional>
 #include <stdexcept>
 
 namespace nt::elf {
@@ -37,19 +38,20 @@ void read_sections(ByteView bytes,Executable& executable) {
         const auto offset=le32(bytes,at+16),size=le32(bytes,at+20);
         require_range(bytes,offset,size); names=bytes.subspan(offset,size);
     }
+    const auto section_name_at=[&](std::size_t at) {
+        if (names.empty()) return std::string{};
+        const auto name=le32(bytes,at);
+        if (name>=names.size()) throw std::runtime_error("Invalid ELF section name");
+        const auto end=std::find(names.begin()+name,names.end(),0);
+        if (end==names.end()) throw std::runtime_error("Unterminated ELF section name");
+        return std::string(names.begin()+name,end);
+    };
     for (unsigned index=0;index<count;++index) {
         const auto at=std::size_t(table)+index*stride;
         const auto type=le32(bytes,at+4),flags=le32(bytes,at+8);
         if (!(flags&2)) continue; // Only allocated tables belong to the program.
         const auto section_address=le32(bytes,at+12),section_offset=le32(bytes,at+16),section_size=le32(bytes,at+20);
-        std::string section_name;
-        if (!names.empty()) {
-            const auto name=le32(bytes,at);
-            if (name>=names.size()) throw std::runtime_error("Invalid ELF section name");
-            const auto end=std::find(names.begin()+name,names.end(),0);
-            if (end==names.end()) throw std::runtime_error("Unterminated ELF section name");
-            section_name.assign(names.begin()+name,end);
-        }
+        const auto section_name=section_name_at(at);
         const bool vector_code=type==1 && section_name==".vutext";
         if (section_size && (flags&4) && !vector_code) {
             if (type!=1 || section_address%4 || section_size%4)
@@ -96,6 +98,47 @@ void read_sections(ByteView bytes,Executable& executable) {
             });
             if (target%4 || !executable_target) throw std::runtime_error("Invalid ELF lifecycle code pointer");
             executable.lifecycle_entries.push_back(target);
+        }
+    }
+    bool overlays_seen=false;
+    for (unsigned index=0;index<count;++index) {
+        const auto at=std::size_t(table)+index*stride;
+        if (le32(bytes,at+4)!=0x7ffff420U) continue;
+        const auto offset=le32(bytes,at+16),size=le32(bytes,at+20),link=le32(bytes,at+24);
+        if (overlays_seen || le32(bytes,at+36)!=12 || size%12 || size/12>4096 || link>=count)
+            throw std::runtime_error("Invalid ELF DVP overlay table");
+        overlays_seen=true; require_range(bytes,offset,size);
+        const auto strings=std::size_t(table)+link*stride;
+        if (le32(bytes,strings+4)!=3) throw std::runtime_error("Invalid ELF DVP overlay strings");
+        const auto string_offset=le32(bytes,strings+16),string_size=le32(bytes,strings+20);
+        require_range(bytes,string_offset,string_size);
+        const auto text=bytes.subspan(string_offset,string_size);
+        for (unsigned item=0;item<size;item+=12) {
+            const auto row=std::size_t(offset)+item;
+            const auto name_offset=le32(bytes,row),source=le32(bytes,row+4),destination=le32(bytes,row+8);
+            if (name_offset>=text.size()) throw std::runtime_error("Invalid ELF DVP overlay name");
+            const auto end=std::find(text.begin()+name_offset,text.end(),0);
+            if (end==text.end()) throw std::runtime_error("Unterminated ELF DVP overlay name");
+            const std::string name(text.begin()+name_offset,end);
+            unsigned matches=0,extent=0;
+            for (unsigned section=0;section<count;++section) {
+                const auto header=std::size_t(table)+section*stride;
+                if (le32(bytes,header+4)==0x7ffff421U && section_name_at(header)==name) {
+                    ++matches; extent=le32(bytes,header+20);
+                }
+            }
+            if (matches!=1 || !extent || extent%8 || source%8 || destination%8 ||
+                std::uint64_t(destination)+extent>16384)
+                throw std::runtime_error("Invalid ELF DVP overlay extent");
+            std::optional<std::uint32_t> file_offset;
+            for (const auto& segment:executable.segments)
+                if (source>=segment.address && std::uint64_t(source)+extent<=std::uint64_t(segment.address)+segment.file_size) {
+                    if (file_offset) throw std::runtime_error("Ambiguous ELF DVP source mapping");
+                    file_offset=segment.offset+(source-segment.address);
+                }
+            if (!file_offset) throw std::runtime_error("ELF DVP overlay source is not file-backed");
+            require_range(bytes,*file_offset,extent);
+            executable.vector_overlays.push_back({name,source,destination,extent,*file_offset});
         }
     }
     auto& entries=executable.lifecycle_entries;

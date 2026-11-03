@@ -7,6 +7,10 @@ struct Segment {
     std::uint32_t offset, address, file_size, memory_size, flags, alignment;
 };
 struct AddressRange { std::uint32_t address,size; };
+struct VectorOverlay {
+    std::string name;
+    std::uint32_t source_address,destination,size,file_offset;
+};
 struct Executable {
     std::uint32_t entry, flags;
     std::vector<Segment> segments;
@@ -26,6 +30,9 @@ struct Executable {
     // File-backed allocated EE instruction sections, excluding VU containers.
     // Unlike LOAD permissions, these do not include inter-section padding/data.
     std::vector<AddressRange> code_sections;
+    // DVP linker metadata identifies VU bytes without executing the EE program.
+    // Destination is a VU byte address; the metadata does not specify the unit.
+    std::vector<VectorOverlay> vector_overlays;
 };
 Executable parse(ByteView bytes);
 bool executable_address(const Executable&,std::uint32_t address,unsigned bytes=4,bool allow_inferred=false);

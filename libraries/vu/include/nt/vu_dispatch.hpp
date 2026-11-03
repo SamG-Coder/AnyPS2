@@ -35,6 +35,11 @@ public:
         }
     }
     unsigned unit() const { return unit_; }
+    bool contains(unsigned address) const {
+        const auto found=std::lower_bound(blocks_.begin(),blocks_.end(),address,
+            [](const Block& block,unsigned value) { return block.address<value; });
+        return found!=blocks_.end() && found->address==address;
+    }
     bool within(unsigned begin,std::uint64_t end) const {
         return !blocks_.empty() && blocks_.front().address>=begin && blocks_.back().address<end;
     }
