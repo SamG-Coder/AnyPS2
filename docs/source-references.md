@@ -2208,3 +2208,9 @@ The local graphics examples use [ps2dev/gsKit](https://github.com/ps2dev/gsKit)
 at `8ef73d05f022d14b3ded7c70cba670fe333ed61a` (AFL-2.0 and per-file notices),
 with the gsKit/dmaKit archives supplied by the PS2DEV v2.0.0 toolchain.
 The upstream checkout, sample assets, PS2 ELFs and converted output stay ignored.
+
+AOT-recognized VSYNC polls use native display deadlines and bounded host waits.
+The Windows wait follows Microsoft's public [CreateWaitableTimerExW](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createwaitabletimerexw)
+and [SetWaitableTimer](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-setwaitabletimer)
+contracts. It uses an unnamed, thread-owned high-resolution timer, with standard
+host sleep if unavailable; no timer sample code is copied.

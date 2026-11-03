@@ -29,6 +29,68 @@ void run_ee_batch_tests();
 void run_ee_file_rpc_tests();
 int main() {
     try {
+        // Execute the AOT-recognized wait, retaining state/budget on suspension.
+        // Ordinary RAM polls, side effects and other event masks remain code.
+        {
+            nt::ee::NativePlatform platform(timer_clock); nt::ee::Memory memory;
+            platform.attach(memory);
+            platform.graphics.synchronize=[](void*) { return nt::ee::Stop::budget; };
+            unsigned presentations=0;
+            platform.graphics.scanout_context=&presentations;
+            platform.graphics.scanout_ready=[](void* p) { ++*static_cast<unsigned*>(p); };
+            const auto sync=(487ULL*2002000+62)/63;
+            for (unsigned variant=0;variant<3;++variant) for (unsigned address:{0x12000ff0U,0xb2000ff0U}) {
+                timer_now=0; check(platform.graphics.configure(1,2,0)==nt::ee::Stop::budget);
+                nt::runtime::State s; s.pc=0x4d0000+variant*32; s.set(4,address); s.set(8,77); s.gpr[8].hi=99;
+                const auto pc=s.pc, before=presentations;
+                check(nt_ee_generated_run(&s,&memory,8)==nt::ee::Stop::display_wait && s.pc==pc && !s.executed && s.gpr[8].lo==77);
+                timer_now=sync-1;
+                check(nt_ee_generated_run(&s,&memory,8)==nt::ee::Stop::display_wait && presentations==before);
+                timer_now=sync;
+                check(nt_ee_generated_run(&s,&memory,8)==nt::ee::Stop::breakpoint && s.pc==pc+16 &&
+                    s.executed==(variant==2 ? 3U : 4U) && s.gpr[8].lo==8 && s.gpr[8].hi==99 && presentations==before+1);
+                // Already signalled waits must not acknowledge or wait another field.
+                s.pc=pc;
+                check(nt_ee_generated_run(&s,&memory,8)==nt::ee::Stop::breakpoint && presentations==before+1);
+            }
+            timer_now=0; check(platform.graphics.configure(1,2,0)==nt::ee::Stop::budget);
+            nt::runtime::State s; s.pc=0x4d0000; s.set(4,0x12000ff0);
+            check(nt_ee_generated_run(&s,&memory,1)==nt::ee::Stop::budget && s.executed==1 && s.pc==0x4d0004);
+            for (unsigned variant:{3U,4U}) {
+                s={}; s.pc=0x4d0000+variant*32; s.set(4,0x12000ff0);
+                check(nt_ee_generated_run(&s,&memory,4)==nt::ee::Stop::budget && s.executed==4);
+                if (variant==3) check(s.gpr[9].lo==1 && s.pc==0x4d0060);
+            }
+            std::array<std::uint8_t,32> data{}; data[16]=8;
+            memory.data=data.data(); memory.size=data.size();
+            s={}; s.pc=0x4d0000;
+            check(nt_ee_generated_run(&s,&memory,8)==nt::ee::Stop::breakpoint && s.gpr[8].lo==8);
+            s={}; s.pc=0x4d00a0; s.set(8,0x12000ff0);
+            check(nt_ee_generated_run(&s,&memory,4)==nt::ee::Stop::budget && s.executed==4);
+            // Scheduler pumping, cancellation and interrupts remain observable;
+            // waiting never invents retired operations or a display completion.
+            nt::ee::StartupServices services(nt_ee_generated_code_overlap);
+            unsigned pumps=0;
+            services.idle_pump=[&] { ++pumps; timer_now=sync; return nt::ee::Stop::budget; };
+            s={}; s.pc=0x4d0000; s.set(4,0x12000ff0);
+            check(nt::ee::run(nt_ee_generated_run,s,memory,8,services)==nt::ee::Stop::breakpoint && pumps==1 && s.executed==4);
+            timer_now=0; platform.graphics.configure(1,2,0);
+            services.idle_pump=[&] { ++pumps; return nt::ee::Stop::unsupported_system; };
+            s={}; s.pc=0x4d0000; s.set(4,0x12000ff0);
+            check(nt::ee::run(nt_ee_generated_run,s,memory,8,services)==nt::ee::Stop::unsupported_system && !s.executed);
+            services.idle_pump={};
+            unsigned checks=0;
+            services.stop_requested=[&] { return ++checks==2; };
+            check(nt::ee::run(nt_ee_generated_run,s,memory,8,services)==nt::ee::Stop::host_stop && !s.executed);
+            services.stop_requested={}; memory.interrupts=nullptr;
+            services.idle_pump=[&] { memory.pending_interrupts=0x400; return nt::ee::Stop::budget; };
+            s.cop0_status=0x10401;
+            check(nt::ee::run(nt_ee_generated_run,s,memory,8,services)==nt::ee::Stop::interrupt_pending && !s.executed);
+            timer_now=0; platform.graphics.configure(1,3,0);
+            check(platform.graphics.display_wait_ns()==582ULL*32000);
+            timer_now=582ULL*32000;
+            check(platform.graphics.display_wait_ns()==0);
+        }
         for (const bool taken:{false,true}) {
             nt::runtime::State state; state.pc=0x4afffc; state.set(8,!taken); state.set(9,41);
             check(run(&state,1)==nt::ee::Stop::budget && state.executed==1 && state.delay_slot==taken);

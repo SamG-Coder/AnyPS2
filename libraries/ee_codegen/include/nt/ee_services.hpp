@@ -309,6 +309,34 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
         }
         if (retired>slice) return Stop::invalid_state;
         budget-=retired;
+        if (result==Stop::display_wait && budget) {
+            if (!memory.graphics) return Stop::invalid_state;
+            const auto waiting_since=std::chrono::steady_clock::now();
+            for (;;) {
+                if (services.stop_requested && services.stop_requested()) return Stop::host_stop;
+                if (services.idle_pump) {
+                    const auto pumped=services.idle_pump();
+                    if (pumped!=Stop::budget) return pumped;
+                }
+                if (memory.sif_outbound) {
+                    const auto pumped=memory.sif_outbound->pump(memory);
+                    if (pumped!=Stop::budget) return pumped;
+                }
+                if (memory.io.poll) memory.io.poll(memory.io.context);
+                if (memory.completions) memory.completions->publish(memory);
+                if (memory.interrupts) memory.interrupts->publish(memory);
+                if ((state.cop0_status&0x10007U)==0x10001U && (state.cop0_status&memory.pending_interrupts&0xff00U)) break;
+                const auto delay=memory.graphics->display_wait_ns();
+                if (!delay || !*delay) break;
+                if (std::chrono::steady_clock::now()-waiting_since>=services.idle_timeout) return Stop::display_wait;
+                // Bound host sleep by the next display deadline and the existing
+                // native service-pump cadence so input, timers and IOP work run.
+                const auto start=std::chrono::steady_clock::now();
+                native_service_wait(*delay);
+                if (services.profile) services.profile->idle_ns+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count();
+            }
+            continue;
+        }
         if ((result==Stop::unmapped_code || result==Stop::budget) && services.returning(state)) {
             const auto restored=services.finish(state,memory);
             if (restored!=Stop::budget) return restored;

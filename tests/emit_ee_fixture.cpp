@@ -407,6 +407,15 @@ int main(int argc,char** argv) {
     code.push_back(nt::r5900::decode(0x4c0004,12));
     code.push_back(nt::r5900::decode(0x4c0010,0x03e00008));
     code.push_back(nt::r5900::decode(0x4c0014,0x24420007));
+    // Original VSYNC loops with width, alias, likely-branch and unsafe variants.
+    for (unsigned variant=0;variant<6;++variant) {
+        const auto pc=0x4d0000+variant*32;
+        const unsigned load=variant==1 ? 0x8c880010U : variant==2 ? 0x9c880010U : 0xdc880010U;
+        const std::array words{load,variant==4 ? 0x31080002U : 0x31080008U,
+            variant==2 ? 0x5100fffdU : 0x1100fffdU,variant==3 ? 0x25290001U : 0U,13U};
+        for (unsigned n=0;n<words.size();++n)
+            code.push_back(nt::r5900::decode(pc+n*4,variant==5 && n==0 ? 0xdd080010U : words[n]));
+    }
     code.push_back(nt::r5900::decode(0xfffffffcU,12));
     auto malformed=images; malformed[1].segments[0].bytes[0]^=1;
     failed=false;

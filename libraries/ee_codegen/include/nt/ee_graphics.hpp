@@ -113,6 +113,24 @@ public:
     std::uint32_t poll() { advance(); const auto result=events_; events_=0; return result; }
     std::uint64_t resets() const { return resets_; }
     bool edge_overflow() const { return edge_lost_; }
+    // Time remaining to the real native display deadline. This does not set a
+    // completion bit early, acknowledge it, or advance time by retired operations.
+    // Missing configuration leaves the original compiled poll intact.
+    std::optional<std::uint64_t> display_wait_ns() {
+        advance();
+        if (!mode_) return {};
+        if (flags_&8) return 0;
+        const std::uint64_t period=mode_->standard==2 ? 525 : 625;
+        const std::uint64_t sync=mode_->standard==2 ? 487 : 582;
+        const std::uint64_t numerator=mode_->standard==2 ? 63 : 1;
+        const std::uint64_t denominator=mode_->standard==2 ? 2002000 : 32000;
+        auto target=(ticks_/period)*period+sync;
+        if (target<=ticks_) target+=period;
+        const auto deadline=epoch_+(target/numerator)*denominator+
+            ((target%numerator)*denominator+numerator-1)/numerator;
+        const auto now=clock_();
+        return deadline>now ? deadline-now : 0;
+    }
 private:
     static std::uint64_t edges(std::uint64_t ticks,std::uint32_t period,std::uint32_t offset) {
         return ticks<offset ? 0 : (ticks-offset)/period+1;

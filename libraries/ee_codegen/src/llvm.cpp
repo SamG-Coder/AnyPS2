@@ -127,6 +127,36 @@ void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::s
             w.store("i32",std::to_string(payload.address),offsetof(ee::Memory,fault_address),"%memory");
             w.out<<"  ret i32 14\npayload_ready"<<suffix<<":\n";
         }
+        if (display_wait_pattern(instructions.subspan(n)) && !(n && instructions[n-1].branch())) {
+            // All four instructions must have the same lifetime/publication
+            // guards. The hint never retires code or changes register state.
+            bool same_guard=true;
+            for (const auto& range:ranges) {
+                const auto contains=[&](std::uint32_t pc) { return pc>=range.address && std::uint64_t(pc)<std::uint64_t(range.address)+range.size; };
+                for (unsigned k=1;k<4;++k) same_guard&=contains(i.pc)==contains(instructions[n+k].pc);
+            }
+            for (const auto& payload:payloads) {
+                const auto contains=[&](std::uint32_t pc) { return physical_address(pc)>=payload.address && std::uint64_t(physical_address(pc))<std::uint64_t(payload.address)+payload.bytes.size(); };
+                for (unsigned k=1;k<4;++k) same_guard&=contains(i.pc)==contains(instructions[n+k].pc);
+            }
+            if (same_guard) {
+                const auto enough=w.value("icmp uge i64 "+remaining+", 4");
+                w.out<<"  br i1 "<<enough<<", label %display_wait"<<suffix<<", label %display_continue"<<suffix<<"\ndisplay_wait"<<suffix<<":\n";
+                const auto address=w.binary("add","i32",w.narrow(w.reg(i.rs)),std::to_string(static_cast<std::uint32_t>(static_cast<std::int32_t>(i.immediate))));
+                auto eligible=std::string("true");
+                const auto exclude=[&](std::uint32_t base,std::uint32_t bytes) {
+                    const auto relative=w.binary("sub","i32",address,std::to_string(base));
+                    eligible=w.binary("and","i1",eligible,w.value("icmp uge i32 "+relative+", "+std::to_string(bytes)));
+                };
+                for (const auto& view:layout.aliases) exclude(view.address,view.bytes);
+                for (const auto& guard:layout.guards) if (!guard.readable) exclude(guard.address,guard.bytes);
+                const auto hint=eligible=="true" ? address : w.value("select i1 "+eligible+", i32 "+address+", i32 0");
+                const auto result=w.value("call i32 @nt_ee_wait_display(ptr %memory, i32 "+hint+")");
+                const auto ready=w.value("icmp eq i32 "+result+", 0");
+                w.out<<"  br i1 "<<ready<<", label %display_continue"<<suffix<<", label %display_stop"<<suffix
+                     <<"\ndisplay_stop"<<suffix<<":\n  ret i32 "<<result<<"\ndisplay_continue"<<suffix<<":\n";
+            }
+        }
         if (native_layout_transaction(instructions.subspan(n)) && !(n && instructions[n-1].branch())) {
             const auto enough=w.value("icmp uge i64 "+remaining+", 7");
             w.out<<"  br i1 "<<enough<<", label %layout_call"<<suffix<<", label %budget_stop\nlayout_call"<<suffix<<":\n";
@@ -318,6 +348,7 @@ void emit_declarations(Writer& w) {
     w.out<<"declare i64 @nt_ee_address_space(ptr, i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_performance(ptr, i32, i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_test_completions(ptr)\n";
+    w.out<<"declare i32 @nt_ee_wait_display(ptr, i32)\n";
     w.out<<"declare i64 @nt_ee_io_read32(ptr, i32)\ndeclare i32 @nt_ee_io_write32(ptr, i32, i32)\ndeclare i32 @nt_ee_io_write8(ptr, i32, i32)\n";
     w.out<<"declare i32 @nt_ee_io_read64(ptr, ptr, i32, i32)\ndeclare i32 @nt_ee_io_write64(ptr, i32, i64)\n";
     declare_packed_intrinsics(w.out);

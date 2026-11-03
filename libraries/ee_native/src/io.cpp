@@ -2,6 +2,41 @@
 #include <nt/ee_interrupts.hpp>
 #include <nt/ee_completions.hpp>
 #include <nt/ee_performance.hpp>
+#include <nt/ee_graphics.hpp>
+#include <thread>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+void nt::ee::native_service_wait(std::uint64_t nanoseconds) {
+    const auto duration=std::min<std::uint64_t>(nanoseconds,1000000);
+    if (!duration) return;
+#ifdef _WIN32
+    struct Timer {
+        HANDLE handle=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_MODIFY_STATE|SYNCHRONIZE);
+        ~Timer() { if (handle) CloseHandle(handle); }
+    };
+    thread_local Timer timer;
+    if (timer.handle) {
+        LARGE_INTEGER due;
+        due.QuadPart=-static_cast<LONGLONG>((duration+99)/100);
+        if (SetWaitableTimer(timer.handle,&due,0,nullptr,nullptr,FALSE) &&
+            WaitForSingleObject(timer.handle,INFINITE)==WAIT_OBJECT_0) return;
+    }
+#endif
+    std::this_thread::sleep_for(std::chrono::nanoseconds(duration));
+}
+extern "C" std::uint32_t nt_ee_wait_display(nt::ee::Memory* memory,std::uint32_t address) {
+    using namespace nt::ee;
+    // Only a proven poll invokes this hint. Recheck the actual native service
+    // binding; an identical loop over RAM or another device must not sleep.
+    if (nt::runtime::default_ram_address(address)!=0x12001000 || !memory->graphics)
+        return static_cast<std::uint32_t>(Stop::budget);
+    const auto wait=memory->graphics->display_wait_ns();
+    return static_cast<std::uint32_t>(wait && *wait ? Stop::display_wait : Stop::budget);
+}
 extern "C" std::uint64_t nt_ee_performance(nt::ee::Memory* memory,std::uint32_t operation,
     std::uint32_t counter,std::uint32_t value,std::uint32_t execution_mode) {
     using namespace nt::ee;

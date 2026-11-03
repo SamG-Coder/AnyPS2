@@ -30,6 +30,7 @@ duplicated here as a per-operation log.
 | PS2SDK Texture | Rotating flower-textured cube at 640×512; bounded native run and capture | Reference and hardware parity not established |
 | PS2SDK Sprites | 1,000 moving sprites; user confirmed appearance after native framebuffer mapping and display-alpha fixes | Visual PCSX2 comparison; hardware parity unverified |
 | PS2SDK Cube | Rotating coloured cube; user confirmed it matches PCSX2 | Visual comparison; hardware parity unverified |
+| gsKit Basic | Points, lines, triangle strips/fans, clipping and blending; user confirmed it matches PCSX2 | Native VSYNC waits verified; hardware parity unverified |
 
 These are locally adapted inputs, not unmodified-upstream compatibility claims.
 Ports include compiler compatibility, native service binding and a public SDK
