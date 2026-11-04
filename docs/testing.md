@@ -38,7 +38,8 @@ Automated tests should not open visible windows during ordinary development.
 requested presentation test. Opening an actual demo for the user is separate.
 
 `ANYPS2_TEST_AUDIO_DEVICE` and `ANYPS2_TEST_USB_DEVICES` opt into real host devices.
-`ANYPS2_TEST_LLVM_GPU` enables the experimental shader test; it is OFF by default.
+`ANYPS2_TEST_LLVM_GPU` enables the experimental shader tests, which run AOT LLVM
+shaders on a Vulkan device (label `gpu`); it is OFF by default.
 A synthetic device fixture does not establish physical controller or audio behavior.
 
 ## Original PS2 source programs

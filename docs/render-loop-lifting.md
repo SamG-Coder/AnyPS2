@@ -77,6 +77,47 @@ epilogue equivalence (elements before the steady state and after the last
 iteration), loops with internal branches, live-out registers and flags, and
 installation remain open.
 
+## Element kernels
+
+`emit_element_kernel_llvm` compiles a recovered per-element function to LLVM, as a
+CPU function or a Vulkan compute shader with one element per invocation and 64
+invocations per workgroup. Every operation node calls an exact `nt_gpu_element_*`
+helper from `gpu_numeric.cpp`, the same definitions the CPU VU path uses, so both
+variants reproduce VU results bit for bit. They are not native-float kernels.
+
+| Binding | Data |
+| --- | --- |
+| 0 | Read-only VU data memory snapshot, four words per row |
+| 1 | Output: per element, a status word then one word per recovered store |
+| 2 | Read-only parameters from `element_parameters`: count, first element, base rows, entry vectors, ACC, I, Q, P |
+
+The CPU entry is `void nt_render_elements(const uint32_t* data, const uint32_t* parameters, uint32_t* output)`.
+Element item covers element first+item; rows wrap at the unit's data size. A
+nonzero status word marks an element with an operand the VU would stop on; its
+stored words must not be used. Loads are relative to each base register's entry
+value, so the same compiled kernel serves any batch position and buffer.
+
+```sh
+ps2-vu-loop-probe --element <program-image.bin> <unit> <destination-index> <loop-head> cpu|vulkan
+```
+
+Shaders are compiled with `anyps2_compile_llvm_shader(... STRUCTURIZE)`. With the
+LLVM 22 SPIR-V backend that requires `lower-switch` before `structurizecfg`
+(otherwise a switch becomes a branch on undef, and drivers can reduce the shader to
+one that writes nothing) and `-disable-machine-cse` (otherwise an instruction can
+land between `OpSelectionMerge` and its branch). Numeric helpers avoid wide struct
+returns and private arrays, which this backend cannot lower.
+
+On the private image above, all 21 recovered loops compiled to valid SPIR-V. A local
+Vulkan run on an NVIDIA RTX 5080 matched the CPU kernels, which match the production
+VU blocks, word for word. Repository tests use an original synthetic reciprocal
+square-root loop: the CPU kernel is executed against the exact arithmetic definitions,
+and with `ANYPS2_TEST_LLVM_GPU=ON` the shader runs on a Vulkan device, including
+wrapped rows, VU-stop operands, flag-only cases and unused invocations. Prologue and
+epilogue elements, branchy loops, resident streams and draw integration remain open.
+With LLVM 22.1.8 the two native-float32 loop shaders below crash `llc`; the element
+shader is unaffected.
+
 ## Conditional independence and binding
 
 `analyze_vertex_loop` returns an immutable `VertexLoop`. `bind_vertex_loop` takes

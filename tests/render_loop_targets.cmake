@@ -4,6 +4,49 @@ add_test(NAME render-loop-lifting COMMAND render-loop-tests)
 add_executable(render-loop-structure-tests tests/loop_structure.cpp)
 target_link_libraries(render-loop-structure-tests PRIVATE nt_render_codegen)
 add_test(NAME render-loop-structure COMMAND render-loop-structure-tests)
+# Recovered element kernel of an original synthetic quotient loop, compiled from
+# emitted LLVM and executed on the CPU and, when enabled, on a Vulkan device.
+set(element_prefix "${CMAKE_CURRENT_BINARY_DIR}/render-element")
+add_custom_command(OUTPUT "${element_prefix}.cpu.ll" "${element_prefix}.gpu.ll"
+    COMMAND render-loop-structure-tests --emit-element "${element_prefix}"
+    DEPENDS render-loop-structure-tests VERBATIM)
+add_custom_target(render-element-fixture ALL DEPENDS "${element_prefix}.cpu.ll" "${element_prefix}.gpu.ll")
+if(ANYPS2_RENDER_CLANG)
+    if(WIN32)
+        set(element_object "${element_prefix}.obj")
+    else()
+        set(element_object "${element_prefix}.o")
+    endif()
+    add_custom_command(OUTPUT "${element_object}"
+        COMMAND "${ANYPS2_RENDER_CLANG}" -x ir -O2 -Werror -Wno-override-module -c
+            "${element_prefix}.cpu.ll" -o "${element_object}"
+        DEPENDS render-element-fixture "${element_prefix}.cpu.ll" VERBATIM)
+    set_source_files_properties("${element_object}" PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+    add_executable(render-element-native-tests tests/element_kernel_native.cpp
+        libraries/ee_native/src/gpu_numeric.cpp "${element_object}")
+    target_include_directories(render-element-native-tests PRIVATE libraries/runtime/include)
+    target_link_libraries(render-element-native-tests PRIVATE nt_render_codegen)
+    add_test(NAME render-element-llvm-execution COMMAND render-element-native-tests)
+    if(ANYPS2_TEST_RENDER_SPIRV OR ANYPS2_TEST_LLVM_GPU)
+        include(cmake/llvm_shaders.cmake)
+        anyps2_compile_llvm_shader(element_shader "${element_prefix}.gpu.ll" STRUCTURIZE)
+        add_custom_target(render-element-spirv ALL DEPENDS "${element_shader}")
+        add_dependencies(render-element-spirv render-element-fixture)
+        add_test(NAME render-element-spirv-validation
+            COMMAND "${ANYPS2_SPIRV_VAL}" --target-env vulkan1.3 "${element_shader}")
+    endif()
+    if(ANYPS2_TEST_LLVM_GPU)
+        find_package(Vulkan REQUIRED)
+        add_executable(render-element-vulkan-tests tests/element_kernel_native.cpp
+            libraries/ee_native/src/gpu_numeric.cpp "${element_object}")
+        target_include_directories(render-element-vulkan-tests PRIVATE libraries/runtime/include)
+        target_compile_definitions(render-element-vulkan-tests PRIVATE ANYPS2_ELEMENT_VULKAN)
+        target_link_libraries(render-element-vulkan-tests PRIVATE nt_render_codegen Vulkan::Vulkan)
+        add_dependencies(render-element-vulkan-tests render-element-spirv)
+        add_test(NAME render-element-vulkan-execution COMMAND render-element-vulkan-tests "${element_shader}")
+        set_tests_properties(render-element-vulkan-execution PROPERTIES LABELS "gpu" TIMEOUT 60)
+    endif()
+endif()
 foreach(variant 0 1)
     set(prefix "${CMAKE_CURRENT_BINARY_DIR}/render-loop-${variant}")
     add_custom_command(OUTPUT "${prefix}.cpu.ll" "${prefix}.gpu.ll" "${prefix}.json" "${prefix}.bin"

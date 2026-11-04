@@ -54,8 +54,15 @@ void report_structures(const std::vector<nt::vu::Pair>& program,unsigned unit,st
            <<" flags="<<loop.mac_reads+loop.status_reads<<" q="<<loop.uses_quotient<<" p="<<loop.uses_p<<" blockers=[";
         for (std::size_t n=0;n<loop.blockers.size();++n) out<<(n ? "; " : "")<<loop.blockers[n];
         const auto recovered=nt::render::recover_pipelined_loop(body,unit,loop);
-        if (recovered.loop) out<<"] pipeline=[depth="<<recovered.loop->depth<<" stores="<<recovered.loop->stores.size()
-                                <<" nodes="<<recovered.loop->nodes.size()<<"]\n";
+        if (recovered.loop) {
+            std::array<unsigned,16> operations{};
+            for (const auto& node:recovered.loop->nodes)
+                if (node.kind==nt::render::ElementNodeKind::operation && node.a<operations.size()) ++operations[node.a];
+            out<<"] pipeline=[depth="<<recovered.loop->depth<<" stores="<<recovered.loop->stores.size()
+               <<" nodes="<<recovered.loop->nodes.size()<<" operations=";
+            for (unsigned n=0;n<operations.size();++n) if (operations[n]) out<<n<<":"<<operations[n]<<",";
+            out<<"]\n";
+        }
         else out<<"] pipeline=[no: "<<recovered.reason<<"]\n";
     }
 }
@@ -67,6 +74,23 @@ unsigned decimal(std::string_view text) {
 }
 }
 int main(int argc,char** argv) {
+    if (argc==7 && std::string_view(argv[1])=="--element") {
+        try {
+            const auto unit=decimal(argv[3]),destination=decimal(argv[4]),head=decimal(argv[5]);
+            const std::string_view target=argv[6];
+            if (target!="cpu" && target!="vulkan") throw std::invalid_argument("Expected cpu or vulkan");
+            const auto program=nt::vu::frame(nt::read_file(argv[2],unit ? 16384 : 4096),unit,destination);
+            for (const auto& region:nt::render::find_loop_regions(program,unit)) {
+                if (region.head!=head) continue;
+                const auto body=std::span(program).subspan(region.head-program.front().address,region.branch+2-region.head);
+                const auto recovered=nt::render::recover_pipelined_loop(body,unit,nt::render::analyze_loop_structure(body,unit));
+                if (!recovered.loop) throw std::invalid_argument("Loop not recovered: "+recovered.reason);
+                nt::render::emit_element_kernel_llvm(std::cout,*recovered.loop,unit,target=="vulkan");
+                return std::cout ? 0 : 1;
+            }
+            throw std::invalid_argument("No loop starts at that pair");
+        } catch (const std::exception& error) { std::cerr<<"Element kernel probe: "<<error.what()<<'\n'; return 1; }
+    }
     if (argc==5 && std::string_view(argv[1])=="--structure") {
         try {
             const auto unit=decimal(argv[3]),destination=decimal(argv[4]);

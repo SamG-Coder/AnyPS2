@@ -26,6 +26,10 @@ function(anyps2_compile_llvm_shader result source)
                 "${root}/libraries/ee_native/src/gpu_numeric.cpp" -o "${numeric}"
             DEPENDS "${root}/libraries/ee_native/src/gpu_numeric.cpp"
                 "${root}/libraries/runtime/include/nt/finite_arithmetic.hpp"
+                "${root}/libraries/runtime/include/nt/ee_float.hpp"
+                "${root}/libraries/runtime/include/nt/ee_vector_math.hpp"
+                "${root}/libraries/runtime/include/nt/vu_quotient.hpp"
+                "${root}/libraries/runtime/include/nt/vu_extended.hpp"
                 "${root}/libraries/runtime/include/nt/compiler_attributes.hpp" VERBATIM)
         add_custom_target(anyps2-gpu-numeric DEPENDS "${numeric}")
     endif()
@@ -33,18 +37,24 @@ function(anyps2_compile_llvm_shader result source)
     set(optimized "${source}.optimized.bc")
     set(output "${source}.spv")
     set(passes "internalize,default<O2>")
+    set(codegen_options "")
     # Arithmetic graphs with nested helper exits need explicit structured CFG
     # lowering. Keep it selectable: LLVM 22's second structurization of an
     # already simple resource kernel can create invalid selection merges.
-    # Every variant must pass spirv-val before it can enter a runtime binary.
+    # structurizecfg only rewrites conditional branches; a switch left by the
+    # optimizer becomes a branch on undef, which drivers may legally reduce to
+    # a shader that writes nothing, so switches are lowered first. Machine CSE
+    # can move an instruction between OpSelectionMerge and its branch in these
+    # graphs. Every variant must pass spirv-val before it can enter a runtime binary.
     if(shader_STRUCTURIZE)
-        string(APPEND passes ",structurizecfg")
+        string(APPEND passes ",lower-switch,structurizecfg")
+        list(APPEND codegen_options -disable-machine-cse)
     endif()
     add_custom_command(OUTPUT "${output}"
         COMMAND "${ANYPS2_LLVM_LINK}" "${source}" "${numeric}" ${shader_UNPARSED_ARGUMENTS} -o "${linked}"
         COMMAND "${ANYPS2_LLVM_OPT}" "-passes=${passes}" -internalize-public-api-list=main
             "${linked}" -o "${optimized}"
-        COMMAND "${ANYPS2_SPIRV_LLC}" -mtriple=spirv-unknown-vulkan1.3 -O2 -filetype=obj
+        COMMAND "${ANYPS2_SPIRV_LLC}" -mtriple=spirv-unknown-vulkan1.3 -O2 ${codegen_options} -filetype=obj
             "${optimized}" -o "${output}"
         COMMAND "${ANYPS2_SPIRV_VAL}" --target-env vulkan1.3 "${output}"
         DEPENDS "${source}" "${numeric}" ${shader_UNPARSED_ARGUMENTS} anyps2-gpu-numeric

@@ -1,16 +1,16 @@
 #pragma once
 #include <nt/ee_float.hpp>
+#if !defined(__SPIRV__)
 #include <array>
+#endif
 
 namespace nt::numeric {
-using Vector=std::array<std::uint32_t,4>;
-struct VectorResult { Vector value; std::uint32_t mac,status; bool supported=true; };
-inline std::uint32_t vector_lane_flags(std::uint32_t bits,bool underflow,bool overflow,unsigned lane) {
+inline uint32_t vector_lane_flags(uint32_t bits,bool underflow,bool overflow,unsigned lane) {
     const auto bit=1U<<(3-lane);
     return (!(bits&0x7fffffff) ? bit : 0U)|((bits>>31) ? bit<<4 : 0U)|(underflow ? bit<<8 : 0U)|
            (overflow ? bit<<12 : 0U);
 }
-inline std::uint32_t vector_status_flags(std::uint32_t mac,std::uint32_t previous) {
+inline uint32_t vector_status_flags(uint32_t mac,uint32_t previous) {
     // Reduce each four-lane flag group to one bit in parallel. Adding seven to
     // its low three bits sets the high bit exactly when those bits are nonzero;
     // OR retains an already-set high bit. No carry crosses a nibble boundary.
@@ -24,8 +24,8 @@ inline std::uint32_t vector_status_flags(std::uint32_t mac,std::uint32_t previou
 // The VU and scalar units share the finite encoded range, but not the
 // accumulator overflow policy. A product overflow takes precedence over the
 // accumulator; it cannot be cancelled by adding a finite opposing value.
-inline FiniteFloatResult vector_multiply_accumulate(std::uint32_t accumulator,std::uint32_t left,
-                                                    std::uint32_t right,bool subtract) {
+NT_SHADER_INLINE FiniteFloatResult vector_multiply_accumulate(uint32_t accumulator,uint32_t left,
+                                                    uint32_t right,bool subtract) {
     const auto product=multiply_finite(left,right,true);
     const auto product_flags=vector_status_flags(vector_lane_flags(product.bits,product.underflow,product.overflow,0),0)&15U;
     const auto signed_product=product.bits^(subtract ? 0x80000000U : 0U);
@@ -37,9 +37,12 @@ inline FiniteFloatResult vector_multiply_accumulate(std::uint32_t accumulator,st
     return result;
 }
 
+#if !defined(__SPIRV__)
+using Vector=std::array<uint32_t,4>;
+struct VectorResult { Vector value; uint32_t mac,status; bool supported=true; };
 template<class Arithmetic>
 NT_FORCE_INLINE VectorResult binary_vector(Vector original,Vector left,Vector right,unsigned mask,
-                                  unsigned broadcast,std::uint32_t previous_status,Arithmetic arithmetic) {
+                                  unsigned broadcast,uint32_t previous_status,Arithmetic arithmetic) {
     VectorResult result{original,0,previous_status};
     if (mask>15 || broadcast>4) { result.supported=false; return result; }
     for (unsigned lane=0;lane<4;++lane) {
@@ -55,12 +58,13 @@ NT_FORCE_INLINE VectorResult binary_vector(Vector original,Vector left,Vector ri
     return result;
 }
 inline VectorResult add_subtract_vector(Vector original,Vector left,Vector right,unsigned mask,
-                                        bool subtract,unsigned broadcast,std::uint32_t previous_status) {
+                                        bool subtract,unsigned broadcast,uint32_t previous_status) {
     return binary_vector(original,left,right,mask,broadcast,previous_status,
         [subtract](auto a,auto b,unsigned) { return add_subtract_finite(a,b,subtract,true); });
 }
 inline VectorResult multiply_vector(Vector original,Vector left,Vector right,unsigned mask,
-                                    unsigned broadcast,std::uint32_t previous_status) {
+                                    unsigned broadcast,uint32_t previous_status) {
     return binary_vector(original,left,right,mask,broadcast,previous_status,[](auto a,auto b,unsigned) { return multiply_finite(a,b,true); });
 }
+#endif
 }

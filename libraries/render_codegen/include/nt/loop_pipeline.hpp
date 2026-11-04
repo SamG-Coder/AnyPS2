@@ -51,4 +51,23 @@ struct PipelineRecovery {
 // Requires a structure without internal control flow, flag tests, kicks or
 // non-affine/stationary memory. Simulates iterations to a bounded steady state.
 PipelineRecovery recover_pipelined_loop(std::span<const vu::Pair> pairs,unsigned unit,const LoopStructure& structure);
+
+// Element kernel ABI, shared by the CPU and Vulkan compute variants. Arithmetic
+// calls the exact nt_gpu_element_* helpers, so both match the VU bit for bit.
+//   data:       VU data memory snapshot, four words per row (read only)
+//   parameters: element_parameters() layout (read only)
+//   output:     per element, a status word (nonzero if an operand is one the VU
+//               would stop on) followed by one word per ElementStore, in order
+// Element item covers element first+item. Rows wrap at the unit's data size.
+struct ElementEntry {
+    std::array<std::uint16_t,16> integers{};  // vi0..vi15
+    std::array<std::array<std::uint32_t,4>,32> vectors{};
+    std::array<std::uint32_t,4> accumulator{};
+    std::uint32_t immediate=0,quotient=0,p=0,top=0,itop=0;
+};
+inline constexpr unsigned element_parameter_words=156;
+std::vector<std::uint32_t> element_parameters(const ElementEntry&,unsigned first_element,unsigned count);
+inline unsigned element_output_words(const PipelinedLoop& loop) { return 1+static_cast<unsigned>(loop.stores.size()); }
+// CPU entry: void nt_render_elements(const uint32_t* data,const uint32_t* parameters,uint32_t* output)
+void emit_element_kernel_llvm(std::ostream&,const PipelinedLoop&,unsigned unit,bool vulkan);
 }

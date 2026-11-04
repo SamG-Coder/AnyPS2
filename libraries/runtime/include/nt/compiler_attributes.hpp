@@ -8,3 +8,10 @@
 #else
 #define NT_FORCE_INLINE inline
 #endif
+// Shader numeric helpers return small structs. Inline them in SPIR-V so no
+// struct crosses a function boundary as a wide integer the backend rejects.
+#if defined(__SPIRV__)
+#define NT_SHADER_INLINE inline __attribute__((always_inline))
+#else
+#define NT_SHADER_INLINE inline
+#endif

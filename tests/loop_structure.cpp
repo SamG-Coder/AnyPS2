@@ -2,7 +2,10 @@
 #include <nt/loop_structure.hpp>
 #include <nt/loop_pipeline.hpp>
 #include <algorithm>
+#include <fstream>
+#include <sstream>
 #include <iostream>
+#include <string>
 #include <string_view>
 
 // Original synthetic VU loops. No commercial program or SDK bytes are included.
@@ -19,6 +22,12 @@ std::uint32_t subtract_immediate(unsigned index,unsigned amount) { return (9U<<2
 std::uint32_t branch_not_zero(unsigned index,int displacement) { return (41U<<25)|(index<<11)|(static_cast<unsigned>(displacement)&0x7ffU); }
 std::uint32_t graphics_kick(unsigned index) { return 0x80000000U|(index<<11)|(27U<<6)|0x3cU; }
 std::uint32_t forward_branch(int displacement) { return (32U<<25)|(static_cast<unsigned>(displacement)&0x7ffU); }
+// Q = fs.fsf / sqrt(ft.ftf); WAITQ; upper MULq (fd = fs * Q).
+std::uint32_t reciprocal_square_root(unsigned fs,unsigned fsf,unsigned ft,unsigned ftf) {
+    return 0x80000000U|(ftf<<23)|(fsf<<21)|(ft<<16)|(fs<<11)|0x3beU;
+}
+constexpr std::uint32_t wait_quotient=0x800003bfU;
+std::uint32_t multiply_quotient(unsigned destination,unsigned source) { return (15U<<21)|(source<<11)|(destination<<6)|0x1cU; }
 struct Builder {
     nt::Bytes bytes;
     void pair(std::uint32_t lower=lower_nop,std::uint32_t upper=upper_nop) { render_fixture::word(bytes,lower); render_fixture::word(bytes,upper); }
@@ -29,6 +38,21 @@ struct Builder {
     }
     nt::render::LoopStructure analyze() const { return nt::render::analyze_loop_structure(nt::vu::frame(bytes,1,0),1); }
 };
+// Each element scales its input row by x/sqrt(y): a quotient-unit loop whose element
+// function exercises the reciprocal square root helper and its VU-stop status.
+nt::render::PipelinedLoop quotient_loop() {
+    Builder b;
+    b.pair(load_increment(1,3));
+    b.pair(reciprocal_square_root(1,0,1,1));
+    b.pair(wait_quotient);
+    b.pair(lower_nop,multiply_quotient(2,1));
+    b.pair(store_increment(2,4));
+    b.pair(subtract_immediate(9,1));
+    b.close(9);
+    auto recovered=nt::render::recover_pipelined_loop(nt::vu::frame(b.bytes,1,0),1,b.analyze());
+    if (!recovered.loop) throw std::runtime_error("Quotient loop not recovered: "+recovered.reason);
+    return *recovered.loop;
+}
 void run() {
     using namespace nt::render;
     // Straight-line loop: uniform rows, a vertex stream, an output stream and a countdown.
@@ -72,6 +96,24 @@ void run() {
                 "Stream element offset not recovered");
             require(matrix.kind==ElementNodeKind::invariant && matrix.b==5 && matrix.c==out.lane,"Invariant operand not recovered");
         }
+    }
+    // A WAITQ-published quotient feeds every lane of the element's product.
+    {
+        const auto loop=quotient_loop();
+        require(loop.stores.size()==4,"Quotient element stores not recovered");
+        for (const auto& out:loop.stores) {
+            const auto& product=loop.nodes[out.node];
+            require(out.lane==static_cast<unsigned>(&out-loop.stores.data()),"Element stores are not in lane order");
+            require(out.base==4 && out.stride==1 && product.kind==ElementNodeKind::operation &&
+                product.a==static_cast<std::uint32_t>(ElementOperation::multiply),"Quotient product not recovered");
+            const auto& quotient=loop.nodes[product.c];
+            require(quotient.kind==ElementNodeKind::operation && quotient.a==static_cast<std::uint32_t>(ElementOperation::reciprocal_square_root) &&
+                loop.nodes[quotient.b].c==0 && loop.nodes[quotient.c].c==1,"Reciprocal square root operands not recovered");
+        }
+        require(element_output_words(loop)==5,"Element output layout changed");
+        bool rejected=false;
+        try { std::ostringstream ignored; emit_element_kernel_llvm(ignored,loop,2,false); } catch (const std::invalid_argument&) { rejected=true; }
+        require(rejected,"Element kernel accepted an invalid VU unit");
     }
     // A value read back from an earlier iteration's store is not independent.
     {
@@ -123,8 +165,21 @@ void run() {
     }
 }
 }
-int main() {
-    try { run(); }
+// --emit-element <prefix>: writes the quotient loop's CPU and Vulkan element
+// kernels as <prefix>.cpu.ll and <prefix>.gpu.ll for compiled execution tests.
+int main(int argc,char** argv) {
+    try {
+        if (argc==3 && std::string_view(argv[1])=="--emit-element") {
+            const auto loop=quotient_loop();
+            for (const bool vulkan:{false,true}) {
+                std::ofstream out(std::string(argv[2])+(vulkan ? ".gpu.ll" : ".cpu.ll"),std::ios::binary);
+                nt::render::emit_element_kernel_llvm(out,loop,1,vulkan);
+            }
+            return 0;
+        }
+        if (argc!=1) throw std::invalid_argument("Usage: render-loop-structure-tests [--emit-element <prefix>]");
+        run();
+    }
     catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
     return 0;
 }
