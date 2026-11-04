@@ -1,5 +1,6 @@
 #include <nt/render_loop.hpp>
 #include <nt/loop_structure.hpp>
+#include <nt/loop_pipeline.hpp>
 #include <charconv>
 #include <iostream>
 #include <sstream>
@@ -52,7 +53,10 @@ void report_structures(const std::vector<nt::vu::Pair>& program,unsigned unit,st
         out<<" ] kicks="<<loop.graphics_kicks<<" clip="<<loop.clip_writes<<"/"<<loop.clip_reads
            <<" flags="<<loop.mac_reads+loop.status_reads<<" q="<<loop.uses_quotient<<" p="<<loop.uses_p<<" blockers=[";
         for (std::size_t n=0;n<loop.blockers.size();++n) out<<(n ? "; " : "")<<loop.blockers[n];
-        out<<"]\n";
+        const auto recovered=nt::render::recover_pipelined_loop(body,unit,loop);
+        if (recovered.loop) out<<"] pipeline=[depth="<<recovered.loop->depth<<" stores="<<recovered.loop->stores.size()
+                                <<" nodes="<<recovered.loop->nodes.size()<<"]\n";
+        else out<<"] pipeline=[no: "<<recovered.reason<<"]\n";
     }
 }
 unsigned decimal(std::string_view text) {

@@ -52,13 +52,30 @@ conditional branch in a program image.
 ps2-vu-loop-probe --structure <program-image.bin> <unit> <destination-index>
 ```
 
-prints one line per loop. On a private commercial VU1 image, the hot loops had
-affine counters and constant-stride streams with large invariant register sets
-and no packet or flag effects; their remaining blocker was software pipelining
-(values and the accumulator handed to the next iteration). The next frontend step
-is to recover the per-element function from such modulo-scheduled loops by
-symbolically executing several iterations and proving that each store depends
-only on fixed-offset stream elements and invariants.
+prints one line per loop, including the pipeline recovery result below.
+
+## Software-pipeline recovery
+
+`recover_pipelined_loop` handles loops whose only blockers are values, the
+accumulator, Q or P carried to the next iteration. It symbolically executes ten
+iterations over a hash-consed lane-level expression graph with exact VU operation
+nodes (no host float semantics). VF reads are sequential, as VU hazards stall;
+Q and P publication follows the production generator's latencies (7/13 and
+12/24/29 pairs, published early by WAITQ/WAITP or a new producer). Loads that read
+a row stored by an earlier iteration are rejected. A store site's steady state
+starts where its value no longer depends on loop-entry state and each iteration's
+value equals the previous one with every stream row advanced by its stride. The
+result is a per-element function: element k is stored by iteration k, with load
+and store rows relative to each base register's entry value plus stride times k.
+
+On a private commercial VU1 image, 21 of 53 loops were recovered, including every
+hot loop without internal branches. A local validator ran each recovered loop's
+production-compiled VU block iteration by iteration on random data and compared
+38,700 stored lanes of steady-state elements against the recovered functions
+evaluated with the exact numeric helpers: all matched bit for bit. Prologue and
+epilogue equivalence (elements before the steady state and after the last
+iteration), loops with internal branches, live-out registers and flags, and
+installation remain open.
 
 ## Conditional independence and binding
 
