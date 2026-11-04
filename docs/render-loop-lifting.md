@@ -377,6 +377,18 @@ CPU state. Both CPU and Vulkan executors are exercised, including rejected
 entry/range conditions and transactional failure. The runtime executable links
 native services and generated objects without the analysis/decoder libraries.
 
+On a local commercial VU1 program, 9 of 21 hot loops are accepted as regions; a
+local validator matched 1,800 randomized region executions against the original
+compiled loops in complete VU state. A Release timing of those loops on one host
+found the CPU region service 1.2-13 times slower than the original compiled blocks,
+which already use inlined four-lane helpers, while the element kernels call scalar
+exact helpers. Regions must therefore not be installed as a CPU replacement. The
+device-resident preparation (`prepare_region_launch`) took a roughly constant
+1.1-4.9 us per launch, faster than the original loop only for longer batches (for
+example 4.3 us against 27.2 us at 64 vertices for the slowest loop), and it also
+avoids per-primitive packet planning. An installation should select the GPU-owned
+path from the actual launch count, after measuring the complete frame.
+
 The renderer is exercised by this explicit interface, not installed automatically
 into converted games. The region proofs apply only to the accepted subset above;
 other arithmetic, side effects and renderer ownership remain unsupported. There is
