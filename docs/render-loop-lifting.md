@@ -114,7 +114,8 @@ VU blocks, word for word. Repository tests use an original synthetic reciprocal
 square-root loop: the CPU kernel is executed against the exact arithmetic definitions,
 and with `ANYPS2_TEST_LLVM_GPU=ON` the shader runs on a Vulkan device, including
 wrapped rows, VU-stop operands, flag-only cases and unused invocations. Prologue and
-epilogue elements, branchy loops, resident streams and draw integration remain open.
+epilogue elements, branchy loops and automatic replacement installation remain open.
+The explicit resident draw interface below accepts already compiled element kernels.
 With LLVM 22.1.8 the two native-float32 loop shaders below crash `llc`; the element
 shader is unaffected.
 
@@ -193,28 +194,69 @@ Automatic menu capture and whole-program region discovery remain unimplemented.
 `ANYPS2_TEST_RENDER_SPIRV=ON` also compiles and validates both loop shaders through
 the existing LLVM/SPIR-V build chain. That option does not run a GPU or draw a frame.
 
+## GPU-resident drawing
+
+`VulkanRenderer::load_vector_kernel(spirv, unit)` loads a build-time compiled
+`emit_element_kernel_llvm` kernel. It requires Vulkan 1.3, `shaderInt8`, `shaderInt64`
+and ordered fragment access. Ordinary CPU-packet rendering still works without
+vector-kernel support. This API accepts trusted compiler output with the element
+ABI above; it is not a general shader loader or a runtime VU translator. The
+caller must match the kernel's unit, output stride and parameter layout.
+
+`NativeDrawing::submit_vectors(renderer, launch)` consumes current GS state plus
+an explicit PACKED vertex layout. Each layout word identifies an element store
+or a constant. It accepts independent triangle lists, strips and fans with one
+position write at the end of each vertex record. ST must precede RGBAQ. Texture,
+fog, continued primitives and unsupported layouts produce diagnostics. A batch
+is bounded to 4,096 primitive slots; wrapped or aliased target layouts outside
+the renderer's supported bounds are rejected.
+
+`NativeVectors` stages parameter and dynamic stream changes, retains
+content-identified immutable streams, and applies ordered memory writes to a
+zero-initialized per-unit data view. Unwritten rows retain their previous values.
+The element kernel writes device-local results; a second compute pass assembles
+native triangle records. `NativeRaster` ends the active render pass before this
+work, inserts compute-to-draw dependencies, then binds the target using the
+conservative scissor union and submits one instanced draw. Color/depth ordering
+uses the existing ordered-fragment pipeline. No generated vertex packets or
+framebuffer images make a CPU round trip during submission.
+
+Frame slots own staging and status memory until their queue fence completes.
+`RenderStatistics` exposes vector launches, resident hits/uploads, staged bytes
+and failed-element counts. A failed element suppresses all primitives using it;
+`vector_failures` becomes visible after completion collection (`synchronize` or
+`completed_submission`). Callers must treat an increase as an incomplete batch,
+not successful conversion. Primitive/draw counters count submitted slots,
+including culled slots; they are not a count of visible triangles or game frames.
+
+The final GS vertex latches remain GPU-owned. The planner marks registers written
+by a vector batch unknown and rejects later CPU consumption until explicit writes
+restore them. Strips, fans and incomplete lists also require a PRIM write before
+another batch can consume their vertex queue. This is deliberate rejection, not
+an assumed last-vertex value or hidden readback.
+
 ## Validation and limits
 
-Two original synthetic loops vary register allocation, instruction destination,
-source offsets and vertex/output strides. Both generated CPU functions were built
-with Clang 17 at O3 and executed on Linux x86-64: 8,256 transforms per variant
-matched an independent float32 C++ reference bit-for-bit. Uniform data and vertex
-inputs vary between batches. Tests also check input immutability, output canaries,
-invalid counts, unsafe dependencies and malformed loop shapes. The complete local
-research suite passed eight Release CTest tests, including the original three.
-The source mirror used Git-blob-verified dependencies; a full repository clone was
-unavailable in the validation environment. The normal Windows build was not run.
+The original synthetic loop fixtures compile and execute native LLVM functions;
+the optional Vulkan tests compile the same recovered element graphs to SPIR-V.
+The draw test compares complete framebuffer storage against the production CPU
+packet planner for lists, strips and fans, including ADC, XYZ3, winding changes,
+degenerate/off-scissor culling, flat/shaded color, coverage and depth. It also
+checks second-frame resident hits, interleaved CPU/GPU draws, slot reuse, stale
+GS-state diagnostics and failed-element reporting. It runs headlessly with Vulkan
+validation; no presentation window or commercial assets are needed.
 
-Object inspection found packed SIMD multiply/add instructions and no undefined
-helper symbols. This is evidence of native code generation, not a frame-time or
-GPU speedup. No end-to-end performance improvement is claimed.
+In a normal build with the LLVM SPIR-V toolchain configured:
 
-Vulkan-target LLVM was emitted and structurally checked. An LLVM SPIR-V backend,
-SPIR-V validator and Vulkan development toolchain were unavailable here; shader
-compilation, GPU execution, Vulkan draws and GT4 menu replay are not established.
-Numerical policy is explicit native float32, not PS2 bit-exact arithmetic. Shader
-rounding/contraction and visual acceptance still require device-level validation.
+```sh
+cmake -S . -B work/vector-draw -DANYPS2_TEST_LLVM_GPU=ON
+cmake --build work/vector-draw --config Release --target render-vector-draw-tests
+ctest --test-dir work/vector-draw -C Release --output-on-failure -R '^render-vector-drawing$'
+```
 
-The next integration boundary is a validated GPU-resident stream feeding an actual
-draw, with resource ownership and synchronization tested. No persistent resource
-manager, automatic replacement installation or ray tracing is implemented here.
+The renderer is exercised by this explicit interface, not installed automatically
+into converted games. Entry/exit state equivalence, external-entry exclusion and
+live-out proofs remain prerequisites for replacing a whole VU region. There is
+no GT4 performance or gameplay claim from these synthetic comparisons. The
+older `--native-f32` loop probe has a different, explicitly approximate numeric
+policy; it must not be substituted for the exact element kernels silently.

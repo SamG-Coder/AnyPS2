@@ -8,7 +8,7 @@ add_test(NAME render-loop-structure COMMAND render-loop-structure-tests)
 # emitted LLVM and executed on the CPU and, when enabled, on a Vulkan device.
 set(element_prefix "${CMAKE_CURRENT_BINARY_DIR}/render-element")
 add_custom_command(OUTPUT "${element_prefix}.cpu.ll" "${element_prefix}.gpu.ll"
-    COMMAND render-loop-structure-tests --emit-element "${element_prefix}"
+    COMMAND render-loop-structure-tests --emit-element quotient "${element_prefix}"
     DEPENDS render-loop-structure-tests VERBATIM)
 add_custom_target(render-element-fixture ALL DEPENDS "${element_prefix}.cpu.ll" "${element_prefix}.gpu.ll")
 if(ANYPS2_RENDER_CLANG)
@@ -45,6 +45,33 @@ if(ANYPS2_RENDER_CLANG)
         add_dependencies(render-element-vulkan-tests render-element-spirv)
         add_test(NAME render-element-vulkan-execution COMMAND render-element-vulkan-tests "${element_shader}")
         set_tests_properties(render-element-vulkan-execution PROPERTIES LABELS "gpu" TIMEOUT 60)
+        if(TARGET nt_vulkan)
+            set(vertex_prefix "${CMAKE_CURRENT_BINARY_DIR}/render-vertex")
+            add_custom_command(OUTPUT "${vertex_prefix}.cpu.ll" "${vertex_prefix}.gpu.ll"
+                COMMAND render-loop-structure-tests --emit-element vertex "${vertex_prefix}"
+                DEPENDS render-loop-structure-tests VERBATIM)
+            add_custom_target(render-vertex-fixture DEPENDS "${vertex_prefix}.cpu.ll" "${vertex_prefix}.gpu.ll")
+            if(WIN32)
+                set(vertex_object "${vertex_prefix}.obj")
+            else()
+                set(vertex_object "${vertex_prefix}.o")
+            endif()
+            add_custom_command(OUTPUT "${vertex_object}"
+                COMMAND "${ANYPS2_RENDER_CLANG}" -x ir -O2 -Werror -Wno-override-module -c
+                    "${vertex_prefix}.cpu.ll" -o "${vertex_object}"
+                DEPENDS render-vertex-fixture "${vertex_prefix}.cpu.ll" VERBATIM)
+            set_source_files_properties("${vertex_object}" PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+            anyps2_compile_llvm_shader(vertex_shader "${vertex_prefix}.gpu.ll" STRUCTURIZE)
+            add_custom_target(render-vertex-spirv DEPENDS "${vertex_shader}")
+            add_dependencies(render-vertex-spirv render-vertex-fixture)
+            add_executable(render-vector-draw-tests tests/vector_draw.cpp
+                libraries/ee_native/src/gpu_numeric.cpp "${vertex_object}")
+            target_include_directories(render-vector-draw-tests PRIVATE libraries/runtime/include)
+            target_link_libraries(render-vector-draw-tests PRIVATE nt_render_codegen nt_vulkan)
+            add_dependencies(render-vector-draw-tests render-vertex-spirv render-element-spirv)
+            add_test(NAME render-vector-drawing COMMAND render-vector-draw-tests "${vertex_shader}" "${element_shader}")
+            set_tests_properties(render-vector-drawing PROPERTIES LABELS "gpu" TIMEOUT 120)
+        endif()
     endif()
 endif()
 foreach(variant 0 1)

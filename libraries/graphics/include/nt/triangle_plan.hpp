@@ -2,6 +2,7 @@
 #include <nt/sprite_plan.hpp>
 
 namespace nt::graphics {
+// vector_assembly.comp repeats this for GPU-produced triangles; keep them equal.
 inline std::optional<PlannedPrimitive> plan_triangle(std::uint64_t frame,std::uint64_t offset,
     std::uint64_t scissor,std::array<RasterVertex,3> vertices,bool shaded,bool coverage=false) {
     for (const auto& vertex:vertices)

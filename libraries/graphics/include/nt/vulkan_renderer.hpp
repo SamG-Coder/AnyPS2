@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <nt/image_upload.hpp>
 #include <nt/native_scanout.hpp>
+#include <nt/vector_draw.hpp>
 
 namespace nt::graphics {
 // Per-primitive bounds; std::minmax over an initializer list is a runtime-dispatched call.
@@ -76,6 +77,8 @@ struct RenderStatistics {
     bool llvm_texture_kernels=false;
     std::uint64_t texture_kernel_dispatches=0;
     std::uint64_t texture_kernel_verified=0;
+    std::uint64_t vector_launches=0,vector_resident_hits=0,vector_resident_uploads=0;
+    std::uint64_t vector_resident_upload_bytes=0,vector_staged_bytes=0,vector_failures=0;
 };
 // Native Vulkan storage and ordered batches. Native window is an HWND on Windows.
 enum class RenderPath { native_images, reference_compute };
@@ -93,11 +96,16 @@ public:
     void sprites(std::span<std::uint32_t> memory, std::span<const SpriteCommand> commands);
     // Resident clients exclusively own this renderer's working storage.
     static void validate(std::span<const SpriteCommand> commands);
+    // Data-independent draw state; GPU assembly validates vertex-dependent bounds.
+    static void validate_target(const Sprite& draw);
     // Validates one draw's fields; the palette contents need no validation.
     static void validate(const Sprite& draw,const std::array<RasterVertex,3>& triangle,
         std::uint32_t fog_color,std::uint32_t fog,const TextureLevels& levels);
     void upload(std::span<const std::uint32_t> memory);
     void draw(std::span<const SpriteCommand> commands);
+    // Precompiled element kernels only; no runtime instruction translation.
+    unsigned load_vector_kernel(std::span<const std::uint32_t> spirv,unsigned unit);
+    void draw_vectors(const VectorLaunch& launch,const VectorAssembly& assembly,const Sprite& target);
     void write(std::span<const PixelWrite> writes);
     void read(std::span<std::uint32_t> memory);
     void read_words(std::span<const unsigned> addresses,std::span<std::uint32_t> values);

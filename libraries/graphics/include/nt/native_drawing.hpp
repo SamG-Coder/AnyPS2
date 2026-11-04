@@ -46,6 +46,69 @@ public:
             pending_finishes_.pop_front(); ++completed_finishes_;
         }
     }
+    // The converter supplies a precompiled element kernel and a PACKED output
+    // layout. This entry never reads vertex results back to the CPU.
+    void submit_vectors(VulkanRenderer& renderer,const VectorLaunch& launch) {
+        if (!resident_) throw std::invalid_argument("Vector drawing requires resident storage");
+        if (renderer_ && renderer_!=&renderer) throw std::invalid_argument("Resident drawing renderer changed");
+        const auto primitive=state_.primitive&7;
+        const auto attributes=state_.use_primitive ? state_.primitive : state_.attributes;
+        if (primitive<3 || primitive>5 || (attributes&~0x3ffU))
+            throw std::invalid_argument("Vector drawing supports triangle list, strip and fan only");
+        if (attributes&16) throw std::invalid_argument("Textured vector drawing is not supported");
+        if (attributes&32) throw std::invalid_argument("Fogged vector drawing is not supported");
+        if (state_.vertex_count || (state_.unknown&unknown_vertices))
+            throw std::invalid_argument("Vector drawing cannot continue an existing primitive; write PRIM first");
+        if (launch.elements<3 || launch.vertex.empty() || launch.vertex.size()>5)
+            throw std::invalid_argument("Invalid vector vertex layout or element count");
+        VectorAssembly assembly{};
+        for (auto& store:assembly.store) store.fill(vector_constant_word);
+        assembly.primitive=primitive; assembly.shaded=bool(attributes&8); assembly.coverage=bool(attributes&128);
+        for (unsigned i=0;i<launch.vertex.size();++i) {
+            const auto& reg=launch.vertex[i];
+            unsigned kind=0;
+            switch (reg.reg) {
+            case 1: kind=0; break;
+            case 2:
+                if (assembly.present&1) throw std::invalid_argument("Vector ST must precede RGBAQ");
+                kind=1; break;
+            case 3: kind=2; break;
+            case 10: kind=3; break;
+            case 4: case 5: case 12: case 13:
+                if (i+1!=launch.vertex.size()) throw std::invalid_argument("Vector position must end the vertex record");
+                kind=4; assembly.xyz_register=reg.reg; break;
+            default: throw std::invalid_argument("Unsupported vector PACKED register: "+std::to_string(reg.reg));
+            }
+            if (assembly.present&(1U<<kind)) throw std::invalid_argument("Duplicate vector PACKED register");
+            assembly.present|=1U<<kind; assembly.store[kind]=reg.store; assembly.constant[kind]=reg.constant;
+            for (auto word:reg.store) if (word!=vector_constant_word && (launch.element_words<2 || word>=launch.element_words-1))
+                throw std::invalid_argument("Vector register names a missing store word");
+        }
+        if (!(assembly.present&16)) throw std::invalid_argument("Vector vertex layout lacks a position");
+        const unsigned written=(assembly.present&15)|((assembly.xyz_register&1) ? 0U : 8U);
+        if (state_.unknown&15U&~written)
+            throw std::invalid_argument("Vector drawing requires GS registers whose values are still GPU-owned");
+        const auto& context=state_.contexts[(attributes>>9)&1];
+        assembly.offset_x=int(context.offset&65535); assembly.offset_y=int((context.offset>>32)&65535);
+        assembly.scissor={unsigned(context.scissor&2047),unsigned((context.scissor>>16)&2047),
+            unsigned((context.scissor>>32)&2047),unsigned((context.scissor>>48)&2047)};
+        assembly.state={state_.color,state_.q,state_.s,state_.t,state_.uv,state_.fog};
+        auto target=sprite_target(context.frame);
+        target.left=assembly.scissor[0]; target.right=assembly.scissor[1]+1;
+        target.top=assembly.scissor[2]; target.bottom=assembly.scissor[3]+1;
+        target.flags|=triangle_flag|(assembly.shaded ? shaded_triangle_flag : 0);
+        configure_draw(state_,context,attributes,target);
+        if (!renderer_) { renderer.upload(pixels_); renderer_=&renderer; }
+        renderer.draw_vectors(launch,assembly,target);
+        dirty_=true; last_draw_=target;
+        submitted_draws_+=vector_primitives(primitive,launch.elements);
+        // No guessed last-vertex values. A later packet must overwrite these
+        // latches (and restart a continued primitive) before consuming them.
+        state_.unknown|=written;
+        if (assembly.present&2) state_.unknown|=unknown_packed_q;
+        else { state_.packed_q=0x3f800000; state_.unknown&=~unknown_packed_q; }
+        if (primitive!=3 || launch.elements%3) state_.unknown|=unknown_vertices;
+    }
     void submit(VulkanRenderer& renderer,std::span<const Packet> packets) {
         auto marked=profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         const auto account=[&](std::uint64_t Profile::* member) {
@@ -172,6 +235,7 @@ private:
         bool force_alpha=false;
     };
     struct State {
+        unsigned unknown=0; // RGBAQ, ST, UV, FOG, then queue and PACKED Q below.
         std::array<Context,2> contexts;
         unsigned primitive=0,attributes=0,color=0,x=0,y=0;
         unsigned scan_mask=0;
@@ -191,6 +255,7 @@ private:
         std::array<unsigned,2> palette_bases{};
         std::uint64_t palette_config=0;
     } state_;
+    static constexpr unsigned unknown_vertices=1U<<5,unknown_packed_q=1U<<6;
     std::vector<std::uint8_t> download_;
     std::size_t download_offset_=0;
     bool resident_=false;
@@ -207,11 +272,11 @@ private:
     }
     static void command(State& state,unsigned reg,std::uint64_t value,std::vector<Operation>& draws) {
         switch (reg) {
-        case 0: state.primitive=unsigned(value&2047); state.first=false; state.vertex_count=0; return;
-        case 1: state.color=std::uint32_t(value); state.q=std::uint32_t(value>>32); return;
-        case 2: state.s=std::uint32_t(value); state.t=std::uint32_t(value>>32); return;
-        case 3: state.uv=std::uint32_t(value)&0x3fff3fffU; return;
-        case 0xa: state.fog=std::uint32_t(value>>56); return;
+        case 0: state.primitive=unsigned(value&2047); state.first=false; state.vertex_count=0; state.unknown&=~unknown_vertices; return;
+        case 1: state.color=std::uint32_t(value); state.q=std::uint32_t(value>>32); state.unknown&=~1U; return;
+        case 2: state.s=std::uint32_t(value); state.t=std::uint32_t(value>>32); state.unknown&=~2U; return;
+        case 3: state.uv=std::uint32_t(value)&0x3fff3fffU; state.unknown&=~4U; return;
+        case 0xa: state.fog=std::uint32_t(value>>56); state.unknown&=~8U; return;
         case 6: case 7:
             if (const auto load=plan_palette(value,state.palette_config,state.palette_bases)) draws.push_back(*load);
             state.contexts[reg-6].texture=value; return;
@@ -262,7 +327,9 @@ private:
         auto attributes=state.use_primitive ? state.primitive : state.attributes;
         const unsigned x=value&65535,y=(value>>16)&65535;
         const auto z=std::uint32_t(value>>32)&((reg==4 || reg==12) ? 0xffffffU : 0xffffffffU);
-        if (reg==4 || reg==12) state.fog=std::uint32_t(value>>56);
+        if (reg==4 || reg==12) { state.fog=std::uint32_t(value>>56); state.unknown&=~8U; }
+        if (state.unknown&(15U|unknown_vertices))
+            throw std::invalid_argument("CPU graphics packet consumes GPU-owned GS state; overwrite registers and restart PRIM");
         const auto primitive=state.primitive&7;
         // Coverage antialiasing belongs to lines and triangles only. A caller
         // may retain AA1 while issuing point draws or rectangular clears.
@@ -369,7 +436,7 @@ private:
             const auto tag=packet[cursor++]; const auto low=half(tag,0),registers=half(tag,1);
             const auto format=(low>>58)&3,encoded=low>>60,nreg=encoded ? encoded : 16;
             const auto entries=(low&0x7fffU)*nreg;
-            if (entries) state.packed_q=0x3f800000;
+            if (entries) { state.packed_q=0x3f800000; state.unknown&=~unknown_packed_q; }
             const auto count=format>=2 ? low&0x7fffU : format ? (entries+1)/2 : entries;
             if (count>packet.size()-cursor) throw std::invalid_argument("Truncated native graphics packet");
             if (!format && (low&(1ULL<<46))) command(state,0,(low>>47)&2047,draws);
@@ -394,7 +461,7 @@ private:
                 else if (reg==0) command(state,0,q[0]&2047,draws);
                 else if (reg==1) command(state,1,(q[0]&255)|((q[1]&255)<<8)|((q[2]&255)<<16)|((q[3]&255)<<24)|
                     (std::uint64_t(state.packed_q)<<32),draws);
-                else if (reg==2) { state.packed_q=q[2]; command(state,2,half(q,0),draws); }
+                else if (reg==2) { state.packed_q=q[2]; state.unknown&=~unknown_packed_q; command(state,2,half(q,0),draws); }
                 else if (reg==3) command(state,3,(q[0]&16383)|((q[1]&16383)<<16),draws);
                 else if (reg==0xa) command(state,0xa,std::uint64_t((q[3]>>4)&255)<<56,draws);
                 else if (reg==4 || reg==5 || reg==12 || reg==13) {

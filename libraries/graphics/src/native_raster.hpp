@@ -11,6 +11,8 @@ public:
     void upload(std::span<const std::uint32_t> words);
     void write(std::span<const PixelWrite> writes);
     void draw(std::span<const SpriteCommand> commands);
+    unsigned load_vector_kernel(std::span<const std::uint32_t> spirv,unsigned unit);
+    void draw_vectors(const VectorLaunch&,const VectorAssembly&,const Sprite&);
     void read(std::span<std::uint32_t> words);
     void read_words(std::span<const unsigned> addresses,std::span<std::uint32_t> values);
     void finish();

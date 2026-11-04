@@ -80,6 +80,8 @@ const std::uint32_t scanout_code[] =
 struct VulkanRenderer::Impl {
     std::unique_ptr<NativeRaster> native;
     RenderPath path=RenderPath::native_images;
+    std::uint32_t api_version=VK_API_VERSION_1_1;
+    bool shader_int8=false;
     VkInstance instance{};
     VkDebugUtilsMessengerEXT debug{};
     VkSurfaceKHR surface{};
@@ -202,7 +204,11 @@ struct VulkanRenderer::Impl {
         if (window) throw std::runtime_error("Windowed Vulkan host currently requires Windows");
 #endif
         VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-        app.pApplicationName="AnyPS2"; app.apiVersion=VK_API_VERSION_1_1;
+        std::uint32_t loader_version=VK_API_VERSION_1_0;
+        if (const auto enumerate=reinterpret_cast<PFN_vkEnumerateInstanceVersion>(vkGetInstanceProcAddr(nullptr,"vkEnumerateInstanceVersion")))
+            check(enumerate(&loader_version),"Query Vulkan version");
+        if (loader_version<VK_API_VERSION_1_1) throw std::runtime_error("Native rendering requires Vulkan 1.1 or newer");
+        app.pApplicationName="AnyPS2"; app.apiVersion=std::min(loader_version,VK_API_VERSION_1_3);
 #ifdef ANYPS2_LLVM_TEXTURES
         app.apiVersion=VK_API_VERSION_1_3;
 #endif
@@ -245,6 +251,8 @@ struct VulkanRenderer::Impl {
             }
         }
         if (!physical) throw std::runtime_error("No Vulkan compute/presentation device");
+        VkPhysicalDeviceProperties properties{}; vkGetPhysicalDeviceProperties(physical,&properties);
+        api_version=std::min(app.apiVersion,properties.apiVersion);
         const float priority=1;
         VkDeviceQueueCreateInfo q{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}; q.queueFamilyIndex=family; q.queueCount=1; q.pQueuePriorities=&priority;
         const char* swap_extension=VK_KHR_SWAPCHAIN_EXTENSION_NAME;
@@ -279,16 +287,18 @@ struct VulkanRenderer::Impl {
             }
         }
         dc.enabledExtensionCount=unsigned(device_extensions.size()); dc.ppEnabledExtensionNames=device_extensions.data();
-#ifdef ANYPS2_LLVM_TEXTURES
-        // LLVM's Vulkan resource-name lowering emits byte constants. Declare
-        // its Int8 capability explicitly, including on devices which otherwise
-        // accept the shader without enabling the feature.
+        // LLVM resource-name lowering emits byte constants even when the
+        // arithmetic is 32-bit. Enable this optional capability at device creation.
         VkPhysicalDeviceShaderFloat16Int8Features integers{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES};
-        VkPhysicalDeviceFeatures2 integer_query{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-        integer_query.pNext=&integers; vkGetPhysicalDeviceFeatures2(physical,&integer_query);
-        if (!integers.shaderInt8) throw std::runtime_error("LLVM texture kernels require Vulkan shaderInt8");
-        integers.shaderFloat16=VK_FALSE;
-        integers.pNext=const_cast<void*>(dc.pNext); dc.pNext=&integers;
+        if (api_version>=VK_API_VERSION_1_3) {
+            VkPhysicalDeviceFeatures2 query{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+            query.pNext=&integers; vkGetPhysicalDeviceFeatures2(physical,&query);
+            shader_int8=integers.shaderInt8;
+            integers.shaderFloat16=VK_FALSE;
+            integers.pNext=const_cast<void*>(dc.pNext); dc.pNext=&integers;
+        }
+#ifdef ANYPS2_LLVM_TEXTURES
+        if (!shader_int8) throw std::runtime_error("LLVM texture kernels require Vulkan shaderInt8");
 #endif
         check(vkCreateDevice(physical,&dc,nullptr,&device),"Create device"); vkGetDeviceQueue(device,family,0,&queue);
         if (path==RenderPath::native_images) {
@@ -524,6 +534,7 @@ void VulkanRenderer::validate(std::span<const SpriteCommand> commands) {
     if (commands.size()>65536) throw std::runtime_error("Vulkan draw batch exceeds bound");
     for (const auto& command:commands) validate(command.draw,command.triangle,command.fog_color,command.fog,command.levels);
 }
+void VulkanRenderer::validate_target(const Sprite& draw) { validate_sprite(draw); }
 void VulkanRenderer::validate(const Sprite& draw,const std::array<RasterVertex,3>& triangle,
         std::uint32_t fog_color,std::uint32_t fog,const TextureLevels& levels) {
     validate_sprite(draw);
@@ -601,6 +612,16 @@ void VulkanRenderer::upload(std::span<const std::uint32_t> memory) {
 #else
     throw std::runtime_error("Reference renderer operation is unavailable in native output");
 #endif
+}
+unsigned VulkanRenderer::load_vector_kernel(std::span<const std::uint32_t> spirv,unsigned unit) {
+    if (!impl_->native) throw std::invalid_argument("Vector kernels require the native image renderer");
+    if (impl_->api_version<VK_API_VERSION_1_3 || !impl_->shader_int8)
+        throw std::invalid_argument("LLVM vector kernels require Vulkan 1.3 and shaderInt8");
+    return impl_->native->load_vector_kernel(spirv,unit);
+}
+void VulkanRenderer::draw_vectors(const VectorLaunch& launch,const VectorAssembly& assembly,const Sprite& target) {
+    if (!impl_->native) throw std::invalid_argument("Vector batches require the native image renderer");
+    impl_->native->draw_vectors(launch,assembly,target);
 }
 void VulkanRenderer::draw(std::span<const SpriteCommand> commands) {
     if (impl_->native) { impl_->native->draw(commands); return; }

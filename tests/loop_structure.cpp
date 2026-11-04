@@ -28,6 +28,7 @@ std::uint32_t reciprocal_square_root(unsigned fs,unsigned fsf,unsigned ft,unsign
 }
 constexpr std::uint32_t wait_quotient=0x800003bfU;
 std::uint32_t multiply_quotient(unsigned destination,unsigned source) { return (15U<<21)|(source<<11)|(destination<<6)|0x1cU; }
+std::uint32_t float_to_fixed4(unsigned destination,unsigned source) { return (15U<<21)|(destination<<16)|(source<<11)|0x17dU; }
 struct Builder {
     nt::Bytes bytes;
     void pair(std::uint32_t lower=lower_nop,std::uint32_t upper=upper_nop) { render_fixture::word(bytes,lower); render_fixture::word(bytes,upper); }
@@ -51,6 +52,21 @@ nt::render::PipelinedLoop quotient_loop() {
     b.close(9);
     auto recovered=nt::render::recover_pipelined_loop(nt::vu::frame(b.bytes,1,0),1,b.analyze());
     if (!recovered.loop) throw std::runtime_error("Quotient loop not recovered: "+recovered.reason);
+    return *recovered.loop;
+}
+// Each element copies a color row and converts a position row to 12.4 fixed
+// point, storing both through one pointer: a PACKED RGBAQ, XYZ2 vertex record.
+nt::render::PipelinedLoop vertex_loop() {
+    Builder b;
+    b.pair(load_increment(1,3));
+    b.pair(load_increment(2,5));
+    b.pair(lower_nop,float_to_fixed4(6,1));
+    b.pair(store_increment(2,4));
+    b.pair(store_increment(6,4));
+    b.pair(subtract_immediate(9,1));
+    b.close(9);
+    auto recovered=nt::render::recover_pipelined_loop(nt::vu::frame(b.bytes,1,0),1,b.analyze());
+    if (!recovered.loop) throw std::runtime_error("Vertex loop not recovered: "+recovered.reason);
     return *recovered.loop;
 }
 void run() {
@@ -95,6 +111,19 @@ void run() {
             require(input.kind==ElementNodeKind::load && input.a==3 && static_cast<std::int32_t>(input.b)==-1 && input.c==out.lane,
                 "Stream element offset not recovered");
             require(matrix.kind==ElementNodeKind::invariant && matrix.b==5 && matrix.c==out.lane,"Invariant operand not recovered");
+        }
+    }
+    // Two stores per iteration through one pointer: a PACKED RGBAQ/XYZ2 record.
+    {
+        const auto loop=vertex_loop();
+        require(loop.stores.size()==8 && element_output_words(loop)==9,"Vertex record stores not recovered");
+        for (unsigned n=0;n<8;++n) {
+            const auto& out=loop.stores[n];
+            require(out.base==4 && out.stride==2 && out.row==static_cast<std::int32_t>(n/4) && out.lane==n%4,"Vertex record layout not recovered");
+            const auto& node=loop.nodes[out.node];
+            if (n<4) require(node.kind==ElementNodeKind::load && node.a==5,"Color copy not recovered");
+            else require(node.kind==ElementNodeKind::operation && node.a==static_cast<std::uint32_t>(ElementOperation::float_to_integer) &&
+                node.value==4 && loop.nodes[node.b].kind==ElementNodeKind::load && loop.nodes[node.b].a==3,"Fixed-point position not recovered");
         }
     }
     // A WAITQ-published quotient feeds every lane of the element's product.
@@ -165,19 +194,21 @@ void run() {
     }
 }
 }
-// --emit-element <prefix>: writes the quotient loop's CPU and Vulkan element
-// kernels as <prefix>.cpu.ll and <prefix>.gpu.ll for compiled execution tests.
+// --emit-element quotient|vertex <prefix>: writes a fixture loop's CPU and Vulkan
+// element kernels as <prefix>.cpu.ll and <prefix>.gpu.ll for execution tests.
 int main(int argc,char** argv) {
     try {
-        if (argc==3 && std::string_view(argv[1])=="--emit-element") {
-            const auto loop=quotient_loop();
+        if (argc==4 && std::string_view(argv[1])=="--emit-element") {
+            const std::string_view fixture=argv[2];
+            if (fixture!="quotient" && fixture!="vertex") throw std::invalid_argument("Unknown element fixture");
+            const auto loop=fixture=="vertex" ? vertex_loop() : quotient_loop();
             for (const bool vulkan:{false,true}) {
-                std::ofstream out(std::string(argv[2])+(vulkan ? ".gpu.ll" : ".cpu.ll"),std::ios::binary);
+                std::ofstream out(std::string(argv[3])+(vulkan ? ".gpu.ll" : ".cpu.ll"),std::ios::binary);
                 nt::render::emit_element_kernel_llvm(out,loop,1,vulkan);
             }
             return 0;
         }
-        if (argc!=1) throw std::invalid_argument("Usage: render-loop-structure-tests [--emit-element <prefix>]");
+        if (argc!=1) throw std::invalid_argument("Usage: render-loop-structure-tests [--emit-element quotient|vertex <prefix>]");
         run();
     }
     catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }

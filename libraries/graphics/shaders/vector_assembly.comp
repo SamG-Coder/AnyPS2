@@ -1,0 +1,104 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : require
+// GS primitive assembly for GPU-produced PACKED vertex records. One invocation
+// per primitive slot writes one native draw record in submission order, and per
+// element checks the element kernel's status word. This repeats the triangle
+// path of NativeDrawing::command, plan_triangle and plan_sprite for the subset
+// NativeDrawing::submit_vectors accepts; tests compare it with that CPU path.
+layout(local_size_x=64) in;
+layout(std430,set=0,binding=0) readonly buffer Elements { uint words[]; } elements;
+layout(std430,set=0,binding=1) writeonly buffer Records { uint words[]; } records;
+layout(std430,set=0,binding=2) readonly buffer Plan { uint words[]; } plan;
+layout(std430,set=0,binding=3) buffer Status { uint failures; } status;
+
+// Plan words, written by NativeVectors from VectorAssembly.
+const uint plan_elements=0u, plan_element_words=1u, plan_record_first=2u, plan_primitive=3u;
+const uint plan_shaded=4u, plan_coverage=5u, plan_xyz_register=6u, plan_present=7u;
+const uint plan_offset=8u, plan_scissor=10u, plan_store=14u, plan_constant=34u, plan_state=54u;
+const uint plan_template=64u;
+// DrawRecord words (native_raster.cpp, native.vert).
+const uint record_words=68u, record_left=0u, record_color=6u, record_vertices=32u, record_fog=65u;
+
+uint P(uint index) { return plan.words[index]; }
+uint register_word(uint element,uint kind,uint n) {
+    const uint store=P(plan_store+kind*4u+n);
+    return store==0xffffffffu ? P(plan_constant+kind*4u+n) : elements.words[element*P(plan_element_words)+1u+store];
+}
+struct Vertex { int x,y; uint color,u,v,s,t,q,z,fog; bool kick; };
+Vertex vertex(uint element) {
+    const uint present=P(plan_present);
+    Vertex r;
+    // RGBAQ takes Q from the preceding ST of the same record, otherwise from
+    // the value reset at the GIF tag. The host rejects ST after RGBAQ.
+    const uint packed_q=(present&2u)!=0u ? register_word(element,1u,2u) : 0x3f800000u;
+    r.color=(present&1u)!=0u ? ((register_word(element,0u,0u)&255u)|((register_word(element,0u,1u)&255u)<<8)|
+        ((register_word(element,0u,2u)&255u)<<16)|((register_word(element,0u,3u)&255u)<<24)) : P(plan_state);
+    r.q=(present&1u)!=0u ? packed_q : P(plan_state+1u);
+    r.s=(present&2u)!=0u ? register_word(element,1u,0u) : P(plan_state+2u);
+    r.t=(present&2u)!=0u ? register_word(element,1u,1u) : P(plan_state+3u);
+    const uint uv=(present&4u)!=0u ?
+        (((register_word(element,2u,0u)&16383u)|((register_word(element,2u,1u)&16383u)<<16))&0x3fff3fffu) : P(plan_state+4u);
+    r.u=uv&16383u; r.v=(uv>>16)&16383u;
+    r.fog=(present&8u)!=0u ? ((register_word(element,3u,3u)>>4)&255u) : P(plan_state+5u);
+    const uint reg=P(plan_xyz_register);
+    const uint w0=register_word(element,4u,0u),w1=register_word(element,4u,1u);
+    const uint w2=register_word(element,4u,2u),w3=register_word(element,4u,3u);
+    r.x=int(w0&65535u); r.y=int(w1&65535u);
+    if ((reg&1u)==0u) { r.z=(w2>>4)&0xffffffu; r.fog=(w3>>4)&255u; } else r.z=w2;
+    // XYZ3/XYZF3 and the ADC bit update the vertex queue without a kick.
+    r.kick=reg<12u && (w3&0x8000u)==0u;
+    return r;
+}
+// Integer division truncates toward zero, as in the C++ planner.
+int ceil_pixel(int value) { return value>=0 ? (value+15)/16 : -((-value)/16); }
+void write_vertex(uint base,uint index,Vertex v,int ox,int oy) {
+    const uint at=base+record_vertices+index*10u;
+    records.words[at]=uint(v.x-ox); records.words[at+1u]=uint(v.y-oy);
+    records.words[at+2u]=v.color; records.words[at+3u]=v.u; records.words[at+4u]=v.v;
+    records.words[at+5u]=v.s; records.words[at+6u]=v.t; records.words[at+7u]=v.q;
+    records.words[at+8u]=v.z; records.words[at+9u]=v.fog;
+}
+void main() {
+    const uint item=gl_GlobalInvocationID.x;
+    const uint count=P(plan_elements);
+    if (item<count && elements.words[item*P(plan_element_words)]!=0u) atomicAdd(status.failures,1u);
+    const uint primitive=P(plan_primitive);
+    const uint primitives=primitive==3u ? count/3u : (count>=2u ? count-2u : 0u);
+    if (item>=primitives) return;
+    const uint a=primitive==3u ? item*3u : primitive==4u ? item : 0u;
+    const uint b=primitive==3u ? item*3u+1u : item+1u;
+    const uint c=primitive==3u ? item*3u+2u : item+2u;
+    const uint base=(P(plan_record_first)+item)*record_words;
+    for (uint w=0u;w<record_words;++w) records.words[base+w]=P(plan_template+w);
+    // Failed elements have no usable stores. Suppress their primitives before
+    // reading those stores; the slot's failure counter remains observable.
+    if ((elements.words[a*P(plan_element_words)]|elements.words[b*P(plan_element_words)]|
+         elements.words[c*P(plan_element_words)])!=0u) {
+        for (uint w=0u;w<4u;++w) records.words[base+record_left+w]=0u;
+        for (uint w=0u;w<30u;++w) records.words[base+record_vertices+w]=0u;
+        return;
+    }
+    Vertex v0=vertex(a),v1=vertex(b),v2=vertex(c);
+    const int coverage=P(plan_coverage)!=0u ? 15 : 0;
+    const int ox=int(P(plan_offset)),oy=int(P(plan_offset+1u));
+    const int x0=max(0,min(v0.x,min(v1.x,v2.x))-coverage),x1=max(v0.x,max(v1.x,v2.x));
+    const int y0=max(0,min(v0.y,min(v1.y,v2.y))-coverage),y1=max(v0.y,max(v1.y,v2.y));
+    const int left=max(ceil_pixel(x0-ox),int(P(plan_scissor)));
+    const int right=min(ceil_pixel(x1-ox),int(P(plan_scissor+1u))+1);
+    const int top=max(ceil_pixel(y0-oy),int(P(plan_scissor+2u)));
+    const int bottom=min(ceil_pixel(y1-oy),int(P(plan_scissor+3u))+1);
+    const int64_t area=int64_t(v1.x-v0.x)*int64_t(v2.y-v0.y)-int64_t(v1.y-v0.y)*int64_t(v2.x-v0.x);
+    if (!v2.kick || left>=right || top>=bottom || area==0) {
+        // No draw: an empty, zero-area record rasterizes no fragments.
+        for (uint w=0u;w<4u;++w) records.words[base+record_left+w]=0u;
+        for (uint w=0u;w<30u;++w) records.words[base+record_vertices+w]=0u;
+        return;
+    }
+    // Flat color and the draw's fog come from the kicking vertex.
+    const uint color=v2.color,fog=v2.fog;
+    if (area<0) { const Vertex swapped=v1; v1=v2; v2=swapped; }
+    records.words[base+record_left]=uint(left); records.words[base+record_left+1u]=uint(top);
+    records.words[base+record_left+2u]=uint(right); records.words[base+record_left+3u]=uint(bottom);
+    records.words[base+record_color]=color; records.words[base+record_fog]=fog;
+    write_vertex(base,0u,v0,ox,oy); write_vertex(base,1u,v1,ox,oy); write_vertex(base,2u,v2,ox,oy);
+}

@@ -1,4 +1,5 @@
 #include "native_raster.hpp"
+#include "native_vectors.hpp"
 #include "raster_hazards.hpp"
 #include "sprite_mapping.hpp"
 #include <algorithm>
@@ -90,6 +91,7 @@ struct NativeRaster::Impl {
     VkCommandPool pool{}; VkCommandBuffer command{};
     VkBuffer staging{}; VkDeviceMemory staging_memory{}; void* mapped=nullptr;
     VkBuffer records{}; VkDeviceMemory record_memory{}; void* record_mapping=nullptr;
+    std::unique_ptr<NativeVectors> vectors;
     unsigned records_used=0,batch_first=0,batch_count=0,batch_vertices=0;
     VkPipeline batch_pipeline{},bound_pipeline{};
     VkDescriptorSet batch_set{},bound_set{};
@@ -175,6 +177,7 @@ struct NativeRaster::Impl {
     void flush_batch();
     void append_draw(VkDescriptorSet,const SpriteCommand&);
     void collect(unsigned index,bool wait);
+    void collect_vectors();
     void prepare_slot();
     void flush(VkSemaphore acquired=VK_NULL_HANDLE,VkSemaphore rendered=VK_NULL_HANDLE,bool wait=true);
     VkPipeline make_pipeline(VkRenderPass pass,VkPipelineLayout pipeline_layout,std::span<const std::uint32_t> vs,
@@ -260,7 +263,14 @@ void NativeRaster::Impl::collect(unsigned index,bool wait) {
         const auto mask=timestamp_bits==64 ? ~std::uint64_t(0) : (std::uint64_t(1)<<timestamp_bits)-1;
         stats.gpu_ns+=static_cast<std::uint64_t>(double((values[1]-values[0])&mask)*timestamp_period);
     }
+    if (vectors) { vectors->collect(index); collect_vectors(); }
     entry.measured=true;
+}
+void NativeRaster::Impl::collect_vectors() {
+    const auto& v=vectors->statistics();
+    stats.vector_launches=v.launches; stats.vector_resident_hits=v.resident_hits;
+    stats.vector_resident_uploads=v.resident_uploads; stats.vector_resident_upload_bytes=v.resident_upload_bytes;
+    stats.vector_staged_bytes=v.staged_bytes; stats.vector_failures=v.failures;
 }
 void NativeRaster::Impl::prepare_slot() {
     // A slot owns its command buffer and upload bytes until its fence completes.
@@ -445,6 +455,7 @@ NativeRaster::Impl::~Impl() {
     if (readback_mapping) vkUnmapMemory(device,readback_memory);
     if (readback) vkDestroyBuffer(device,readback,nullptr);
     if (readback_memory) vkFreeMemory(device,readback_memory,nullptr);
+    vectors.reset();
     if (record_mapping) vkUnmapMemory(device,record_memory);
     if (records) vkDestroyBuffer(device,records,nullptr);
     if (record_memory) vkFreeMemory(device,record_memory,nullptr);
@@ -996,6 +1007,65 @@ void NativeRaster::write(std::span<const PixelWrite> writes) {
         ++r.revision; r.touch(changed);
         for (unsigned page=first/2048;page<=last/2048;++page) r.backing_revisions[page]=r.revision;
     }
+}
+unsigned NativeRaster::load_vector_kernel(std::span<const std::uint32_t> spirv,unsigned unit) {
+    auto& r=*impl_;
+    if (!r.ordered_fragments) throw std::invalid_argument("Vector batches require ordered fragment access for overlapping primitives");
+    if (!r.vectors) r.vectors=std::make_unique<NativeVectors>(r.physical,r.device,r.records,record_bytes,frame_slots);
+    return r.vectors->load_kernel(spirv,unit);
+}
+void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly& assembly,const Sprite& target) {
+    auto& r=*impl_; Measure timing(r.stats.draw_ns,r.profiling);
+    if (!r.initialized || !r.vectors) throw std::invalid_argument("Vector drawing requires initialized storage and a loaded kernel");
+    r.vectors->validate(launch);
+    const auto count=vector_primitives(assembly.primitive,launch.elements);
+    if (assembly.primitive<3 || assembly.primitive>5 || !count || count>records_per_slot ||
+        !(target.flags&triangle_flag) || (target.flags&(1|fog_flag|line_flag|perspective_triangle_flag)) ||
+        target.right>target.pitch*64 || target.left>=target.right || target.top>=target.bottom ||
+        assembly.scissor!=std::array<std::uint32_t,4>{target.left,target.right-1,target.top,target.bottom-1} ||
+        assembly.shaded!=unsigned(bool(target.flags&shaded_triangle_flag)) ||
+        assembly.coverage!=unsigned(bool(target.flags&coverage_flag)) || assembly.offset_x<0 || assembly.offset_x>65535 ||
+        assembly.offset_y<0 || assembly.offset_y>65535 || !(assembly.present&16) || (assembly.present&~31U) ||
+        (assembly.xyz_register!=4 && assembly.xyz_register!=5 && assembly.xyz_register!=12 && assembly.xyz_register!=13))
+        throw std::invalid_argument("Unsupported vector assembly or target bounds");
+    for (const auto& kind:assembly.store) for (const auto store:kind)
+        if (store!=vector_constant_word && store>=launch.element_words-1)
+            throw std::invalid_argument("Vector register names a missing store word");
+    VulkanRenderer::validate_target(target);
+    if (r.sets.size()>=8192) r.clear_views();
+    ++r.surface_scope;
+    const unsigned format=(target.flags&color_16_flag) ? ((target.flags&color_16s_flag) ? 10 : 2) : 0;
+    auto& color=r.surface(target.base,target.pitch,target.bottom,false,false,false,&target,format);
+    auto& depth=r.surface((target.flags&depth_test_flag) ? target.depth_base : 0,target.pitch,target.bottom,
+        true,!(target.flags&depth_test_flag),false,&target);
+    const auto textures=r.textures_for(SpriteCommand{target});
+    r.end_pass(); r.begin();
+    if (r.records_used+count>records_per_slot || r.vectors->space(r.slot,launch)==NativeVectors::Space::slot_full) {
+        r.flush(VK_NULL_HANDLE,VK_NULL_HANDLE,false); r.begin();
+    }
+    if (r.vectors->space(r.slot,launch)==NativeVectors::Space::resident_full) {
+        r.flush(); r.vectors->clear_resident(); r.begin();
+    }
+    const unsigned first=r.slot*records_per_slot+r.records_used;
+    const DrawRecord record{target,{},color.width,std::min(color.height,depth.height),0,0,0,1};
+    const auto words=std::bit_cast<std::array<std::uint32_t,NativeVectors::record_words>>(record);
+    r.vectors->record(r.command,r.slot,launch,assembly,words,first,count);
+    r.records_used+=count; r.collect_vectors();
+    // The GPU determines individual bounds. The host tracks their conservative
+    // scissor union for resource ownership and subsequent CPU-packet hazards.
+    const auto set=r.bind_target(color,depth,textures,target);
+    const VkRect2D scissor{{static_cast<int>(target.left),static_cast<int>(target.top)},
+        {target.right-target.left,target.bottom-target.top}};
+    vkCmdSetScissor(r.command,0,1,&scissor);
+    r.batch_first=first; r.batch_count=count; r.batch_vertices=3; r.batch_set=set;
+    r.batch_pipeline=(target.flags&coverage_flag) ? r.coverage_pipeline : r.pipeline;
+    r.flush_batch();
+    const VkRect2D full_scissor{{0,0},{r.current_width,r.current_height}};
+    vkCmdSetScissor(r.command,0,1,&full_scissor);
+    ++r.revision;
+    if (target.mask!=0xffffffffU) r.written(color,target);
+    if (target.flags&depth_write_flag) r.written(depth,target);
+    r.stats.triangles+=count;
 }
 void NativeRaster::draw(std::span<const SpriteCommand> commands) {
     VulkanRenderer::validate(commands); auto& r=*impl_; Measure timing(r.stats.draw_ns,r.profiling);
