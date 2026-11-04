@@ -272,7 +272,8 @@ A host-record batch is bounded by all of its vertices, as `plan_sprite` bounds a
 primitive, so it requests the same surface extent as CPU draws; test flags are
 normalized as for CPU draws. Assembly compute runs in a per-slot prologue command
 buffer submitted before the slot's draws, so batches are instanced draws inside
-the current render pass. `ps2-native --gpu-triangles` enables the path (off by
+the current render pass. Host-record batches are read in place from staging memory;
+batches write disjoint records, so the prologue needs one barrier in total. `ps2-native --gpu-triangles` enables the path (off by
 default) and the graphics profile reports `gpu_triangle_batches` and fallback
 reasons.
 
@@ -280,9 +281,10 @@ A private local capture of 9,143 GT4 graphics batches, replayed through the CPU
 planner and through this path, produced identical complete GS memory at 45
 checkpoints and at the end, with 9,306 GPU-assembled tags. Most remaining tags
 have fewer than three vertices (sprites and single-vertex tags). In headless GT4
-runs on one host the path rendered about 24,000 batches per second but still
-cost more render-thread CPU time than the CPU planner (about 0.96 s against
-0.74 s per 5 s window, mostly fence waits); no speedup is claimed.
+runs on one host (60 s, last 5 s window), the path assembled about 24,000 batches
+per second with render-thread time on par with the CPU planner (0.75 s against
+0.74 s) and half the measured GPU time (75 ms against 148 ms). That scene does not
+limit the game's frame rate, so no frame-rate change is claimed.
 
 Frame slots own staging and status memory until their queue fence completes.
 `RenderStatistics` exposes vector launches, resident hits/uploads, staged bytes

@@ -317,9 +317,9 @@ void NativeRaster::Impl::flush(VkSemaphore acquired,VkSemaphore rendered,bool wa
         if (prologue_recording) {
             // Vector compute results become visible to the slot's draws.
             VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER}; b.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_TRANSFER_WRITE_BIT;
-            b.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
+            b.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_HOST_READ_BIT;
             vkCmdPipelineBarrier(entry.prologue,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,1,&b,0,nullptr,0,nullptr);
+                VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_HOST_BIT,0,1,&b,0,nullptr,0,nullptr);
             checked(vkEndCommandBuffer(entry.prologue),"End native vector commands");
             s.commandBufferCount=2; s.pCommandBuffers=buffers; prologue_recording=false;
         }

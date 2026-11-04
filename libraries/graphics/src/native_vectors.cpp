@@ -47,7 +47,8 @@ struct NativeVectors::Impl {
     VkPipeline assembly{};
     VkDescriptorPool pool{};
     std::array<VkDescriptorSet,2> element_sets{};
-    VkDescriptorSet assembly_set{};
+    // assembly_host_set reads host-record batches directly from staging memory.
+    VkDescriptorSet assembly_set{},assembly_host_set{};
     struct Kernel { VkPipeline pipeline{}; unsigned unit=0; };
     std::vector<Kernel> kernels;
     struct Resident { VkDeviceSize offset=0; std::vector<std::uint32_t> words; };
@@ -122,7 +123,8 @@ NativeVectors::NativeVectors(VkPhysicalDevice physical,VkDevice device,VkBuffer 
     if (limits.minStorageBufferOffsetAlignment>alignment || limits.maxDescriptorSetStorageBuffersDynamic<4 ||
         limits.maxStorageBufferRange<launch_output_bytes)
         throw std::runtime_error("Device cannot run GPU vector batches");
-    v.buffer(slots*host_slot_bytes,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+    // Padded so a record binding's dynamic range at the end of a slot stays inside.
+    v.buffer(slots*host_slot_bytes+launch_output_bytes,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,v.host,v.host_memory);
     void* mapping=nullptr; checked(vkMapMemory(device,v.host_memory,0,VK_WHOLE_SIZE,0,&mapping),"Map vector staging");
     v.host_mapping=static_cast<std::byte*>(mapping);
@@ -138,26 +140,27 @@ NativeVectors::NativeVectors(VkPhysicalDevice physical,VkDevice device,VkBuffer 
     pl.pSetLayouts=&v.element_descriptors; checked(vkCreatePipelineLayout(device,&pl,nullptr,&v.element_layout),"Create element layout");
     pl.pSetLayouts=&v.assembly_descriptors; checked(vkCreatePipelineLayout(device,&pl,nullptr,&v.assembly_layout),"Create assembly layout");
     v.assembly=v.pipeline(assembly_code,v.assembly_layout);
-    const std::array<VkDescriptorPoolSize,2> sizes{{{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,3},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,7}}};
-    VkDescriptorPoolCreateInfo dp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO}; dp.maxSets=3; dp.poolSizeCount=2; dp.pPoolSizes=sizes.data();
+    const std::array<VkDescriptorPoolSize,2> sizes{{{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,4},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,10}}};
+    VkDescriptorPoolCreateInfo dp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO}; dp.maxSets=4; dp.poolSizeCount=2; dp.pPoolSizes=sizes.data();
     checked(vkCreateDescriptorPool(device,&dp,nullptr,&v.pool),"Create vector descriptor pool");
-    const std::array<VkDescriptorSetLayout,3> layouts{v.element_descriptors,v.element_descriptors,v.assembly_descriptors};
-    std::array<VkDescriptorSet,3> sets{};
-    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO}; ai.descriptorPool=v.pool; ai.descriptorSetCount=3; ai.pSetLayouts=layouts.data();
+    const std::array<VkDescriptorSetLayout,4> layouts{v.element_descriptors,v.element_descriptors,v.assembly_descriptors,v.assembly_descriptors};
+    std::array<VkDescriptorSet,4> sets{};
+    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO}; ai.descriptorPool=v.pool; ai.descriptorSetCount=4; ai.pSetLayouts=layouts.data();
     checked(vkAllocateDescriptorSets(device,&ai,sets.data()),"Allocate vector descriptors");
-    v.element_sets={sets[0],sets[1]}; v.assembly_set=sets[2];
-    const std::array<VkDescriptorBufferInfo,10> infos{{
+    v.element_sets={sets[0],sets[1]}; v.assembly_set=sets[2]; v.assembly_host_set=sets[3];
+    const std::array<VkDescriptorBufferInfo,14> infos{{
         {v.device_buffer,vu0_offset,vu_rows[0]*16},{v.device_buffer,outputs_offset,launch_output_bytes},{v.host,0,parameter_bytes},
         {v.device_buffer,vu1_offset,vu_rows[1]*16},{v.device_buffer,outputs_offset,launch_output_bytes},{v.host,0,parameter_bytes},
-        {v.device_buffer,outputs_offset,launch_output_bytes},{records,0,record_bytes},{v.host,0,plan_bytes},{v.host,0,status_bytes}}};
-    std::array<VkWriteDescriptorSet,10> writes{};
-    for (unsigned n=0;n<10;++n) {
-        const unsigned set=n<3 ? 0 : n<6 ? 1 : 2,binding=n<6 ? n%3 : n-6;
+        {v.device_buffer,outputs_offset,launch_output_bytes},{records,0,record_bytes},{v.host,0,plan_bytes},{v.host,0,status_bytes},
+        {v.host,0,launch_output_bytes},{records,0,record_bytes},{v.host,0,plan_bytes},{v.host,0,status_bytes}}};
+    std::array<VkWriteDescriptorSet,14> writes{};
+    for (unsigned n=0;n<14;++n) {
+        const unsigned set=n<3 ? 0 : n<6 ? 1 : n<10 ? 2 : 3,binding=n<6 ? n%3 : (n-6)%4;
         writes[n]={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}; writes[n].dstSet=sets[set]; writes[n].dstBinding=binding;
         writes[n].descriptorCount=1; writes[n].pBufferInfo=&infos[n];
         writes[n].descriptorType=set<2 ? element_types[binding] : assembly_types[binding];
     }
-    vkUpdateDescriptorSets(device,10,writes.data(),0,nullptr);
+    vkUpdateDescriptorSets(device,14,writes.data(),0,nullptr);
 }
 NativeVectors::~NativeVectors()=default;
 unsigned NativeVectors::load_kernel(std::span<const std::uint32_t> spirv,unsigned unit) {
@@ -275,8 +278,12 @@ void NativeVectors::record(VkCommandBuffer command,unsigned slot,const VectorLau
     }
     if (!host_records) barrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);
     const auto parameters=host_records ? VkDeviceSize(0) : host_allocate(std::as_bytes(launch.parameters));
-    const auto output=device_base+aligned(s.device_used); s.device_used=aligned(s.device_used)+v.output_bytes(launch);
-    if (!launch.prefix.empty()) {
+    // Host records are read in place: no copy, no transfer barrier.
+    const auto host_output=host_records ? host_allocate(std::as_bytes(launch.prefix)) : VkDeviceSize(0);
+    const auto output=host_records ? VkDeviceSize(0) : device_base+aligned(s.device_used);
+    if (!host_records) s.device_used=aligned(s.device_used)+v.output_bytes(launch);
+    if (host_records) v.stats.staged_bytes+=launch.prefix.size_bytes();
+    if (!host_records && !launch.prefix.empty()) {
         const VkBufferCopy copy{host_allocate(std::as_bytes(launch.prefix)),output,launch.prefix.size_bytes()};
         vkCmdCopyBuffer(command,v.host,v.device_buffer,1,&copy);
         v.stats.staged_bytes+=copy.size;
@@ -287,7 +294,7 @@ void NativeVectors::record(VkCommandBuffer command,unsigned slot,const VectorLau
         vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_COMPUTE,v.element_layout,0,1,&v.element_sets[unit],2,element_offsets);
         vkCmdDispatch(command,(launch.parameters[0]+63)/64,1,1);
     }
-    barrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    if (!host_records) barrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_ACCESS_TRANSFER_WRITE_BIT|VK_ACCESS_SHADER_WRITE_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);
     std::array<std::uint32_t,plan_words> plan{};
     plan[0]=launch.elements; plan[1]=launch.element_words; plan[2]=first_record; plan[3]=assembly.primitive;
@@ -305,13 +312,13 @@ void NativeVectors::record(VkCommandBuffer command,unsigned slot,const VectorLau
     const auto status=host_allocate(std::as_bytes(std::span(&zero,1)));
     s.status.push_back(status);
     vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_COMPUTE,v.assembly);
-    const std::uint32_t assembly_offsets[]{static_cast<std::uint32_t>(output-outputs_offset),
+    const std::uint32_t assembly_offsets[]{static_cast<std::uint32_t>(host_records ? host_output : output-outputs_offset),
         static_cast<std::uint32_t>(plan_offset),static_cast<std::uint32_t>(status)};
-    vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_COMPUTE,v.assembly_layout,0,1,&v.assembly_set,3,assembly_offsets);
+    vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_COMPUTE,v.assembly_layout,0,1,
+        host_records ? &v.assembly_host_set : &v.assembly_set,3,assembly_offsets);
     vkCmdDispatch(command,(std::max(launch.elements,primitives)+63)/64,1,1);
-    barrier(command,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_HOST_BIT,
-        VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_HOST_READ_BIT);
+    // Batches write disjoint records. The owner's single barrier after all vector
+    // work makes records visible to draws and status words to the host.
     ++v.stats.launches;
 }
 void NativeVectors::collect(unsigned slot) {

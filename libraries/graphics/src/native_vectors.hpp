@@ -9,7 +9,9 @@ namespace nt::graphics {
 // batches (vector_draw.hpp). Work is recorded into the owner's command buffer for
 // one frame slot. The owner must have completed a slot's previous submission
 // before collect() and reuse, and must have drained all work before
-// clear_resident().
+// clear_resident(). After a slot's vector work and before its draws or host
+// reads, the owner records one barrier from compute and transfer writes to
+// vertex, fragment and host reads.
 class NativeVectors {
 public:
     static constexpr unsigned record_words=68;
