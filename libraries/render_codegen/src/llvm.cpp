@@ -6,10 +6,11 @@
 namespace nt::render {
 namespace {
 std::string value(unsigned n) { return "%v"+std::to_string(n); }
+// The final target-type parameter is writability, not the descriptor binding.
 std::string type(unsigned binding) {
-    return "target(\"spirv.VulkanBuffer\", [0 x i32], 12, "+std::to_string(binding)+")";
+    return "target(\"spirv.VulkanBuffer\", [0 x i32], 12, "+std::to_string(binding==1 ? 1 : 0)+")";
 }
-std::string suffix(unsigned binding) { return "tspirv.VulkanBuffer_a0i32_12_"+std::to_string(binding)+"t"; }
+std::string suffix(unsigned binding) { return "tspirv.VulkanBuffer_a0i32_12_"+std::to_string(binding==1 ? 1 : 0)+"t"; }
 constexpr std::array<const char*,3> buffer_names{"input","output","uniforms"};
 void pointer(std::ostream& out,bool gpu,unsigned binding,const std::string& name,const std::string& index) {
     if (gpu) out<<"  "<<name<<" = call ptr addrspace(11) @llvm.spv.resource.getpointer.p11."
@@ -28,8 +29,10 @@ void emit(std::ostream& out,const Kernel& kernel,NumericPolicy policy,bool gpu) 
         for (unsigned b=0;b<3;++b) {
             if (b==2 && !sizes.uniform_words) continue;
             const std::string name=buffer_names[b];
-            out<<"@"<<name<<"_name = private constant ["<<name.size()+1<<" x i8] c\""<<name<<"\\00\"\n"
-               <<"declare "<<type(b)<<" @llvm.spv.resource.handlefrombinding."<<suffix(b)<<"(i32, i32, i32, i32, ptr)\n"
+            out<<"@"<<name<<"_name = private constant ["<<name.size()+1<<" x i8] c\""<<name<<"\\00\"\n";
+            // Input and uniforms share the read-only overload. Declare it once.
+            if (b==2) continue;
+            out<<"declare "<<type(b)<<" @llvm.spv.resource.handlefrombinding."<<suffix(b)<<"(i32, i32, i32, i32, ptr)\n"
                <<"declare ptr addrspace(11) @llvm.spv.resource.getpointer.p11."<<suffix(b)<<'('<<type(b)<<", i32)\n";
         }
         out<<"define void @main() #0 {\nentry:\n";
@@ -82,7 +85,8 @@ void emit(std::ostream& out,const Kernel& kernel,NumericPolicy policy,bool gpu) 
         const auto index="%output_index"+std::to_string(n),ptr="%output_ptr"+std::to_string(n);
         out<<"  "<<index<<" = add i32 %output_base, "<<n<<"\n";
         pointer(out,gpu,1,ptr,index);
-        out<<"  store float "<<value(program.outputs[n])<<", ptr "<<space<<ptr<<", align 4\n";
+        out<<"  %output_bits"<<n<<" = bitcast float "<<value(program.outputs[n])<<" to i32\n"
+           <<"  store i32 %output_bits"<<n<<", ptr "<<space<<ptr<<", align 4\n";
     }
     out<<"  br label %done\ndone:\n  ret void\n}\n";
     if (gpu) out<<"attributes #0 = { \"hlsl.numthreads\"=\"64,1,1\" \"hlsl.shader\"=\"compute\" }\n";
