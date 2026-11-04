@@ -63,18 +63,7 @@ Helper helper(Op op) {
     throw std::invalid_argument("Unknown element operation");
 }
 }
-std::vector<std::uint32_t> element_parameters(const ElementEntry& entry,unsigned first_element,unsigned count) {
-    std::vector<std::uint32_t> words(element_parameter_words,0);
-    words[0]=count; words[parameter_first]=first_element;
-    for (unsigned n=1;n<16;++n) words[parameter_bases+n]=entry.integers[n];
-    words[parameter_bases+17]=entry.top; words[parameter_bases+18]=entry.itop;
-    for (unsigned reg=0;reg<32;++reg) for (unsigned lane=0;lane<4;++lane)
-        words[parameter_vectors+reg*4+lane]=entry.vectors[reg][lane];
-    for (unsigned lane=0;lane<4;++lane) words[parameter_accumulator+lane]=entry.accumulator[lane];
-    words[parameter_immediate]=entry.immediate; words[parameter_quotient]=entry.quotient; words[parameter_p]=entry.p;
-    return words;
-}
-void emit_element_kernel_llvm(std::ostream& out,const PipelinedLoop& loop,unsigned unit,bool vulkan) {
+void emit_element_kernel_llvm(std::ostream& out,const PipelinedLoop& loop,unsigned unit,bool vulkan,std::string_view symbol) {
     if (unit>1 || loop.stores.empty()) throw std::invalid_argument("Element kernel needs a recovered loop with stores");
     const auto call_convention=vulkan ? "spir_func " : "";
     out<<"; AnyPS2 recovered VU element kernel. Exact VU arithmetic through nt_gpu_element_* helpers.\n"
@@ -107,7 +96,7 @@ void emit_element_kernel_llvm(std::ostream& out,const PipelinedLoop& loop,unsign
         for (unsigned b=0;b<3;++b)
             out<<"  %"<<bindings[b]<<" = call "<<resource_type(b)<<" @llvm.spv.resource.handlefrombinding."<<resource_suffix(b)
                <<"(i32 0, i32 "<<b<<", i32 1, i32 0, ptr @"<<bindings[b]<<"_name)\n";
-    } else out<<"define void @nt_render_elements(ptr noalias readonly %data, ptr noalias readonly %parameters, ptr noalias writeonly %output) {\nentry:\n";
+    } else out<<"define void @"<<symbol<<"(ptr noalias readonly %data, ptr noalias readonly %parameters, ptr noalias writeonly %output) {\nentry:\n";
     Emitter e(out,vulkan);
     const auto count=e.load(2,"0"),first=e.load(2,std::to_string(parameter_first));
     const auto row_mask=std::to_string(unit ? 1023 : 255);

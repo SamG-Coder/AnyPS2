@@ -9,7 +9,7 @@ if(ANYPS2_RENDER_RESEARCH_ONLY)
     add_library(nt_binary libraries/binary/src/reader.cpp)
     target_include_directories(nt_binary PUBLIC libraries/binary/include)
     add_library(nt_vu libraries/vu/src/program.cpp libraries/vu/src/flow.cpp
-        libraries/vu/src/arithmetic.cpp libraries/vu/src/lower.cpp)
+        libraries/vu/src/arithmetic.cpp libraries/vu/src/lower.cpp libraries/vu/src/llvm.cpp)
     target_include_directories(nt_vu PUBLIC libraries/vu/include)
     target_link_libraries(nt_vu PUBLIC nt_binary)
     add_library(nt_gpu_codegen libraries/gpu_codegen/src/gpu_ir.cpp)

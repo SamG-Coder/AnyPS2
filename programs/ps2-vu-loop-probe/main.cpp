@@ -3,6 +3,7 @@
 #include <nt/loop_pipeline.hpp>
 #include <nt/element_packet.hpp>
 #include <nt/element_range.hpp>
+#include <nt/vector_region_codegen.hpp>
 #include <charconv>
 #include <iostream>
 #include <sstream>
@@ -78,6 +79,22 @@ template<class T> T number(std::string_view text,int base=10) {
 unsigned decimal(std::string_view text) { return number<unsigned>(text); }
 }
 int main(int argc,char** argv) {
+    if (argc>=8 && std::string_view(argv[1])=="--region") {
+        try {
+            const auto unit=decimal(argv[3]),destination=decimal(argv[4]),head=decimal(argv[5]);
+            const std::string_view part=argv[6];
+            if (part!="boundary" && part!="elements" && part!="binding")
+                throw std::invalid_argument("Expected boundary, elements or binding");
+            std::vector<unsigned> entries;
+            for (int i=7;i<argc;++i) entries.push_back(decimal(argv[i]));
+            const auto program=nt::vu::frame(nt::read_file(argv[2],unit ? 16384:4096),unit,destination);
+            const auto region=nt::render::analyze_vector_region(program,unit,entries,head);
+            std::ostringstream boundary,elements,binding;
+            nt::render::emit_vector_region_llvm(boundary,elements,binding,region,"nt_render_region");
+            std::cout<<(part=="boundary" ? boundary.str():part=="elements" ? elements.str():binding.str());
+            return std::cout ? 0:1;
+        } catch (const std::exception& error) { std::cerr<<"Vector region probe: "<<error.what()<<'\n'; return 1; }
+    }
     const bool binding_mode=argc==10 && std::string_view(argv[1])=="--element-binding";
     if ((argc==7 && std::string_view(argv[1])=="--element") || binding_mode) {
         try {
@@ -114,6 +131,7 @@ int main(int argc,char** argv) {
     if (argc!=6 || std::string_view(argv[5])!="--native-f32") {
         std::cerr<<"Usage: ps2-vu-loop-probe <isolated-loop.bin> <unit:0|1> <destination-index> "
                    "<manifest|cpu-llvm|spirv-llvm> --native-f32\n"
+                   "       ps2-vu-loop-probe --region <image> <unit> <destination> <head> boundary|elements|binding <entries...>\n"
                    "       ps2-vu-loop-probe --structure <program-image.bin> <unit:0|1> <destination-index>\n"
                    "       ps2-vu-loop-probe --element <program-image.bin> <unit> <destination> <loop-head> cpu|vulkan|guard\n"
                    "       ps2-vu-loop-probe --element-binding <program-image.bin> <unit> <destination> <loop-head> "

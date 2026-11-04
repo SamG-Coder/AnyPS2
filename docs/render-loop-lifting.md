@@ -281,6 +281,34 @@ rejected even when a more detailed lane analysis could prove them safe. Passing
 this guard establishes only count/range eligibility. It does not replace proofs
 of region entry, startup/drain equivalence, live-out state or graphics ordering.
 
+## Native region execution
+
+`analyze_vector_region(image, unit, entries, head)` requires the complete declared
+image and export entries. It rejects interior entries, indirect-entry uncertainty,
+external delay-slot entry and an undeclared exit. The current subset accepts
+loads/stores, vector moves/rotations, ABS, MIN/MAX, integer/float conversions and
+self-updating integer counters. Flag-producing arithmetic, scalar-unit effects,
+kicks and other unproved side effects are rejected. Lane dependency analysis must
+prove that at most eight final iterations reconstruct every changed VF lane.
+
+`ps2-vu-loop-probe --region <image> <unit> <destination> <head>
+boundary|elements|binding <entries...>` emits each reproducible LLVM module.
+`emit_vector_region_llvm` provides the same boundary, element and binding modules.
+The binding is an immutable `VectorRegion` with native linker relocations to its
+iteration, element and guard functions. `execute_vector_region` validates the
+entry and quiescent pipelines, runs the original AOT startup, evaluates recovered
+steady-state outputs, and reconstructs live-out state with the bounded original
+AOT tail. Short loops run entirely through their compiled boundary function.
+The service commits registers, memory and continuation only after every stage
+succeeds. It contains no instruction decoder or original-address dispatch table.
+
+This uses the existing VU state ABI as a migration boundary, not the final native
+render ABI. Output memory remains observable and is preserved. The optional
+synchronous executor can run the AOT element kernel on Vulkan, but must return
+completed output words; the GPU test does so by readback. Direct GPU-resident draw
+replacement still requires proving output ownership and graphics ordering. The
+region service is not automatically installed in games and makes no speed claim.
+
 ## Validation and limits
 
 The original synthetic loop fixtures compile and execute native LLVM functions;
@@ -301,9 +329,15 @@ cmake --build work/vector-draw --config Release --target render-vector-draw-test
 ctest --test-dir work/vector-draw -C Release --output-on-failure -R '^render-vector-drawing$'
 ```
 
+Region tests compare complete state and memory against original LLVM-compiled VU
+iterations for VU0/VU1, short loops, pipelined startup and multi-iteration live-out
+dependencies. Both CPU and Vulkan executors are exercised, including rejected
+entry/range conditions and transactional failure. The runtime executable links
+native services and generated objects without the analysis/decoder libraries.
+
 The renderer is exercised by this explicit interface, not installed automatically
-into converted games. Entry/exit state equivalence, external-entry exclusion and
-live-out proofs remain prerequisites for replacing a whole VU region. There is
+into converted games. The region proofs apply only to the accepted subset above;
+other arithmetic, side effects and renderer ownership remain unsupported. There is
 no GT4 performance or gameplay claim from these synthetic comparisons. The
 older `--native-f32` loop probe has a different, explicitly approximate numeric
 policy; it must not be substituted for the exact element kernels silently.

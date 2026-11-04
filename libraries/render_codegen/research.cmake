@@ -1,3 +1,6 @@
+add_library(nt_render_runtime libraries/render_runtime/src/element_abi.cpp libraries/render_runtime/src/vector_region.cpp)
+target_include_directories(nt_render_runtime PUBLIC libraries/render_runtime/include libraries/vu/include)
+target_compile_features(nt_render_runtime PUBLIC cxx_std_20)
 # Pure conversion-time research tools. These targets do not change generated
 # games or install an alternative renderer.
 add_library(nt_render_codegen
@@ -7,11 +10,12 @@ add_library(nt_render_codegen
     libraries/render_codegen/src/loop_structure.cpp
     libraries/render_codegen/src/loop_pipeline.cpp
     libraries/render_codegen/src/element_range.cpp
+    libraries/render_codegen/src/vector_region.cpp
     libraries/render_codegen/src/element_packet.cpp
     libraries/render_codegen/src/element_llvm.cpp
     libraries/render_codegen/src/vertex_loop_llvm.cpp)
 target_include_directories(nt_render_codegen PUBLIC libraries/render_codegen/include libraries/graphics/include)
-target_link_libraries(nt_render_codegen PUBLIC nt_vu nt_gpu_codegen)
+target_link_libraries(nt_render_codegen PUBLIC nt_vu nt_gpu_codegen nt_render_runtime)
 target_compile_features(nt_render_codegen PUBLIC cxx_std_20)
 add_executable(ps2-vu-render-probe programs/ps2-vu-render-probe/main.cpp)
 target_link_libraries(ps2-vu-render-probe PRIVATE nt_render_codegen)
