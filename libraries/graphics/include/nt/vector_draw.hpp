@@ -48,7 +48,7 @@ struct VectorLaunch {
 // Host-planned, data-independent part of primitive assembly. Field order is
 // the GPU plan layout in vector_assembly.comp.
 struct VectorAssembly {
-    std::uint32_t primitive=0;              // 3 list, 4 strip, 5 fan
+    std::uint32_t primitive=0;              // 3 list, 4 strip, 5 fan, 6 sprite
     std::uint32_t shaded=0,coverage=0,xyz_register=0;
     std::uint32_t present=0;                // bit n: register kind n is in the record
     std::int32_t offset_x=0,offset_y=0;     // XYOFFSET in 12.4 units
@@ -56,13 +56,15 @@ struct VectorAssembly {
     std::array<std::array<std::uint32_t,4>,5> store{};     // per kind and word
     std::array<std::array<std::uint32_t,4>,5> constant{};
     std::array<std::uint32_t,6> state{};    // color, q, s, t, uv, fog when not in the record
-    // 1: records hold REGLIST register values (low and high 32-bit words), with
-    // GS register semantics: RGBAQ carries Q, no ADC bit. 0: PACKED quadwords.
+    // 0: records hold PACKED quadwords. 1: REGLIST register values (low and high
+    // words; RGBAQ carries Q, no ADC bit). 2: resolved vertices, as the GS state
+    // machine sees them at each position write: color, Q, S, T, UV, fog, XY, Z and
+    // a word with bit 0 kick and bit 1 strip restart (first vertex of a new strip).
     std::uint32_t reglist=0;
 };
 // Register kinds of VectorAssembly::store/constant/present.
 enum class VectorRegisterKind : unsigned { color=0, texture=1, uv=2, fog=3, position=4 };
 inline constexpr unsigned vector_primitives(unsigned primitive,unsigned vertices) {
-    return primitive==3 ? vertices/3 : vertices>=2 ? vertices-2 : 0;
+    return primitive==3 ? vertices/3 : primitive==6 ? vertices/2 : vertices>=2 ? vertices-2 : 0;
 }
 }

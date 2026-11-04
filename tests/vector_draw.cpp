@@ -292,6 +292,52 @@ void packets(VulkanRenderer& gpu,VulkanRenderer& cpu) {
             (textured ? "textured" : "colored")+" primitive "+std::to_string(primitive));
         ++batches;
     }
+    // Sprite lists: pairs of vertices, plain or UV-textured, PACKED or REGLIST, with depth.
+    for (bool textured:{false,true}) for (bool reglist:{false,true}) for (bool depth:{false,true}) {
+        Fixture fixture;
+        NativeDrawing generated(true),packets(true);
+        require(generated.assemble_triangles_on_gpu(gpu),"GPU packet assembly unavailable");
+        for (auto [drawing,renderer]:{std::pair{&generated,&gpu},std::pair{&packets,&cpu}}) {
+            if (textured) upload(*drawing,*renderer);
+            setup(*drawing,*renderer,6,false,depth);
+            const auto state=textured ? registers({{0,6U|16U|64U|256U},
+                {6,0x1000ULL|(1ULL<<14)|(3ULL<<26)|(3ULL<<30)|(1ULL<<34)|(1ULL<<35)}}) : registers({{0,6U|64U}});
+            drawing->submit(*renderer,std::span(&state,1));
+        }
+        const auto source=fixture.packet();
+        // Per vertex: UV (when textured), RGBAQ, XYZ2.
+        std::vector<std::array<std::uint64_t,3>> vertices;
+        for (unsigned i=0;i<Fixture::count;++i) {
+            const auto& color=source[1+i*2];
+            const auto& xyz=source[1+i*2+1];
+            vertices.push_back({std::uint64_t((xyz[0]&1023U)/2)|(std::uint64_t((xyz[1]&1023U)/2)<<16),
+                (color[0]&255U)|((color[1]&255U)<<8)|((color[2]&255U)<<16)|(std::uint64_t(color[3]&255U)<<24)|(0x3f800000ULL<<32),
+                (xyz[0]&65535U)|((xyz[1]&65535U)<<16)|(std::uint64_t(depth ? 1000U+i*37U : 0U)<<32)});
+        }
+        const unsigned nreg=textured ? 3 : 2;
+        const std::uint32_t regs=textured ? (3U|(1U<<4)|(5U<<8)) : (1U|(5U<<4));
+        Packet packet{{0x8000U|Fixture::count,(nreg<<28)|(reglist ? 0x04000000U : 0U),regs,0}};
+        if (reglist) {
+            std::vector<std::uint64_t> values;
+            for (const auto& v:vertices) for (unsigned n=textured ? 0U : 1U;n<3;++n) values.push_back(v[n]);
+            for (std::size_t n=0;n<values.size();n+=2) {
+                const auto first=values[n],second=n+1<values.size() ? values[n+1] : 0;
+                packet.push_back({std::uint32_t(first),std::uint32_t(first>>32),std::uint32_t(second),std::uint32_t(second>>32)});
+            }
+        } else for (std::size_t i=0;i<vertices.size();++i) {
+            const auto& color=source[1+i*2];
+            const auto& v=vertices[i];
+            if (textured) packet.push_back({std::uint32_t(v[0]&16383U),std::uint32_t((v[0]>>16)&16383U),0,0});
+            packet.push_back(color);
+            packet.push_back({std::uint32_t(v[2]&65535U),std::uint32_t((v[2]>>16)&65535U),std::uint32_t(v[2]>>32),0});
+        }
+        const auto before=generated.gpu_packet_batches();
+        generated.submit(gpu,std::span(&packet,1)); packets.submit(cpu,std::span(&packet,1));
+        require(generated.gpu_packet_batches()==before+1,"Eligible sprite packet was not assembled on the GPU");
+        require(generated.pixels()==packets.pixels(),std::string("GPU-assembled sprite pixels differ:")+
+            (textured ? " textured" : " colored")+(reglist ? " REGLIST" : " PACKED")+(depth ? " depth" : ""));
+        ++batches;
+    }
     // A texture in the frame's pages keeps the CPU planner and still matches.
     Fixture fixture;
     NativeDrawing generated(true),packets(true);

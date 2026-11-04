@@ -1067,8 +1067,10 @@ void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly&
     if (!r.initialized || !r.vectors) throw std::invalid_argument("Vector drawing requires initialized storage and enabled vector batches");
     r.vectors->validate(launch);
     const auto count=vector_primitives(assembly.primitive,launch.elements);
-    if (assembly.primitive<3 || assembly.primitive>5 || !count || count>records_per_slot ||
-        !(target.flags&triangle_flag) || (target.flags&(texture_flags|line_flag)) ||
+    const bool sprites=assembly.primitive==6;
+    if (assembly.primitive<3 || assembly.primitive>6 || !count || count>records_per_slot ||
+        bool(target.flags&triangle_flag)==sprites || (target.flags&(texture_flags|line_flag)) ||
+        (sprites && (target.flags&(shaded_triangle_flag|perspective_triangle_flag|coverage_flag))) ||
         ((target.flags&perspective_triangle_flag) && !(target.flags&1)) ||
         target.right>target.pitch*64 || target.left>=target.right || target.top>=target.bottom ||
         target.left<assembly.scissor[0] || target.right>assembly.scissor[1]+1 ||
@@ -1084,10 +1086,12 @@ void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly&
     {
         // Target and texture-level rules of the per-draw validator; triangle
         // rules hold by construction or were checked on the host.
-        // A fixed positive-area stand-in triangle selects the triangle rules.
+        // A fixed positive-area stand-in triangle selects the triangle rules; a
+        // stand-in extent does the same for sprites, whose extents the host checked.
         auto shape=target; shape.flags&=~perspective_triangle_flag;
+        if (sprites) { shape.dx=1; shape.dy=1; }
         std::array<RasterVertex,3> triangle{};
-        triangle[1].x=16; triangle[2].y=16;
+        if (!sprites) { triangle[1].x=16; triangle[2].y=16; }
         VulkanRenderer::validate(shape,triangle,command.fog_color,command.fog,command.levels);
     }
     if (r.sets.size()>=8192) { r.clear_views(); r.vector_target={}; }
@@ -1124,21 +1128,22 @@ void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly&
     r.records_used+=count; r.collect_vectors();
     // The GPU determines individual bounds. The host tracks a conservative union
     // (all vertices, or the scissor) for resource ownership and later hazards.
-    // Earlier CPU draws may still be accumulating in an open batch: record them first.
-    r.flush_batch();
+    // Every record carries its own bounds, which the fragment shader enforces.
+    // As consecutive CPU draws do, extend the open instanced draw when it uses the
+    // same target, pipeline and vertex count and its records are contiguous.
     const auto set=r.bind_target(color,depth,textures,target);
-    const VkRect2D scissor{{static_cast<int>(target.left),static_cast<int>(target.top)},
-        {target.right-target.left,target.bottom-target.top}};
-    vkCmdSetScissor(r.command,0,1,&scissor);
-    r.batch_first=first; r.batch_count=count; r.batch_vertices=3; r.batch_set=set;
-    r.batch_pipeline=(target.flags&coverage_flag) ? r.coverage_pipeline : r.pipeline;
-    r.flush_batch();
-    const VkRect2D full_scissor{{0,0},{r.current_width,r.current_height}};
-    vkCmdSetScissor(r.command,0,1,&full_scissor);
+    const auto pipeline=(target.flags&coverage_flag) ? r.coverage_pipeline : r.pipeline;
+    const unsigned vertices=sprites ? 6 : 3;
+    if (r.batch_count && r.batch_set==set && r.batch_pipeline==pipeline && r.batch_vertices==vertices &&
+        r.batch_first+r.batch_count==first) r.batch_count+=count;
+    else {
+        r.flush_batch();
+        r.batch_first=first; r.batch_count=count; r.batch_vertices=vertices; r.batch_set=set; r.batch_pipeline=pipeline;
+    }
     ++r.revision;
     if (target.mask!=0xffffffffU) r.written(color,target);
     if (target.flags&depth_write_flag) r.written(depth,target);
-    r.stats.triangles+=count;
+    (sprites ? r.stats.sprites : r.stats.triangles)+=count;
 }
 void NativeRaster::draw(std::span<const SpriteCommand> commands) {
     VulkanRenderer::validate(commands); auto& r=*impl_; Measure timing(r.stats.draw_ns,r.profiling);

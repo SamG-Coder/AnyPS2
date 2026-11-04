@@ -18,13 +18,14 @@ const uint plan_offset=8u, plan_scissor=10u, plan_store=14u, plan_constant=34u, 
 const uint plan_reglist=60u, plan_template=64u;
 // DrawRecord words (native_raster.cpp, native.vert).
 const uint record_words=68u, record_left=0u, record_color=6u, record_vertices=32u, record_fog=65u;
+const uint record_x0=16u, record_depth=31u, record_lod_q=67u, record_flags=12u;
 
 uint P(uint index) { return plan.words[index]; }
 uint register_word(uint element,uint kind,uint n) {
     const uint store=P(plan_store+kind*4u+n);
     return store==0xffffffffu ? P(plan_constant+kind*4u+n) : elements.words[element*P(plan_element_words)+1u+store];
 }
-struct Vertex { int x,y; uint color,u,v,s,t,q,z,fog; bool kick; };
+struct Vertex { int x,y; uint color,u,v,s,t,q,z,fog; bool kick,restart; };
 // REGLIST register values, as NativeDrawing::command applies them: RGBAQ is
 // color and Q, ST is S and T, UV is masked, FOG is the top byte, and the
 // position carries Z (24 bits with fog for XYZF) without an ADC bit.
@@ -42,10 +43,27 @@ Vertex reglist_vertex(uint element) {
     const uint low=register_word(element,4u,0u),high=register_word(element,4u,1u);
     r.x=int(low&65535u); r.y=int(low>>16);
     if ((reg&1u)==0u) { r.z=high&0xffffffu; r.fog=high>>24; } else r.z=high;
-    r.kick=reg<12u;
+    r.kick=reg<12u; r.restart=false;
+    return r;
+}
+// Resolved vertices carry every value the GS state machine applies at a position
+// write, including values written by earlier vertices and the kick decision.
+Vertex resolved_vertex(uint element) {
+    Vertex r;
+    r.color=register_word(element,0u,0u); r.q=register_word(element,0u,1u);
+    r.s=register_word(element,1u,0u); r.t=register_word(element,1u,1u);
+    const uint uv=register_word(element,2u,0u);
+    r.u=uv&16383u; r.v=(uv>>16)&16383u;
+    r.fog=register_word(element,3u,0u);
+    const uint xy=register_word(element,4u,0u);
+    r.x=int(xy&65535u); r.y=int(xy>>16);
+    r.z=register_word(element,4u,1u);
+    const uint flags=register_word(element,4u,2u);
+    r.kick=(flags&1u)!=0u; r.restart=(flags&2u)!=0u;
     return r;
 }
 Vertex vertex(uint element) {
+    if (P(plan_reglist)==2u) return resolved_vertex(element);
     if (P(plan_reglist)!=0u) return reglist_vertex(element);
     const uint present=P(plan_present);
     Vertex r;
@@ -67,7 +85,7 @@ Vertex vertex(uint element) {
     r.x=int(w0&65535u); r.y=int(w1&65535u);
     if ((reg&1u)==0u) { r.z=(w2>>4)&0xffffffu; r.fog=(w3>>4)&255u; } else r.z=w2;
     // XYZ3/XYZF3 and the ADC bit update the vertex queue without a kick.
-    r.kick=reg<12u && (w3&0x8000u)==0u;
+    r.kick=reg<12u && (w3&0x8000u)==0u; r.restart=false;
     return r;
 }
 // Integer division truncates toward zero, as in the C++ planner.
@@ -79,11 +97,41 @@ void write_vertex(uint base,uint index,Vertex v,int ox,int oy) {
     records.words[at+5u]=v.s; records.words[at+6u]=v.t; records.words[at+7u]=v.q;
     records.words[at+8u]=v.z; records.words[at+9u]=v.fog;
 }
+// Sprite i is vertices 2i and 2i+1, as NativeDrawing latches and kicks them:
+// bounds as plan_sprite, texture mapping as plan_sprite_texture (UV only), and
+// color, depth, fog and LOD Q from the kicking vertex.
+void sprite(uint item) {
+    const Vertex first=vertex(item*2u),last=vertex(item*2u+1u);
+    const uint base=(P(plan_record_first)+item)*record_words;
+    for (uint w=0u;w<record_words;++w) records.words[base+w]=P(plan_template+w);
+    const int ox=int(P(plan_offset)),oy=int(P(plan_offset+1u));
+    const int left=max(ceil_pixel(min(first.x,last.x)-ox),int(P(plan_scissor)));
+    const int right=min(ceil_pixel(max(first.x,last.x)-ox),int(P(plan_scissor+1u))+1);
+    const int top=max(ceil_pixel(min(first.y,last.y)-oy),int(P(plan_scissor+2u)));
+    const int bottom=min(ceil_pixel(max(first.y,last.y)-oy),int(P(plan_scissor+3u))+1);
+    if (!last.kick || left>=right || top>=bottom) {
+        // No draw: an empty rectangle rasterizes no fragments.
+        for (uint w=0u;w<4u;++w) records.words[base+record_left+w]=0u;
+        return;
+    }
+    records.words[base+record_left]=uint(left); records.words[base+record_left+1u]=uint(top);
+    records.words[base+record_left+2u]=uint(right); records.words[base+record_left+3u]=uint(bottom);
+    records.words[base+record_color]=last.color; records.words[base+record_depth]=last.z;
+    records.words[base+record_fog]=last.fog;
+    if ((P(plan_template+record_flags)&1u)!=0u) {
+        records.words[base+record_x0]=uint(first.x-ox); records.words[base+record_x0+1u]=uint(first.y-oy);
+        records.words[base+record_x0+2u]=uint(last.x-first.x); records.words[base+record_x0+3u]=uint(last.y-first.y);
+        records.words[base+record_x0+4u]=first.u; records.words[base+record_x0+5u]=first.v;
+        records.words[base+record_x0+6u]=uint(int(last.u)-int(first.u)); records.words[base+record_x0+7u]=uint(int(last.v)-int(first.v));
+        records.words[base+record_lod_q]=last.q;
+    }
+}
 void main() {
     const uint item=gl_GlobalInvocationID.x;
     const uint count=P(plan_elements);
     if (item<count && elements.words[item*P(plan_element_words)]!=0u) atomicAdd(status.failures,1u);
     const uint primitive=P(plan_primitive);
+    if (primitive==6u) { if (item<count/2u) sprite(item); return; }
     const uint primitives=primitive==3u ? count/3u : (count>=2u ? count-2u : 0u);
     if (item>=primitives) return;
     const uint a=primitive==3u ? item*3u : primitive==4u ? item : 0u;
@@ -109,7 +157,8 @@ void main() {
     const int top=max(ceil_pixel(y0-oy),int(P(plan_scissor+2u)));
     const int bottom=min(ceil_pixel(y1-oy),int(P(plan_scissor+3u))+1);
     const int64_t area=int64_t(v1.x-v0.x)*int64_t(v2.y-v0.y)-int64_t(v1.y-v0.y)*int64_t(v2.x-v0.x);
-    if (!v2.kick || left>=right || top>=bottom || area==0) {
+    // A triangle spanning a strip restart does not exist in the source stream.
+    if (!v2.kick || v1.restart || v2.restart || left>=right || top>=bottom || area==0) {
         // No draw: an empty, zero-area record rasterizes no fragments.
         for (uint w=0u;w<4u;++w) records.words[base+record_left+w]=0u;
         for (uint w=0u;w<30u;++w) records.words[base+record_vertices+w]=0u;

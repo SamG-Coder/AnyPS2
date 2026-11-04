@@ -255,36 +255,36 @@ uses the existing ordered-fragment pipeline. No generated vertex packets or
 framebuffer images make a CPU round trip during submission.
 
 `NativeDrawing::assemble_triangles_on_gpu(renderer)` applies the same assembly to
-ordinary kicked packets. A PACKED tag whose registers are only RGBAQ, ST, UV, FOG,
-NOP and one final position, with GS state that `submit_vectors` would accept, is
-drawn as one batch from its own vertex records (`vector_host_records`: no element
-kernel or memory writes). The same registers still pass through the GS state
-machine with draw planning suppressed, so later CPU packets see exact register and
-vertex-queue state. Textured packets are included when their texture and mip pages
-cannot alias the color or depth target (a conservative GS page test) and, for
-perspective STQ, every primitive passes the per-draw validator's ST/Q range rules,
-checked on the host from the packet records; the palette is snapshotted in
-submission order as for CPU draws. Fog uses the per-vertex values and fog color
-as CPU draws do. Other cases keep the CPU planner. Element-kernel batches remain untextured, because their ST/Q values exist
-only on the device. REGLIST tags are included: records hold the 64-bit register
-values and the assembler applies GS register semantics (RGBAQ carries Q, no ADC).
-A host-record batch is bounded by all of its vertices, as `plan_sprite` bounds a
-primitive, so it requests the same surface extent as CPU draws; test flags are
-normalized as for CPU draws. Assembly compute runs in a per-slot prologue command
-buffer submitted before the slot's draws, so batches are instanced draws inside
-the current render pass. Host-record batches are read in place from staging memory;
-batches write disjoint records, so the prologue needs one barrier in total. `ps2-native --gpu-triangles` enables the path (off by
-default) and the graphics profile reports `gpu_triangle_batches` and fallback
-reasons.
+ordinary kicked packets: triangle lists, strips and fans, and sprite lists, plain,
+textured (UV or validated perspective STQ, including indexed textures with a
+palette snapshot) and fogged. Each GIF tag is processed in runs of vertex-register
+entries (RGBAQ, ST, UV, FOG, positions, NOP, and A+D writes to those registers);
+any other register write ends a run and applies normally, as a modern renderer
+splits batches at state changes. A run is planned from the GS state at its start.
+The GS state machine still applies every register, with draw planning suppressed,
+and records each vertex as it resolves at a position write (color, Q, S, T, UV,
+fog, position, depth, kick). These resolved records make PACKED, REGLIST and A+D
+encodings, register order, several vertices per loop and values carried from
+earlier vertices irrelevant to the GPU. A failed host check (ST/Q range, textured
+sprite extent, primitive limit) replays the run through the CPU planner from a
+state snapshot. Consecutive runs with identical draw state join one batch; joined
+strips carry a restart flag so that no triangle spans the join. A batch is
+bounded by all of its vertices, as `plan_sprite` bounds a primitive, and textures
+that may alias the color or depth target keep the CPU planner. Batches extend the
+renderer's open instanced draw like consecutive CPU draws. Assembly compute runs
+in a per-slot prologue command buffer submitted before the slot's draws, reading
+host records in place; one barrier orders all of it. `ps2-native --gpu-triangles`
+enables the path (off by default); the graphics profile reports
+`gpu_triangle_batches` and fallback reasons.
 
-A private local capture of 9,143 GT4 graphics batches, replayed through the CPU
-planner and through this path, produced identical complete GS memory at 45
-checkpoints and at the end, with 9,306 GPU-assembled tags. Most remaining tags
-have fewer than three vertices (sprites and single-vertex tags). In headless GT4
-runs on one host (60 s, last 5 s window), the path assembled about 24,000 batches
-per second with render-thread time on par with the CPU planner (0.75 s against
-0.74 s) and half the measured GPU time (75 ms against 148 ms). That scene does not
-limit the game's frame rate, so no frame-rate change is claimed.
+A private local capture of 9,143 GT4 graphics batches replayed through the CPU
+planner and through this path produced identical complete GS memory at 91
+checkpoints and at the end; 11,015 GPU batches covered all but 263 vertex runs
+(textures that might alias their target). In headless 60-second GT4 runs on one
+host, the last 5-second window issued the same number of draw calls as the CPU
+planner with lower measured draw-pass GPU time (110 ms against 148 ms), but the
+render thread took 0.97 s against 0.74 s, mostly fence waits that include the
+unmeasured prologue. No speedup is claimed; the path stays opt-in.
 
 Frame slots own staging and status memory until their queue fence completes.
 `RenderStatistics` exposes vector launches, resident hits/uploads, staged bytes
