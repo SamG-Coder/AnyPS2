@@ -32,3 +32,18 @@ execute_process(COMMAND "${run}/cross-build/Release/ps2-native${EXE_SUFFIX}" "${
 if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00002018 executed=8 v0=42")
     message(FATAL_ERROR "Packed code/data classification or cross-segment call failed: ${out} ${err}")
 endif()
+
+checked("${UNPACKER}" "${run}/input.packed.whole" "${run}/whole.elf" --layout "${run}/input.packed.layout")
+checked("${CONVERTER}" "${run}/whole.elf" "${run}/whole" --whole-code)
+file(READ "${run}/whole/code-coverage.txt" coverage)
+file(READ "${run}/whole/generated-0.ll" whole_ir)
+if(NOT coverage MATCHES "selected_instructions=20" OR NOT whole_ir MATCHES "i32 8256, label")
+    message(FATAL_ERROR "Packed whole-code selection missed an unreferenced function or included data/VU bytes")
+endif()
+checked("${CMAKE_COMMAND}" -S "${run}/whole" -B "${run}/whole-build" -G "${GENERATOR}" ${platform} "-DANYPS2_ROOT=${ROOT}")
+checked("${CMAKE_COMMAND}" --build "${run}/whole-build" --config Release --target ps2-native --parallel 2)
+execute_process(COMMAND "${run}/whole-build/Release/ps2-native${EXE_SUFFIX}" "${run}/whole/program.data" --headless
+    RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
+if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00002014 executed=[0-9]+ v0=42")
+    message(FATAL_ERROR "Classified packed whole-code callback failed: ${out} ${err}")
+endif()

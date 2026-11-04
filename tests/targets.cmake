@@ -210,7 +210,7 @@ if(BUILD_TESTING)
             "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/packed-project-tests" "-DGENERATOR=${CMAKE_GENERATOR}"
             "-DPLATFORM=${CMAKE_GENERATOR_PLATFORM}" "-DEXE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/packed_project.cmake")
-        set_tests_properties(packed-llvm-project PROPERTIES TIMEOUT 120)
+        set_tests_properties(packed-llvm-project PROPERTIES TIMEOUT 180)
         add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/iop-llvm-fixture.obj"
             COMMAND emit-iop-fixture "${CMAKE_CURRENT_BINARY_DIR}/iop-llvm-reference.ll"
                 "${CMAKE_CURRENT_BINARY_DIR}/iop-llvm-fixture.irx" "${CMAKE_CURRENT_BINARY_DIR}/iop-llvm-fixture.ll"

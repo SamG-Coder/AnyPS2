@@ -23,6 +23,19 @@ BSS and inter-section padding remain separate. Unsupported words are reported
 together; they are never silently treated as data. Sectionless or ambiguous
 images need code/data classification before this mode can be used.
 
+For supported packed images, `ps2-unpack <packed> <new.elf> --layout <layout.txt>`
+also accepts an explicit offline classification. The `--disc` form accepts the
+same option. A layout starts with `anyps2-packed-layout-v1 <input_identity>`;
+use the packed input identity reported by an ordinary unpack. Subsequent records
+are `ee <address> <size>`, `data <address> <size>` or `vu <address> <size>`; numbers
+may be decimal or `0x` hexadecimal. Together they must cover every loaded byte
+exactly once, with aligned EE ranges and the entry point in EE code. The unpacker
+preserves load addresses and emits corresponding ELF sections for `--whole-code`.
+The identity detects accidental input mismatches; it is not authentication.
+This validates a supplied classification, not its semantic correctness: a
+decodable word or executable load segment alone is not proof that bytes are EE
+instructions. Keep input-specific layouts and their investigation under `work/`.
+
 Mixed copied payload mappings may append `code=offset:size` extents after their
 entry offsets. The complete payload is retained, including its data; only the
 declared code extents are compiled. These extents describe input layout, not
@@ -63,6 +76,14 @@ Preserve integer widths, signedness, packed lanes, shift behavior and delay-slot
 state without host-language undefined behavior. Floating-point and VU operations
 must retain supported rounding, range and lane semantics; unsupported modes stop.
 Operation budgets support diagnostic resumption and are not PS2 timing models.
+
+Cause reads combine recorded native exception boundaries with live pending
+interrupts. BadVAddr and BadPAddr reads expose established address-error and
+bus-error diagnostics, respectively; reads before a corresponding fault stop
+with an unavailable-selector diagnostic. Exception snapshots preserve delay-slot
+and nested-EPC behavior without entering BIOS vectors. Debug (selector 24),
+EJTAG and writes to these diagnostic registers remain unsupported. Selector 23
+is BadPAddr, not Debug.
 
 Memory layout conversion distinguishes initialized data, BSS, copied payloads and
 compiled instruction ranges. Native aliases share the intended backing storage.

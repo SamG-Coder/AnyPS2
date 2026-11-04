@@ -798,6 +798,8 @@ int main(int argc,char** argv) {
         if (stop==nt::ee::Stop::memory_fault || stop==nt::ee::Stop::code_write || stop==nt::ee::Stop::unpublished_code || (stop==nt::ee::Stop::unsupported_system && memory.fault_address))
             std::cout<<" address="<<nt::hex32(memory.fault_address);
         if (stop==nt::ee::Stop::unmapped_code) std::cout<<" return_address="<<nt::hex32(static_cast<std::uint32_t>(state.gpr[31].lo));
+        if (stop==nt::ee::Stop::unsupported_system && memory.exception.unavailable_selector)
+            std::cout<<" unavailable_exception_selector="<<memory.exception.unavailable_selector;
         std::cout<<" native_image="<<memory.executable_image;
         if (memory.metrics.rejected) {
             const auto control=memory.metrics.rejected_control;

@@ -473,6 +473,19 @@ int main(int argc,char** argv) try {
             code.push_back(nt::r5900::decode(0x4f0024+n*8,12));
         }
     }
+    // Original diagnostic programs: live reads, alignment faults and delay slots.
+    for (unsigned n=0;n<3;++n) {
+        constexpr unsigned selectors[]{13,8,23};
+        code.push_back(nt::r5900::decode(0x4f0100+n*8,(16U<<26)|(8U<<16)|(selectors[n]<<11)));
+        code.push_back(nt::r5900::decode(0x4f0104+n*8,12));
+    }
+    for (unsigned n=0;n<2;++n) {
+        code.push_back(nt::r5900::decode(0x4f0120+n*8,((n ? 43U : 35U)<<26)|(4U<<21)|(8U<<16)));
+        code.push_back(nt::r5900::decode(0x4f0124+n*8,12));
+    }
+    code.push_back(nt::r5900::decode(0x4f0130,(4U<<26)|1U));
+    code.push_back(nt::r5900::decode(0x4f0134,(35U<<26)|(4U<<21)|(8U<<16)));
+    code.push_back(nt::r5900::decode(0x4f0138,12));
     code.push_back(nt::r5900::decode(0xfffffffcU,12));
     std::sort(code.begin(),code.end(),[](const auto& left,const auto& right) { return left.pc<right.pc; });
     auto malformed=images; malformed[1].segments[0].bytes[0]^=1;

@@ -19,6 +19,9 @@ struct Writer {
     void store(const std::string& type,const std::string& v,std::size_t offset,const std::string& base="%state") {
         const auto p=pointer(offset,base); out<<"  store "<<type<<" "<<v<<", ptr "<<p<<", align 1\n";
     }
+    void exception(const std::string& code,const std::string& address="0") {
+        out<<"  call void @nt_ee_exception_record(ptr %state, ptr %memory, i32 "<<code<<", i32 "<<address<<")\n";
+    }
     std::string reg(unsigned index) {
         return index ? load("i64",offsetof(runtime::State,gpr)+index*sizeof(runtime::Register)) : "0";
     }
@@ -252,7 +255,9 @@ struct Writer {
             const auto overflow=value("extractvalue "+aggregate+" "+checked+", 1");
             const auto suffix=std::to_string(i.pc);
             out<<"  br i1 "<<overflow<<", label %overflow"<<suffix<<", label %arithmetic"<<suffix
-               <<"\noverflow"<<suffix<<":\n  ret i32 12\narithmetic"<<suffix<<":\n";
+               <<"\noverflow"<<suffix<<":\n";
+            exception("12");
+            out<<"  ret i32 12\narithmetic"<<suffix<<":\n";
             result=value("extractvalue "+aggregate+" "+checked+", 0");
             if (word) result=extend(result);
             if (immediate) destination=i.rt;

@@ -45,7 +45,7 @@ Image unpack(ByteView input) {
     if (cursor!=decoded.size()) throw std::runtime_error("Trailing segmented-image data");
     return image;
 }
-Bytes elf_image(const Image& image) {
+Bytes elf_image(const Image& image,std::span<const Region> layout) {
     if (image.segments.empty() || image.segments.size()>64 || !image.entry || image.entry%4)
         throw std::runtime_error("Invalid segmented image");
     auto source=image.segments;
@@ -71,6 +71,32 @@ Bytes elf_image(const Image& image) {
         segments.push_back(segment);
     }
     if (!entry_present) throw std::runtime_error("Entry is not backed by executable input");
+    auto regions=std::vector<Region>(layout.begin(),layout.end());
+    if (regions.size()>4094) throw std::invalid_argument("Packed layout region limit exceeded");
+    std::sort(regions.begin(),regions.end(),[](const auto& a,const auto& b) { return a.address<b.address; });
+    if (!regions.empty()) {
+        std::size_t next=0;
+        bool code_entry=false;
+        for (const auto& segment:segments) {
+            auto cursor=std::uint64_t(segment.address);
+            const auto end=cursor+segment.data.size();
+            while (cursor<end) {
+                if (next==regions.size()) throw std::invalid_argument("Packed layout leaves loaded bytes unclassified");
+                const auto& region=regions[next++];
+                const auto finish=std::uint64_t(region.address)+region.size;
+                if (!region.size || region.address!=cursor || finish>end)
+                    throw std::invalid_argument("Packed layout has a gap, overlap or out-of-segment region");
+                if (region.content!=Content::ee && region.content!=Content::data && region.content!=Content::vu)
+                    throw std::invalid_argument("Unknown packed layout content kind");
+                if (region.content==Content::ee) {
+                    if (region.address%4 || region.size%4) throw std::invalid_argument("Unaligned packed EE code region");
+                    code_entry|=image.entry>=region.address && std::uint64_t(image.entry)+4<=finish;
+                }
+                cursor=finish;
+            }
+        }
+        if (next!=regions.size() || !code_entry) throw std::invalid_argument("Packed layout has extra regions or classifies entry as non-code");
+    }
     // PT_NOTE preserves the source format's lack of permissions. Consumers can
     // follow actual code edges into any imported segment without declaring all
     // of its data executable or protecting it against ordinary writes.
@@ -85,9 +111,40 @@ Bytes elf_image(const Image& image) {
         put32(result,at+8,segment.address); put32(result,at+12,segment.address);
         put32(result,at+16,static_cast<std::uint32_t>(segment.data.size()));
         put32(result,at+20,static_cast<std::uint32_t>(segment.data.size()));
-        const bool entry_segment=image.entry>=segment.address && std::uint64_t(image.entry)<std::uint64_t(segment.address)+segment.data.size();
-        put32(result,at+24,entry_segment ? 7U : 6U); put32(result,at+28,4);
+        const bool executable=regions.empty() ? image.entry>=segment.address && std::uint64_t(image.entry)<std::uint64_t(segment.address)+segment.data.size() :
+            std::any_of(regions.begin(),regions.end(),[&](const auto& r) { return r.content==Content::ee && r.address>=segment.address &&
+                std::uint64_t(r.address)+r.size<=std::uint64_t(segment.address)+segment.data.size(); });
+        put32(result,at+24,executable ? 7U : 6U); put32(result,at+28,4);
         result.insert(result.end(),segment.data.begin(),segment.data.end());
+    }
+    if (!regions.empty()) {
+        // The spare program header stays PT_NULL: permissions are now supplied
+        // by the complete declaration, so no inferred-permissions note applies.
+        constexpr char names[]="\0.text\0.data\0.vutext\0.shstrtab\0";
+        const auto names_offset=result.size();
+        result.insert(result.end(),std::begin(names),std::end(names));
+        while (result.size()%4) result.push_back(0);
+        const auto table=result.size();
+        put32(result,32,static_cast<std::uint32_t>(table));
+        put16(result,46,40); put16(result,48,static_cast<std::uint16_t>(regions.size()+2));
+        put16(result,50,static_cast<std::uint16_t>(regions.size()+1));
+        result.resize(table+40*(regions.size()+2),0);
+        for (std::size_t n=0;n<regions.size();++n) {
+            const auto& region=regions[n];
+            const auto at=table+40*(n+1);
+            const auto owner=std::find_if(segments.begin(),segments.end(),[&](const auto& s) {
+                return region.address>=s.address && std::uint64_t(region.address)+region.size<=std::uint64_t(s.address)+s.data.size();
+            });
+            const auto segment_offset=le32(result,52+32*static_cast<std::size_t>(owner-segments.begin())+4);
+            put32(result,at,region.content==Content::ee ? 1U : region.content==Content::data ? 7U : 13U);
+            put32(result,at+4,1); put32(result,at+8,region.content==Content::ee ? 6U : 3U);
+            put32(result,at+12,region.address); put32(result,at+16,segment_offset+region.address-owner->address);
+            put32(result,at+20,region.size); put32(result,at+32,region.content==Content::ee ? 4U : 1U);
+        }
+        const auto at=table+40*(regions.size()+1);
+        put32(result,at,21); put32(result,at+4,3);
+        put32(result,at+16,static_cast<std::uint32_t>(names_offset)); put32(result,at+20,sizeof(names)); put32(result,at+32,1);
+        return result;
     }
     while (result.size()%4) result.push_back(0);
     const auto header=52+32*segments.size(),note=result.size();

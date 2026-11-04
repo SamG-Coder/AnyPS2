@@ -22,7 +22,7 @@ add_library(nt_disc libraries/disc/src/disc_files.cpp libraries/disc/src/iso9660
 target_include_directories(nt_disc PUBLIC libraries/disc/include)
 target_link_libraries(nt_disc PUBLIC nt_binary)
 include(cmake/converter_zlib.cmake)
-add_library(nt_package libraries/package/src/packed_image.cpp)
+add_library(nt_package libraries/package/src/packed_image.cpp libraries/package/src/layout.cpp)
 target_include_directories(nt_package PUBLIC libraries/package/include PRIVATE "${anyps2_zlib_SOURCE_DIR}" "${anyps2_zlib_BINARY_DIR}")
 target_link_libraries(nt_package PUBLIC nt_binary PRIVATE zlibstatic)
 add_executable(ps2-unpack programs/ps2-unpack/main.cpp)
@@ -74,7 +74,8 @@ add_library(nt_ee_codegen libraries/ee_codegen/src/llvm.cpp libraries/ee_codegen
     libraries/ee_codegen/src/project_build.cpp)
 target_include_directories(nt_ee_codegen PUBLIC libraries/ee_codegen/include)
 target_link_libraries(nt_ee_codegen PUBLIC nt_r5900 nt_ee_native)
-add_library(nt_analysis libraries/analysis/src/discover.cpp libraries/analysis/src/metrics.cpp)
+add_library(nt_analysis libraries/analysis/src/discover.cpp libraries/analysis/src/pointer_analysis.cpp
+    libraries/analysis/src/reports.cpp libraries/analysis/src/metrics.cpp)
 target_include_directories(nt_analysis PUBLIC libraries/analysis/include)
 target_link_libraries(nt_analysis PUBLIC nt_elf nt_r5900)
 target_link_libraries(nt_ee_codegen PRIVATE nt_analysis)

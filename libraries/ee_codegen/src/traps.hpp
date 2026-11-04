@@ -19,7 +19,9 @@ inline void emit_trap(Writer& w,const r5900::Instruction& i,const char* predicat
     const auto condition=w.value(std::string("icmp ")+predicate+" i64 "+w.reg(i.rs)+", "+right);
     const auto suffix=std::to_string(i.pc);
     w.out<<"  br i1 "<<condition<<", label %trap_stop"<<suffix<<", label %trap_continue"<<suffix
-         <<"\ntrap_stop"<<suffix<<":\n  ret i32 "<<static_cast<unsigned>(ee::Stop::trap)
+         <<"\ntrap_stop"<<suffix<<":\n";
+    w.exception("13");
+    w.out<<"  ret i32 "<<static_cast<unsigned>(ee::Stop::trap)
          <<"\ntrap_continue"<<suffix<<":\n";
 }
 }

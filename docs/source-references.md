@@ -39,8 +39,9 @@ applications are never bundled with these dependencies.
 The principal source areas consulted at those pins are:
 
 - **EE and memory:** PCSX2 `R5900OpcodeTables.cpp`, `R5900OpcodeImpl.cpp`, `MMI.cpp`,
-  `FPU.cpp`, `COP0.cpp`, `Cache.cpp`, `x86/iFPUd.cpp`; Play! `Source/ee/PS2OS.cpp`;
-  PS2SDK `ee/startup`, `ee/kernel` and public ELF section/symbol specifications.
+  `FPU.cpp`, `COP0.cpp`, `R5900.cpp` (exception boundaries), `Cache.cpp`, `x86/iFPUd.cpp`; Play! `Source/ee/PS2OS.cpp`;
+  PS2SDK `ee/startup`, `ee/kernel` (including Cause, BadVAddr and BadPAddr
+  selector names in `kernel.h`) and public ELF section/symbol specifications.
 - **IOP and native services:** PS2SDK `iop/system`, `iop/kernel`, `iop/fs`, `iop/cdvd`,
   `iop/network`, `iop/usb`, `iop/input`, `iop/sound`, `ee/rpc`, plus public
   `libsd-common.h`, `fileio-common.h`, `sifcmd-common.h` and `sifrpc-common.h`;
@@ -53,6 +54,8 @@ The principal source areas consulted at those pins are:
   `GSClut.cpp`, `GSLocalMemory.h`, `GSRendererSW.cpp`, `GSRasterizer.cpp`,
   `GSDrawScanline.cpp`, `GSDeviceVK::DoMerge`, Vulkan `tfx.glsl` and `merge.glsl`;
   `Counters.cpp`, `MTGS.cpp` and `GSRenderer.cpp` for field/display ordering.
+  The image importer independently implements PSMCT16/PSMCT16S address-bit
+  permutations checked against the public GS format tables.
 - **Input and audio:** PS2SDK PADMAN `sio2Cmds.c`, `padCmds.c`, `libpad.c`, audsrv,
   `iopheap.c`, `tools/adpenc/src/adpcm.c`, LIBSD `voice.c` and `block.c`;
   PCSX2 `SIO/Sio2.cpp`, `SIO/SioTypes.h` and `SPU2/Mixer.cpp`;

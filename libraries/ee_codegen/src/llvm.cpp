@@ -225,8 +225,8 @@ void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::s
                     "%block"+std::to_string(i.pc+8) : "%unmapped")<<"\nconstant_single"<<suffix<<":\n";
             }
         }
-        if (i.op==Op::breakpoint) { w.out<<"  ret i32 11\n"; continue; }
-        if (i.op==Op::syscall) { w.out<<"  ret i32 1\n"; continue; }
+        if (i.op==Op::breakpoint) { w.exception("9"); w.out<<"  ret i32 11\n"; continue; }
+        if (i.op==Op::syscall) { w.exception("8"); w.out<<"  ret i32 1\n"; continue; }
         std::string taken="true";
         if (i.branch()) {
             taken=branch_condition(w,i);
@@ -329,7 +329,7 @@ EeRejection reject_unsupported(std::span<const r5900::Instruction> instructions)
         }
         std::ostringstream where;
         where<<"0x"<<std::hex<<i.pc;
-        if ((i.op==r5900::Op::mfc0 || i.op==r5900::Op::mtc0) && i.rd!=0 && i.rd!=2 && i.rd!=3 && i.rd!=5 && i.rd!=10 && i.rd!=25 && i.rd!=12 && i.rd!=14 && i.rd!=30 && i.rd!=6 && !((i.rd==28 || i.rd==9 || i.rd==1) && i.op==r5900::Op::mfc0))
+        if ((i.op==r5900::Op::mfc0 || i.op==r5900::Op::mtc0) && i.rd!=0 && i.rd!=2 && i.rd!=3 && i.rd!=5 && i.rd!=10 && i.rd!=25 && i.rd!=12 && i.rd!=14 && i.rd!=30 && i.rd!=6 && !((i.rd==28 || i.rd==9 || i.rd==1 || i.rd==8 || i.rd==13 || i.rd==23) && i.op==r5900::Op::mfc0))
             add_constraint(rejection,"EE system transfer selector is not supported at "+where.str());
         if (i.op==r5900::Op::cfc2 && i.rd==20)
             add_constraint(rejection,"EE vector random-register transfer is not implemented at "+where.str());
@@ -343,6 +343,8 @@ EeRejection reject_unsupported(std::span<const r5900::Instruction> instructions)
     return rejection;
 }
 void emit_declarations(Writer& w) {
+    w.out<<"declare i64 @nt_ee_exception_read(ptr, i32)\n"
+         <<"declare void @nt_ee_exception_record(ptr, ptr, i32, i32)\n";
     w.out<<"declare i32 @memcmp(ptr, ptr, i64)\n";
     w.out<<"declare i32 @nt_ee_validate_native_layout(ptr, i32, i32, i32, i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_address_space(ptr, i32, i32, i32)\n";

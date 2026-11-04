@@ -169,6 +169,7 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
     }
     if (access.bytes==16 && access.bank!=RegisterBank::vector) physical=w.binary("and","i32",physical,"4294967280");
     if (access.merge!=Merge::none) physical=w.binary("and","i32",physical,std::to_string(~std::uint32_t(access.bytes-1)));
+    const auto bus_address=physical;
     physical=w.value("select i1 "+scratchpad+", i32 "+w.binary("and","i32",physical,std::to_string(ee::scratchpad_size-1))+", i32 "+physical);
     const auto vector_limit=w.value("select i1 "+vu1+", i64 16384, i64 4096");
     const auto vector_mask=w.value("select i1 "+vu1+", i32 16383, i32 4095");
@@ -194,6 +195,9 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
     const auto invalid=w.binary("or","i1",w.binary("or","i1",outside,device),w.binary("or","i1",null,unaligned));
     w.out<<"  br i1 "<<invalid<<", label %fault"<<suffix<<", label %valid"<<suffix<<"\nfault"<<suffix<<":\n";
     w.store("i32",address,offsetof(ee::Memory,fault_address),"%memory");
+    const auto exception=w.value("select i1 "+unaligned+", i32 "+std::to_string(access.write ? 5 : 4)+", i32 7");
+    const auto fault=w.value("select i1 "+unaligned+", i32 "+address+", i32 "+bus_address);
+    w.exception(exception,fault);
     w.out<<"  ret i32 4\nvalid"<<suffix<<":\n";
     // Native RAM is coherent. These data-cache hit operations become an ordering
     // boundary; executable writes are still rejected at every memory store.

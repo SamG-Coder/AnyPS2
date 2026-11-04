@@ -2,6 +2,16 @@
 
 // Format address calculations shared by CPU import and LLVM GPU conversion.
 namespace nt::graphics {
+inline unsigned rgba_halfword(unsigned base,unsigned pitch,unsigned x,unsigned y,bool alternate=false) {
+    x&=2047; y&=2047;
+    const auto page=(y/64)*pitch+x/64;
+    // Both layouts use 16x8 blocks; PSMCT16S permutes the upper block bits.
+    const auto block=((y>>3)&1)|(((x>>4)&1)<<1)|
+        (alternate ? (((y>>5)&1)<<2)|(((y>>4)&1)<<3)|(((x>>5)&1)<<4) :
+                     (((y>>4)&1)<<2)|(((x>>5)&1)<<3)|(((y>>5)&1)<<4));
+    const auto half=((x>>3)&1)|((x&1)<<1)|((y&1)<<2)|((x&6)<<2)|((y&6)<<4);
+    return (base*128+page*4096+block*128+half)&0x1fffff;
+}
 inline unsigned rgba_word(unsigned base,unsigned pitch,unsigned x,unsigned y) {
     x&=2047; y&=2047;
     const auto page=(y/32)*pitch+x/64;

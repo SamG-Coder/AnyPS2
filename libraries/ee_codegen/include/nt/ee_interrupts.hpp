@@ -1,5 +1,6 @@
 #pragma once
 #include <nt/ee_handlers.hpp>
+#include <nt/ee_exception.hpp>
 #include <nt/ee_completions.hpp>
 #include <optional>
 #include <bit>
@@ -123,6 +124,7 @@ public:
         if (protection(stack-0x2a0,0x2a0)) { memory.fault_address=stack-0x2a0; return Stop::code_write; }
         if (observe_delivery) observe_delivery(observation_context,dma,line,state);
         interrupted_=state; stack_=stack-0x2a0;
+        record_exception(state,memory,ExceptionCode::interrupt);
         state.cop0_epc=state.pc; state.cop0_status=(state.cop0_status|2U)&~1U;
         callbacks_=std::move(callbacks); callback_=0;
         start(state);
@@ -136,7 +138,8 @@ public:
             start(state); return Stop::budget;
         }
         const auto executed=state.executed;
-        state=*interrupted_; state.executed=executed; interrupted_.reset(); callbacks_.clear();
+        const auto epc=state.cop0_epc;
+        state=*interrupted_; state.executed=executed; state.cop0_epc=epc; interrupted_.reset(); callbacks_.clear();
         return Stop::budget;
     }
 private:

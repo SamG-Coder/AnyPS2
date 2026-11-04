@@ -1,5 +1,6 @@
 #include <nt/ee_sif_command_peer.hpp>
 #include <nt/ee_services.hpp>
+#include <nt/ee_exception.hpp>
 #include <nt/ee_timers.hpp>
 #include <nt/ee_platform.hpp>
 #include <nt/ee_performance.hpp>
@@ -31,6 +32,45 @@ void run_scratchpad_tests();
 int main() {
     try {
         run_scratchpad_tests();
+        {
+            std::vector<std::uint8_t> bytes(1024);
+            nt::ee::Memory memory{bytes.data(),bytes.size()};
+            nt::runtime::State state;
+            const auto execute=[&](unsigned pc,unsigned budget=1) {
+                state.pc=pc; return nt_ee_generated_run(&state,&memory,budget);
+            };
+            check(execute(0x4f0108)==nt::ee::Stop::unsupported_system && memory.exception.unavailable_selector==8);
+            check(execute(0x4f0110)==nt::ee::Stop::unsupported_system && memory.exception.unavailable_selector==23);
+            memory.pending_interrupts=0xc00;
+            check(execute(0x4f0100)==nt::ee::Stop::budget && state.gpr[8].lo==0xc00);
+            memory.pending_interrupts=0;
+            state.set(4,0x80000003); state.gpr[8]={99,77};
+            check(execute(0x4f0120)==nt::ee::Stop::memory_fault && state.gpr[8].lo==99);
+            check(memory.exception.cause==16 && state.cop0_epc==0x4f0120);
+            check(execute(0x4f0108)==nt::ee::Stop::budget && state.gpr[8].lo==0xffffffff80000003ULL && state.gpr[8].hi==77);
+            check(execute(0x4f0128)==nt::ee::Stop::memory_fault && memory.exception.cause==20);
+            check(execute(0x4f0130,2)==nt::ee::Stop::memory_fault && memory.exception.cause==0x80000010U && state.cop0_epc==0x4f0130);
+            state.delay_slot=false;
+            memory.pending_interrupts=0x400;
+            check(execute(0x4f0100)==nt::ee::Stop::budget && state.gpr[8].lo==0xffffffff80000410ULL);
+            state.set(4,0x80001000);
+            check(execute(0x4f0120)==nt::ee::Stop::memory_fault && memory.exception.cause==28);
+            check(execute(0x4f0110)==nt::ee::Stop::budget && state.gpr[8].lo==0x1000);
+            check(execute(0x4f0108)==nt::ee::Stop::budget && state.gpr[8].lo==0xffffffff80000003ULL);
+            state.cop0_status=2; state.cop0_epc=0x1234; state.set(4,5);
+            check(execute(0x4f0120)==nt::ee::Stop::memory_fault && state.cop0_epc==0x1234);
+            nt::ee::NativeInterrupts interrupts;
+            check(interrupts.install(1,0x4f0100,nt_ee_generated_contains)==nt::ee::Stop::budget);
+            state={}; state.pc=0x4f0138; state.cop0_status=0x10401; state.cop0_epc=0x1234; state.set(29,1024);
+            interrupts.raise(1); interrupts.publish(memory);
+            check(interrupts.enter(state,memory,nt_ee_generated_code_overlap)==nt::ee::Stop::budget);
+            check(memory.exception.cause==0 && state.cop0_epc==0x4f0138);
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.gpr[8].lo==0);
+            state.pc=nt::ee::NativeInterrupts::return_gate; state.set(2,0);
+            check(interrupts.finish(state)==nt::ee::Stop::budget && state.cop0_epc==0x4f0138);
+
+        }
+
         {
             struct Job { bool ready=false; unsigned attempts=0,polls=0,writes=0; } job;
             nt::ee::Memory memory; memory.io.context=&job;
@@ -1382,7 +1422,7 @@ int main() {
             const auto retired=state.executed;
             check(nt::ee::run(nt_ee_generated_run,state,memory,3,services)==nt::ee::Stop::budget &&
                   state.executed==retired+3 && state.pc==0x11f0 && state.gpr[16].lo==0xabcdef &&
-                  state.cop0_status==0x400 && state.cop0_epc==0x1234);
+                  state.cop0_status==0x400 && state.cop0_epc==0x390008 && memory.exception.cause==32);
             std::uint32_t result=0; std::memcpy(&result,ram.data()+0x6000,4); check(result==0x12345678);
             check(call(0x21,2)==nt::ee::Stop::budget && state.gpr[2].lo==2);
             check(call(0x20,0x5000)==nt::ee::Stop::budget && state.gpr[2].lo==2);
@@ -1419,7 +1459,7 @@ int main() {
             check(stop==nt::ee::Stop::syscall && state.pc==before.pc && state.executed==3);
             check(state.gpr[2].lo==41 && state.gpr[2].hi==42 && state.gpr[4].lo==23 &&
                   state.gpr[29].lo==0x8000 && state.gpr[31].lo==0x12345678 && state.fpr[2]==123 && state.hi==987 &&
-                  state.cop0_status==before.cop0_status && state.cop0_epc==before.cop0_epc);
+                  state.cop0_status==before.cop0_status && state.cop0_epc==before.pc && memory.exception.cause==32);
             check(interrupts.read(0x1000f000).value==0 && !(memory.pending_interrupts&0x400));
             interrupts.raise(12); interrupts.write(0x1000f010,1U<<12);
             check(nt::ee::run(nt_ee_generated_run,state,memory,4,services)==nt::ee::Stop::syscall && state.executed==3);
@@ -2100,7 +2140,9 @@ int main() {
             state.gpr[8].lo=0x12345678ffffffffULL; state.gpr[9].hi=77;
             check(run(&state,8)==nt::ee::Stop::syscall && state.executed==2 && state.gpr[9].hi==77 &&
                   state.gpr[9].lo==(selector==0 ? 0xfffffffff0c79c1fULL : 0xffffffffffffffffULL));
-            check((selector==0 ? state.cop0_status : selector==1 ? state.cop0_epc : state.cop0_error_epc)==0xffffffff);
+            // The read sees the explicit write; the following syscall establishes a new EPC.
+            check((selector==0 ? state.cop0_status : selector==1 ? state.cop0_epc : state.cop0_error_epc)==
+                  (selector==1 ? state.pc : 0xffffffff));
         }
         {
             nt::ee::Memory memory; memory.pending_interrupts=0x400;

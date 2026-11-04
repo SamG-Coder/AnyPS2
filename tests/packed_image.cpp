@@ -33,12 +33,50 @@ int main(int argc,char** argv) {
             word(cross,0x3000); word(cross,12);
             for (const auto value:{0x03e00008U,0x24420001U,0xdeadbeefU}) word(cross,value);
             nt::write_file(std::string(argv[1])+".cross",pack(cross));
+            Bytes whole{0,0,0,0}; word(whole,3); word(whole,0x2000);
+            word(whole,0x2000); word(whole,0x50);
+            constexpr unsigned code[]{0x24083000,0x8d090000,0x0120f809,0,0x2403007b,12,0,0,
+                0x2402002a,0x03e00008,0,0,0,0,0,0,0x2402004d,0x03e00008,0,0};
+            for (const auto instruction:code) word(whole,instruction);
+            word(whole,0x3000); word(whole,8); word(whole,0x2020); word(whole,0x4c000000);
+            word(whole,0x3010); word(whole,8); word(whole,0x4c000000); word(whole,0x4c000000);
+            const auto whole_packed=pack(whole);
+            nt::write_file(std::string(argv[1])+".whole",whole_packed);
+            nt::write_text_file(std::string(argv[1])+".layout","anyps2-packed-layout-v1 "+std::to_string(nt::fingerprint(whole_packed))+
+                "\nee 0x2000 0x50\ndata 0x3000 8\nvu 0x3010 8\n");
         }
         const auto image=nt::package::unpack(packed);
         const auto bytes=nt::package::elf_image(image); const auto elf=nt::elf::parse(bytes);
         check(elf.entry==0x2000 && elf.segments.size()==2 && elf.segments[0].file_size==8);
         check(elf.inferred_permissions);
         check(nt::le32(bytes,elf.segments[0].offset)==0x2402002a && elf.segments[0].flags==7 && elf.segments[1].flags==6);
+        using nt::package::Content;
+        const std::vector<nt::package::Region> layout{{0x2000,8,Content::ee},{0x3000,4,Content::vu}};
+        const auto classified=nt::elf::parse(nt::package::elf_image(image,layout));
+        check(!classified.inferred_permissions && classified.code_sections.size()==1 && classified.vector_sections.size()==1);
+        check(classified.code_sections.front().address==0x2000 && classified.code_sections.front().size==8);
+        check(!nt::elf::executable_address(classified,0x3000));
+        const auto declaration="anyps2-packed-layout-v1 "+std::to_string(nt::fingerprint(packed))+"\nee 0x2000 8\nvu 0x3000 4\n";
+        const Bytes declaration_bytes(declaration.begin(),declaration.end());
+        const auto parsed_layout=nt::package::parse_layout(declaration_bytes,nt::fingerprint(packed));
+        check(parsed_layout.size()==2 && parsed_layout[1].content==Content::vu);
+        rejected([&] { nt::package::parse_layout(declaration_bytes,nt::fingerprint(packed)^1); });
+        for (const auto& bad_text:{std::string("anyps2-packed-layout-v1 1"),std::string("anyps2-packed-layout-v1 1 ee 0x2000"),
+            std::string("anyps2-packed-layout-v1 1 invalid 0x2000 8"),std::string("anyps2-packed-layout-v1 1 ee 0xfffffffc 8")}) {
+            const Bytes text(bad_text.begin(),bad_text.end());
+            rejected([&] { nt::package::parse_layout(text,1); });
+        }
+        for (unsigned kind=0;kind<7;++kind) {
+            auto invalid=layout;
+            if (kind==0) invalid.pop_back();
+            if (kind==1) invalid[0].size=4;
+            if (kind==2) invalid[1].address=0x2004;
+            if (kind==3) invalid[0].content=Content::data;
+            if (kind==4) invalid[0].size=7;
+            if (kind==5) invalid[1].size=8;
+            if (kind==6) invalid.push_back({0x4000,4,Content::data});
+            rejected([&] { nt::package::elf_image(image,invalid); });
+        }
         auto bad_note=bytes;
         bad_note.back()=1;
         rejected([&] { nt::elf::parse(bad_note); });

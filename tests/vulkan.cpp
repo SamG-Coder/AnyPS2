@@ -1,4 +1,5 @@
 #include "indexed_textures.hpp"
+#include "rgba16_uploads.hpp"
 #include <nt/vulkan_renderer.hpp>
 #include <nt/native_drawing.hpp>
 #include <iostream>
@@ -10,7 +11,7 @@
 namespace {
 void bulk_transfers() {
     using namespace nt::graphics;
-    for (const unsigned bits:{4U,8U,24U,32U}) for (const unsigned width:{1U,3U,17U,33U}) {
+    for (const unsigned bits:{4U,8U,16U,24U,32U}) for (const unsigned width:{1U,3U,17U,33U}) {
         const unsigned pixels=width*3,mask=bits==32 ? 0xffffffffU : (1U<<bits)-1;
         Packet payload((pixels*bits+127)/128,Quadword{0xa5a5a5a5,0xa5a5a5a5,0xa5a5a5a5,0xa5a5a5a5});
         for (unsigned p=0;p<pixels;++p) {
@@ -22,7 +23,7 @@ void bulk_transfers() {
             }
         }
         const auto initial=ImageUpload::begin((16383ULL<<32)|(3ULL<<48)|
-            (std::uint64_t(bits==4 ? 20 : bits==8 ? 19 : bits==24 ? 1 : 0)<<56),
+            (std::uint64_t(bits==4 ? 20 : bits==8 ? 19 : bits==16 ? 2 : bits==24 ? 1 : 0)<<56),
             (2045ULL<<32)|(2046ULL<<48),width|(3ULL<<32),0);
         // Exercise whole trailing quadwords as well as padding within the final
         // word. Public upload builders can overprovision 24-bit IMAGE packets.
@@ -36,8 +37,9 @@ void bulk_transfers() {
             throw std::runtime_error("Bulk image transfer lost partial-byte state");
         for (unsigned p=0;p<pixels;++p) {
             const auto x=2045+p%width,y=2046+p/width;
-            const unsigned index=bits==8 ? indexed_byte(16383,3,x,y) : bits==4 ? indexed_nibble(16383,3,x,y) : rgba_word(16383,3,x,y);
-            const unsigned shift=bits==8 ? (index%4)*8 : bits==4 ? (index%8)*4 : 0,address=bits==8 ? index/4 : bits==4 ? index/8 : index;
+            const unsigned index=bits==8 ? indexed_byte(16383,3,x,y) : bits==4 ? indexed_nibble(16383,3,x,y) : bits==16 ? rgba_halfword(16383,3,x,y) : rgba_word(16383,3,x,y);
+            const unsigned shift=bits==8 ? (index%4)*8 : bits==4 ? (index%8)*4 : bits==16 ? (index%2)*16 : 0;
+            const unsigned address=bits==8 ? index/4 : bits==4 ? index/8 : bits==16 ? index/2 : index;
             const auto value=((0x1234567U*(p+1))&mask)<<shift;
             if (a[p].address!=address || a[p].value!=value || a[p].mask!=(mask<<shift) ||
                 b[p].address!=a[p].address || b[p].value!=a[p].value || b[p].mask!=a[p].mask)
@@ -568,6 +570,7 @@ int main(int argc,char**) {
             if (resident_gpu.validation_errors()) throw std::runtime_error("Resident Vulkan validation failed");
         }
         indexed8_textures(gpu,argc>1);
+        rgba16_uploads(gpu,argc>1);
         if (gpu.validation_errors()) throw std::runtime_error("Vulkan validation reported errors");
         std::cout << "Vulkan sprite readback verified on " << gpu.device_name() << "; validation errors=0\n";
     } catch (const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}

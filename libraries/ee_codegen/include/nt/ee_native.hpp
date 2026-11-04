@@ -57,6 +57,13 @@ struct NativeVectorMemory {
     std::uint64_t bytes=0;
     const bool* active=nullptr;
 };
+// Diagnostics belong to the native execution instance, not a saved thread.
+// Address fields are unavailable until an actual address/bus fault establishes them.
+struct ExceptionRecord {
+    std::uint32_t cause=0, virtual_address=0, physical_address=0;
+    bool virtual_valid=false, physical_valid=false;
+    std::uint32_t unavailable_selector=0;
+};
 struct Memory {
     std::uint8_t* data=nullptr;
     std::uint64_t size=0;
@@ -64,6 +71,7 @@ struct Memory {
     // Cooperative native producers publish interrupt classes in bits 8..15
     // between calls. The runner never acknowledges or drops pending events.
     std::uint32_t pending_interrupts=0;
+    ExceptionRecord exception;
     VectorControl vector_control;
     VectorStorage* vectors=nullptr;
     PerformanceState performance;

@@ -1,9 +1,18 @@
 #include <nt/ee_native.hpp>
+#include <nt/ee_exception.hpp>
 #include <nt/ee_interrupts.hpp>
 #include <nt/ee_completions.hpp>
 #include <nt/ee_performance.hpp>
 #include <nt/ee_graphics.hpp>
 #include <thread>
+extern "C" std::uint64_t nt_ee_exception_read(nt::ee::Memory* memory,std::uint32_t selector) {
+    const auto result=nt::ee::read_exception(*memory,selector);
+    return (std::uint64_t(result.status)<<32)|result.value;
+}
+extern "C" void nt_ee_exception_record(nt::runtime::State* state,nt::ee::Memory* memory,
+                                       std::uint32_t code,std::uint32_t address) {
+    nt::ee::record_exception(*state,*memory,static_cast<nt::ee::ExceptionCode>(code),address);
+}
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX

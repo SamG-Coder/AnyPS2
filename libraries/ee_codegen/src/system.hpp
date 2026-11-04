@@ -55,6 +55,16 @@ inline void emit_performance_transfer(Writer& w,const r5900::Instruction& i) {
     if (!write && i.rt) w.store("i64",w.extend(w.narrow(packed)),offsetof(runtime::State,gpr)+i.rt*sizeof(runtime::Register));
 }
 inline void emit_system_transfer(Writer& w,const r5900::Instruction& i,std::size_t native_declarations=0) {
+    if (i.op==Op::mfc0 && (i.rd==8 || i.rd==13 || i.rd==23)) {
+        const auto result=w.value("call i64 @nt_ee_exception_read(ptr %memory, i32 "+std::to_string(i.rd)+")");
+        const auto status=w.narrow(w.binary("lshr","i64",result,"32"));
+        const auto ready=w.value("icmp eq i32 "+status+", 0");
+        const auto suffix=std::to_string(i.pc);
+        w.out<<"  br i1 "<<ready<<", label %exception_ready"<<suffix<<", label %exception_stop"<<suffix
+             <<"\nexception_stop"<<suffix<<":\n  ret i32 "<<status<<"\nexception_ready"<<suffix<<":\n";
+        if (i.rt) w.store("i64",w.extend(w.narrow(result)),offsetof(runtime::State,gpr)+i.rt*sizeof(runtime::Register));
+        return;
+    }
     // Converted native allocations have fixed lifetime and no eviction policy.
     // A reservation within the compiled plan needs no console register state.
     // Readback is deliberately unsupported, rather than fabricating a value.
