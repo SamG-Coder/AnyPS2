@@ -165,7 +165,7 @@ void test_async_submission() {
     nt::ee::NativeVuSubmissions routing; routing.add(owner);
     routing.connect(platform.packet_setup); owner.connect_data(memory);
     const auto start=[&] {
-        const std::array<std::uint32_t,8> words{0x6c010000,11,22,33,44,0x94000000,0,0};
+        const std::array<std::uint32_t,8> words{0x01000101,0x6c010000,11,22,33,44,0x94000000,0};
         std::memcpy(ram.data()+256,words.data(),sizeof(words));
         auto& submit=platform.packet_submission;
         if (submit.write(memory,0x10009010,256)!=nt::ee::Stop::budget ||
@@ -383,7 +383,7 @@ int run_core_tests() {
                 owner.state.integers[0]!=3 || consumer.accepted!=1 || owner.state.graphics_completes)
                 throw std::runtime_error("Continuation retained completed graphics boundary");
             const auto complete=owner.state;
-            if (submit({0x6c010000,1,2,3,4,0x17000000})!=nt::ee::Stop::unsupported_vector ||
+            if (submit({0x01000101,0x6c010000,1,2,3,4,0x17000000})!=nt::ee::Stop::unsupported_vector ||
                 owner.last_result.status!=nt::vu::RunStatus::unmapped_block || owner.state!=complete)
                 throw std::runtime_error("Missing compiled continuation did not roll back upload");
             struct Completion { bool ready=false; unsigned calls=0; } completion;
@@ -716,7 +716,7 @@ int run_core_tests() {
             };
             combined_packets.graphics={&accept_drawing,drawing_consumer};
             combined_owner.graphics={&accept_drawing,drawing_consumer};
-            upload_packet.clear(); packet_word(0x0700002a);
+            upload_packet.clear(); packet_word(0x0700002a); packet_word(0x01000101);
             packet_word(0x6c010000); for (unsigned lane=0;lane<4;++lane) packet_word(lane+17);
             packet_word(0x4a000000U|(static_cast<unsigned>(identity.size()/8)<<16));
             const auto code_offset=upload_packet.size();
@@ -784,7 +784,7 @@ int run_core_tests() {
         packet_word(0x7b000000);
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_system || launch_owner.state!=completed_launch)
             throw std::runtime_error("Trailing command executed a partial VU launch");
-        upload_packet.clear(); packet_word(0x14000000); packet_word(0x01000000);
+        upload_packet.clear(); packet_word(0x14000000); packet_word(0x0100ffff);
         packet_word(0x6c010000); for (unsigned lane=0;lane<4;++lane) packet_word(90+lane);
         packet_word(0x14000006); // Outside both complete six-pair artifacts.
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_vector ||
@@ -847,7 +847,7 @@ int run_core_tests() {
             throw std::runtime_error("TOPS-relative upload destination failed");
         upload_packet.clear(); packet_word(0x01000100);
         upload_packet.insert(upload_packet.end(),data_packet.begin(),data_packet.end());
-        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_vector || packets.read(0x10003c40).value)
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_vector || packets.read(0x10003c40).value!=0xffff)
             throw std::runtime_error("Unsupported cycle mode committed configuration");
         const auto unpack_and_launch=[&](std::uint32_t code,std::initializer_list<std::uint32_t> payload,
                                         std::array<std::uint32_t,4> expected,unsigned mode=0) {
@@ -916,6 +916,27 @@ int run_core_tests() {
             packet_word(0x31000000); for (unsigned v:{100U,200U,300U,400U}) packet_word(v);
             packet_word(0x20000000); packet_word(selectors);
         };
+        // Zero CL supplies no input bytes. Masked row fill still writes data,
+        // wraps local storage and can immediately feed compiled VU execution.
+        for (const unsigned wl:{1U,4U,0U}) {
+            mask_setup(1,0x55555555); packet_word(0x01000000|(wl<<8));
+            packet_word(0x05000002); packet_word(0x7c0903fe); packet_word(0x14000000);
+            if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
+                data_owner.state.vectors[0]!=std::array<std::uint32_t,4>{10,20,30,40} ||
+                data_owner.state.data[1022]!=data_owner.state.vectors[0] ||
+                data_owner.state.data[6]!=data_owner.state.vectors[0] || packets.read(0x10003d00).value!=10)
+                throw std::runtime_error("Zero-input row fill consumed commands as payload or lost compiled output");
+        }
+        mask_setup(1,0x55555555); packet_word(0x01000000); packet_word(0x7c000000);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
+            data_owner.state.data[255]!=std::array<std::uint32_t,4>{10,20,30,40})
+            throw std::runtime_error("Zero-encoded WL/NUM did not fill 256 outputs without input");
+        mask_setup(1,0x55555500); packet_word(0x01000001); packet_word(0x05000000);
+        packet_word(0x70040000); packet_word(7); packet_word(0x14000000);
+        if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
+            data_owner.state.vectors[0]!=std::array<std::uint32_t,4>{7,7,7,7} ||
+            data_owner.state.data[3]!=std::array<std::uint32_t,4>{10,20,30,40})
+            throw std::runtime_error("Zero-encoded WL lost its one-input fill cycle");
         for (unsigned i=0;i<6;++i) data_owner.state.data[i]={90,91,92,93};
         mask_setup(2,0x00001be4); // First group D,R,C,P; second P,C,R,D.
         packet_word(0x72040000); packet_word(0x04030201); packet_word(0x14000000);
@@ -924,13 +945,13 @@ int run_core_tests() {
             data_owner.state.data[1]!=std::array<std::uint32_t,4>{90,200,30,2} ||
             data_owner.state.data[2]!=std::array<std::uint32_t,4>{3,20,100,93})
             throw std::runtime_error("Masked scalar selection or cycle restart failed");
-        mask_setup(0,0xaaaaaaaa); // Column selection saturates at column three.
+        mask_setup(255,0xaaaaaaaa); // Column selection saturates at column three.
         packet_word(0x76060000); packet_word(0); packet_word(0); packet_word(0);
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
             data_owner.state.data[0]!=std::array<std::uint32_t,4>{100,100,100,100} ||
             data_owner.state.data[4]!=std::array<std::uint32_t,4>{400,400,400,400})
             throw std::runtime_error("Masked V2 column saturation failed");
-        mask_setup(0,0xe4); packet_word(0x7f010000); packet_word(0xfffffc1f); packet_word(0x14000000);
+        mask_setup(255,0xe4); packet_word(0x7f010000); packet_word(0xfffffc1f); packet_word(0x14000000);
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
             data_owner.state.vectors[0]!=std::array<std::uint32_t,4>{248,20,100,100})
             throw std::runtime_error("Masked packed-colour conversion failed");
@@ -964,7 +985,7 @@ int run_core_tests() {
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::unsupported_system ||
             data_owner.state!=before_row_failure || packets.read(0x10003c40).value!=prior_cycle)
             throw std::runtime_error("Invalid trailing command committed row updates");
-        mask_setup(0,0);
+        mask_setup(255,0);
         packet_word(0x05000002); packet_word(0x60020000); packet_word(1); packet_word(2);
         packet_word(0x05000003); packet_word(0x64010002); packet_word(9); packet_word(8);
         packet_word(0x05000002); packet_word(0x60010003); packet_word(1); packet_word(0x14000000);
@@ -975,7 +996,7 @@ int run_core_tests() {
             data_owner.state.data[3]!=std::array<std::uint32_t,4>{10,9,10,9} ||
             packets.read(0x10003d00).value!=10 || packets.read(0x10003d10).value!=9)
             throw std::runtime_error("Mutable row modes did not compose across uploads in one native batch");
-        mask_setup(0,0xe4e4); packet_word(0x05000002);
+        mask_setup(255,0xe4e4); packet_word(0x05000002);
         packet_word(0x72020000); packet_word(0x0201); packet_word(0x14000000);
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
             data_owner.state.data[1]!=std::array<std::uint32_t,4>{13,20,200,43} ||
@@ -988,10 +1009,10 @@ int run_core_tests() {
             data_owner.state!=before_failed_launch || packets.read(0x10003d00).value!=13)
             throw std::runtime_error("Failed native launch published mutable row or data state");
         // Restore normal configuration for subsequent unrelated launch fixtures.
-        upload_packet.clear(); packet_word(0x01000000); packet_word(0x05000000);
+        upload_packet.clear(); packet_word(0x0100ffff); packet_word(0x05000000);
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget) throw std::runtime_error("Normal upload configuration failed");
         data_owner.state.data[1]={9,8,7,6};
-        mask_setup(0,0xffaa5500); packet_word(0x01000401); packet_word(0x05000002);
+        mask_setup(255,0xffaa5500); packet_word(0x01000401); packet_word(0x05000002);
         packet_word(0x720603fe); packet_word(0x0201); packet_word(0x0700002a); packet_word(0x14000000);
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
             data_owner.state.data[1022]!=std::array<std::uint32_t,4>{11,21,31,41} ||
@@ -1010,16 +1031,16 @@ int run_core_tests() {
         upload_packet.clear(); packet_word(0x70060000); packet_word(7);
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::invalid_state || data_owner.state!=before_fill_failure)
             throw std::runtime_error("Truncated fill source changed vector state");
-        mask_setup(0,0x55555500); packet_word(0x01000401); packet_word(0x05000000);
+        mask_setup(255,0x55555500); packet_word(0x01000401); packet_word(0x05000000);
         packet_word(0x72004000);
         for (unsigned i=0;i<16;++i) packet_word((i*4)|((i*4+1)<<8)|((i*4+2)<<16)|((i*4+3)<<24));
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget ||
             data_owner.state.data[252]!=std::array<std::uint32_t,4>{63,63,63,63} ||
             data_owner.state.data[255]!=std::array<std::uint32_t,4>{10,20,30,40})
             throw std::runtime_error("Encoded-zero filling did not consume the bounded source count");
-        upload_packet.clear(); packet_word(0x01000000); packet_word(0x05000000);
+        upload_packet.clear(); packet_word(0x0100ffff); packet_word(0x05000000);
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget) throw std::runtime_error("Upload configuration restoration failed");
-        mask_setup(0,0x40404040);
+        mask_setup(255,0x40404040);
         if (packets.consume(1,upload_packet,false)!=nt::ee::Stop::budget) throw std::runtime_error("V3 mask setup failed");
         unpack_and_launch(0x78010000,{1,2,3},{1,2,3,40});
         unpack_and_launch(0x79010000,{0xffff8000,0xdead7fff},{0xffff8000,0xffffffff,0x7fff,40});

@@ -52,7 +52,7 @@ inline std::optional<NativeVectorPlan> plan_vector_data(std::size_t storage_size
     if (!storage_size || upload.destination>=storage_size || upload.mode>3 || !stride ||
         upload.bytes.size()%stride || upload.bytes.size()/stride>256 || upload.source_alignment>4) return {};
     if (upload.mask && (!upload.mask->cycle || upload.mask->cycle>256)) return {};
-    if (!upload.writes_per_cycle || upload.writes_per_cycle>256 || !upload.destination_cycle || upload.destination_cycle>256) return {};
+    if (!upload.writes_per_cycle || upload.writes_per_cycle>256 || upload.destination_cycle>256) return {};
     const bool filling=upload.writes_per_cycle>upload.destination_cycle;
     const auto outputs=upload.output_count ? upload.output_count : unsigned(upload.bytes.size()/stride);
     if (!outputs || outputs>256) return {};

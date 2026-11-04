@@ -16,6 +16,10 @@ class NativePlatform {
 public:
     explicit NativePlatform(NativeTimers::Clock clock=nullptr) : graphics(clock),timers(clock) {
         timers.connect_events(); packet_submission.consumer={this,consume_packet,packet_pending,consume_packet_origins};
+        timers.display_context=&graphics;
+        timers.display_lines=[](void* raw,std::uint64_t time) {
+            return static_cast<NativeGraphics*>(raw)->horizontal_ticks(time);
+        };
         packet_submission.consumer.working=[](void* raw) { return static_cast<NativePlatform*>(raw)->packet_setup.working(); };
         // Application startup owns a usable native submission queue. Explicit
         // guest suspension still gates it; completion requires real consumption.

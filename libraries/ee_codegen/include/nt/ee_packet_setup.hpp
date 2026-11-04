@@ -282,10 +282,11 @@ private:
                 const auto format=static_cast<NativeVectorFormat>(command&3U);
                 const auto components=((command>>2)&3U)+1;
                 const auto raw_span=next.cycle&255U,raw_writes=(next.cycle>>8)&255U;
-                if (!submit_compiled || (!uploads.empty() && !submit_uploaded) || (!drawing.empty() && !submit_combined) ||
-                    (!raw_span && raw_writes) || (!raw_writes && raw_span)) return Stop::unsupported_vector;
+                if (!submit_compiled || (!uploads.empty() && !submit_uploaded) || (!drawing.empty() && !submit_combined)) return Stop::unsupported_vector;
                 const auto encoded_count=(code>>16)&255U,count=encoded_count ? encoded_count : 256U;
-                const auto span=raw_span ? raw_span : 256U,writes=raw_writes ? raw_writes : 256U;
+                // Only WL encodes 256 as zero. CL=0 consumes no source vectors;
+                // row/column/protected mask lanes can still produce output.
+                const auto span=raw_span,writes=raw_writes ? raw_writes : 256U;
                 const auto inputs=writes>span ? (count/writes)*span+std::min(count%writes,span) : count;
                 const auto size=inputs*vector_data_stride(format,components);
                 const auto padded=(size+3U)&~3U;
@@ -322,7 +323,7 @@ private:
                 if (!channel || gif_paused_ || !graphics.submit || ((!uploads.empty() || !data.empty()) && !submit_combined)) return Stop::unsupported_system;
                 const auto count=code&65535U,size=(count ? count : 65536U)*16U;
                 if (size>bytes.size()-offset) return Stop::invalid_state;
-                if (size>65536U*16U-drawing_bytes) return Stop::unsupported_system;
+                if (size>graphics::maximum_batch_bytes-drawing_bytes) return Stop::unsupported_system;
                 // DIRECT extents are transport fragments, not GIF packet
                 // boundaries. Retain the same bounded framing used by path 3.
                 try { next_direct.append(bytes.subspan(offset,size),drawing); }

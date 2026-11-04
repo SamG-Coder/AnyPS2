@@ -65,7 +65,7 @@ int main() {
             check((platform.interrupts.read(0x1000f000).value&256)==0);
             check(write(0x10002000,19)==nt::ee::Stop::budget); acknowledge();
             const auto before=state.executed;
-            check(write(0x10002000,0x10000000)==nt::ee::Stop::unsupported_system &&
+            check(write(0x10002000,0x80000000)==nt::ee::Stop::unsupported_system &&
                   state.executed==before && read(0x10002020)==19 && platform.video.resets()==1);
             check(write(0x10002010,0x40030000)==nt::ee::Stop::unsupported_system &&
                   read(0x10002010)==0x00220000 && read(0x10002020)==19 && (platform.interrupts.read(0x1000f000).value&256)==0);
@@ -1376,6 +1376,43 @@ int main() {
             memory.io={};
             check(access(false,0x10001810)==nt::ee::Stop::memory_fault);
         }
+        for (const unsigned standard:{2U,3U}) {
+            timer_now=0; nt::ee::NativePlatform platform(timer_clock);
+            nt::ee::Memory memory; platform.attach(memory); nt::runtime::State state;
+            platform.graphics.synchronize=[](void*) { return nt::ee::Stop::budget; };
+            check(platform.graphics.configure(1,standard,0)==nt::ee::Stop::budget);
+            const auto write=[&](unsigned address,unsigned value) {
+                state.pc=0x360000; state.set(4,address); state.set(8,value);
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+            };
+            const auto read=[&](unsigned address) {
+                state.pc=0x360008; state.set(4,address);
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+                return static_cast<unsigned>(state.gpr[8].lo);
+            };
+            const auto deadline=[&](std::uint64_t lines) {
+                return standard==2 ? (lines*4004000+62)/63 : lines*64000;
+            };
+            write(0x10001800,65530); write(0x10001820,3); write(0x10001810,0x383);
+            timer_now=deadline(6)-1;
+            check(read(0x10001800)==65535 && !(read(0x10001810)&0xc00));
+            timer_now=deadline(6); memory.io.poll(memory.io.context);
+            check(read(0x10001800)==0 && (read(0x10001810)&0xc00)==0x800);
+            check((platform.interrupts.read(0x1000f000).value&(1U<<12))!=0);
+            platform.interrupts.write(0x1000f000,1U<<12);
+            timer_now=deadline(9); memory.io.poll(memory.io.context);
+            check(read(0x10001800)==3 && (read(0x10001810)&0xc00)==0xc00);
+            check((platform.interrupts.read(0x1000f000).value&(1U<<12))!=0);
+            write(0x10001810,0xc03); // Acknowledge both events and stop counting.
+            timer_now=deadline(100); check(read(0x10001800)==3);
+            write(0x10001810,0x83);
+            timer_now=deadline(102); check(read(0x10001800)==5);
+            check(platform.graphics.write(0x12001000,0x200)==nt::ee::Stop::budget);
+            timer_now+=1000000000; check(read(0x10001800)==5);
+            const auto epoch=timer_now;
+            check(platform.graphics.configure(1,3,0)==nt::ee::Stop::budget);
+            timer_now=epoch+64000; check(read(0x10001800)==6);
+        }
         {
             std::vector<std::uint8_t> ram(0x10000);
             nt::ee::Memory memory{ram.data(),ram.size()};
@@ -1407,11 +1444,15 @@ int main() {
             std::memcpy(ram.data()+0x370000,words.data(),4);
             check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::unpublished_code && state.gpr[2].lo==0);
             std::memcpy(ram.data()+0x370000,words.data(),12);
+            ram[0x37000c]=1; // A copied routine's state is not executable identity.
             check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget && state.gpr[2].lo==7);
             ram[0x370008]=1;
             check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::unpublished_code && state.executed==1 && state.pc==0x370004);
             ram[0x370008]=0;
             check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall && state.executed==3 && state.pc==0x360004);
+            state.pc=0x37000c;
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unpublished_code &&
+                  state.executed==3 && memory.fault_address==0x37000c);
             // Initialization copies use ordinary compiled stores, not a hidden loader.
             state.pc=0x360000; state.gpr[4].lo=0x370000; state.gpr[8].lo=words[0];
             check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
@@ -3352,6 +3393,30 @@ int main() {
             sink.ready=true;
             check(submit(pixels)==nt::ee::Stop::budget && sink.packets.size()==1 && sink.packets[0].size()==3);
             check(sink.packets[0][0][0]==0x8002 && sink.packets[0][1][0]==1 && sink.packets[0][2][3]==8);
+            // Multiple complete packets exceed a single DIRECT extent without
+            // becoming one oversized packet. Exercise the compiled chain entry.
+            constexpr unsigned payload_words=20000,transfer_words=payload_words+2;
+            std::vector<std::uint32_t> chain;
+            for (unsigned packet=0;packet<4;++packet) {
+                chain.insert(chain.end(),{(packet==3 ? 0x70000000U : 0x10000000U)|transfer_words,0,0,0});
+                chain.insert(chain.end(),{0,0,0,0x51000000U|(payload_words+1)});
+                chain.insert(chain.end(),{0x8000U|payload_words,0x08000000,0,0});
+                chain.insert(chain.end(),payload_words*4,packet+1);
+            }
+            ram.resize(0x1000+chain.size()*4); memory.data=ram.data(); memory.size=ram.size();
+            std::memcpy(ram.data()+0x1000,chain.data(),chain.size()*4);
+            sink.packets.clear();
+            check(write(0x10009030,0x1000)==nt::ee::Stop::budget);
+            check(write(0x10009000,0x105)==nt::ee::Stop::budget && sink.packets.size()==4);
+            for (unsigned packet=0;packet<4;++packet)
+                check(sink.packets[packet].size()==payload_words+1 && sink.packets[packet].back()[3]==packet+1);
+            const auto last_tag=3*(transfer_words+1)*4;
+            ++chain[last_tag]; chain.insert(chain.end(),{0x7b000000,0,0,0});
+            ram.resize(0x1000+chain.size()*4); memory.data=ram.data(); memory.size=ram.size();
+            std::memcpy(ram.data()+0x1000,chain.data(),chain.size()*4);
+            sink.packets.clear();
+            check(write(0x10009030,0x1000)==nt::ee::Stop::budget);
+            check(write(0x10009000,0x105)==nt::ee::Stop::unsupported_system && sink.packets.empty());
         }
         run_ee_batch_tests();
         run_ee_file_rpc_tests();

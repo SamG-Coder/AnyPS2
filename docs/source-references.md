@@ -62,7 +62,7 @@ The principal source areas consulted at those pins are:
 - **Video initialization:** PCSX2 `IPU/IPU.cpp`, `IPU/IPU.h`, `IPU/IPUdma.cpp`
   and `IPU/IPU_MultiISA.cpp` for reset,
   bitstream-position clearing, format/threshold settings, table upload, header
-  reads and completion events;
+  reads, intra-slice sequencing and completion events;
   independent native command implementation, no PCSX2 decoder source imported.
   Native MPEG header VLC tables in `ee_video_vlc.hpp` are adapted from Play!
   `Source/ee/IPU_*Table.cpp` at the pin above, under its retained BSD notice.

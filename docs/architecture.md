@@ -43,8 +43,12 @@ occupy those segments. Unresolved callbacks remain coverage gaps. See
 
 - Memory services preserve guest widths, aliases, initialization and writable data.
   Writes into compiled instruction ranges must stop rather than silently modify code.
+  Copied-code regions retain publication checks on each compiled straight-line
+  path, including delay slots; unrelated writable state is excluded from that check.
 - Scheduling and synchronization preserve observable wait, callback and completion
   order. Host elapsed time is distinct from console instruction counts.
+  Display-line timers use the same nominal NTSC/PAL host-time schedule as scanout,
+  independent of presentation throughput; this is not cycle-accurate video timing.
 - EE/IOP communication connects compiled modules with native service providers.
   Registration, initialization, pending requests and completion are distinct states;
   transport completion is not proof that a caller has consumed a reply.
@@ -62,7 +66,10 @@ occupy those segments. Unresolved callbacks remain coverage gaps. See
   The IDCT is checked against the mathematical transform
   within one sample; bit-identical hardware rounding is not established. CSC converts
   planar 8-bit YCbCr batches to RGBA32 with defined coefficient rounding and alpha
-  thresholds. Whole-picture IDEC, RGB16 conversion and PACK remain unsupported.
+  thresholds. IDEC reuses these stages for intra slices, retaining DC predictors
+  between macroblocks and supporting field layout and signed RGB output. It waits
+  for output consumption before decoding the next block and completes at the
+  following start code. RGB16 conversion and PACK remain unsupported.
 - Input uses SDL gamepad capabilities and haptics. Audio uses native XAudio2 owners
   for supported sample services. Open-ended ADPCM streams decode into bounded
   owned PCM queues; the host playback cursor drives refill and end notifications.

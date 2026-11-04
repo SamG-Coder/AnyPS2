@@ -112,19 +112,37 @@ void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::s
         for (std::size_t payload_index=0;payload_index<payloads.size();++payload_index) {
             const auto& payload=payloads[payload_index];
             if (physical_address(i.pc)<payload.address || std::uint64_t(physical_address(i.pc))>=std::uint64_t(payload.address)+payload.bytes.size()) continue;
+            // Copied regions can mix code and writable state. Validate the
+            // compiled straight-line suffix, including a branch's delay slot,
+            // rather than treating unrelated data as immutable instructions.
+            // Every possible native entry retains this integrity guard.
+            std::size_t end=n+1;
+            const bool delay=n && instructions[n-1].pc+4==i.pc && instructions[n-1].branch();
+            while (!delay && end<instructions.size()) {
+                const auto& previous=instructions[end-1];
+                const auto& next=instructions[end];
+                if (next.pc!=previous.pc+4 || physical_address(next.pc)<payload.address ||
+                    std::uint64_t(physical_address(next.pc))+4>std::uint64_t(payload.address)+payload.bytes.size()) break;
+                if (previous.op==Op::syscall || previous.op==Op::breakpoint || previous.op==Op::eret) break;
+                ++end;
+                if (previous.branch()) break;
+            }
+            const auto address=physical_address(i.pc),offset=address-payload.address;
+            const auto bytes=(end-n)*4;
             const auto data=w.load("ptr",offsetof(ee::Memory,data),"%memory");
             const auto size=w.load("i64",offsetof(ee::Memory,size),"%memory");
             const auto absent=w.value("icmp eq ptr "+data+", null");
-            const auto short_memory=w.value("icmp ult i64 "+size+", "+std::to_string(std::uint64_t(payload.address)+payload.bytes.size()));
+            const auto short_memory=w.value("icmp ult i64 "+size+", "+std::to_string(std::uint64_t(address)+bytes));
             const auto invalid_payload=w.binary("or","i1",absent,short_memory);
             w.out<<"  br i1 "<<invalid_payload<<", label %payload_stop"<<suffix<<", label %payload_compare"<<suffix
                  <<"\npayload_compare"<<suffix<<":\n";
-            const auto pointer=w.pointer(payload.address,data);
-            const auto equal=w.value("call i32 @memcmp(ptr "+pointer+", ptr @nt_payload_"+std::to_string(payload_index)+", i64 "+std::to_string(payload.bytes.size())+")");
+            const auto pointer=w.pointer(address,data);
+            const auto expected=w.pointer(offset,"@nt_payload_"+std::to_string(payload_index));
+            const auto equal=w.value("call i32 @memcmp(ptr "+pointer+", ptr "+expected+", i64 "+std::to_string(bytes)+")");
             const auto matches=w.value("icmp eq i32 "+equal+", 0");
             w.out<<"  br i1 "<<matches<<", label %payload_ready"<<suffix<<", label %payload_stop"<<suffix
                  <<"\npayload_stop"<<suffix<<":\n";
-            w.store("i32",std::to_string(payload.address),offsetof(ee::Memory,fault_address),"%memory");
+            w.store("i32",std::to_string(address),offsetof(ee::Memory,fault_address),"%memory");
             w.out<<"  ret i32 14\npayload_ready"<<suffix<<":\n";
         }
         if (display_wait_pattern(instructions.subspan(n)) && !(n && instructions[n-1].branch())) {

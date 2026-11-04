@@ -256,6 +256,8 @@ int main(int argc,char** argv) try {
         code.push_back(nt::r5900::decode(payload.address+static_cast<std::uint32_t>(payload.bytes.size()),word));
         for (unsigned byte=0;byte<4;++byte) payload.bytes.push_back(static_cast<std::uint8_t>(word>>(byte*8)));
     }
+    payload.bytes.insert(payload.bytes.end(),4,0); // Writable state after the returning code.
+    code.push_back(nt::r5900::decode(payload.address+12,0)); // Conservative whole-code selection.
     code.push_back(nt::r5900::decode(0x380000,0x080e0000U));
     code.push_back(nt::r5900::decode(0x380004,0U));
     code.push_back(nt::r5900::decode(0x390000,0xaf840000U));

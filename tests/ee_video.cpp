@@ -79,6 +79,47 @@ void check_idct() {
 }
 void run_video_block_tests() {
     check_idct();
+    for (const bool field:{false,true}) for (const bool signed_rgb:{false,true}) {
+        Fixture f; f.matrix(0);
+        const auto control=f.read(0x10002010);
+        check(f.write(0x10002000,0x18010000)==Stop::unsupported_system);
+        check(f.read(0x10002010)==control); // Unimplemented RGB16 cannot start work.
+        const auto command=0x1101003fU|(signed_rgb ? 1U<<25 : 0);
+        check(f.write(0x10002000,command)==Stop::budget);
+        check((f.read(0x10002010)&0x80000000)!=0 && f.platform.video.decoded_blocks()==0);
+        const auto layout=field ? "1" : "0";
+        // Two original intra macroblocks: increasing luma DC, then retained DC.
+        // The second header changes the quantizer without resetting prediction.
+        const auto bytes=stream(std::string(63,'0')+"1"+layout+"00110" "00110" "00110" "00110" "0010" "0010"+
+            "1" "01"+layout+"10101"+"10010" "10010" "10010" "10010" "0010" "0010");
+        f.upload(std::span(bytes).first(16));
+        check(f.platform.video.decoded_blocks()==1 && f.platform.video.output().size()==1024);
+        check(!(f.read(0x1000f000)&256));
+        f.upload(std::span(bytes).subspan(16));
+        check(f.platform.video.decoded_blocks()==1); // Output ownership blocks the next block.
+        f.destination(512,128);
+        check(f.platform.video.decoded_blocks()==2 && f.platform.video.converted_blocks()==2);
+        check(f.read(0x1000b020)==0 && !(f.read(0x1000b000)&256));
+        check((f.read(0x10002010)&0x8000c000)==0x8000 && f.read(0x10002030)==0x1b3);
+        check((f.platform.completions.status()&8)!=0 && (f.read(0x1000f000)&256)!=0);
+        for (unsigned block=0;block<2;++block) for (unsigned pixel=0;pixel<256;++pixel) {
+            const auto row=pixel/16,column=pixel%16;
+            const auto shade=block ? 135U : 132U+(field ? row%2 : row/8)*2+column/8;
+            const auto offset=512+block*1024+pixel*4;
+            for (unsigned channel=0;channel<3;++channel) check(f.ram[offset+channel]==(shade^(signed_rgb ? 128U : 0U)));
+            check(f.ram[offset+3]==128);
+        }
+    }
+    {
+        Fixture f; f.matrix(0);
+        check(f.write(0x10002000,0x10010000)==Stop::budget);
+        f.upload(stream("00")); // Invalid intra type must report decode failure, not pixels.
+        check((f.read(0x10002010)&0x80004000)==0x4000);
+        check(f.platform.video.output().empty() && f.platform.video.decoded_blocks()==0);
+        check(f.write(0x10002000,0x10010000)==Stop::budget);
+        check(f.write(0x10002010,0x40000000)==Stop::budget);
+        check((f.read(0x10002010)&0x80004000)==0 && f.platform.video.output().empty());
+    }
     for (const bool field:{false,true}) {
         Fixture f; f.matrix(0);
         check(f.write(0x1000f590,0x11201)==Stop::budget);

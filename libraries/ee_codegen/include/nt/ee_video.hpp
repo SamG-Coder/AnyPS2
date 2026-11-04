@@ -14,7 +14,8 @@ namespace nt::ee {
 // Native media stream initialization, header parsing and block decoding.
 // Addresses are the converted caller's command ABI, not a device clock model.
 class NativeVideo {
-    enum class Command { none, peek, matrix, palette, vlc, picture, color };
+    enum class Command { none, peek, matrix, palette, vlc, picture, color, intra };
+    enum class IntraStage { header, block, increment, finish };
 public:
     static bool maps(std::uint32_t address) {
         return address>=0x10002000 && address<0x10002040;
@@ -51,6 +52,14 @@ public:
             decode_error_=false; start_code_=false;
             clear_input(value&127U);
             break;
+        case 1: // Decode an intra slice directly to native RGBA macroblocks.
+            if (output_ready_ || (value&(1U<<27))) return Stop::unsupported_system;
+            intra_command_=value; intra_scale_=(value>>16)&31U;
+            intra_reset_dc_=true; intra_stage_=IntraStage::header;
+            format_=(format_&~0x07000000U)|0x01000000U;
+            bit_offset_+=value&63U; pending_=Command::intra;
+            start_code_=false; decode_error_=false; coded_pattern_=0; peek_=0;
+            process(); return Stop::budget;
         case 2: { // Decode one macroblock into native planar 16-bit samples.
             if (output_ready_ || ((format_&0x00a00000U)==0x00a00000U)) return Stop::unsupported_system;
             media::MpegBlockDecoder::Format format;
@@ -182,9 +191,88 @@ private:
         for (unsigned i=0;i<4;++i) value=(value<<8)|byte_at(bit+i*8);
         return value;
     }
+    bool decode_block() {
+        for (;;) {
+            if (!prepare(32)) return false;
+            const auto previous=bit_offset_;
+            const auto status=decoder_.process(std::span<const std::uint8_t>(input_).first(cached_qwords_*16),bit_offset_);
+            const bool progressed=previous!=bit_offset_;
+            compact_input(); feed();
+            if (status==media::MpegBlockDecoder::Result::malformed) {
+                decode_error_=true; pending_=Command::none; completed_=true; return false;
+            }
+            if (status==media::MpegBlockDecoder::Result::complete) {
+                coded_pattern_=decoder_.pattern(); ++decoded_blocks_; return true;
+            }
+            if (!progressed) return false;
+        }
+    }
+    void finish_picture() {
+        if (!prepare(32)) return;
+        if ((word_at(bit_offset_)>>24)==0) {
+            bit_offset_=(bit_offset_+7)&~7U;
+            for (;;) {
+                if (!prepare(32)) return;
+                const auto prefix=word_at(bit_offset_)>>8;
+                if (prefix) { start_code_=prefix==1; decode_error_=prefix!=1; break; }
+                bit_offset_+=8;
+            }
+        }
+        peek_=word_at(bit_offset_); pending_=Command::none; completed_=true;
+    }
+    void process_intra() {
+        for (;;) {
+            if (output_ready_) return;
+            if (intra_stage_==IntraStage::finish) { finish_picture(); return; }
+            if (intra_stage_==IntraStage::increment) {
+                if (!prepare(32)) return;
+                const auto prefix=word_at(bit_offset_);
+                if (!(prefix>>24)) { intra_stage_=IntraStage::finish; continue; }
+                const video_vlc::Entry* match=nullptr;
+                for (const auto& entry:video_vlc::address_increment)
+                    if ((prefix>>(32-entry.bits))==entry.code) { match=&entry; break; }
+                if (!match) { decode_error_=true; pending_=Command::none; completed_=true; return; }
+                bit_offset_+=match->bits;
+                const auto increment=match->result&65535U;
+                if (increment==34) continue; // MPEG stuffing does not advance a macroblock.
+                if (increment>1) intra_reset_dc_=true;
+                if (increment==35) continue; // Escape contributes a predictor-resetting gap.
+                intra_stage_=IntraStage::header;
+            }
+            if (intra_stage_==IntraStage::header) {
+                // Commit type, optional DCT layout and scale together; a split
+                // input submission must not consume the header twice.
+                if (!prepare(32)) return;
+                const auto prefix=word_at(bit_offset_);
+                const bool quantized=!(prefix&0x80000000U);
+                if (quantized && !(prefix&0x40000000U)) {
+                    decode_error_=true; pending_=Command::none; completed_=true; return;
+                }
+                unsigned bits=quantized ? 2U : 1U;
+                media::MpegBlockDecoder::Format format;
+                format.intra=true; format.reset_dc=intra_reset_dc_;
+                if (intra_command_&(1U<<24)) format.field=((prefix>>(31-bits++))&1U)!=0;
+                if (quantized) { intra_scale_=(prefix>>(27-bits))&31U; bits+=5; }
+                format.precision=(format_>>16)&3; format.mpeg1=(format_&(1U<<23))!=0;
+                format.alternate_scan=(format_&(1U<<20))!=0; format.intra_vlc=(format_&(1U<<21))!=0;
+                format.scale=(format_&(1U<<22)) ? media::mpeg_tables::nonlinear_scale[intra_scale_] : intra_scale_*2;
+                decoder_.begin(format,matrices_[0]); bit_offset_+=bits;
+                intra_reset_dc_=false; intra_stage_=IntraStage::block;
+            }
+            if (!decode_block()) return;
+            std::transform(decoder_.samples().begin(),decoder_.samples().end(),color_input_.begin(),
+                [](std::int16_t value) { return static_cast<std::uint8_t>(std::clamp<int>(value,0,255)); });
+            output_storage_=media::mpeg_rgba(color_input_,thresholds_);
+            if (intra_command_&(1U<<25)) for (unsigned pixel=0;pixel<256;++pixel)
+                for (unsigned channel=0;channel<3;++channel) output_storage_[pixel*4+channel]^=128;
+            output_size_=1024; output_offset_=0; output_ready_=true; ++converted_blocks_;
+            intra_stage_=IntraStage::increment; return;
+        }
+    }
     void process() {
         compact_input(); feed();
         if (pending_==Command::none) return;
+        if (pending_==Command::intra) { process_intra(); return; }
         if (pending_==Command::color) {
             if (output_ready_) return;
             if (!color_remaining_) { pending_=Command::none; completed_=true; return; }
@@ -199,38 +287,13 @@ private:
         }
         if (pending_==Command::picture) {
             if (!picture_decoded_) {
-                for (;;) {
-                    if (!prepare(32)) return;
-                    const auto previous=bit_offset_;
-                    const auto status=decoder_.process(std::span<const std::uint8_t>(input_).first(cached_qwords_*16),bit_offset_);
-                    const bool progressed=previous!=bit_offset_;
-                    compact_input(); feed();
-                    if (status==media::MpegBlockDecoder::Result::malformed) {
-                        decode_error_=true; pending_=Command::none; completed_=true; return;
-                    }
-                    if (status==media::MpegBlockDecoder::Result::complete) {
-                        coded_pattern_=decoder_.pattern(); picture_decoded_=true;
-                        output_ready_=true; output_offset_=0; output_size_=sizeof(decoder_.samples());
-                        std::memcpy(output_storage_.data(),decoder_.samples().data(),output_size_);
-                        ++decoded_blocks_; break;
-                    }
-                    // A full native input window with consumed bytes can refill;
-                    // otherwise wait for another owned submission/programmed write.
-                    if (!progressed) return;
-                }
+                if (!decode_block()) return;
+                picture_decoded_=true;
+                output_ready_=true; output_offset_=0; output_size_=sizeof(decoder_.samples());
+                std::memcpy(output_storage_.data(),decoder_.samples().data(),output_size_);
             }
             if (output_ready_) return;
-            if (!prepare(32)) return;
-            if ((word_at(bit_offset_)>>24)==0) {
-                bit_offset_=(bit_offset_+7)&~7U;
-                for (;;) {
-                    if (!prepare(32)) return;
-                    const auto prefix=word_at(bit_offset_)>>8;
-                    if (prefix) { start_code_=prefix==1; decode_error_=prefix!=1; break; }
-                    bit_offset_+=8;
-                }
-            }
-            peek_=word_at(bit_offset_); pending_=Command::none; completed_=true;
+            finish_picture();
             return;
         }
         if (pending_==Command::matrix || pending_==Command::palette) {
@@ -266,6 +329,10 @@ private:
     unsigned color_remaining_=0,color_offset_=0;
     std::uint64_t converted_blocks_=0;
     media::MpegBlockDecoder decoder_;
+    IntraStage intra_stage_=IntraStage::header;
+    std::uint32_t intra_command_=0;
+    unsigned intra_scale_=0;
+    bool intra_reset_dc_=true;
     bool picture_decoded_=false,output_ready_=false,start_code_=false;
     std::size_t output_offset_=0;
     std::uint32_t coded_pattern_=0;

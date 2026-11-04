@@ -43,7 +43,9 @@ public:
         if (!synchronize) return Stop::unsupported_system;
         const auto ready=synchronize(context);
         if (ready!=Stop::budget) return ready;
-        mode_=DisplayMode{interlace,standard,frame}; epoch_=clock_(); ticks_=0; delivered_ticks_=0;
+        const auto time=clock_();
+        completed_lines_=horizontal_ticks(time);
+        mode_=DisplayMode{interlace,standard,frame}; epoch_=time; ticks_=0; delivered_ticks_=0;
         flags_=0; field_=0; events_=0; edge_lost_=false; scanout_odd_=false;
         vsync_profile_start_.reset();
         return Stop::budget;
@@ -51,6 +53,11 @@ public:
     const std::optional<DisplayMode>& mode() const { return mode_; }
     bool half_height_output() const { return mode_ && mode_->interlace && mode_->frame; }
     bool scanout_odd() const { return scanout_odd_; }
+    // Monotonic nominal line deadlines share the display clock, independent of
+    // presentation rate. A mode reset freezes the count until reconfigured.
+    std::uint64_t horizontal_ticks(std::uint64_t time) const {
+        return completed_lines_+(mode_ ? half_line_ticks(time)/2 : 0);
+    }
     static bool maps(std::uint32_t address) {
         return address==0x12000000 || address==0x12000020 ||
             (address>=0x12000070 && address<=0x120000a0 && address%16==0) ||
@@ -100,6 +107,7 @@ public:
                         const auto reset=reset_drawing(context);
                         if (reset!=Stop::budget) return reset;
                     }
+                    completed_lines_=horizontal_ticks(clock_());
                     mask_=0x7f00; flags_=0; field_=0; events_=0; scanout_odd_=false; mode_.reset(); output_={}; ++resets_;
                     return Stop::budget;
                 }
@@ -164,16 +172,18 @@ private:
         if (!(flags_&flag) && !(mask_&(flag<<8))) events_|=1;
         flags_|=flag;
     }
-    void advance() {
-        if (!mode_) return;
-        const auto time=clock_();
-        if (time<epoch_) return;
+    std::uint64_t half_line_ticks(std::uint64_t time) const {
+        if (time<epoch_) return ticks_;
         const auto elapsed=time-epoch_;
         // Reduced rational half-line deadlines: NTSC 60000/1001 fields/sec,
         // PAL 50 fields/sec. Quotient/remainder avoids overflow and catch-up loops.
         const std::uint64_t numerator=mode_->standard==2 ? 63 : 1;
         const std::uint64_t denominator=mode_->standard==2 ? 2002000 : 32000;
-        const auto ticks=(elapsed/denominator)*numerator+(elapsed%denominator)*numerator/denominator;
+        return std::max(ticks_,(elapsed/denominator)*numerator+(elapsed%denominator)*numerator/denominator);
+    }
+    void advance() {
+        if (!mode_) return;
+        const auto ticks=half_line_ticks(clock_());
         if (ticks<ticks_) return;
         const auto period=mode_->standard==2 ? 525U : 625U;
         const auto blank=mode_->standard==2 ? 480U : 576U;
@@ -233,6 +243,6 @@ private:
     bool edge_lost_=false,scanout_odd_=false;
     std::optional<DisplayMode> mode_;
     std::uint32_t mask_=0x7f00,flags_=0,field_=0,events_=0;
-    std::uint64_t epoch_=0,ticks_=0,delivered_ticks_=0,resets_=0;
+    std::uint64_t epoch_=0,ticks_=0,delivered_ticks_=0,resets_=0,completed_lines_=0;
 };
 }
