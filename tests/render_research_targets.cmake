@@ -44,3 +44,5 @@ if(ANYPS2_TEST_RENDER_SPIRV)
     add_test(NAME render-kernel-spirv-validation
         COMMAND "${ANYPS2_SPIRV_VAL}" --target-env vulkan1.3 "${render_shader}")
 endif()
+
+include(tests/render_loop_targets.cmake)

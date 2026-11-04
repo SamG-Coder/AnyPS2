@@ -1,0 +1,47 @@
+add_executable(render-loop-tests tests/render_loop.cpp)
+target_link_libraries(render-loop-tests PRIVATE nt_render_codegen)
+add_test(NAME render-loop-lifting COMMAND render-loop-tests)
+foreach(variant 0 1)
+    set(prefix "${CMAKE_CURRENT_BINARY_DIR}/render-loop-${variant}")
+    add_custom_command(OUTPUT "${prefix}.cpu.ll" "${prefix}.gpu.ll" "${prefix}.json" "${prefix}.bin"
+        COMMAND render-loop-tests --emit "${prefix}" "${variant}"
+        DEPENDS render-loop-tests VERBATIM)
+    add_custom_target(render-loop-fixture-${variant} ALL
+        DEPENDS "${prefix}.cpu.ll" "${prefix}.gpu.ll" "${prefix}.json" "${prefix}.bin")
+    if(variant EQUAL 0)
+        set(destination 0)
+    else()
+        set(destination 112)
+    endif()
+    add_test(NAME render-loop-probe-${variant} COMMAND "${CMAKE_COMMAND}"
+        "-DPROBE=$<TARGET_FILE:ps2-vu-loop-probe>" "-DPREFIX=${prefix}" "-DDESTINATION=${destination}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/render_loop_probe.cmake")
+    if(ANYPS2_RENDER_CLANG)
+        if(WIN32)
+            set(object "${prefix}.obj")
+        else()
+            set(object "${prefix}.o")
+        endif()
+        add_custom_command(OUTPUT "${object}"
+            COMMAND "${ANYPS2_RENDER_CLANG}" -x ir -O3 -Werror -Wno-override-module -c
+                "${prefix}.cpu.ll" -o "${object}"
+            DEPENDS render-loop-fixture-${variant} "${prefix}.cpu.ll" VERBATIM)
+        set_source_files_properties("${object}" PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+        add_executable(render-loop-native-${variant} tests/render_loop_native.cpp "${object}")
+        target_link_libraries(render-loop-native-${variant} PRIVATE nt_render_codegen)
+        target_compile_definitions(render-loop-native-${variant} PRIVATE ANYPS2_LOOP_VARIANT=${variant})
+        if(MSVC)
+            target_compile_options(render-loop-native-${variant} PRIVATE /fp:strict)
+        else()
+            target_compile_options(render-loop-native-${variant} PRIVATE -ffp-contract=off)
+        endif()
+        add_test(NAME render-loop-llvm-execution-${variant} COMMAND render-loop-native-${variant})
+    endif()
+    if(ANYPS2_TEST_RENDER_SPIRV)
+        anyps2_compile_llvm_shader(loop_shader "${prefix}.gpu.ll")
+        add_custom_target(render-loop-spirv-${variant} ALL DEPENDS "${loop_shader}")
+        add_dependencies(render-loop-spirv-${variant} render-loop-fixture-${variant})
+        add_test(NAME render-loop-spirv-validation-${variant}
+            COMMAND "${ANYPS2_SPIRV_VAL}" --target-env vulkan1.3 "${loop_shader}")
+    endif()
+endforeach()
