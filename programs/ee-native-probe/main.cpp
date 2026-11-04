@@ -9,6 +9,7 @@
 #include <nt/ee_cdvd_rpc.hpp>
 #include <nt/ee_bootstrap_modules.hpp>
 #include <nt/ee_pad_rpc.hpp>
+#include <nt/pad_script.hpp>
 #include <nt/ee_audsrv_rpc.hpp>
 #include <nt/ee_performance.hpp>
 #include <nt/live_counters.hpp>
@@ -19,6 +20,7 @@
 #include <windows.h>
 #endif
 #include <memory>
+#include <optional>
 #include "display.hpp"
 #include <nt/vulkan_renderer.hpp>
 #include <nt/native_drawing_worker.hpp>
@@ -220,6 +222,7 @@ int main(int argc,char** argv) {
         std::filesystem::path iop_data;
         bool iop_session=false,iop_default=false;
 #endif
+        std::optional<nt::input::PadScript> pad_script;
         for (int index=2;index<argc;++index) {
             const std::string_view text=argv[index];
             if (text=="--native-thread-cycles") { native_cycles=true; continue; }
@@ -234,6 +237,14 @@ int main(int argc,char** argv) {
             if (text=="--cpu-triangles") { gpu_triangles=false; continue; }
             if (text=="--profile-graphics") { profile_graphics=true; continue; }
             if (text=="--trace-services") { trace_services=true; continue; }
+            if (text=="--pad-script") {
+                if (pad_script || index+1==argc) throw std::runtime_error("Expected one pad script path");
+                const auto data=nt::read_file(argv[++index],1U<<20);
+                pad_script.emplace();
+                const auto error=pad_script->parse(std::string_view(reinterpret_cast<const char*>(data.data()),data.size()));
+                if (!error.empty()) throw std::runtime_error(error);
+                continue;
+            }
             if (text=="--run-seconds") {
                 if (run_seconds || index+1==argc) throw std::runtime_error("Expected one diagnostic duration");
                 const std::string_view value=argv[++index];
@@ -421,13 +432,27 @@ int main(int argc,char** argv) {
             throw std::runtime_error("Cannot register native sample audio services");
         command_peer.data_upload([&](std::span<const nt::ee::NativeSifPacket> packets) { return upload_buffers.upload(packets); });
         nt::input::Gamepads gamepads;
-        nt::ee::NativePadRpc pads([&](unsigned port) { return gamepads.sample(port); },
-            [&](unsigned port,std::uint16_t low,std::uint16_t high) { return gamepads.rumble(port,low,high); });
+        // A pad script replaces the host controllers; its clock starts with execution.
+        std::chrono::steady_clock::time_point script_epoch=std::chrono::steady_clock::now();
+        const auto sample_pad=[&](unsigned port) {
+            if (!pad_script) return gamepads.sample(port);
+            if (port) return nt::input::PadSnapshot{};
+            const auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-script_epoch);
+            // A scripted pad is a standard controller whose motors produce no output.
+            auto snapshot=pad_script->sample(static_cast<std::uint64_t>(elapsed.count()));
+            snapshot.rumble=true;
+            return snapshot;
+        };
+        const auto rumble_pad=[&](unsigned port,std::uint16_t low,std::uint16_t high) {
+            return pad_script ? port==0 : gamepads.rumble(port,low,high);
+        };
+        nt::ee::NativePadRpc pads([&](unsigned port) { return sample_pad(port); },
+            rumble_pad);
         nt::ee::NativePadRpc::Auxiliary pad_auxiliary;
         if (!command_peer.register_service(pads) || !command_peer.register_service(pad_auxiliary))
             throw std::runtime_error("Cannot register native controller services");
         for (unsigned port=0;port<2;++port)
-            if (gamepads.sample(port).connected) std::cout<<"native_controller port="<<port<<" name="<<gamepads.name(port)<<'\n';
+            if (!pad_script && gamepads.sample(port).connected) std::cout<<"native_controller port="<<port<<" name="<<gamepads.name(port)<<'\n';
         command_peer.data_reader([&](std::uint32_t source,std::span<std::uint8_t> output) { return bootstrap_modules.snapshot(source,output); });
         if (!command_peer.register_service(bootstrap_modules)) throw std::runtime_error("Cannot register bootstrap module service");
 #ifdef ANYPS2_NATIVE_IOP
@@ -436,8 +461,8 @@ int main(int argc,char** argv) {
         std::unique_ptr<probe::IopReset> iop_reset;
         if (!iop_data.empty()) {
             iop_reset=std::make_unique<probe::IopReset>(iop_data,disc,memory,platform,native_code_overlap,iop_session,iop_default,disc_media,
-                [&](unsigned port) { return gamepads.sample(port); },
-                [&](unsigned port,std::uint16_t low,std::uint16_t high) { return gamepads.rumble(port,low,high); });
+                [&](unsigned port) { return sample_pad(port); },
+                rumble_pad);
             if (!command_peer.reset_owner(iop_reset->owner())) throw std::runtime_error("Cannot bind compiled IOP reset probe");
             active_iop=iop_reset.get();
         }
@@ -487,6 +512,8 @@ int main(int argc,char** argv) {
                 <<" llvm_texture_kernels="<<gpu.renderer->statistics().llvm_texture_kernels<<'\n';
         }
         const auto started=std::chrono::steady_clock::now();
+        script_epoch=started;
+        if (pad_script) std::cout<<"pad_script presses="<<pad_script->presses().size()<<" end_ms="<<pad_script->end_ms()<<'\n';
         auto next_profile=started+std::chrono::seconds(5);
         nt::graphics::RenderStatistics previous_statistics{};
         nt::graphics::NativeDrawing::Profile previous_drawing{};
@@ -510,14 +537,16 @@ int main(int argc,char** argv) {
         const auto display_field=[&] { return platform.graphics.scanout_odd() ?
             nt::graphics::DisplayField::odd : nt::graphics::DisplayField::even; };
         auto present_output=[&] {
-            if (!window || window_closed || display_failed) return;
+            // Headless runs still present to a display capture.
+            const bool capturing=gpu.capture && gpu.capture->ready();
+            if ((!window && !capturing) || window_closed || display_failed) return;
             try {
                 gpu.join();
                 const auto& output=platform.graphics.output();
                 if (const auto plan=nt::graphics::plan_display(output.control,output.buffers,output.displays,
                         platform.graphics.half_height_output(),std::uint32_t(output.background),display_field())) {
                     const auto present_started=std::chrono::steady_clock::now();
-                    const auto updated=window->present(*plan);
+                    const auto updated=window && window->present(*plan);
                     if (profile_graphics && updated) {
                         const auto completed=std::chrono::steady_clock::now();
                         if (last_update!=std::chrono::steady_clock::time_point{})
@@ -525,7 +554,7 @@ int main(int argc,char** argv) {
                         last_update=completed; ++profile_updates;
                     }
                     presentation_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-present_started).count();
-                    if (gpu.capture && gpu.capture->ready()) {
+                    if (capturing) {
                         const auto frame=gpu.renderer->scanout_readback(*plan);
                         gpu.capture->present(frame,gpu.drawing.submitted_draws(),output.control,output.buffers,output.displays,platform.graphics.half_height_output(),platform.graphics.scanout_odd());
                     }
@@ -663,7 +692,7 @@ int main(int argc,char** argv) {
                 input_stop=pads.update(memory,native_code_overlap);
                 if (input_stop!=nt::ee::Stop::budget) return true;
                 for (unsigned port=0;port<2;++port) {
-                    const auto buttons=gamepads.sample(port).buttons;
+                    const auto buttons=sample_pad(port).buttons;
                     if (buttons!=last_buttons[port]) { ++input_button_changes; last_buttons[port]=buttons; }
                 }
             }

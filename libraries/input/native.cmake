@@ -19,7 +19,8 @@ function(anyps2_add_input target)
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
         FetchContent_MakeAvailable(anyps2_sdl)
     endif()
-    add_library(${target} "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/src/gamepad.cpp")
+    add_library(${target} "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/src/gamepad.cpp"
+        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/src/pad_script.cpp")
     target_include_directories(${target} PUBLIC "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/include"
         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../runtime/include")
     target_compile_features(${target} PUBLIC cxx_std_20)

@@ -63,6 +63,15 @@ check actual game/demo pixels and interaction; synthetic raster tests alone do n
 establish visual correctness. Separate displayed updates, simulation rate and CPU/GPU
 cost when reporting performance. See [batch conversion](batch-conversion.md).
 
+For repeatable menu measurements, `ps2-native --pad-script <file>` replaces the host
+controllers with timed port-0 presses. Each line is `<start-ms> <hold-ms>
+<button>[+<button>...]`, timed from the start of execution, with `#` comments. The
+scripted pad is a standard controller whose rumble motors produce no output.
+`--capture-display <directory>` records scanout frames headlessly as well as with a
+window. Times follow host execution, so check captured frames to confirm that a
+script reached the intended screen before comparing runs. Keep scripts and
+captures for commercial games under ignored `work/`.
+
 ## Before committing
 
 Run the repository-content guard before staging and again after staging:
