@@ -305,9 +305,21 @@ succeeds. It contains no instruction decoder or original-address dispatch table.
 This uses the existing VU state ABI as a migration boundary, not the final native
 render ABI. Output memory remains observable and is preserved. The optional
 synchronous executor can run the AOT element kernel on Vulkan, but must return
-completed output words; the GPU test does so by readback. Direct GPU-resident draw
-replacement still requires proving output ownership and graphics ordering. The
-region service is not automatically installed in games and makes no speed claim.
+completed output words; the GPU test does so by readback.
+
+`prepare_region_launch` is the device-resident form. It performs the same entry
+validation, AOT startup and live-out reconstruction, but leaves the steady-state
+output rows to the device. Its `RegionLaunch` holds the entry data memory, launch
+parameters (slot 18 numbers output records after the startup elements) and the
+startup records as a `VectorLaunch::prefix`. With the conversion-time PACKED
+binding from `bind_element_packet`, `NativeDrawing::submit_vectors` draws every
+element without a CPU copy of steady outputs. Those rows are GPU-owned: a consumer
+other than the draw must first call `materialize_region_outputs`, which runs the
+same AOT kernel and yields exactly the `execute_vector_region` state. Batches of
+fewer than three vertices are rejected for drawing, because they would leave
+GPU-owned vertex-queue state; such regions are materialized and kicked normally.
+Deciding automatically that only a graphics kick consumes the rows, and installing
+the service in converted programs, remain open. No speed claim is made.
 
 ## Validation and limits
 
@@ -331,7 +343,10 @@ ctest --test-dir work/vector-draw -C Release --output-on-failure -R '^render-vec
 
 Region tests compare complete state and memory against original LLVM-compiled VU
 iterations for VU0/VU1, short loops, pipelined startup and multi-iteration live-out
-dependencies. Both CPU and Vulkan executors are exercised, including rejected
+dependencies. `render-region-drawing` draws each region (list, strip and fan, 1-60
+vertices) with GPU-owned outputs and compares framebuffer storage with CPU region
+execution followed by an ordinary packet kick; materialized state must equal the
+CPU state. Both CPU and Vulkan executors are exercised, including rejected
 entry/range conditions and transactional failure. The runtime executable links
 native services and generated objects without the analysis/decoder libraries.
 

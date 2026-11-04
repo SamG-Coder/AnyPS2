@@ -102,7 +102,7 @@ struct NativeVectors::Impl {
         return result;
     }
     VkDeviceSize host_bytes(const VectorLaunch& launch) const {
-        VkDeviceSize bytes=aligned(parameter_bytes)+aligned(plan_bytes)+aligned(status_bytes);
+        VkDeviceSize bytes=aligned(parameter_bytes)+aligned(plan_bytes)+aligned(status_bytes)+aligned(launch.prefix.size_bytes());
         for (const auto& write:launch.writes) bytes+=aligned(write.words.size_bytes());
         return bytes;
     }
@@ -172,8 +172,13 @@ void NativeVectors::validate(const VectorLaunch& launch) const {
     if (launch.kernel>=v.kernels.size()) throw std::invalid_argument("Unknown vector element kernel");
     const auto rows=vu_rows[v.kernels[launch.kernel].unit];
     if (!launch.elements || launch.elements>65536 || !launch.element_words || launch.element_words>65 ||
-        launch.parameters.size()!=156 || launch.parameters[0]!=launch.elements)
+        launch.parameters.size()!=156 || launch.prefix.size()%launch.element_words ||
+        launch.prefix.size()/launch.element_words>launch.elements ||
+        launch.parameters[0]!=launch.elements-launch.prefix.size()/launch.element_words ||
+        launch.parameters[18]!=launch.prefix.size()/launch.element_words)
         throw std::invalid_argument("Invalid vector launch element range or parameters");
+    for (std::size_t n=0;n<launch.prefix.size();n+=launch.element_words)
+        if (launch.prefix[n]) throw std::invalid_argument("Vector startup record reports unsupported behavior");
     if (v.output_bytes(launch)>launch_output_bytes) throw std::invalid_argument("Vector launch output exceeds its bound");
     if (launch.range_guard) {
         switch (static_cast<VectorRangeStatus>(launch.range_guard(launch.parameters.data()))) {
@@ -259,11 +264,17 @@ void NativeVectors::record(VkCommandBuffer command,unsigned slot,const VectorLau
     barrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);
     const auto parameters=host_allocate(std::as_bytes(launch.parameters));
     const auto output=device_base+aligned(s.device_used); s.device_used=aligned(s.device_used)+v.output_bytes(launch);
+    if (!launch.prefix.empty()) {
+        const VkBufferCopy copy{host_allocate(std::as_bytes(launch.prefix)),output,launch.prefix.size_bytes()};
+        vkCmdCopyBuffer(command,v.host,v.device_buffer,1,&copy);
+        v.stats.staged_bytes+=copy.size;
+    }
     vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_COMPUTE,kernel.pipeline);
     const std::uint32_t element_offsets[]{static_cast<std::uint32_t>(output-outputs_offset),static_cast<std::uint32_t>(parameters)};
     vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_COMPUTE,v.element_layout,0,1,&v.element_sets[kernel.unit],2,element_offsets);
-    vkCmdDispatch(command,(launch.elements+63)/64,1,1);
-    barrier(command,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_WRITE_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);
+    if (launch.parameters[0]) vkCmdDispatch(command,(launch.parameters[0]+63)/64,1,1);
+    barrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT|VK_ACCESS_SHADER_WRITE_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);
     std::array<std::uint32_t,plan_words> plan{};
     plan[0]=launch.elements; plan[1]=launch.element_words; plan[2]=first_record; plan[3]=assembly.primitive;
     plan[4]=assembly.shaded; plan[5]=assembly.coverage; plan[6]=assembly.xyz_register; plan[7]=assembly.present;

@@ -40,6 +40,7 @@ struct VectorLaunch {
     unsigned element_words=0;               // status word plus store words per element
     std::span<const VectorRegister> vertex; // registers of one vertex, XYZ register last
     VectorRangeGuard range_guard=nullptr; // optional for explicit low-level kernels; required by recovered regions
+    std::span<const std::uint32_t> prefix; // startup records: status plus store words
 };
 // Host-planned, data-independent part of primitive assembly. Field order is
 // the GPU plan layout in vector_assembly.comp.

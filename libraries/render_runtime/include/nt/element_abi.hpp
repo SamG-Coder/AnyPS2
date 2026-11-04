@@ -11,5 +11,8 @@ struct ElementEntry {
     std::uint32_t immediate=0,quotient=0,p=0,top=0,itop=0;
 };
 inline constexpr unsigned element_parameter_words=156;
+// Previously reserved absolute-base slot; offsets output records without
+// changing the source iteration index or descriptor alignment.
+inline constexpr unsigned element_output_first_parameter=18;
 std::vector<std::uint32_t> element_parameters(const ElementEntry&,unsigned first_element,unsigned count);
 }

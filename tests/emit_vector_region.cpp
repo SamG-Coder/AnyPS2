@@ -1,5 +1,6 @@
 #include "render_loop_fixture.hpp"
 #include <nt/vector_region_codegen.hpp>
+#include <nt/element_packet.hpp>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -45,13 +46,16 @@ int main(int argc,char** argv) {
             const auto plan=nt::render::analyze_vector_region(pairs,unit,entries,head);
             if (plan.startup!=unsigned(variant==1 || variant==2) || plan.drain!=(variant==2 ? 2U:1U))
                 throw std::runtime_error("Incorrect startup/drain proof");
-            std::ostringstream boundary,elements,binding,gpu;
+            std::ostringstream boundary,elements,binding,gpu,packet;
             const auto symbol="region_"+std::to_string(variant);
             nt::render::emit_vector_region_llvm(boundary,elements,binding,plan,symbol);
             nt::render::emit_element_kernel_llvm(gpu,plan.loop,unit,true);
+            // Each iteration stores RGBAQ then XYZ2 through VI4: a two-register PACKED record.
+            nt::render::emit_element_packet_llvm(packet,nt::render::bind_element_packet(plan.loop,4,0,0x2000000000000000ULL,0x51),symbol+"_packet");
             const auto prefix=std::string(argv[1])+"-"+std::to_string(variant);
             save(prefix+".boundary.ll",boundary.str()); save(prefix+".elements.ll",elements.str());
             save(prefix+".binding.ll",binding.str()); save(prefix+".gpu.ll",gpu.str());
+            save(prefix+".packet.ll",packet.str());
             nt::write_file(prefix+".bin",program(variant));
             reject(pairs,unit,{head,head+1},head,"Exported interior entry accepted");
             auto incomplete=pairs; incomplete.resize(incomplete.size()-2);

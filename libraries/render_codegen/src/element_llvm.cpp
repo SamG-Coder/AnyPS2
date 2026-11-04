@@ -156,7 +156,8 @@ void emit_element_kernel_llvm(std::ostream& out,const PipelinedLoop& loop,unsign
         }
     }
     const auto words=element_output_words(loop);
-    const auto output=e.value("mul i32 %item, "+std::to_string(words));
+    const auto output_item=e.value("add i32 %item, "+e.load(2,std::to_string(element_output_first_parameter)));
+    const auto output=e.value("mul i32 "+output_item+", "+std::to_string(words));
     e.store(output,failure);
     for (std::size_t n=0;n<loop.stores.size();++n)
         e.store(e.value("add i32 "+output+", "+std::to_string(n+1)),names[loop.stores[n].node]);
