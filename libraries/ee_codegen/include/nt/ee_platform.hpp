@@ -20,6 +20,12 @@ public:
         timers.display_lines=[](void* raw,std::uint64_t time) {
             return static_cast<NativeGraphics*>(raw)->horizontal_ticks(time);
         };
+        packet_submission.consumer.receive=[](void* raw,unsigned channel,std::span<std::uint8_t> output) {
+            auto& self=*static_cast<NativePlatform*>(raw);
+            if (channel!=1 || !self.packet_setup.reverse_output() || !self.graphics.readback_enabled() || !self.graphics.readback)
+                return Stop::unsupported_system;
+            return self.graphics.readback(self.graphics.context,output);
+        };
         packet_submission.consumer.working=[](void* raw) { return static_cast<NativePlatform*>(raw)->packet_setup.working(); };
         // Application startup owns a usable native submission queue. Explicit
         // guest suspension still gates it; completion requires real consumption.
@@ -154,6 +160,14 @@ private:
         if (NativeVideo::maps(address)) return self.video.read(address);
         if (NativeGraphics::maps(address)) {
             const auto value=self.graphics.read(address); return {value.status,static_cast<std::uint32_t>(value.value)};
+        }
+        if (address==0x10003c00 && self.packet_setup.reverse_output()) {
+            if (!self.graphics.readback_status) return {Stop::unsupported_system};
+            const auto available=self.graphics.readback_status(self.graphics.context);
+            if (available.status!=Stop::budget) return available;
+            auto status=self.packet_setup.read(address);
+            status.value|=std::min(16U,available.value/16)<<24;
+            return status;
         }
         if (NativePacketSetup::maps(address)) return self.packet_setup.read(address);
         if (NativeScratchpadCopy::maps(address)) return self.scratchpad_copy.read(address);

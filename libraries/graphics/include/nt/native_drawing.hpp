@@ -2,6 +2,7 @@
 #include <nt/graphics_packet.hpp>
 #include <nt/sprite_plan.hpp>
 #include <nt/image_upload.hpp>
+#include <nt/image_download.hpp>
 #include <nt/sprite_texture.hpp>
 #include <nt/triangle_plan.hpp>
 #include <nt/line_plan.hpp>
@@ -29,7 +30,15 @@ public:
     std::uint64_t submitted_draws() const { return submitted_draws_; }
     std::uint64_t completed_finishes() const { return completed_finishes_; }
     const std::optional<Sprite>& last_draw() const { return last_draw_; }
-    void reset() { state_={}; }
+    void reset() { state_={}; download_.clear(); download_offset_=0; }
+    std::size_t readback_bytes() const { return download_.size()-download_offset_; }
+    void readback(std::span<std::uint8_t> output) {
+        if (output.empty() || output.size()%16 || output.size()>download_.size()-download_offset_)
+            throw std::invalid_argument("Native graphics readback exceeds prepared output");
+        std::copy_n(download_.data()+download_offset_,output.size(),output.data());
+        download_offset_+=output.size();
+        if (download_offset_==download_.size()) { download_.clear(); download_offset_=0; }
+    }
     void poll_completions(VulkanRenderer& renderer) {
         if (pending_finishes_.empty()) return;
         const auto completed=renderer.completed_submission();
@@ -97,6 +106,11 @@ public:
                         if (pending_finishes_.size()>=1024) renderer.synchronize();
                         poll_completions(renderer);
                     } else renderer.synchronize();
+                } else if (const auto* download=std::get_if<ImageDownload>(&operation)) {
+                    std::vector<std::uint32_t> storage(1024*1024);
+                    renderer.read(storage); download_=download->pack(storage); download_offset_=0;
+                } else if (std::holds_alternative<CancelDownload>(operation)) {
+                    download_.clear(); download_offset_=0;
                 } else {
                     renderer.write(std::get<ImageWrites>(operation)); dirty_=true;
                 }
@@ -123,7 +137,11 @@ public:
                 flush();
                 if (const auto* load=std::get_if<PaletteLoad>(&operation)) load_palette(candidate.palette,pixels,*load);
                 else if (std::holds_alternative<Finish>(operation)) renderer.synchronize();
-                else for (const auto& write:std::get<ImageWrites>(operation))
+                else if (const auto* download=std::get_if<ImageDownload>(&operation)) {
+                    download_=download->pack(pixels); download_offset_=0;
+                } else if (std::holds_alternative<CancelDownload>(operation)) {
+                    download_.clear(); download_offset_=0;
+                } else for (const auto& write:std::get<ImageWrites>(operation))
                     pixels[write.address]=(pixels[write.address]&~write.mask)|write.value;
             }
         }
@@ -139,7 +157,8 @@ private:
     using ImageWrites=std::vector<PixelWrite>;
     struct Draw { Sprite sprite; unsigned bank; std::array<RasterVertex,3> triangle{}; std::uint32_t fog_color=0,fog=0; bool palette16=false; std::uint64_t texa=0; };
     struct Finish {};
-    using Operation=std::variant<Draw,ImageWrites,PaletteLoad,Finish>;
+    struct CancelDownload {};
+    using Operation=std::variant<Draw,ImageWrites,PaletteLoad,Finish,ImageDownload,CancelDownload>;
     struct Workspace {
         std::vector<Operation> operations;
         std::vector<SpriteCommand> commands;
@@ -174,6 +193,8 @@ private:
         std::array<unsigned,2> palette_bases{};
         std::uint64_t palette_config=0;
     } state_;
+    std::vector<std::uint8_t> download_;
+    std::size_t download_offset_=0;
     bool resident_=false;
     Completion completion_=Completion::synchronous;
     std::deque<std::uint64_t> pending_finishes_;
@@ -231,6 +252,11 @@ private:
         case 0x51: state.transfer_position=value; return;
         case 0x52: state.transfer_extent=value; return;
         case 0x53:
+            if ((value&3)==1) {
+                draws.emplace_back(ImageDownload::begin(state.transfer_buffer,state.transfer_position,state.transfer_extent));
+                state.upload={}; return;
+            }
+            draws.emplace_back(CancelDownload{});
             state.upload=ImageUpload::begin(state.transfer_buffer,state.transfer_position,state.transfer_extent,unsigned(value&3)); return;
         case 0x61: draws.emplace_back(Finish{}); return;
         case 0xf: case 0x7f: return;
@@ -311,7 +337,7 @@ private:
         }
     }
     static void configure_draw(const State& state,const Context& context,unsigned attributes,Sprite& draw) {
-        if (state.dither_enabled && ((context.frame>>24)&63)>1)
+        if (state.dither_enabled && ((context.frame>>24)&63)>1 && (draw.mask&0xffffffU)!=0xffffffU)
             throw std::invalid_argument("Unsupported native dithered surface format");
         if (context.test&0x10000U) {
             const auto format=unsigned((context.depth>>24)&15);

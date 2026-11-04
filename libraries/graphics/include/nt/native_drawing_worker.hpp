@@ -40,6 +40,9 @@ public:
             catch (...) { error_=std::current_exception(); throw; }
         }
     }
+    // VIF command-drain boundaries await parsing/recording and enqueue the
+    // Vulkan work, without waiting for raster completion on the host.
+    void drain() { wait(); renderer_.enqueue_finish(); }
     Duration elapsed() const { return elapsed_; }
 private:
     NativeDrawing& drawing_;

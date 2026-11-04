@@ -30,13 +30,60 @@ void run_ee_batch_tests();
 void run_ee_file_rpc_tests();
 void run_scratchpad_tests();
 void run_video_block_tests();
+void run_graphics_readback_tests();
+void run_thread_exit_tests() {
+    for (unsigned exit_call:{0x23U,0x24U}) {
+        std::vector<std::uint8_t> ram(0x400000);
+        nt::ee::Memory memory{ram.data(),ram.size()};
+        nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
+        nt::runtime::State state;
+        const auto call=[&](unsigned number,unsigned a0=0,unsigned a1=0) {
+            state.pc=0x3a0000; state.set(3,number); state.set(4,a0); state.set(5,a1);
+            return nt::ee::run(nt_ee_generated_run,state,memory,1,services);
+        };
+        state.set(6,0x1000); state.set(7,0); state.set(8,0x1100);
+        check(call(0x3c,0,0x8000)==nt::ee::Stop::budget);
+        const std::array<std::uint32_t,9> descriptor{0,0x390000,0x9000,0x1000,0,10,0,0,0};
+        std::memcpy(ram.data()+0x2000,descriptor.data(),sizeof(descriptor));
+        check(call(0x20,0x2000)==nt::ee::Stop::budget && state.gpr[2].lo==2);
+        check(call(0x22,2)==nt::ee::Stop::budget);
+        check(call(0x32)==nt::ee::Stop::budget && services.current_thread()->id==2);
+        check(call(exit_call)==nt::ee::Stop::syscall); // No event owner: preserve the worker.
+        unsigned pumps=0;
+        services.idle_pump=[&] { ++pumps; return nt::ee::Stop::budget; };
+        services.idle_timeout=std::chrono::milliseconds(0);
+        check(call(exit_call)==nt::ee::Stop::budget && services.current_thread()->id==nt::ee::NativeThreads::idle_id);
+        const auto retired=state.executed;
+        check(nt::ee::run(nt_ee_generated_run,state,memory,32,services)==nt::ee::Stop::thread_wait &&
+            state.executed==retired && pumps==1);
+        // Inspect and wake through the native event boundary. The dead
+        // worker must not resume or consume a wakeup destined for root.
+        nt::runtime::State event;
+        event.set(3,0x30); event.set(4,2);
+        check(services.invoke(event,memory)==nt::ee::Stop::budget && event.gpr[2].lo==(exit_call==0x24 ? 0U:16U));
+        nt::ee::NativeInterrupts interrupts; memory.interrupts=&interrupts;
+        nt::runtime::State registration;
+        registration.set(4,2); registration.set(5,0x366000); registration.set(6,0xffffffff);
+        registration.set(7,1); registration.set(28,0x4000);
+        check(interrupts.service(0x10,registration,nt_ee_generated_contains).status==nt::ee::Stop::budget);
+        check(interrupts.write(0x1000f010,1U<<2)==nt::ee::Stop::budget);
+        state.cop0_status=0x10401;
+        services.idle_pump=[&] { interrupts.raise(2); return nt::ee::Stop::budget; };
+        check(nt::ee::run(nt_ee_generated_run,state,memory,10,services)==nt::ee::Stop::budget);
+        std::uint32_t interrupted_id=0; std::memcpy(&interrupted_id,ram.data()+0x4000,4);
+        check(interrupted_id==nt::ee::NativeThreads::idle_id && services.current_thread()->id==1 &&
+            state.pc==0x3a0004 && !services.waiting(memory) && !interrupts.active());
+    }
+}
 int main() {
     try {
+        run_graphics_readback_tests();
+        run_thread_exit_tests();
         run_scratchpad_tests();
         run_video_block_tests();
         {
             std::vector<std::uint8_t> video_bytes(0x1000);
-            nt::ee::NativePlatform platform; nt::ee::Memory memory{video_bytes.data(),video_bytes.size()}; platform.attach(memory);
+            auto platform_owner=std::make_unique<nt::ee::NativePlatform>(); auto& platform=*platform_owner; nt::ee::Memory memory{video_bytes.data(),video_bytes.size()}; platform.attach(memory);
             nt::runtime::State state;
             const auto write=[&](std::uint32_t address,std::uint32_t value,bool wide=false) {
                 state.pc=wide ? 0x3d0010 : 0x3d0020; state.set(4,address); state.set(8,value);
@@ -961,6 +1008,7 @@ int main() {
             check(call(0x32).value==1); // Preserved sleep credit, no block.
             check(threads.signal_semaphore(7) && !threads.signal_semaphore(7));
         }
+
         {
             std::vector<std::uint8_t> ram(0x10000);
             nt::ee::Memory memory{ram.data(),ram.size()};
@@ -3075,7 +3123,8 @@ int main() {
                 for (unsigned lane=0;lane<8;++lane) check(read(base+0x100+lane*16)==lane+100);
             }
             check(write(0xb0003830,7)==nt::ee::Stop::budget && read(0x10003830)==7 && read(0x10003c30)==0x5678);
-            check(write(0x10003c00,0x800000)==nt::ee::Stop::unsupported_system && read(0x10003c00)==0);
+            check(write(0x10003c00,0x800000)==nt::ee::Stop::budget && platform.packet_setup.read(0x10003c00).value==0x800000);
+            check(write(0x10003c00,0)==nt::ee::Stop::budget && read(0x10003c00)==0);
             check(write(0x10003010,~0U)==nt::ee::Stop::budget && write(0x10003000,8)==nt::ee::Stop::budget && read(0x10003020)==13);
             check(write(0x10003000,9)==nt::ee::Stop::budget && !read(0x10003020) && read(0x10003830)==7);
             for (const auto address:{0x10003840U,0x100038f0U,0x10003020U,0x10004000U,0x10005000U,0x10006000U}) {
@@ -3417,6 +3466,24 @@ int main() {
             sink.packets.clear();
             check(write(0x10009030,0x1000)==nt::ee::Stop::budget);
             check(write(0x10009000,0x105)==nt::ee::Stop::unsupported_system && sink.packets.empty());
+            // The direct GIF channel shares the aggregate bound, independently
+            // of each packet's framing limit. Rejection must allow exact retry.
+            chain.clear();
+            for (unsigned packet=0;packet<4;++packet) {
+                chain.insert(chain.end(),{(packet==3 ? 0x70000000U : 0x10000000U)|(payload_words+1),0,0,0});
+                chain.insert(chain.end(),{0x8000U|payload_words,0x08000000,0,0});
+                chain.insert(chain.end(),payload_words*4,packet+1);
+            }
+            std::memcpy(ram.data()+0x1000,chain.data(),chain.size()*4);
+            check(write(0x1000a030,0x1000)==nt::ee::Stop::budget);
+            platform.completions.acknowledge(4); sink.ready=false;
+            check(write(0x1000a000,0x105)==nt::ee::Stop::unsupported_system && sink.packets.empty() &&
+                !(platform.completions.status()&4));
+            sink.ready=true;
+            check(write(0x1000a000,0x105)==nt::ee::Stop::budget && sink.packets.size()==4 &&
+                (platform.completions.status()&4));
+            for (unsigned packet=0;packet<4;++packet)
+                check(sink.packets[packet].size()==payload_words+1 && sink.packets[packet].back()[3]==packet+1);
         }
         run_ee_batch_tests();
         run_ee_file_rpc_tests();

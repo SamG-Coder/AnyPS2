@@ -24,6 +24,7 @@ inline constexpr std::uint32_t depth_24_flag=1U<<19, coverage_flag=1U<<20, alpha
 inline constexpr std::uint32_t line_flag=1U<<24;
 inline constexpr std::uint32_t indexed8_flag=1U<<25;
 inline constexpr std::uint32_t fog_flag=1U<<26;
+inline constexpr std::uint32_t color_16_flag=1U<<27, color_16s_flag=1U<<28;
 struct RasterVertex {
     std::int32_t x=0,y=0;
     std::uint32_t color=0;
@@ -45,6 +46,7 @@ struct RenderStatistics {
     std::uint64_t wait_ns=0,upload_ns=0,write_ns=0,draw_ns=0,texture_decode_ns=0;
     std::uint64_t surface_import_ns=0,surface_export_ns=0;
     std::uint64_t surface_conflicts=0,texture_readbacks=0,palette_readbacks=0;
+    std::uint64_t surface_evictions=0;
     std::array<std::uint32_t,8> last_surface_conflict{}; // base, pitch, height, depth for each view.
     std::uint64_t uploads=0,feedback_barriers=0,gpu_ns=0;
     std::uint64_t draw_calls=0,batched_primitives=0;

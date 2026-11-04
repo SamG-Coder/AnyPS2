@@ -2,6 +2,16 @@
 
 // Format address calculations shared by CPU import and LLVM GPU conversion.
 namespace nt::graphics {
+inline unsigned pack_rgba16(unsigned value) {
+    unsigned packed=0;
+    for (unsigned channel=0;channel<3;++channel) packed|=((value>>(channel*8+3))&31U)<<(channel*5);
+    return packed|((value>>16)&0x8000U);
+}
+inline unsigned expand_rgba16(unsigned value) {
+    unsigned rgba=(value&0x8000U)<<16;
+    for (unsigned channel=0;channel<3;++channel) rgba|=((value>>(channel*5))&31U)<<(channel*8+3);
+    return rgba;
+}
 inline unsigned rgba_halfword(unsigned base,unsigned pitch,unsigned x,unsigned y,bool alternate=false) {
     x&=2047; y&=2047;
     const auto page=(y/64)*pitch+x/64;

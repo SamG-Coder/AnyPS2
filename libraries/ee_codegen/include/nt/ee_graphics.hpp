@@ -4,6 +4,7 @@
 #include <optional>
 #include <algorithm>
 #include <array>
+#include <span>
 
 namespace nt::ee {
 // Native graphics lifecycle and nominal application display deadlines. These
@@ -26,6 +27,9 @@ public:
     void* context=nullptr;
     Stop (*synchronize)(void*)=nullptr;
     Stop (*poll_drawing)(void*)=nullptr;
+    Stop (*readback)(void*,std::span<std::uint8_t>)=nullptr;
+    IoRead (*readback_status)(void*)=nullptr;
+    bool readback_enabled() const { return readback_enabled_; }
     // Optional drawing owner. Rejection must preserve that owner's state.
     Stop (*reset_drawing)(void*)=nullptr;
     void* edge_context=nullptr;
@@ -61,12 +65,13 @@ public:
     static bool maps(std::uint32_t address) {
         return address==0x12000000 || address==0x12000020 ||
             (address>=0x12000070 && address<=0x120000a0 && address%16==0) ||
-            address==0x120000e0 || address==0x12001000 || address==0x12001010;
+            address==0x120000e0 || address==0x12001000 || address==0x12001010 || address==0x12001040;
     }
     IoRead64 read(std::uint32_t address) {
         if (!maps(address)) return {Stop::unsupported_system};
         if (poll_drawing) { const auto result=poll_drawing(context); if (result!=Stop::budget) return {result}; }
         advance();
+        if (address==0x12001040) return {Stop::budget,readback_enabled_ ? 1U : 0U};
         if (address==0x12000000) return {Stop::budget,output_.control};
         if (address==0x120000e0) return {Stop::budget,output_.background};
         if (address>=0x12000070 && address<=0x120000a0) {
@@ -86,6 +91,12 @@ public:
         return {Stop::budget,mask_};
     }
     Stop write(std::uint32_t address,std::uint64_t value) {
+        if (address==0x12001040) {
+            if (value>1 || !synchronize) return Stop::unsupported_system;
+            const auto ready=synchronize(context);
+            if (ready!=Stop::budget) return ready;
+            readback_enabled_=value!=0; return Stop::budget;
+        }
         if (address==0x12000000) { output_.control=value&0xffffU; return Stop::budget; }
         if (address==0x120000e0) { output_.background=value&0xffffffU; return Stop::budget; }
         if (address>=0x12000070 && address<=0x120000a0 && address%16==0) {
@@ -108,7 +119,7 @@ public:
                         if (reset!=Stop::budget) return reset;
                     }
                     completed_lines_=horizontal_ticks(clock_());
-                    mask_=0x7f00; flags_=0; field_=0; events_=0; scanout_odd_=false; mode_.reset(); output_={}; ++resets_;
+                    mask_=0x7f00; flags_=0; field_=0; events_=0; scanout_odd_=false; mode_.reset(); output_={}; readback_enabled_=false; ++resets_;
                     return Stop::budget;
                 }
             }
@@ -240,7 +251,7 @@ private:
     NativeClock clock_;
     std::optional<std::uint64_t> vsync_profile_start_;
     Output output_;
-    bool edge_lost_=false,scanout_odd_=false;
+    bool edge_lost_=false,scanout_odd_=false,readback_enabled_=false;
     std::optional<DisplayMode> mode_;
     std::uint32_t mask_=0x7f00,flags_=0,field_=0,events_=0;
     std::uint64_t epoch_=0,ticks_=0,delivered_ticks_=0,resets_=0,completed_lines_=0;

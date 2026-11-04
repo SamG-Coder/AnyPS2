@@ -18,9 +18,11 @@ function(anyps2_bind_vu target)
         endif()
         set(object "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/vu${unit}-native.obj")
         anyps2_numeric_bitcode(numeric_bitcode)
+        # Guard-heavy converted blocks look cold to LLVM without profile data.
+        # Allow small arithmetic bodies to inline there; retain larger slow paths.
         add_custom_command(OUTPUT "${object}"
         COMMAND "${ANYPS2_CLANG}" -x ir -target x86_64-pc-windows-msvc
-            -Werror -Wno-override-module -O2 -c "${module}"
+            -Werror -Wno-override-module -O3 -mllvm -inline-cold-callsite-threshold=150 -c "${module}"
             -Xclang -mlink-builtin-bitcode -Xclang "${numeric_bitcode}" -o "${object}"
         DEPENDS "${module}" "${numeric_bitcode}" VERBATIM)
         add_dependencies(${target} anyps2-numeric-bitcode)

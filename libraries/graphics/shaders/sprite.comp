@@ -20,6 +20,24 @@ uint address(uint base,uint pitch,uint x,uint y) {
     uint word=(x&1)|((y&1)<<1)|((x&6)<<1)|((y&6)<<3);
     return (base*64+page*2048+block*64+word)&0xfffff;
 }
+uint halfword_address(uint base,uint pitch,uint x,uint y) {
+    uint page=(y/64)*pitch+x/64;
+    uint block=((y>>3)&1)|(((x>>4)&1)<<1);
+    block|=(draw.flags&268435456)!=0 ? (((y>>5)&1)<<2)|(((y>>4)&1)<<3)|(((x>>5)&1)<<4) :
+        (((y>>4)&1)<<2)|(((x>>5)&1)<<3)|(((y>>5)&1)<<4);
+    uint half_index=((x>>3)&1)|((x&1)<<1)|((y&1)<<2)|((x&6)<<2)|((y&6)<<4);
+    return (base*128+page*4096+block*128+half_index)&0x1fffff;
+}
+uint pack16(uint color) {
+    uint result=(color>>16)&0x8000;
+    for (uint channel=0;channel<3;++channel) result|=((color>>(channel*8+3))&31)<<(channel*5);
+    return result;
+}
+uint expand16(uint color) {
+    uint result=(color&0x8000)<<16;
+    for (uint channel=0;channel<3;++channel) result|=((color>>(channel*5))&31)<<(channel*8+3);
+    return result;
+}
 int floor_div(int n,int d) {int q=n/d;return q-((n%d)!=0 && ((n<0)!=(d<0)) ? 1:0);}
 uint nibble_address(uint base,uint pitch,uint x,uint y) {
     x &= 2047; y &= 2047;
@@ -110,7 +128,9 @@ void main() {
     uint x=draw.left+gl_GlobalInvocationID.x, y=draw.top+gl_GlobalInvocationID.y;
     if ((draw.flags&4096)!=0 && (y&1)==((draw.flags>>13)&1)) return;
     if (x>=draw.right || y>=draw.bottom) return;
-    uint output_address=address(draw.base,draw.pitch,x,y);
+    bool narrow=(draw.flags&134217728)!=0;
+    uint half_index=narrow ? halfword_address(draw.base,draw.pitch,x,y) : 0;
+    uint output_address=narrow ? half_index/2 : address(draw.base,draw.pitch,x,y);
     uint color=draw.color;
     uint depth=draw.depth,coverage=16,line_alpha=128;
     bool triangle_interior=true;
@@ -210,7 +230,10 @@ void main() {
         if(failure==3) mask|=0xff000000;
     }
     uint destination=0;
-    if((draw.flags&256)!=0 || (draw.test&0x4000)!=0) destination=memory.pixels[output_address];
+    if((draw.flags&256)!=0 || (draw.test&0x4000)!=0) {
+        destination=memory.pixels[output_address];
+        if (narrow) destination=expand16((destination>>((half_index%2)*16))&65535);
+    }
     if((draw.test&0x4000)!=0 && (draw.flags&512)==0 &&
         (destination>>31)!=((draw.test>>15)&1)) return;
     if ((draw.flags&131072)!=0) {
@@ -239,6 +262,11 @@ void main() {
         color=blended;
     }
     if((draw.flags&32)!=0) color |= 0x80000000;
+    if (narrow) {
+        uint shift=(half_index%2)*16;
+        mask=(pack16(mask)<<shift)|~(65535u<<shift);
+        color=pack16(color)<<shift;
+    }
     // Aliased framebuffer pages can map different invocations onto one word.
     // Atomic bit operations preserve masked bits without an unordered R/W race.
     atomicAnd(memory.pixels[output_address],mask);

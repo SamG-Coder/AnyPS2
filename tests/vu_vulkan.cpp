@@ -335,7 +335,7 @@ int main() {
         direct.write(0x10003000,1);
         if (consumer.renderer.validation_errors()) throw std::runtime_error("Native transfers caused Vulkan validation errors");
         direct.graphics.wait=[](void* raw) {
-            static_cast<Consumer*>(raw)->renderer.synchronize(); return true;
+            static_cast<Consumer*>(raw)->renderer.enqueue_finish(); return true;
         };
         const auto before_flush=consumer.drawing.pixels();
         transport.clear(); word(0x11000000); word(0x13000000);

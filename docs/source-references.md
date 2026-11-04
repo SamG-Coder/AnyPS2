@@ -54,7 +54,8 @@ The principal source areas consulted at those pins are:
   `microVU_Misc.h`; PS2SDK packet2 and public VIF/upload interfaces.
 - **Graphics:** PCSX2 `GS.h`, `GS.cpp`, `GSRegs.h`, `GSState.cpp`, `GSTables.cpp`,
   `GSClut.cpp`, `GSLocalMemory.h`, `GSRendererSW.cpp`, `GSRasterizer.cpp`,
-  `GSDrawScanline.cpp`, `GSDeviceVK::DoMerge`, Vulkan `tfx.glsl` and `merge.glsl`;
+  `GSDrawScanline.cpp`, `GSRendererHW.cpp` (16-bit write-mask mapping),
+  `GSDeviceVK::DoMerge`, Vulkan `tfx.glsl` and `merge.glsl`;
   `Counters.cpp`, `MTGS.cpp` and `GSRenderer.cpp` for field/display ordering.
   The image importer independently implements PSMCT16/PSMCT16S address-bit
   permutations checked against the public GS format tables. Palette conversion

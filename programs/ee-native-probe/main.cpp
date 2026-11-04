@@ -88,7 +88,7 @@ struct NativeGpu {
     std::unique_ptr<probe::GraphicsCapture> capture;
     nt::ee::NativeGraphics* completion=nullptr;
     std::string error;
-    std::chrono::steady_clock::duration render_time{};
+    std::chrono::steady_clock::duration render_time{},drain_time{};
     void join() {
         if (worker) { worker->wait(); render_time=worker->elapsed(); }
     }
@@ -102,6 +102,21 @@ struct NativeGpu {
             return true;
         }
         catch (const std::exception& error) { self.error=error.what(); return false; }
+    }
+    static bool submit_consumed(void* raw,std::span<const nt::graphics::Packet> packets) {
+        if (!submit(raw,packets)) return false;
+        auto& self=*static_cast<NativeGpu*>(raw);
+        try { self.join(); return true; }
+        catch (const std::exception& error) { self.error=error.what(); return false; }
+    }
+    static bool drain(void* raw) {
+        auto& self=*static_cast<NativeGpu*>(raw);
+        try {
+            const auto started=self.profile_commands ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+            self.ensure_renderer(); self.worker->drain(); self.render_time=self.worker->elapsed();
+            if (self.profile_commands) self.drain_time+=std::chrono::steady_clock::now()-started;
+            return true;
+        } catch (const std::exception& error) { self.error=error.what(); return false; }
     }
     static nt::ee::Stop poll(void* context) {
         auto& self=*static_cast<NativeGpu*>(context);
@@ -318,13 +333,12 @@ int main(int argc,char** argv) {
         nt::ee::NativePlatform platform; platform.attach(memory);
         platform.scratchpad_copy.protection=native_code_overlap;
         platform.video_output.protection=native_code_overlap;
+        platform.packet_submission.protection=native_code_overlap;
         platform.debug_byte=[](void*,std::uint8_t byte) {
             std::cerr.put(static_cast<char>(byte));
             return std::cerr ? nt::ee::Stop::budget : nt::ee::Stop::unsupported_system;
         };
-        platform.packet_setup.graphics={&gpu,NativeGpu::submit,[](void* raw) {
-            return NativeGpu::synchronize(raw)==nt::ee::Stop::budget;
-        },true};
+        platform.packet_setup.graphics={&gpu,NativeGpu::submit_consumed,NativeGpu::drain,true};
         VuCapture capture;
 #if defined(ANYPS2_NATIVE_VU) || defined(ANYPS2_NATIVE_VU1)
         nt::ee::NativeVuUploads compiled_uploads;
@@ -361,6 +375,16 @@ int main(int argc,char** argv) {
         }
         gpu.completion=&platform.graphics;
         platform.graphics.context=&gpu; platform.graphics.synchronize=NativeGpu::synchronize; platform.graphics.poll_drawing=NativeGpu::poll;
+        platform.graphics.readback_status=[](void* context) -> nt::ee::IoRead {
+            auto& gpu=*static_cast<NativeGpu*>(context);
+            try { gpu.join(); return {nt::ee::Stop::budget,static_cast<std::uint32_t>(gpu.drawing.readback_bytes())}; }
+            catch (const std::exception& error) { gpu.error=error.what(); return {nt::ee::Stop::unsupported_system}; }
+        };
+        platform.graphics.readback=[](void* context,std::span<std::uint8_t> output) {
+            auto& gpu=*static_cast<NativeGpu*>(context);
+            try { gpu.join(); gpu.drawing.readback(output); return nt::ee::Stop::budget; }
+            catch (const std::exception& error) { gpu.error=error.what(); return nt::ee::Stop::unsupported_system; }
+        };
         platform.graphics.reset_drawing=[](void* context) {
             auto& gpu=*static_cast<NativeGpu*>(context);
             if (gpu.capture) gpu.capture->reset();
@@ -445,6 +469,7 @@ int main(int argc,char** argv) {
         nt::graphics::RenderStatistics previous_statistics{};
         nt::graphics::NativeDrawing::Profile previous_drawing{};
         auto previous_render_time=gpu.render_time;
+        auto previous_drain_time=gpu.drain_time;
         double presentation_seconds=0,previous_presentation=0;
         std::vector<double> update_intervals;
         std::chrono::steady_clock::time_point last_update{};
@@ -454,6 +479,7 @@ int main(int argc,char** argv) {
         auto next_input=started;
         auto last_input=started;
         double input_gap_max_ms=0,input_gap_total_ms=0;
+        double input_interval_gap_max_ms=0;
         std::uint64_t input_polls=0;
         nt::ee::Stop input_stop=nt::ee::Stop::budget;
         std::array<std::uint16_t,2> last_buttons{};
@@ -545,6 +571,8 @@ int main(int argc,char** argv) {
                     <<" command_validate_ms="<<(gpu.drawing_profile.validate_ns-previous_drawing.validate_ns)/1e6
                     <<" command_submit_ms="<<(gpu.drawing_profile.submit_ns-previous_drawing.submit_ns)/1e6
                     <<" present_ms="<<(presentation_seconds-previous_presentation)*1000
+                    <<" command_drain_ms="<<std::chrono::duration<double,std::milli>(gpu.drain_time-previous_drain_time).count()
+                    <<" input_poll_gap_max_ms="<<input_interval_gap_max_ms
                     <<" compiled_entry_ms="<<(execution_profile.entry_ns-previous_execution.entry_ns)/1e6
                     <<" longest_compiled_entry_ms="<<execution_profile.longest_entry_ns/1e6
                     <<" syscall_ms="<<(execution_profile.service_ns-previous_execution.service_ns)/1e6
@@ -578,6 +606,7 @@ int main(int argc,char** argv) {
                     <<" surface_import_ms="<<(s.surface_import_ns-p.surface_import_ns)/1e6
                     <<" surface_export_ms="<<(s.surface_export_ns-p.surface_export_ns)/1e6
                     <<" surface_conflicts="<<(s.surface_conflicts-p.surface_conflicts)
+                    <<" surface_evictions="<<(s.surface_evictions-p.surface_evictions)
                     <<" texture_readbacks="<<(s.texture_readbacks-p.texture_readbacks)
                     <<" palette_readbacks="<<(s.palette_readbacks-p.palette_readbacks)
                     <<" conflict_view="<<s.last_surface_conflict[0]<<','<<s.last_surface_conflict[1]<<','<<s.last_surface_conflict[2]<<','<<s.last_surface_conflict[3]
@@ -589,6 +618,8 @@ int main(int argc,char** argv) {
                     <<" triangles="<<s.triangles-p.triangles<<" barriers="<<s.feedback_barriers-p.feedback_barriers
                     <<" draw_calls="<<s.draw_calls-p.draw_calls<<" batched_primitives="<<s.batched_primitives-p.batched_primitives<<'\n'<<std::flush;
                 update_intervals.clear(); profile_updates=0; profile_started=now;
+                input_interval_gap_max_ms=0;
+                previous_drain_time=gpu.drain_time;
                 previous_statistics=s; previous_render_time=gpu.render_time; previous_presentation=presentation_seconds;
                 previous_drawing=gpu.drawing_profile;
                 previous_execution=execution_profile;
@@ -600,6 +631,7 @@ int main(int argc,char** argv) {
             if (now>=next_input) {
                 const auto gap=std::chrono::duration<double,std::milli>(now-last_input).count();
                 input_gap_max_ms=std::max(input_gap_max_ms,gap);
+                input_interval_gap_max_ms=std::max(input_interval_gap_max_ms,gap);
                 input_gap_total_ms+=gap; ++input_polls; last_input=now;
                 next_input=now+std::chrono::milliseconds(4);
                 gamepads.update();

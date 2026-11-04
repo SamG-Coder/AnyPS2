@@ -84,7 +84,7 @@ if(BUILD_TESTING)
             set(object "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/vu-${fixture}.obj")
             list(APPEND vu_fixture_objects "${object}")
             list(APPEND vu_fixture_commands COMMAND "${ANYPS2_CLANG}" -x ir
-                -target x86_64-pc-windows-msvc -Werror -Wno-override-module -c -O2 "${source}"
+                -target x86_64-pc-windows-msvc -Werror -Wno-override-module -c -O3 -mllvm -inline-cold-callsite-threshold=150 "${source}"
                 -Xclang -mlink-builtin-bitcode -Xclang "${vu_numeric_bitcode}" -o "${object}")
         endforeach()
         add_custom_command(OUTPUT ${vu_fixture_objects}
@@ -109,7 +109,7 @@ if(BUILD_TESTING)
         # Several native test programs share this object. Give generation one
         # owner so parallel Visual Studio builds cannot truncate each other's IR.
         add_custom_target(ee-fixture-object DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj")
-        add_executable(ee-llvm-tests tests/ee_native.cpp tests/ee_batch.cpp tests/ee_file_rpc.cpp tests/ee_scratchpad.cpp tests/ee_video.cpp libraries/ee_native/src/io.cpp libraries/ee_native/src/numeric.cpp libraries/ee_native/src/vector.cpp "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj")
+        add_executable(ee-llvm-tests tests/ee_native.cpp tests/ee_graphics_readback.cpp tests/ee_batch.cpp tests/ee_file_rpc.cpp tests/ee_scratchpad.cpp tests/ee_video.cpp libraries/ee_native/src/io.cpp libraries/ee_native/src/numeric.cpp libraries/ee_native/src/vector.cpp "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj")
         target_sources(vu-native-tests PRIVATE libraries/ee_native/src/io.cpp libraries/ee_native/src/vector.cpp "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj")
         target_link_libraries(ee-llvm-tests PRIVATE nt_ee_native nt_fileio)
         add_test(NAME ee-llvm-execution COMMAND ee-llvm-tests)

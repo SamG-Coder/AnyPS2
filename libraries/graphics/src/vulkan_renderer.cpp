@@ -449,7 +449,9 @@ namespace {
 void validate_sprite(const Sprite& draw) {
     if ((draw.flags&indexed8_flag) && !(draw.flags&64)) throw std::runtime_error("Invalid indexed texture flags");
 
-    if (draw.flags&~(((1U<<22)-1)|line_flag|indexed8_flag|fog_flag)) throw std::runtime_error("Unknown Vulkan draw flags");
+    if (draw.flags&~(((1U<<22)-1)|line_flag|indexed8_flag|fog_flag|color_16_flag|color_16s_flag)) throw std::runtime_error("Unknown Vulkan draw flags");
+    if ((draw.flags&color_16s_flag) && !(draw.flags&color_16_flag)) throw std::runtime_error("Invalid 16-bit surface flags");
+    if ((draw.flags&color_16_flag) && draw.right>draw.pitch*64) throw std::runtime_error("Wrapped 16-bit render target requires explicit mapping");
     if ((draw.flags&line_flag) && (draw.flags&(1|triangle_flag|perspective_triangle_flag)))
         throw std::runtime_error("Unsupported native line attributes");
     if (draw.right>2048 || draw.bottom>2048 || draw.left>draw.right || draw.top>draw.bottom || !draw.pitch || draw.pitch>63 || draw.base>16383)
@@ -468,7 +470,8 @@ void validate_sprite(const Sprite& draw) {
         if (draw.mask!=0xffffffffU && ((draw.test>>17)&3)!=0 &&
             ((draw.flags&depth_write_flag) || ((draw.test>>17)&3)>=2)) {
             std::array<bool,512> pages{};
-            for (unsigned y=draw.top/32;y<=(draw.bottom-1)/32;++y)
+            const auto color_page_height=(draw.flags&color_16_flag) ? 64U : 32U;
+            for (unsigned y=draw.top/color_page_height;y<=(draw.bottom-1)/color_page_height;++y)
                 for (unsigned x=draw.left/64;x<=(draw.right-1)/64;++x)
                     pages[(draw.base/32+y*draw.pitch+x)%512]=true;
             for (unsigned y=draw.top/32;y<=(draw.bottom-1)/32;++y)

@@ -2,6 +2,7 @@
 #include <nt/ee_completions.hpp>
 #include <nt/ee_submission_policy.hpp>
 #include <nt/ee_packet_batch.hpp>
+#include <nt/ee_handlers.hpp>
 #include <array>
 #include <optional>
 #include <span>
@@ -20,6 +21,7 @@ struct NativePacketConsumer {
     bool (*working)(void*)=nullptr;
     std::size_t (*accepted)(void*,unsigned)=nullptr;
     void (*cancel)(void*,unsigned)=nullptr;
+    Stop (*receive)(void*,unsigned,std::span<std::uint8_t>)=nullptr;
 };
 class NativePacketSubmission {
 public:
@@ -29,6 +31,7 @@ public:
         if (completion_base>7) throw std::invalid_argument("Native submission completion range exceeds available events");
     }
     NativePacketConsumer consumer;
+    CodeOverlap protection=nullptr;
     NativeSubmissionPolicy policy;
     static bool maps(std::uint32_t address) { return address>=0x10008000 && address<0x1000b000; }
     IoRead read(std::uint32_t address) const {
@@ -63,6 +66,32 @@ public:
         // consumer, normal forward transfer and a complete bounded source.
         if (!(value&0x100)) { config[0]=value; armed_[channel]=false; return Stop::budget; }
         const auto mode=value&0xc;
+        if (direction_==Direction::selectable && !(value&1)) {
+            // TAG/ASP/TTE/TIE describe chain traversal; they are retained
+            // metadata in normal mode and do not alter this byte transfer.
+            if (channel!=1 || (value&0x0000fe0fU) || !config[2] || !policy.enabled() ||
+                !consumer.receive || !memory.completions) return Stop::unsupported_system;
+            const auto size=config[2]*16U;
+            std::span<const std::uint8_t> target;
+            const auto checked=NativePacketBatch::view(memory,config[1],size,target);
+            if (checked!=Stop::budget) return checked;
+            const bool scratch=(config[1]&0x80000000U)!=0;
+            if (!scratch) {
+                if (!protection) return Stop::invalid_state;
+                if (protection(runtime::default_ram_address(config[1]),size)) {
+                    memory.fault_address=config[1]; return Stop::code_write;
+                }
+            }
+            std::vector<std::uint8_t> output(size);
+            const auto received=consumer.receive(consumer.context,channel,output);
+            if (received!=Stop::budget) return received;
+            auto* base=scratch ? memory.scratchpad : memory.data;
+            const auto offset=scratch ? config[1]&0x3fffU : runtime::default_ram_address(config[1]);
+            std::memcpy(base+offset,output.data(),size);
+            config[0]=value&~0x100U; config[1]+=size; config[2]=0;
+            memory.completions->complete(completion_base_+channel); memory.completions->publish(memory);
+            return Stop::budget;
+        }
         if ((direction_==Direction::selectable && !(value&1)) || (mode!=0 && mode!=4) ||
             (value&0x0000fe02U) || ((value>>4)&3)==3 || ((channel==2 || direction_==Direction::fixed_input) && (value&0x40)) || !consumer.consume || !memory.completions)
             return Stop::unsupported_system;

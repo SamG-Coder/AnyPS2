@@ -2,6 +2,7 @@
 #include "raster_hazards.hpp"
 #include "sprite_mapping.hpp"
 #include <algorithm>
+#include <bitset>
 #include <chrono>
 #include <cstring>
 #include <map>
@@ -104,8 +105,9 @@ struct NativeRaster::Impl {
     void* readback_mapping=nullptr;
     struct Image {
         VkDevice device; VkImage image{}; VkDeviceMemory memory{}; VkImageView view{};
-        unsigned width,height,base=0,pitch=0; bool depth=false,dirty=false,valid=true,scratch=false;
-        std::uint64_t revision=0; Region region{};
+        unsigned width,height,base=0,pitch=0,format=0; bool depth=false,dirty=false,valid=true,scratch=false;
+        std::uint64_t revision=0,last_use=0,scope=0; Region region{};
+        std::array<std::uint64_t,512> pages{};
         VkDeviceSize allocation_bytes=0;
         Image(VkDevice d,unsigned w,unsigned h):device(d),width(w),height(h) {}
         ~Image() {
@@ -114,7 +116,8 @@ struct NativeRaster::Impl {
             if (memory) vkFreeMemory(device,memory,nullptr);
         }
     };
-    std::map<std::tuple<unsigned,unsigned,bool>,std::unique_ptr<Image>> surfaces;
+    std::map<std::tuple<unsigned,unsigned,unsigned>,std::unique_ptr<Image>> surfaces;
+    std::uint64_t surface_use=0,surface_scope=1;
     struct Texture {
         std::unique_ptr<Image> image; Region region; bool valid=false;
         std::uint64_t last_use=0,source_revision=0;
@@ -122,6 +125,7 @@ struct NativeRaster::Impl {
     VkDeviceSize texture_bytes=0;
     std::uint64_t texture_use=0;
     std::array<std::uint64_t,512> source_revisions{};
+    std::array<std::uint64_t,512> backing_revisions{};
     void touch(Region region) {
         const auto count=std::min(512U,((region.start%2048)+region.length+2047)/2048);
         if (region.length) for (unsigned i=0;i<count;++i) source_revisions[(region.start/2048+i)%512]=revision;
@@ -146,6 +150,7 @@ struct NativeRaster::Impl {
     DisplayField previous_field=DisplayField::progressive;
     DisplayPlan resolved_plan{};
     std::uint64_t resolved_revision=0;
+    std::array<std::uint64_t,2> resolved_sources{};
     RasterHazards hazards;
     VkFramebuffer current_framebuffer{};
     unsigned current_width=0,current_height=0;
@@ -163,9 +168,12 @@ struct NativeRaster::Impl {
         std::span<const std::uint32_t> fs,unsigned colors,bool coverage);
     std::unique_ptr<Image> image(unsigned width,unsigned height);
     void upload_image(Image&,std::span<const std::uint32_t>);
-    void copy_display_pages(Image& destination,const Image& source);
+    void copy_surface_pages(Image& destination,const Image& source,const std::bitset<512>& requested);
+    void written(Image&,const Sprite&);
+    bool current(const Image&,const Sprite&) const;
     void export_image(Image&); void synchronize_source(Region); void clear_views();
-    Image& surface(unsigned base,unsigned pitch,unsigned height,bool depth,bool scratch=false,bool display=false);
+    void trim_surfaces();
+    Image& surface(unsigned base,unsigned pitch,unsigned height,bool depth,bool scratch=false,bool display=false,const Sprite* draw=nullptr,unsigned format=0);
     Image& display_surface(unsigned base,unsigned pitch,unsigned height);
     Image& texture(const SpriteCommand&);
     Image& reconstruct(const DisplayPlan&);
@@ -456,6 +464,10 @@ void NativeRaster::Impl::upload_image(Image& image,std::span<const std::uint32_t
 }
 void NativeRaster::Impl::export_image(Image& image) {
     if (!image.dirty || image.scratch) return;
+    std::bitset<512> newer;
+    for (unsigned page=0;page<512;++page)
+        if (image.pages[page]>backing_revisions[page]) newer.set(page);
+    if (newer.none()) { image.dirty=false; return; }
     Measure timing(stats.surface_export_ns,profiling);
     order();
     VkBufferImageCopy copy{}; copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; copy.imageExtent={image.width,image.height,1};
@@ -465,8 +477,18 @@ void NativeRaster::Impl::export_image(Image& image) {
     // directly from the mapped allocation for every pixel.
     std::vector<std::uint32_t> pixels(std::size_t(image.width)*image.height);
     std::memcpy(pixels.data(),readback_mapping,pixels.size()*sizeof(pixels[0]));
-    for (unsigned y=0;y<image.height;++y) for (unsigned x=0;x<image.width;++x)
-        source[rgba_word(image.base,image.pitch,x,y)^(image.depth ? 0x600 : 0)]=pixels[std::size_t(y)*image.width+x];
+    for (unsigned y=0;y<image.height;++y) for (unsigned x=0;x<image.width;++x) {
+        const auto half=image.format ? rgba_halfword(image.base,image.pitch,x,y,image.format==10) : 0;
+        const auto address=image.format ? half/2 : rgba_word(image.base,image.pitch,x,y)^(image.depth ? 0x600 : 0);
+        if (newer[address/2048]) {
+            const auto pixel=pixels[std::size_t(y)*image.width+x];
+            if (image.format) {
+                const auto shift=(half%2)*16;
+                source[address]=(source[address]&~(65535U<<shift))|(pack_rgba16(pixel)<<shift);
+            } else source[address]=pixel;
+        }
+    }
+    for (unsigned page=0;page<512;++page) if (newer[page]) backing_revisions[page]=image.pages[page];
     // Once the writer becomes clean, surface() can no longer discover it via
     // dirty dependencies. Invalidate older aliases before retiring that link.
     for (auto& [key,other]:surfaces)
@@ -485,72 +507,171 @@ void NativeRaster::Impl::clear_views() {
     field_sets.clear();
     checked(vkResetDescriptorPool(device,descriptor_pool,0),"Reset native resource descriptors");
 }
-void NativeRaster::Impl::copy_display_pages(Image& destination,const Image& source) {
+void NativeRaster::Impl::trim_surfaces() {
+    // Retire descriptors and queued users before releasing an image. Keep the
+    // current draw/display's acquired views alive while resolving its remaining
+    // resources. Dirty pages must reach backing storage before their owner goes.
+    clear_views();
+    while (surfaces.size()>=48) {
+        auto oldest=surfaces.end();
+        for (auto it=surfaces.begin();it!=surfaces.end();++it)
+            if (it->second && it->second->scope!=surface_scope &&
+                (oldest==surfaces.end() || it->second->last_use<oldest->second->last_use)) oldest=it;
+        if (oldest==surfaces.end()) throw std::runtime_error("Native surface cache has no unreferenced view");
+        export_image(*oldest->second);
+        // export_image can record transfers referencing this image.
+        flush();
+        surfaces.erase(oldest); ++stats.surface_evictions;
+    }
+}
+void NativeRaster::Impl::copy_surface_pages(Image& destination,const Image& source,const std::bitset<512>& requested) {
     // A full storage page is 64x32 pixels. Depth's address XOR 0x600
     // permutes its four 32x16 tiles, without changing the page number.
     const bool permute=destination.depth!=source.depth;
     const unsigned tile_width=permute ? 32 : 64,tile_height=permute ? 16 : 32;
     std::vector<VkImageCopy> copies;
+    std::bitset<512> copied;
     for (unsigned y=0;y<destination.height;y+=tile_height)
         for (unsigned x=0;x<destination.width;x+=tile_width) {
-            const unsigned page=(destination.base/32+(y/32)*destination.pitch+x/64-source.base/32)&511;
+            const unsigned storage_page=(destination.base/32+(y/32)*destination.pitch+x/64)&511;
+            if (!requested[storage_page]) continue;
+            if (source.pages[storage_page]<=destination.pages[storage_page]) continue;
+            const unsigned page=(storage_page-source.base/32)&511;
             const unsigned sx=(page%source.pitch)*64+((x%64)^(permute ? 32 : 0));
             const unsigned sy=(page/source.pitch)*32+((y%32)^(permute ? 16 : 0));
             if (sx+tile_width>source.width || sy+tile_height>source.height) continue;
+            copied.set(storage_page);
             VkImageCopy copy{};
             copy.srcSubresource=copy.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
             copy.srcOffset={int(sx),int(sy),0}; copy.dstOffset={int(x),int(y),0};
-            copy.extent={tile_width,tile_height,1}; copies.push_back(copy);
+            copy.extent={tile_width,tile_height,1};
+            if (!copies.empty()) {
+                auto& previous=copies.back();
+                if (previous.srcOffset.y==copy.srcOffset.y && previous.dstOffset.y==copy.dstOffset.y &&
+                    previous.srcOffset.x+int(previous.extent.width)==copy.srcOffset.x &&
+                    previous.dstOffset.x+int(previous.extent.width)==copy.dstOffset.x) {
+                    previous.extent.width+=tile_width; continue;
+                }
+            }
+            copies.push_back(copy);
         }
     if (copies.empty()) return;
+    // Contiguous pages are ordinary image rectangles. Merge adjacent rows
+    // as well as columns instead of issuing a transfer region per GS tile.
+    std::size_t count=0;
+    for (const auto copy:copies) {
+        if (count) {
+            auto& previous=copies[count-1];
+            if (previous.srcOffset.x==copy.srcOffset.x && previous.dstOffset.x==copy.dstOffset.x &&
+                previous.extent.width==copy.extent.width &&
+                previous.srcOffset.y+int(previous.extent.height)==copy.srcOffset.y &&
+                previous.dstOffset.y+int(previous.extent.height)==copy.dstOffset.y) {
+                previous.extent.height+=copy.extent.height; continue;
+            }
+        }
+        copies[count++]=copy;
+    }
+    copies.resize(count);
     order();
     vkCmdCopyImage(command,source.image,VK_IMAGE_LAYOUT_GENERAL,destination.image,VK_IMAGE_LAYOUT_GENERAL,
         static_cast<unsigned>(copies.size()),copies.data());
+    for (unsigned page=0;page<512;++page) if (copied[page]) destination.pages[page]=source.pages[page];
+    destination.dirty=true;
+    destination.revision=revision;
 }
-NativeRaster::Impl::Image& NativeRaster::Impl::surface(unsigned base,unsigned pitch,unsigned height,bool depth,bool scratch,bool display) {
+void NativeRaster::Impl::written(Image& image,const Sprite& draw) {
+    image.dirty=true; image.revision=revision;
+    // Allocated height is a cache capacity, not the footprint of this draw.
+    // Full pages retain earlier pixels because surface() resolves aliases before
+    // recording writes. Track only pages intersecting the clipped draw bounds.
+    if (image.base%32) {
+        const auto count=std::min(512U,((image.region.start%2048)+image.region.length+2047)/2048);
+        for (unsigned i=0;i<count;++i) {
+            const auto page=(image.region.start/2048+i)%512;
+            image.pages[page]=source_revisions[page]=revision;
+        }
+    } else for (unsigned y=draw.top/(image.format ? 64:32);y<=(draw.bottom-1)/(image.format ? 64:32);++y)
+        for (unsigned x=draw.left/64;x<=(draw.right-1)/64;++x) {
+            const auto page=(image.base/32+y*image.pitch+x)&511;
+            image.pages[page]=source_revisions[page]=revision;
+        }
+}
+bool NativeRaster::Impl::current(const Image& image,const Sprite& draw) const {
+    if (image.scratch) return true;
+    if (!image.valid || image.base%32) return false;
+    for (unsigned y=draw.top/(image.format ? 64:32);y<=(draw.bottom-1)/(image.format ? 64:32);++y)
+        for (unsigned x=draw.left/64;x<=(draw.right-1)/64;++x) {
+            const auto page=(image.base/32+y*image.pitch+x)&511;
+            if (image.pages[page]!=source_revisions[page]) return false;
+        }
+    return true;
+}
+NativeRaster::Impl::Image& NativeRaster::Impl::surface(unsigned base,unsigned pitch,unsigned height,bool depth,bool scratch,bool display,const Sprite* draw,unsigned format) {
     Measure timing(stats.surface_lookup_ns,profiling);
-    const auto key=std::tuple(scratch ? 0x10000U : base|(display ? 0x20000U : 0U),pitch,depth); const unsigned width=pitch*64;
-    height=(height+31)&~31U;
+    const auto key=std::tuple(scratch ? 0x10000U : base|(display ? 0x20000U : 0U),pitch,depth ? 1U : format); const unsigned width=pitch*64;
+    const auto page_height=format ? 64U : 32U;
+    height=(height+page_height-1)&~(page_height-1);
     if (!pitch || width>4032 || !height || height>2048) throw std::runtime_error("Invalid native render surface dimensions");
-    if (!surfaces.contains(key) && surfaces.size()>=64)
-        throw std::runtime_error("Native render-surface budget exceeded (64 live views)");
+    if (!surfaces.contains(key) && surfaces.size()>=64) trim_surfaces();
     if (std::uint64_t(width)*height>store_words)
         throw std::runtime_error("Aliased oversized framebuffer requires explicit resource conversion");
     auto& slot=surfaces[key];
     if (slot && slot->height<height) { export_image(*slot); clear_views(); slot.reset(); }
-    const auto requested=region(base,pitch,width,slot ? slot->height : height);
-    bool compose=display && base%32==0 && width<=2048;
+    if (slot) { slot->last_use=++surface_use; slot->scope=surface_scope; }
+    if (slot && draw && current(*slot,*draw)) return *slot;
+    const auto requested=region(base,pitch,width,(slot ? slot->height : height)/(format ? 2:1));
+    std::bitset<512> requested_pages;
+    if (draw && base%32==0) {
+        for (unsigned y=draw->top/page_height;y<=(draw->bottom-1)/page_height;++y)
+            for (unsigned x=draw->left/64;x<=(draw->right-1)/64;++x)
+                requested_pages.set((base/32+y*pitch+x)&511);
+    } else for (unsigned page=0;page<512;++page)
+        if (requested.overlaps({page*2048,2048})) requested_pages.set(page);
+    bool compose=!scratch && !format && base%32==0 && width<=2048;
     std::vector<Image*> writers;
     if (compose) {
         for (auto& [other_key,other]:surfaces) if (other && other->dirty && other->region.overlaps(requested)) {
-            if (!other->valid || other->scratch || other->base%32 || other->width>2048) { compose=false; break; }
+            if (!other->valid || other->scratch || other->format || other->base%32 || other->width>2048) { compose=false; break; }
             writers.push_back(other.get());
         }
         std::sort(writers.begin(),writers.end(),[](auto a,auto b){return a->revision<b->revision;});
     }
     if (!slot) {
         if (!scratch && !compose) synchronize_source(requested); slot=image(width,height);
-        slot->base=base; slot->pitch=pitch; slot->depth=depth; slot->scratch=scratch;
-        slot->region=scratch ? Region{} : region(base,pitch,width,height); slot->valid=false;
+        slot->base=base; slot->pitch=pitch; slot->depth=depth; slot->scratch=scratch; slot->format=format;
+        slot->region=scratch ? Region{} : requested; slot->valid=false;
+        slot->last_use=++surface_use; slot->scope=surface_scope;
     }
-    for (auto& [other_key,other]:surfaces) if (other && other.get()!=slot.get() && other->dirty && other->revision>slot->revision && other->region.overlaps(slot->region)) {
+    for (auto& [other_key,other]:surfaces) if (other && other.get()!=slot.get() && other->dirty && other->region.overlaps(slot->region) &&
+        [&] { for (unsigned page=0;page<512;++page)
+            if (requested_pages[page] && other->pages[page]>slot->pages[page]) return true;
+            return false; }()) {
         ++stats.surface_conflicts;
         stats.last_surface_conflict={slot->base,slot->pitch,slot->height,unsigned(slot->depth),
             other->base,other->pitch,other->height,unsigned(other->depth)};
-        if (!compose) synchronize_source(slot->region);
-        slot->valid=false; break;
+        if (!compose) { synchronize_source(slot->region); slot->valid=false; }
+        break;
     }
+    bool changed=!slot->valid;
     if (!slot->valid) {
         Measure timing(stats.surface_import_ns,profiling);
         std::vector<std::uint32_t> pixels(std::size_t(width)*slot->height);
-        if (!scratch) for (unsigned y=0;y<slot->height;++y) for (unsigned x=0;x<width;++x)
-            pixels[std::size_t(y)*width+x]=source[rgba_word(base,pitch,x,y)^(depth ? 0x600 : 0)];
+        if (!scratch) for (unsigned y=0;y<slot->height;++y) for (unsigned x=0;x<width;++x) {
+            const auto half=format ? rgba_halfword(base,pitch,x,y,format==10) : 0;
+            pixels[std::size_t(y)*width+x]=format ? expand_rgba16((source[half/2]>>((half%2)*16))&65535U) :
+                source[rgba_word(base,pitch,x,y)^(depth ? 0x600 : 0)];
+        }
         upload_image(*slot,pixels);
-        // Only the read-only display alias is composed. Writers stay dirty so
-        // genuine CPU consumers still synchronize through the existing path.
-        if (compose) for (const auto* writer:writers) copy_display_pages(*slot,*writer);
-        slot->revision=revision;
+        slot->pages=backing_revisions;
+        slot->dirty=false;
     }
+    // Preserve the target's existing pixels and merge only newer overlapping
+    // writers, in publication order. Page-aligned color/depth aliases can share
+    // native GPU copies; CPU consumers retain the explicit export path.
+    if (compose) for (const auto* writer:writers) if (writer!=slot.get()) {
+        copy_surface_pages(*slot,*writer,requested_pages);
+    }
+    if (changed) slot->revision=revision;
     return *slot;
 }
 NativeRaster::Impl::Image& NativeRaster::Impl::display_surface(unsigned base,unsigned pitch,unsigned height) {
@@ -708,7 +829,9 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
         auto found=surfaces.find({d.texture_base,d.texture_pitch,false});
         if (found!=surfaces.end() && found->second && found->second->valid &&
             found->second->width>=width && found->second->height>=height) {
-            auto& from=*found->second;
+            // A draw may have resolved only its touched pages. Sampling the
+            // image must first resolve all pages of the requested source view.
+            auto& from=surface(d.texture_base,d.texture_pitch,height,false);
             if (!tex.valid || tex.image->revision!=from.revision) {
                 order(); VkImageCopy copy{}; copy.srcSubresource=copy.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; copy.extent={width,height,1};
                 vkCmdCopyImage(this->command,from.image,VK_IMAGE_LAYOUT_GENERAL,tex.image->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
@@ -805,7 +928,7 @@ std::uint64_t NativeRaster::completed_submission() {
 }
 void NativeRaster::upload(std::span<const std::uint32_t> words) {
     if (words.size()!=store_words) throw std::runtime_error("Invalid native resource import");
-    auto& r=*impl_; r.clear_views(); r.surfaces.clear(); r.textures.clear(); r.texture_bytes=0; r.source_revisions={}; std::copy(words.begin(),words.end(),r.source.begin()); r.initialized=true; ++r.revision;
+    auto& r=*impl_; r.clear_views(); r.surfaces.clear(); r.textures.clear(); r.texture_bytes=0; r.source_revisions={}; r.backing_revisions={}; std::copy(words.begin(),words.end(),r.source.begin()); r.initialized=true; ++r.revision;
     r.field_count=0; r.previous_field=DisplayField::progressive; r.resolved_revision=0;
 }
 void NativeRaster::read(std::span<std::uint32_t> words) {
@@ -837,6 +960,7 @@ void NativeRaster::write(std::span<const PixelWrite> writes) {
         const Region changed{first,last-first+1};
         for (auto& [k,s]:r.surfaces) if (s && s->region.overlaps(changed)) s->valid=false;
         ++r.revision; r.touch(changed);
+        for (unsigned page=first/2048;page<=last/2048;++page) r.backing_revisions[page]=r.revision;
     }
 }
 void NativeRaster::draw(std::span<const SpriteCommand> commands) {
@@ -863,23 +987,30 @@ void NativeRaster::draw(std::span<const SpriteCommand> commands) {
             (!(x.flags&64) || a.palette==b.palette);
     };
     const auto emit=[&](SpriteCommand c,unsigned height) {
+        ++r.surface_scope;
         // An enabled NEVER alpha test always takes its failure action. FB_ONLY
         // and RGB_ONLY cannot write depth. With an ALWAYS depth comparison they
         // do not read it either: avoid creating dependencies on an unused image.
         const auto failure=(c.draw.test>>12)&3U;
         if ((c.draw.test&15U)==1U && (failure==1 || failure==3))
             c.draw.flags&=~depth_write_flag;
+        if ((c.draw.test&15U)==1U && failure==2) c.draw.mask=0xffffffffU;
         if (((c.draw.test>>17)&3U)==1U && !(c.draw.flags&depth_write_flag))
             c.draw.flags&=~depth_test_flag;
         const auto& d=c.draw;
         if (r.records_used==records_per_slot) r.flush(VK_NULL_HANDLE,VK_NULL_HANDLE,false);
         const auto& previous=cached_command.draw;
         const bool reuse=cached_color && previous.base==d.base && previous.pitch==d.pitch &&
+            (previous.flags&(color_16_flag|color_16s_flag))==(d.flags&(color_16_flag|color_16s_flag)) &&
             (previous.flags&depth_test_flag)==(d.flags&depth_test_flag) &&
             (!(d.flags&depth_test_flag) || previous.depth_base==d.depth_base) &&
-            cached_color->height>=height && cached_depth->height>=height && same_texture(c,cached_command);
-        auto& color=reuse ? *cached_color : r.surface(d.base,d.pitch,height,false);
-        auto& depth=reuse ? *cached_depth : r.surface((d.flags&depth_test_flag) ? d.depth_base : 0,d.pitch,height,true,!(d.flags&depth_test_flag));
+            cached_color->height>=height && cached_depth->height>=height && same_texture(c,cached_command) &&
+            r.current(*cached_color,d) && r.current(*cached_depth,d);
+        const unsigned format=(d.flags&color_16_flag) ? ((d.flags&color_16s_flag) ? 10 : 2) : 0;
+        auto& color=reuse ? *cached_color : r.surface(d.base,d.pitch,height,false,false,false,&d,format);
+        color.scope=r.surface_scope; color.last_use=++r.surface_use;
+        auto& depth=reuse ? *cached_depth : r.surface((d.flags&depth_test_flag) ? d.depth_base : 0,d.pitch,height,true,!(d.flags&depth_test_flag),false,&d);
+        depth.scope=r.surface_scope; depth.last_use=++r.surface_use;
         auto& texture=reuse ? *cached_texture : r.texture(c);
         if (!reuse) {
             cached_color=nullptr;
@@ -895,12 +1026,11 @@ void NativeRaster::draw(std::span<const SpriteCommand> commands) {
         }
         const auto set=r.bind_target(color,depth,texture,d);
         { Measure timing(r.stats.draw_record_ns,r.profiling); r.append_draw(set,c); }
-        color.dirty=true; color.revision=++r.revision;
+        ++r.revision;
         { Measure timing(r.stats.invalidate_ns,r.profiling);
-        r.touch(color.region);
-        if (d.flags&depth_write_flag) r.touch(depth.region);
+        if (d.mask!=0xffffffffU) r.written(color,d);
+        if ((d.flags&depth_test_flag) && (d.flags&depth_write_flag)) r.written(depth,d);
         }
-        if ((d.flags&depth_test_flag) && (d.flags&depth_write_flag)) { depth.dirty=true; depth.revision=r.revision; }
         if (d.flags&triangle_flag) ++r.stats.triangles; else ++r.stats.sprites;
     };
     for (const auto& c:commands) {
@@ -913,6 +1043,7 @@ void NativeRaster::draw(std::span<const SpriteCommand> commands) {
     }
 }
 NativeRaster::Impl::Image& NativeRaster::Impl::reconstruct(const DisplayPlan& plan) {
+    ++surface_scope;
     if (!initialized || !plan.width || !plan.height || plan.width>2048 || plan.height>2048)
         throw std::runtime_error("Invalid native field output");
     if (display_image && resolved_revision==revision && std::memcmp(&resolved_plan,&plan,sizeof(plan))==0)
@@ -921,7 +1052,7 @@ NativeRaster::Impl::Image& NativeRaster::Impl::reconstruct(const DisplayPlan& pl
         clear_views();
         display_image=image(plan.width,plan.height);
         for (auto& field:fields) field=image(plan.width,plan.height);
-        field_count=0; field_index=0; previous_field=DisplayField::progressive;
+        field_count=0; field_index=0; previous_field=DisplayField::progressive; resolved_revision=0;
     }
     Image* inputs[2]{};
     for (unsigned i=0;i<2;++i) if (plan.control&(1U<<i)) {
@@ -931,6 +1062,17 @@ NativeRaster::Impl::Image& NativeRaster::Impl::reconstruct(const DisplayPlan& pl
     if (!inputs[0]) inputs[0]=inputs[1];
     if (!inputs[1]) inputs[1]=inputs[0];
     if (!inputs[0]) throw std::runtime_error("Field output has no source");
+    const std::array<std::uint64_t,2> source_revisions{inputs[0]->revision,inputs[1]->revision};
+    auto content_plan=plan; content_plan.field=resolved_plan.field;
+    if (resolved_revision && source_revisions==resolved_sources &&
+        std::memcmp(&resolved_plan,&content_plan,sizeof(plan))==0) {
+        // A display deadline is not a new field of content. Reconstructing an
+        // unchanged source at the opposite parity moves a stationary image.
+        // Retain its progressive result, but break temporal history across the
+        // missing field so subsequent motion cannot weave with stale samples.
+        if (plan.field!=resolved_plan.field) { field_count=0; previous_field=DisplayField::progressive; }
+        return *display_image;
+    }
     if (previous_field==plan.field || previous_field==DisplayField::progressive) field_count=0;
     auto& set=field_sets[{inputs[0],inputs[1],field_index}];
     if (!set) {
@@ -949,7 +1091,7 @@ NativeRaster::Impl::Image& NativeRaster::Impl::reconstruct(const DisplayPlan& pl
         }
         vkUpdateDescriptorSets(device,writes.size(),writes.data(),0,nullptr);
     }
-    auto constants=plan; constants.history_valid=field_count>=3;
+    auto constants=plan; constants.history_valid=(field_count>=3 ? 1U : 0U)|(resolved_revision ? 2U : 0U);
     order();
     vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_COMPUTE,field_pipeline);
     vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_COMPUTE,field_layout,0,1,&set,0,nullptr);
@@ -957,7 +1099,7 @@ NativeRaster::Impl::Image& NativeRaster::Impl::reconstruct(const DisplayPlan& pl
     vkCmdDispatch(command,(plan.width+7)/8,(plan.height+7)/8,1);
     order();
     field_index=(field_index+1)%4; field_count=std::min(field_count+1,3U); previous_field=plan.field;
-    resolved_plan=plan; resolved_revision=revision;
+    resolved_plan=plan; resolved_revision=revision; resolved_sources=source_revisions;
     return *display_image;
 }
 Scanout NativeRaster::capture(const DisplayPlan& plan) {

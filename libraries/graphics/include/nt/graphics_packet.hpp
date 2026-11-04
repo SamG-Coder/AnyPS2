@@ -34,11 +34,12 @@ struct BatchConsumer {
     void* context=nullptr;
     // Accept the complete ordered batch or leave external state unchanged.
     bool (*submit)(void*,std::span<const Packet>)=nullptr;
-    // Complete all previously accepted native graphics work. Failure may drain
-    // prior work, but must not publish a new batch or alter drawing configuration.
+    // Drain previously accepted commands into the ordered native graphics queue.
+    // This is command consumption, not raster completion; FINISH/readback retain
+    // real GPU fences. Failure must not publish a new batch or alter configuration.
     bool (*wait)(void*)=nullptr;
-    // True only when successful submit has completed every operation before
-    // publishing its result. Allows a trailing fence within an atomic batch.
+    // True when submit consumes every command into that ordered queue before
+    // returning. Allows a trailing command-drain within an atomic batch.
     bool synchronous=false;
 };
 inline std::size_t payload_words(const Quadword& tag) {
@@ -55,12 +56,14 @@ public:
     bool pending() const { return !packet_.empty(); }
     void append(std::span<const std::uint8_t> bytes,std::vector<Packet>& output) {
         constexpr std::size_t limit=65536;
-        if (bytes.empty() || bytes.size()%16 || bytes.size()/16>limit-packet_.size())
+        if (bytes.empty() || bytes.size()%16 || bytes.size()>maximum_batch_bytes)
             throw std::invalid_argument("Invalid graphics stream extent");
         std::size_t offset=0;
         while (offset<bytes.size()) {
             if (!remaining_) {
                 // Only tags need inspection; payload words are opaque data.
+                if (packet_.size()==limit)
+                    throw std::invalid_argument("Graphics stream packet exceeds bound");
                 detail::append_quadwords(packet_,bytes.subspan(offset,16)); offset+=16;
                 const auto& word=packet_.back();
                 remaining_=payload_words(word);
@@ -100,14 +103,8 @@ inline std::vector<Quadword> collect_packet(std::span<const Quadword> ring,unsig
     throw std::invalid_argument("Graphics packet has no end tag within bound");
 }
 inline void append_packets(std::vector<Packet>& packets,std::span<const std::uint8_t> bytes) {
-    if (bytes.empty() || bytes.size()%16 || bytes.size()>65536U*16U)
-        throw std::invalid_argument("Invalid native graphics transfer extent");
-    std::vector<Quadword> words;
-    detail::append_quadwords(words,bytes);
-    std::size_t cursor=0;
-    while (cursor<words.size()) {
-        auto packet=collect_packet(std::span(words).subspan(cursor),0);
-        cursor+=packet.size(); packets.push_back(std::move(packet));
-    }
+    PacketStream stream;
+    stream.append(bytes,packets);
+    if (stream.pending()) throw std::invalid_argument("Incomplete native graphics transfer");
 }
 }

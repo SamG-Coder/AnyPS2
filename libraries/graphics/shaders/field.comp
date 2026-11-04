@@ -17,8 +17,21 @@ void main() {
     uvec2 p=gl_GlobalInvocationID.xy;
     if (p.x>=display.width || p.y>=display.height) return;
     imageStore(current_field,ivec2(p),uvec4(compose_circuits(p.x,p.y)));
+    // Repainting the same source field is not new motion. Resource revisions
+    // can change for redraws or overlapping views outside the displayed area.
+    // Retain the prior reconstruction only where all contributing source rows
+    // are exactly unchanged; neighboring changes still use spatial/temporal
+    // reconstruction below. Each invocation owns one output texel.
+    bool unchanged=(display.history_valid&2)!=0;
+    if (unchanged) {
+        int row=int(p.y/2*2);
+        for (int offset=-2;offset<=2;offset+=2) {
+            uint y=uint(clamp(row+offset,0,int(display.height)-1));
+            unchanged=unchanged && compose_circuits(p.x,y)==texelFetch(previous[0],ivec2(p.x,y),0).r;
+        }
+    }
     uint color=compose_display(p.x,p.y),phase=display.field==2 ? 1:0;
-    if (display.history_valid!=0 && p.y>=phase && ((p.y-phase)&1)!=0) {
+    if ((display.history_valid&1)!=0 && p.y>=phase && ((p.y-phase)&1)!=0) {
         // Weave only when BOTH parities are unchanged in a small vertical
         // neighborhood. Motion, fades, startup and discontinuities use the
         // current field's spatial reconstruction, without temporal trails.
@@ -34,7 +47,9 @@ void main() {
             uint previous_phase=1-phase;
             uint y=p.y>previous_phase ? p.y-previous_phase : 0;
             color=texelFetch(previous[0],ivec2(p.x,y),0).r;
+            imageStore(reconstructed,ivec2(p),uvec4(color)); return;
         }
     }
-    imageStore(reconstructed,ivec2(p),uvec4(color));
+    if (!unchanged || ((display.history_valid&1)!=0 && p.y>=phase && ((p.y-phase)&1)==0))
+        imageStore(reconstructed,ivec2(p),uvec4(color));
 }

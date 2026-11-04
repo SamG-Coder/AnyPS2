@@ -138,6 +138,7 @@ bool commit_pixel(uint color,uint depth,uint mask,bool write_depth) {
     }
     if((draw.flags&32)!=0) color |= 0x80000000;
     output_color=(read_color()&mask)|(color&~mask);
+    if ((draw.flags&134217728)!=0) output_color&=0x80f8f8f8;
 #ifdef ANYPS2_ORDERED_FRAGMENTS
     imageStore(color_image,ivec2(gl_FragCoord.xy),uvec4(output_color));
     if (write_depth && (draw.flags&131072)!=0)

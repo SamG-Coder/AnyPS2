@@ -158,7 +158,7 @@ public:
             return {Stop::budget,previous};
         }
         if (call==0x23 || call==0x24) {
-            if (!has_ready()) return {Stop::syscall};
+            if (!has_ready() && !allow_idle) return {Stop::syscall};
             thread.status=0x10; thread.delete_on_exit=call==0x24;
             return {Stop::budget,state.gpr[2].lo};
         }
@@ -186,7 +186,18 @@ public:
             if (selected==records_.end() || next.priority<selected->second.priority ||
                 (next.priority==selected->second.priority && next.order<selected->second.order)) selected=i;
         }
-        if (selected==records_.end()) return;
+        if (selected==records_.end()) {
+            if (current.status==0x10 && allow_idle) {
+                // The last runnable continuation can exit while native events
+                // own sleeping workers. Retain only an idle interrupt context;
+                // never execute the instruction after Exit[Delete]Thread.
+                const auto previous=current_; const bool erase=current.delete_on_exit;
+                records_.emplace(idle_id,Record{4,0,0,0,0,127,127,0,0});
+                current_=idle_id;
+                if (erase) records_.erase(previous);
+            }
+            return;
+        }
         if (selected->first==current_) { current.status=1; return; }
         current.context=state;
         if (current.status==1) { current.status=2; current.order=next_order_++; }
@@ -194,7 +205,7 @@ public:
         const auto epc=state.cop0_epc,error_epc=state.cop0_error_epc;
         state=selected->second.context; state.executed=executed; state.cop0_status=status;
         state.cop0_epc=epc; state.cop0_error_epc=error_epc;
-        const auto previous=current_; const bool erase=current.delete_on_exit;
+        const auto previous=current_; const bool erase=current.delete_on_exit || current_==idle_id;
         selected->second.status=1; current_=selected->first;
         if (erase) records_.erase(previous);
     }

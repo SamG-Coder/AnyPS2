@@ -96,6 +96,11 @@ behavior; it is not a complete GS replacement. Reference rendering is a separate
 validation path, not a fallback for an unsupported production draw.
 
 Textures and render targets stay GPU resident where their dependencies permit.
+Render-target dependencies track touched storage pages, not cached image capacity.
+PSMCT16/PSMCT16S targets use Vulkan rasterization with packed write-mask and color
+quantization semantics. Switching between 16- and 32-bit storage views currently
+requires ordered host format conversion; color dithering remains unsupported
+when it can affect written channels.
 Asynchronous VU1 submissions publish ordered graphics from completed launches
 while later compiled launches continue. A later failure stops execution and does
 not report submission completion; already accepted graphics remain submitted.

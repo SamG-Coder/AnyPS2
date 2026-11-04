@@ -26,6 +26,118 @@ int main(int argc,char** argv) {
         };
         SpriteCommand clear{{0,0,32,32,0,1,0x80203040,0}};
         {
+            native.upload(std::vector<std::uint32_t>(actual.size(),0x12345678));
+            reference.upload(std::vector<std::uint32_t>(actual.size(),0x12345678));
+            const auto before=native.statistics().surface_evictions;
+            for (unsigned pass=0;pass<2;++pass) for (unsigned i=0;i<100;++i) {
+                SpriteCommand draw{{1,2,31,24,i*32,1,0x80402010U+i,pass ? 0x00ff0000U : 0U}};
+                if (i&1) draw.draw.flags=color_16_flag;
+                native.draw(std::array{draw}); reference.draw(std::array{draw});
+            }
+            std::vector<std::uint32_t> a(actual.size()),b(actual.size());
+            native.read(a); reference.read(b);
+            if (a!=b || native.statistics().surface_evictions==before)
+                throw std::runtime_error("Bounded surface cache lost dirty or reloaded pixels");
+            ++checks;
+        }
+        {
+            // 16-bit render targets share packed storage with 32-bit views.
+            // Exercise both block layouts, wraparound, masks, blending, DATE,
+            // and an intervening 32-bit draw through the same native queue.
+            for (const unsigned format:{2U,10U}) for (const unsigned base:{0U,16352U}) {
+                std::vector<std::uint32_t> seed(actual.size(),0x294a6318);
+                native.upload(seed); reference.upload(seed);
+                SpriteCommand paint{{3,7,91,75,base,2,0x81b752e3,0}};
+                paint.draw.flags=color_16_flag|(format==10 ? color_16s_flag : 0);
+                native.draw(std::array{paint}); reference.draw(std::array{paint});
+                std::vector<std::uint32_t> a(seed.size()),b(seed.size());
+                native.read(a); reference.read(b);
+                const auto half=rgba_halfword(base,2,4,8,format==10);
+                if (((a[half/2]>>((half%2)*16))&65535)!=0xd95cU || a!=b)
+                    throw std::runtime_error("16-bit target quantization/address mapping differs");
+                for (unsigned i=0;i<4;++i) {
+                    SpriteCommand wide{{1,2,47,22,base,2,0x8040a060U+i,0x00ff0000}};
+                    native.draw(std::array{wide}); reference.draw(std::array{wide});
+                    auto masked=paint; masked.draw.mask=i&1 ? 0xffffffU : 0xff00ff00U;
+                    masked.draw.color=0x40703010U+i*0x20202020U;
+                    masked.draw.flags|=256; masked.draw.blend=0x44;
+                    if (i==3) masked.draw.test=0xc000;
+                    native.draw(std::array{masked}); reference.draw(std::array{masked});
+                }
+                native.read(a); reference.read(b);
+                if (a!=b) throw std::runtime_error("16-bit render target masks/blending/alias pixels differ");
+                ++checks;
+            }
+            NativeDrawing drawing(true);
+            Packet packet{{0x8007,0x10000000,14,0},{6,0,0,0},
+                {(2U<<24)|(1U<<16),0,0x4c,0},{63U<<16,63U<<16,0x40,0},
+                {0,0,0x18,0},{0x81b752e3,0,1,0},{16|(16U<<16),0,5,0},{48|(48U<<16),0,5,0}};
+            drawing.submit(native,std::array{packet});
+            const auto half=rgba_halfword(0,1,1,1);
+            if (((drawing.pixels()[half/2]>>((half%2)*16))&65535)!=0xd95cU)
+                throw std::runtime_error("16-bit FRAME packet did not reach native rasterization");
+        }
+        {
+            // Keep a tall cached framebuffer, then alternate writes above and
+            // below its midpoint through overlapping allocation views. Capacity
+            // overlap must not turn disjoint draws into a copy per primitive.
+            std::vector<std::uint32_t> seed(actual.size(),0x80402010);
+            native.upload(seed); reference.upload(seed);
+            SpriteCommand full{{0,0,256,128,0,4,0x80705030,0}};
+            native.draw(std::array{full}); reference.draw(std::array{full});
+            const auto before=native.statistics();
+            for (unsigned i=0;i<256;++i) {
+                SpriteCommand upper{{2,3,110,27,0,4,0x80102030U+i,0x00ff0000}};
+                SpriteCommand lower{{4,7,90,30,256,4,0x80908070U+i,0x0000ff00}};
+                native.draw(std::array{upper,lower}); reference.draw(std::array{upper,lower});
+            }
+            const auto after=native.statistics();
+            if (after.surface_conflicts-before.surface_conflicts>2 || after.readback_bytes!=before.readback_bytes)
+                throw std::runtime_error("Disjoint draws synchronized whole framebuffer allocations");
+            // A compatible batch can move into pages last written through the
+            // alias. Reusing its first draw's bindings must still resolve them.
+            SpriteCommand top{{0,0,128,32,0,4,0x80776655,0xffffff00}};
+            auto bottom=top; bottom.draw.top=64; bottom.draw.bottom=96;
+            native.draw(std::array{top,bottom}); reference.draw(std::array{top,bottom});
+            std::vector<std::uint32_t> a(seed.size()),b(seed.size());
+            native.read(a); reference.read(b);
+            if (a!=b) throw std::runtime_error("Draw page ownership lost untouched alias pixels");
+            ++checks;
+        }
+        {
+            // Alternate overlapping targets with different pitches, wrapped
+            // storage and color/depth interpretations. Native copies must keep
+            // untouched pixels and mask/depth behavior without host readback.
+            for (const unsigned base:{0U,16320U}) for (bool depth:{false,true}) {
+                std::vector<std::uint32_t> seed(actual.size());
+                for (unsigned i=0;i<seed.size();++i) seed[i]=0x80000000U|(i*17&0xffffffU);
+                native.upload(seed); reference.upload(seed);
+                const auto before=native.statistics().readback_bytes;
+                for (unsigned i=0;i<8;++i) {
+                    const unsigned color_base=base+(depth && i>=4 ? 512:0);
+                    SpriteCommand paint{{3,5,75,70,(color_base+(i%2)*32)&16383U,i%2 ? 3U:4U,0x80403020U+i*0x010203U,0}};
+                    paint.draw.mask=i%2 ? 0x0000ff00U : 0;
+                    if (depth) {
+                        paint.draw.flags=depth_test_flag|depth_write_flag;
+                        paint.draw.depth_base=(base+(i<4 ? 512:0))&16383U;
+                        paint.draw.depth=0x1000000U+i; paint.draw.test=1U<<17;
+                    }
+                    native.draw(std::array{paint}); reference.draw(std::array{paint});
+                }
+                if (native.statistics().readback_bytes!=before)
+                    throw std::runtime_error("Page-aligned target aliases required CPU readback");
+                std::vector<std::uint32_t> a(seed.size()),b(seed.size());
+                native.read(a); reference.read(b);
+                if (a!=b) throw std::runtime_error("GPU target alias composition changed ordered pixels");
+                // A later masked CPU write must observe the composed contents.
+                const PixelWrite write{rgba_word(base,4,4,6),0x00550000U,0x00ff0000U};
+                native.write(std::array{write}); reference.write(std::array{write});
+                native.read(a); reference.read(b);
+                if (a!=b) throw std::runtime_error("CPU write lost composed alias contents");
+                ++checks;
+            }
+        }
+        {
             // Fog uses affine vertex factors, a 256 divisor and unchanged alpha.
             // Exercise packed XYZF and the separate FOG latch through real packets.
             for (bool packed:{false,true}) {
@@ -326,6 +438,69 @@ int main(int argc,char** argv) {
                     throw std::runtime_error("Field reconstruction changed progressive output");
                 ++checks;
             }
+        }
+        // Repeating an unchanged source at another display deadline must not
+        // move it. Unrelated drawing does not make it a new source field.
+        {
+            std::vector<std::uint32_t> pixels(actual.size());
+            for (unsigned y=0;y<4;++y) pixels[rgba_word(0,1,0,y)]=y*64;
+            native.upload(pixels);
+            const std::array<std::uint64_t,2> displays{5ULL<<44,5ULL<<44};
+            auto plan=*plan_display(2,{0,1ULL<<9},displays,true,0,DisplayField::even);
+            const auto first=native.scanout_readback(plan);
+            plan.field=DisplayField::odd;
+            if (native.scanout_readback(plan).pixels!=first.pixels)
+                throw std::runtime_error("Repeated display source shifted at an unchanged field deadline");
+            native.write(std::array{PixelWrite{rgba_word(64,1,0,0),0x12345678,0xffffffff}});
+            if (native.scanout_readback(plan).pixels!=first.pixels)
+                throw std::runtime_error("Unrelated upload shifted a repeated display source");
+            const PixelWrite changed{rgba_word(0,1,0,1),0x000000e0,0xffffffff};
+            native.write(std::array{changed}); pixels[changed.address]=changed.value;
+            const auto moved=native.scanout_readback(plan);
+            if (moved.pixels==first.pixels || moved.pixels!=scanout(pixels,plan).pixels)
+                throw std::runtime_error("Changed display source retained stale reconstruction or history");
+            plan.surfaces[1].y=1;
+            if (native.scanout_readback(plan).pixels!=scanout(pixels,plan).pixels)
+                throw std::runtime_error("Display origin change retained the old reconstruction");
+            ++checks;
+        }
+        // Identical fields repainted into alternating targets must not bob.
+        // Revisions and target identities change, so this exercises GPU content
+        // comparison rather than the CPU unchanged-resource shortcut.
+        {
+            native.upload(std::vector<std::uint32_t>(actual.size()));
+            const std::array<std::uint64_t,2> displays{(7ULL<<32)|(7ULL<<44),(7ULL<<32)|(7ULL<<44)};
+            std::vector<std::uint32_t> first;
+            for (unsigned field=0;field<8;++field) {
+                const unsigned base=(field&1)*32;
+                std::array<SpriteCommand,4> stripes{};
+                for (unsigned y=0;y<4;++y) stripes[y].draw={0,y,8,y+1,base,1,0xff000000U|y*64,0};
+                native.draw(stripes);
+                const auto plan=*plan_display(2,{0,(1ULL<<9)|(base/32)},displays,true,0,
+                    field&1 ? DisplayField::odd : DisplayField::even);
+                const auto frame=native.scanout_readback(plan);
+                if (!field || field==3) first=frame.pixels;
+                else if (frame.pixels!=first) throw std::runtime_error("Repainted identical fields moved vertically");
+            }
+            ++checks;
+        }
+        {
+            // Shared rows between the two fields must still converge to real
+            // interlaced detail, not retain an early spatial interpolation.
+            const std::array<unsigned,8> rows{0,0,64,128,128,128,192,255};
+            std::vector<std::uint32_t> pixels(actual.size());
+            for (unsigned y=0;y<8;++y) pixels[rgba_word((y&1)*32,1,0,y/2)]=rows[y];
+            native.upload(pixels);
+            const std::array<std::uint64_t,2> displays{7ULL<<44,7ULL<<44};
+            for (unsigned field=0;field<8;++field) {
+                const auto plan=*plan_display(2,{0,(1ULL<<9)|(field&1)},displays,true,0,
+                    field&1 ? DisplayField::odd : DisplayField::even);
+                const auto frame=native.scanout_readback(plan);
+                if (field>=3) for (unsigned y=1;y<7;++y)
+                    if (frame.pixels[y]!=(0xff000000U|rows[y]))
+                        throw std::runtime_error("Unchanged-region retention suppressed interlaced detail");
+            }
+            ++checks;
         }
         // Static alternating scan lines must stop flickering after history is
         // established. Changes in either parity must reject stale field data.
@@ -635,7 +810,9 @@ int main(int argc,char** argv) {
                 worker.submit(std::span(&batch,1));
                 batch[5][0]=0x8000ffffU; // Reuse producer storage immediately.
             }
-            worker.wait();
+            worker.drain();
+            // Draining commands does not publish FINISH itself. Completion
+            // still comes from retired Vulkan queue fences.
             native.synchronize(); asynchronous.poll_completions(native);
             if (asynchronous.completed_finishes()!=32 || asynchronous.pixels()[0]!=0x8000001fU)
                 throw std::runtime_error("Deferred FINISH lost completion or draw ordering");

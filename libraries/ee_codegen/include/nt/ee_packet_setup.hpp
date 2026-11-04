@@ -41,6 +41,7 @@ public:
     void* upload_context=nullptr;
     void (*uncompiled_upload)(void*,unsigned,unsigned,std::span<const std::uint8_t>)=nullptr;
     void (*uncompiled_packet)(void*,unsigned,std::span<const std::uint8_t>)=nullptr;
+    bool reverse_output() const { return reverse_output_; }
     static bool maps(std::uint32_t address) { return address>=0x10003000 && address<0x10007000; }
     IoRead read(std::uint32_t address) const {
         if (address%16) return {Stop::unsupported_system};
@@ -61,7 +62,7 @@ public:
         const auto& unit=units_[channel];
         switch (field) {
         case 0: return {Stop::budget,(deferred_[channel] ? 4U : 0U)|(unit.stopped ? 0x100U : 0U)|(unit.broken ? 0x200U : 0U)|
-            (unit.interrupt_stall ? 0x400U : 0U)|(unit.interrupt ? 0x800U : 0U)|(unit.double_buffer ? 0x80U : 0U)};
+            (unit.interrupt_stall ? 0x400U : 0U)|(unit.interrupt ? 0x800U : 0U)|(unit.double_buffer ? 0x80U : 0U)|(channel && reverse_output_ ? 0x800000U : 0U)};
         case 2: return {Stop::budget,unit.error_mask};
         case 3: return {Stop::budget,unit.mark};
         case 4: return {Stop::budget,unit.cycle};
@@ -93,12 +94,14 @@ public:
         auto& unit=units_[channel];
         switch (field) {
         case 0:
-            return channel && (value&0x800000) ? Stop::unsupported_system : Stop::budget;
+            if (channel) reverse_output_=(value&0x800000)!=0;
+            return Stop::budget;
         case 1:
             if (value&2) unit.broken=true;
             if (value&4) unit.stopped=true;
             if (value&8) unit.broken=unit.stopped=unit.interrupt=unit.interrupt_stall=false;
             if (value&1) {
+                if (channel) reverse_output_=false;
                 unit.broken=unit.stopped=unit.interrupt=unit.interrupt_stall=false;
                 unit.error_mask=0; pending_[channel]={}; interrupt_events_&=~(1U<<channel);
             }
@@ -164,6 +167,7 @@ public:
         return Stop::budget;
     }
 private:
+    bool reverse_output_=false;
     Stop consume_segment(unsigned channel,std::span<const std::uint8_t> bytes,bool vector_active,std::size_t& consumed,
                          std::span<const NativePacketOrigin> origins={},std::size_t source_offset=0) {
         if (channel==2) {

@@ -76,6 +76,27 @@ void bulk_transfers() {
     bool rejected=false;
     try {PacketStream stream; stream.append(bytes.first(17),result);} catch(const std::invalid_argument&) {rejected=true;}
     if (!rejected) throw std::runtime_error("Bulk packet framing accepted incomplete quadword");
+    // Two tags form one maximum-sized packet; a batch can contain several.
+    Packet full(65536);
+    full[0]={32767,0x08000000,0,0}; full[32768]={0xffff,0x08000000,0,0};
+    std::vector<std::uint8_t> large(full.size()*16*2);
+    std::memcpy(large.data(),full.data(),full.size()*16);
+    std::memcpy(large.data()+full.size()*16,full.data(),full.size()*16);
+    const auto large_bytes=std::span(large);
+    for (const unsigned split:{16U,32768U*16,65535U*16,65536U*16+16}) {
+        PacketStream stream; result.clear();
+        stream.append(large_bytes.first(split),result);
+        stream.append(large_bytes.subspan(split),result);
+        if (stream.pending() || result!=std::vector<Packet>{full,full})
+            throw std::runtime_error("Aggregate framing rejected valid packets across a split");
+    }
+    result.clear(); append_packets(result,large_bytes);
+    if (result!=std::vector<Packet>{full,full}) throw std::runtime_error("Complete batch framing changed payloads");
+    // Removing EOP must not permit the next tag to grow the existing packet.
+    large[32768*16+1]&=0x7f;
+    rejected=false; result.clear();
+    try {PacketStream stream; stream.append(large_bytes,result);} catch(const std::invalid_argument&) {rejected=true;}
+    if (!rejected || !result.empty()) throw std::runtime_error("Oversized individual packet escaped its bound");
 }
 }
 
@@ -134,6 +155,30 @@ int main(int argc,char**) {
         native.submit(gpu,std::array{setup32,rgba,packet});
         for (unsigned pixel=0;pixel<4;++pixel)
             if (native.pixels()[pixel]!=0x80604020) throw std::runtime_error("Draw after image upload lost ordering");
+        {
+            // The readback snapshots preceding GPU writes and preserves packed
+            // storage bits across split host requests, without display conversion.
+            for (unsigned format:{0U,1U,2U,10U,19U,20U}) {
+                nt::graphics::Packet download{{0x8004,0x10000000,14,0}};
+                const auto put=[&](unsigned reg,std::uint64_t value) {
+                    download.push_back({std::uint32_t(value),std::uint32_t(value>>32),reg,0});
+                };
+                put(0x50,(1ULL<<16)|(std::uint64_t(format)<<24)); put(0x51,0);
+                put(0x52,9|(3ULL<<32)); put(0x53,1);
+                const auto saved=native.pixels();
+                const auto expected=nt::graphics::ImageDownload::begin((1ULL<<16)|(std::uint64_t(format)<<24),0,9|(3ULL<<32)).pack(saved);
+                native.submit(gpu,std::array{download});
+                std::vector<std::uint8_t> too_large(expected.size()+16,0xcc);
+                bool rejected=false;
+                try { native.readback(too_large); } catch (const std::invalid_argument&) { rejected=true; }
+                if (!rejected || native.readback_bytes()!=expected.size()) throw std::runtime_error("Invalid readback consumed output");
+                native.submit(gpu,std::array{packet});
+                std::vector<std::uint8_t> output(expected.size());
+                native.readback(std::span(output).first(16));
+                if (output.size()>16) native.readback(std::span(output).subspan(16));
+                if (output!=expected || native.readback_bytes()) throw std::runtime_error("Readback lost GPU ordering or split output");
+            }
+        }
         const auto odd_rgba=transfer_setup(0,3,2);
         const nt::graphics::Packet rgba_tail{{0x8001,0x08000000,0,0},{0x81abcdef,0x82abcdef,0xffffffff,0xffffffff}};
         const auto before_odd=native.pixels();

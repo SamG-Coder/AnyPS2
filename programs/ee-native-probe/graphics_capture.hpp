@@ -22,7 +22,7 @@ public:
     }
     void reset() { if (!display_only_) { reserve(4); word(2); } }
     bool ready() const {
-        return frames_count_<(display_only_ ? 120U : 128U) &&
+        return frames_count_<(display_only_ ? 360U : 128U) &&
             image_bytes_<1024ULL*1024*1024 && std::chrono::steady_clock::now()>=next_frame_;
     }
     void submit(std::span<const nt::graphics::Packet> packets) {
@@ -48,7 +48,7 @@ public:
         // Short consecutive bursts expose field alternation without making
         // readback/PPM I/O dominate every display deadline during the run.
         if (display_only_) {
-            if (++burst_frames_==6) { burst_frames_=0; next_frame_=now+std::chrono::seconds(2); }
+            if (++burst_frames_==6) { burst_frames_=0; next_frame_=now+std::chrono::seconds(10); }
         } else next_frame_=now+std::chrono::milliseconds(500);
         const auto hash=nt::fingerprint({reinterpret_cast<const std::uint8_t*>(frame.pixels.data()),frame.pixels.size()*4});
         if (frames_count_ && hash==last_hash_ && half_height==last_half_height_) return;
