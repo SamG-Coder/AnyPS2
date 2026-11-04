@@ -185,10 +185,24 @@ public:
                     if (checked.status!=NativeServiceStatus::returned) return checked;
                 }
             }
-            next.registers[29]=stack_top-16; next.registers[30]=next.registers[29];
+            // The entry ABI leaves a 0xb8-byte initialized startup frame,
+            // whose 0x98-byte register image ends at the initial SP. The
+            // compiled function may reuse these bytes as its first locals.
+            // Scheduling still owns Cpu directly; this is entry memory only.
+            constexpr std::uint32_t startup_size=0xb8;
+            const auto startup=stack_top-startup_size;
+            const auto checked=writable(ram,startup,startup_size);
+            if (checked.status!=NativeServiceStatus::returned) return checked;
+            next.registers[29]=stack_top-0x20; next.registers[30]=next.registers[29];
             next.registers[31]=thread_return;
             ready_.push_back(id);
             if (source) std::memmove(ram.data()+stack_top,ram.data()+*source,count);
+            std::fill_n(ram.begin()+startup,startup_size,0);
+            store_native_word(ram,startup,0xfffffffeU);
+            for (unsigned reg=1;reg<32;++reg) store_native_word(ram,startup+reg*4,next.registers[reg]);
+            store_native_word(ram,startup+0x88,0x404U|(thread.attributes&8U));
+            store_native_word(ram,startup+0x8c,next.pc);
+            store_native_word(ram,startup+0x90,1);
             thread.cpu=next; thread.wakeups=0; thread.wait_id=0; thread.priority=thread.initial_priority; thread.status=Status::ready;
             thread.delivery_enabled=true;
             return current_ ? NativeServiceReply{NativeServiceStatus::yielded} : returned();

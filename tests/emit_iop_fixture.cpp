@@ -1123,16 +1123,19 @@ int main(int argc,char** argv) {
             0x0040f809,0,0x0200f821,0x03e00008,0};
         for (unsigned i=0;i<std::size(assigned_callback);++i) display_word(0x11280+i*4,assigned_callback[i]);
         bundle_roots.push_back(0x11280);
-        nt::elf::IopModule registry_client{0x12000,0x12060,nt::Bytes(0x100),0x100,{}};
+        nt::elf::IopModule registry_client{0x12000,0x120b0,nt::Bytes(0x180),0x180,{}};
         fixture::put32(registry_client.memory,0,0x41e00000);
         fixture::put32(registry_client.memory,8,0x101);
         std::copy(std::begin(registry_library),std::end(registry_library),registry_client.memory.begin()+12);
         fixture::put32(registry_client.memory,0x14,0x03e00008); fixture::put32(registry_client.memory,0x18,0x24000000);
         fixture::put32(registry_client.memory,0x40,0x03e00008); fixture::put32(registry_client.memory,0x44,0x24020057);
-        constexpr std::uint32_t registry_register[]{0x03e08021,0x3c040001,0x34842080,0x0c004805,0,0x0200f821,0x03e00008,0};
-        for (unsigned i=0;i<std::size(registry_register);++i) fixture::put32(registry_client.memory,0x60+i*4,registry_register[i]);
+        // Build a callback field at runtime; there is no data relocation for it.
+        constexpr std::uint32_t registry_register[]{0x03e08021,0x3c080001,0x350820a0,0x3c090001,0x35292120,0xad280000,
+            0x3c040001,0x34842080,0x0c004805,0,0x0200f821,0x03e00008,0};
+        for (unsigned i=0;i<std::size(registry_register);++i) fixture::put32(registry_client.memory,0xb0+i*4,registry_register[i]);
         fixture::put32(registry_client.memory,0x80,0x03e00008); fixture::put32(registry_client.memory,0x84,0x24020063);
         registry_client.code_addresses={0x12040};
+        fixture::put32(registry_client.memory,0xa0,0x03e00008); fixture::put32(registry_client.memory,0xa4,0x24020065);
         {
             const std::array roots{0x11100U};
             const auto discovered=nt::iop_codegen::ir::discover(display,roots);
@@ -1525,6 +1528,8 @@ int main(int argc,char** argv) {
             if (std::find(received.begin(),received.end(),0x12080)==received.end())
                 throw std::runtime_error("Registry lost a callback constructed and passed by its compiled client");
             const auto& targets=discovered.instructions.at(0x11118).targets;
+            if (!discovered.instructions.contains(0x120a0) || std::find(targets.begin(),targets.end(),0x120a0)==targets.end())
+                throw std::runtime_error("Registry lost a callback stored into its client's descriptor");
             if (!discovered.instructions.contains(0x12040) || std::find(targets.begin(),targets.end(),0x12040)==targets.end())
                 throw std::runtime_error("Registry client callback was not compiled in its owning module");
         }

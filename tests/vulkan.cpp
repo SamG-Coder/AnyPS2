@@ -1,5 +1,6 @@
 #include "indexed_textures.hpp"
 #include "rgba16_uploads.hpp"
+#include "palette16_textures.hpp"
 #include <nt/vulkan_renderer.hpp>
 #include <nt/native_drawing.hpp>
 #include <iostream>
@@ -229,7 +230,7 @@ int main(int argc,char**) {
         set_palette(0);
         native.submit(gpu,std::array{indexed});
         if (native.pixels()[2048]!=0x80110004) throw std::runtime_error("Rejected palette batch published palette state");
-        auto bad_palette=indexed; bad_palette[6][1]|=(2U<<19)|(1U<<29); rejected=false;
+        auto bad_palette=indexed; bad_palette[6][1]|=(3U<<19)|(1U<<29); rejected=false;
         try { native.submit(gpu,std::array{bad_palette}); }
         catch (const std::invalid_argument&) { rejected=true; }
         if (!rejected || native.pixels()!=palette_snapshot) throw std::runtime_error("Unsupported palette format changed pixels");
@@ -571,6 +572,7 @@ int main(int argc,char**) {
         }
         indexed8_textures(gpu,argc>1);
         rgba16_uploads(gpu,argc>1);
+        palette16_textures(gpu,argc>1);
         if (gpu.validation_errors()) throw std::runtime_error("Vulkan validation reported errors");
         std::cout << "Vulkan sprite readback verified on " << gpu.device_name() << "; validation errors=0\n";
     } catch (const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}

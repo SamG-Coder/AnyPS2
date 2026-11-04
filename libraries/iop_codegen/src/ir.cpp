@@ -739,6 +739,14 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
         }
         auto candidates=stored_code_candidates(program,states,data_modules);
         for (const auto& library:libraries) candidates.erase(library.address);
+        // A client may build its registration descriptor with address-forming
+        // instructions and stores, rather than relocated data words. Publish
+        // these compilation candidates along the same import/export edges.
+        // They do not prove the contents of a mutable registry at execution.
+        if (outgoing_callbacks) for (const auto& import:program.library_imports) {
+            auto& callbacks=(*outgoing_callbacks)[{import.library,unsigned(import.version>>8)}];
+            callbacks.insert(candidates.begin(),candidates.end());
+        }
         if (!module.code_addresses.empty()) {
             std::vector<std::uint32_t> registry_sites;
             for (const auto& [pc,instruction]:program.instructions)

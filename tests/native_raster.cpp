@@ -1,4 +1,5 @@
 #include "indexed_textures.hpp"
+#include "palette16_textures.hpp"
 #include <nt/vulkan_renderer.hpp>
 #include <nt/native_drawing_worker.hpp>
 #include <chrono>
@@ -714,6 +715,7 @@ int main(int argc,char** argv) {
             if (!failed) throw std::runtime_error("Failed drawing worker reported success");
         }
         indexed8_textures(native,true);
+        palette16_textures(native,true);
         if (native.validation_errors()) throw std::runtime_error(native.validation_message());
         if (reference.validation_errors()) throw std::runtime_error(reference.validation_message());
         if (argc>1 && !native.statistics().texture_kernel_dispatches)

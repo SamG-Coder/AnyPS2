@@ -19,7 +19,10 @@ inline void plan_texture(Sprite& draw,std::uint64_t texture,
     draw.flags|=1|(format==1 ? 2U : 0U)|(((texture>>34)&1) ? 4U : 0U)|(function<<3);
     if (format==19 || format==20) {
         const unsigned palette_format=(texture>>51)&15;
-        if (palette_format>1) throw std::invalid_argument("Unsupported 16-bit palette sampling");
+        if (palette_format>1 && palette_format!=2 && palette_format!=10)
+            throw std::invalid_argument("Unsupported palette sampling format");
+        if ((palette_format==2 || palette_format==10) && format==19 && ((texture>>56)&31)>16)
+            throw std::invalid_argument("16-bit palette sampling across palette capacity is unsupported");
         draw.flags|=64|(palette_format==1 ? 2U : 0U);
         if (format==19) draw.flags|=indexed8_flag;
     }

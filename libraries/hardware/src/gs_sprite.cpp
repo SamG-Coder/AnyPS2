@@ -1,6 +1,7 @@
 #include <nt/gs.hpp>
 #include <nt/sprite_plan.hpp>
 #include <nt/sprite_texture.hpp>
+#include <nt/palette_plan.hpp>
 #include <algorithm>
 
 namespace nt::hardware {
@@ -32,7 +33,11 @@ void Gs::draw_sprite(const Vertex& first, const Vertex& last) {
     }
     writable_local();
     if (!renderer_) renderer_=std::make_shared<graphics::VulkanRenderer>();
-    const auto bank=(drawing_[6+context]>>56)&15;
-    renderer_->sprite(*local_,draw,std::span(palette_).subspan(bank*16,16));
+    const bool narrow=graphics::palette_is16(drawing_[6+context]);
+    const auto bank=(drawing_[6+context]>>56)&(narrow ? 31 : 15);
+    std::array<std::uint32_t,256> colors{};
+    const auto selected=std::span(colors).first((draw.flags&graphics::indexed8_flag) ? 256 : 16);
+    graphics::snapshot_palette(selected,palette_,unsigned(bank),narrow,drawing_[0x3b]);
+    renderer_->sprite(*local_,draw,selected);
 }
 }

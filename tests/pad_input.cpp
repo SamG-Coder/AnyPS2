@@ -24,6 +24,18 @@ int main(int argc,char**) {
             auto exchange=[&] { return pad.exchange({&item,1}); };
             check(exchange() && item.acknowledged && response[1]==0x41 && response[3]==0xf7 && response[4]==0xbf,
                   "Compiled driver digital report must use host buttons");
+            request[1]=0x46;
+            for (unsigned motor=0;motor<2;++motor) {
+                request[3]=static_cast<std::uint8_t>(motor);
+                check(exchange() && response[1]==0x41 && response[5]==1 && response[6]==(motor ? 1 : 2),
+                      "Actuator query before configuration must retain the current mode");
+            }
+            request[1]=0x44; request[3]=1; request[4]=3;
+            check(exchange() && response[1]==0x41,"Supported mode request outside configuration");
+            request[1]=0x45;
+            check(exchange() && response[1]==0x73 && response[5]==1,"Mode change must update capability reports");
+            request[1]=0x44; request[3]=0; request[4]=0;
+            check(exchange(),"Restore digital mode after capability negotiation");
             request[1]=0x43; request[3]=1;
             check(exchange() && response[1]==0x41,"Configuration entry reports previous mode");
             request[1]=0x45;

@@ -45,6 +45,7 @@ The principal source areas consulted at those pins are:
 - **IOP and native services:** PS2SDK `iop/system`, `iop/kernel`, `iop/fs`, `iop/cdvd`,
   `iop/network`, `iop/usb`, `iop/input`, `iop/sound`, `ee/rpc`, plus public
   `libsd-common.h`, `fileio-common.h`, `sifcmd-common.h` and `sifrpc-common.h`;
+  PS2SDK `threadman/src/thbase.c` and `thcommon.c` for thread-entry stack ABI;
   Play! `Source/iop/IopBios.cpp`, `Iop_FileIo*` and `Iop_Sysclib*`.
 - **Transfers and vector work:** PCSX2 `Sif0.cpp`, `Sif1.cpp`, `Dmac.cpp`, `Hw*.cpp`,
   `SPR.cpp`, `Gif_Unit.h`, `Vif*.cpp`, `Vif.h`, `VUops.cpp`, `VUflags.cpp`,
@@ -55,10 +56,12 @@ The principal source areas consulted at those pins are:
   `GSDrawScanline.cpp`, `GSDeviceVK::DoMerge`, Vulkan `tfx.glsl` and `merge.glsl`;
   `Counters.cpp`, `MTGS.cpp` and `GSRenderer.cpp` for field/display ordering.
   The image importer independently implements PSMCT16/PSMCT16S address-bit
-  permutations checked against the public GS format tables.
+  permutations checked against the public GS format tables. Palette conversion
+  preserves CSM1/CSM2 selection, shared 16/32-bit entry storage and draw-time TEXA expansion.
 - **Input and audio:** PS2SDK PADMAN `sio2Cmds.c`, `padCmds.c`, `libpad.c`, audsrv,
   `iopheap.c`, `tools/adpenc/src/adpcm.c`, LIBSD `voice.c` and `block.c`;
-  PCSX2 `SIO/Sio2.cpp`, `SIO/SioTypes.h` and `SPU2/Mixer.cpp`;
+  PCSX2 `SIO/Sio2.cpp`, `SIO/SioTypes.h`, `SIO/Pad/PadDualshock2.cpp` (command negotiation)
+  and `SPU2/Mixer.cpp`;
   public psx-spx controller and USB HID specifications.
 
 Native services replace supported operations with explicit host ownership and

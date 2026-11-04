@@ -19,6 +19,9 @@ public:
         : sample_(std::move(sample)),rumble_(std::move(rumble)) {}
     std::uint64_t polls() const { return polls_; }
     unsigned rejected_command() const { return rejected_; }
+    unsigned rejected_argument() const { return rejected_argument_; }
+    bool rejected_config() const { return rejected_config_; }
+    bool rejected_rumble() const { return rejected_rumble_; }
     bool exchange(std::span<NativePortExchange> batch) {
         if (batch.size()>16) return false;
         auto next=ports_;
@@ -43,7 +46,10 @@ public:
             const auto command=request[1]; rejected_=command;
             auto& port=next[item.port];
             const bool config=port.config;
-            if (command!=0x42 && command!=0x43 && !config) return false;
+            rejected_argument_=request.size()>3 ? request[3] : 0;
+            rejected_config_=config; rejected_rumble_=snapshot.rumble && bool(rumble_);
+            // Configuration changes the reported mode byte. It is not a gate
+            // on supported commands; some drivers query capabilities first.
             reply.fill(0); reply[0]=0xff;
             reply[1]=config ? 0xf3 : port.analog ? 0x73 : 0x41;
             reply[2]=0x5a;
@@ -135,5 +141,7 @@ private:
     std::array<Port,2> ports_{};
     std::uint64_t polls_=0;
     unsigned rejected_=0;
+    unsigned rejected_argument_=0;
+    bool rejected_config_=false,rejected_rumble_=false;
 };
 }

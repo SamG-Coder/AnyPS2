@@ -77,7 +77,7 @@ public:
             for (const auto& operation:draws) {
                 if (const auto* draw=std::get_if<Draw>(&operation)) {
                     SpriteCommand command{draw->sprite,{},draw->triangle,draw->fog_color,draw->fog};
-                    snapshot_palette(std::span(command.palette).first((draw->sprite.flags&indexed8_flag) ? 256 : 16),candidate.palette,draw->bank);
+                    snapshot_palette(std::span(command.palette).first((draw->sprite.flags&indexed8_flag) ? 256 : 16),candidate.palette,draw->bank,draw->palette16,draw->texa);
                     pending.push_back(command);
                     if (pending.size()==256) flush();
                     continue;
@@ -85,7 +85,10 @@ public:
                 // Preserve palette, resource-upload and FINISH boundaries.
                 flush();
                 if (const auto* load=std::get_if<PaletteLoad>(&operation)) {
-                    renderer.read_words(load->addresses,std::span(candidate.palette).subspan(load->bank*16,load->addresses.size()));
+                    std::array<std::uint32_t,256> words{};
+                    const auto selected=std::span(words).first(load->addresses.size());
+                    renderer.read_words(load->addresses,selected);
+                    apply_palette(candidate.palette,selected,*load);
                 } else if (std::holds_alternative<Finish>(operation)) {
                     // Native queue tokens preserve FINISH ordering without blocking
                     // command consumption on every texture switch.
@@ -114,7 +117,7 @@ public:
         for (const auto& operation:draws) {
             if (const auto* draw=std::get_if<Draw>(&operation)) {
                 SpriteCommand command{draw->sprite,{},draw->triangle,draw->fog_color,draw->fog};
-                snapshot_palette(std::span(command.palette).first((draw->sprite.flags&indexed8_flag) ? 256 : 16),candidate.palette,draw->bank);
+                snapshot_palette(std::span(command.palette).first((draw->sprite.flags&indexed8_flag) ? 256 : 16),candidate.palette,draw->bank,draw->palette16,draw->texa);
                 sprites.push_back(command);
             } else {
                 flush();
@@ -134,7 +137,7 @@ public:
     }
 private:
     using ImageWrites=std::vector<PixelWrite>;
-    struct Draw { Sprite sprite; unsigned bank; std::array<RasterVertex,3> triangle{}; std::uint32_t fog_color=0,fog=0; };
+    struct Draw { Sprite sprite; unsigned bank; std::array<RasterVertex,3> triangle{}; std::uint32_t fog_color=0,fog=0; bool palette16=false; std::uint64_t texa=0; };
     struct Finish {};
     using Operation=std::variant<Draw,ImageWrites,PaletteLoad,Finish>;
     struct Workspace {
@@ -155,7 +158,8 @@ private:
         std::array<Context,2> contexts;
         unsigned primitive=0,attributes=0,color=0,x=0,y=0;
         unsigned scan_mask=0;
-        std::uint32_t uv=0,first_uv=0,texa=0;
+        std::uint32_t uv=0,first_uv=0;
+        std::uint64_t texa=0;
         std::uint32_t s=0,t=0,q=0x3f800000,packed_q=0x3f800000;
         std::uint32_t fog_color=0,fog=0;
         bool use_primitive=false,first=false;
@@ -207,7 +211,7 @@ private:
             // Mipmap sampling remains checked by plan_sprite_texture; setup
             // alone does not require fetching any mip level.
             state.contexts[reg&1].mipmap_bases[(reg-0x34)/2]=value; return;
-        case 0x3b: state.texa=std::uint32_t(value); return;
+        case 0x3b: state.texa=value; return;
         case 0x3d: state.fog_color=std::uint32_t(value)&0xffffffU; return;
         case 0x3f: return; // Coherent native texture storage has no deferred cache contents.
         case 0x1a: state.use_primitive=(value&1)!=0; return;
@@ -275,7 +279,7 @@ private:
                     plan_texture(draw->draw,context.texture,context.filter,context.clamp,state.texa);
                     if (!(attributes&256)) draw->draw.flags|=perspective_triangle_flag;
                 }
-                draws.push_back(Draw{draw->draw,unsigned((context.texture>>56)&15),draw->triangle,state.fog_color,state.fog});
+                draws.push_back(Draw{draw->draw,unsigned((context.texture>>56)&(palette_is16(context.texture) ? 31 : 15)),draw->triangle,state.fog_color,state.fog,palette_is16(context.texture),state.texa});
             }
             return;
         }
@@ -303,7 +307,7 @@ private:
                 plan_sprite_texture(*draw,attributes,context.texture,context.filter,context.clamp,state.texa,context.offset,
                     state.x,state.y,x,y,state.first_uv,state.uv);
             }
-            draws.push_back(Draw{*draw,unsigned((context.texture>>56)&15),{},state.fog_color,state.fog});
+            draws.push_back(Draw{*draw,unsigned((context.texture>>56)&(palette_is16(context.texture) ? 31 : 15)),{},state.fog_color,state.fog,palette_is16(context.texture),state.texa});
         }
     }
     static void configure_draw(const State& state,const Context& context,unsigned attributes,Sprite& draw) {

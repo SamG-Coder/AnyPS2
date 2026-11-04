@@ -2000,9 +2000,9 @@ int main() {
             check(run_native(nt_iop_generated_run,start_stack,ram,1,&stack_services).reason==NativeStop::budget,
                   "Stack-check worker start failed");
             const auto result=stack_threads.run(nt_iop_generated_run,ram,32,stack_services);
-            if (entry==0x19bc) check(result.reason==NativeStop::unmapped_code && stack_threads.state(id).registers[2]==0x1f0,
+            if (entry==0x19bc) check(result.reason==NativeStop::unmapped_code && stack_threads.state(id).registers[2]==0x1e0,
                                        "Stack query did not report the owned stack's remaining bytes");
-            else check(result.reason==NativeStop::address_fault && result.address==0xde70 &&
+            else check(result.reason==NativeStop::address_fault && result.address==0xde60 &&
                        stack_threads.state(id).pc==0x19bc && stack_threads.state(id).executed==3,
                        "Low-stack check retired or fabricated a successful result");
             auto no_stack=initial(); no_stack.pc=0x19bc;
@@ -2097,8 +2097,13 @@ int main() {
         const auto starter_id=lifecycle.admit(starter);
         check(lifecycle.run(nt_iop_generated_run,ram,32,lifecycle_services).reason==NativeStop::unmapped_code &&
               lifecycle.state(worker_id).registers[2]==47 && lifecycle.state(worker_id).registers[28]==0x1234 &&
-              lifecycle.state(worker_id).registers[29]==0xdff0 && lifecycle.state(starter_id).executed==1,
+              lifecycle.state(worker_id).registers[29]==0xdfe0 && lifecycle.state(starter_id).executed==1,
               "StartThread did not dispatch its higher-priority compiled worker with argument, GP and stack");
+        check(load_native_word(ram,0xdf48)==0xfffffffeU && load_native_word(ram,0xdf58)==42 &&
+              load_native_word(ram,0xdfb8)==0x1234 && load_native_word(ram,0xdfbc)==0xdfe0 &&
+              load_native_word(ram,0xdfb0)==0 && ram[0xdf47]==0xff,
+              "Thread startup did not initialize its ABI frame without clearing the stack below it");
+        store_native_word(ram,0xdfb0,0xdeadbeef);
         check(lifecycle.run(nt_iop_generated_run,ram,32,lifecycle_services).reason==NativeStop::unmapped_code &&
               lifecycle.state(starter_id).registers[2]==0,"StartThread caller did not resume after its worker");
         starter.registers[5]=7;
@@ -2107,6 +2112,8 @@ int main() {
               lifecycle.state(worker_id).registers[2]==12 &&
               lifecycle.run(nt_iop_generated_run,ram,32,lifecycle_services).reason==NativeStop::unmapped_code,
               "Dormant compiled thread could not be restarted with fresh arguments");
+        check(load_native_word(ram,0xdfb0)==0 && load_native_word(ram,0xdf58)==7,
+              "Restart retained stale startup locals or arguments");
         auto deleter=starter; deleter.pc=0x194c;
         const auto deleter_id=lifecycle.admit(deleter);
         check(lifecycle.run(nt_iop_generated_run,ram,32,lifecycle_services).reason==NativeStop::unmapped_code &&
@@ -2199,9 +2206,12 @@ int main() {
         const auto args_parent=args_threads.admit(args_start);
         check(args_threads.run(nt_iop_generated_run,ram,32,args_services).reason==NativeStop::unmapped_code &&
               args_threads.state(args_worker).registers[2]==43 && args_threads.state(args_worker).registers[4]==3 &&
-              args_threads.state(args_worker).registers[5]==0xdff0 && args_threads.state(args_worker).registers[29]==0xdfe0 &&
-              args_threads.state(args_worker).registers[30]==0xdfe0 && ram[0xdff0]==40 && ram[0xdff1]==7 && ram[0xdff2]==9,
+              args_threads.state(args_worker).registers[5]==0xdff0 && args_threads.state(args_worker).registers[29]==0xdfd0 &&
+              args_threads.state(args_worker).registers[30]==0xdfd0 && ram[0xdff0]==40 && ram[0xdff1]==7 && ram[0xdff2]==9,
               "StartThreadArgs did not copy its block or provide the native worker ABI");
+        check(load_native_word(ram,0xdf38)==0xfffffffeU && load_native_word(ram,0xdf48)==3 &&
+              load_native_word(ram,0xdf4c)==0xdff0 && load_native_word(ram,0xdfa0)==0,
+              "Argument-thread startup did not initialize the frame below its copied arguments");
         ram[0xc500]=99;
         check(ram[0xdff0]==40 && args_threads.run(nt_iop_generated_run,ram,32,args_services).reason==NativeStop::unmapped_code &&
               args_threads.state(args_parent).registers[2]==0,"Worker argument block retained the caller source or lost its caller");
@@ -2444,12 +2454,12 @@ int main() {
             auto missing=waiting(4);
             check(run_native(nt_iop_generated_run,missing,display_ram,4,&unconnected).reason==NativeStop::import_request,
                   "Unconnected display wait fabricated completion");
-            for (auto target : {0x111a0U,0x12040U,0x111b0U,0U}) {
+            for (auto target : {0x111a0U,0x12040U,0x120a0U,0x111b0U,0U}) {
                 store_native_word(display_ram,0x18000,target);
                 auto cpu=initial(); cpu.pc=0x11100; cpu.registers[4]=0x18000; cpu.registers[5]=0;
                 const auto stop=run_native(nt_iop_generated_run,cpu,display_ram,64);
                 check(stop.reason==NativeStop::unmapped_code &&
-                      (target==0x111a0 || target==0x12040 ? cpu.pc==0x5000 && cpu.registers[2]==(target==0x111a0 ? 73U : 87U) :
+                      (target==0x111a0 || target==0x12040 || target==0x120a0 ? cpu.pc==0x5000 && cpu.registers[2]==(target==0x111a0 ? 73U : target==0x12040 ? 87U : 101U) :
                        target ? stop.address==target && cpu.pc==0x11118 : cpu.pc==0x5000),
                       "Returned registry callback did not execute or reject an unknown target");
             }
