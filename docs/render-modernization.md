@@ -234,9 +234,36 @@ outputs. Capture several histories: initial menu, animated menu object, entering
 settings and returning. Keep captures and generated game artifacts under ignored
 `work/`; never commit commercial data.
 
-The supplied SFV is only a checksum manifest, not game/menu bytes. No commercial
-input or complete capture was available for this branch's initial validation.
-A game menu test has therefore not been extracted or executed.
+### Measured submission structure
+
+`ps2-native --capture-vectors` (on `main`) records accepted vector submissions
+per displayed frame. A private capture of a 3D menu scene, with the program
+running on compiled native VU code, showed the conventional producer structure
+this design assumes:
+
+- About 1,800 VU1 launches per frame from about a dozen program entries, each
+  preceded by a few data unpacks: roughly 10,000 unpacks and 2 MiB per frame,
+  with no microcode uploads and little direct graphics data.
+- About 93% of unpacked bytes were identical to the previous frame. They were
+  vertex-like streams (three- and two-component 32-bit words, packed 8/16-bit
+  four-component data) written to rotating input buffers.
+- The changing remainder was small four-component float blocks (3-16 quadwords)
+  written to a few fixed destinations: per-object parameter blocks.
+- Every hot VU block was the body of a backward-branching loop in a program that
+  ends batches with graphics kicks.
+
+This motivates, in order: content-identified resident GPU streams for unchanged
+unpacks; per-launch parameter blocks as uniforms; and lifting the per-vertex loops
+to vertex shaders. Caching uploads by content is semantics-preserving on its own,
+but the CPU saving requires the lifted program to run on the GPU. Memoizing whole
+launches is not sufficient here: the parameters change every frame in an animated
+scene, so outputs change even when streams do not. Role assignment must still come
+from program dataflow, not from observed change rates.
+
+The present loop frontend rejects all of these loops at its first check: they use
+branch-pair and delay-slot work, other counter forms, auto-increment memory, the
+I register, EFU and conversion operations, and MAC-flag tests. Gate 1 below must
+cover these generally.
 
 The next implementation gates are concrete:
 
