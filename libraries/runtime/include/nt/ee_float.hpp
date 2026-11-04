@@ -15,22 +15,22 @@ inline FiniteFloatResult multiply_accumulate_finite(std::uint32_t accumulator,st
     return add_subtract_finite(accumulator,product.bits,subtract);
 }
 
+// A 32-bit integer converts exactly to a host double. Clearing the low 29
+// double significand bits chops it to 24 bits, and the float conversion of
+// that representable value is exact in every host rounding mode.
 inline std::uint32_t integer_to_scalar(std::uint32_t bits) {
-    const auto sign = bits & 0x80000000U;
-    const auto magnitude = sign ? 0U-bits : bits;
-    if (!magnitude) return 0;
-    const unsigned high = 31U-static_cast<unsigned>(std::countl_zero(magnitude));
-    const auto fraction = high > 23 ? magnitude >> (high-23) : magnitude << (23-high);
-    return sign | ((high+127)<<23) | (fraction & 0x7fffff);
+    const auto exact=std::bit_cast<std::uint64_t>(static_cast<double>(static_cast<std::int32_t>(bits)));
+    return std::bit_cast<std::uint32_t>(static_cast<float>(std::bit_cast<double>(exact&~((1ULL<<29)-1))));
 }
+// Chop toward zero and saturate. Exponents 127..157 are below 2^31 in magnitude,
+// where the host truncating conversion is exact; other ranges are selected.
 inline std::uint32_t scalar_to_integer(std::uint32_t bits) {
     const auto exponent=(bits>>23)&255;
     const bool negative=(bits>>31)!=0;
-    if (exponent<127) return 0;
-    if (exponent>=158) return negative ? 0x80000000U : 0x7fffffffU;
-    const auto significand=(bits&0x7fffff)|0x800000;
-    const auto magnitude=exponent>=150 ? significand << (exponent-150) : significand >> (150-exponent);
-    return negative ? 0U-magnitude : magnitude;
+    const auto in_range=exponent<158 ? bits : 0U;
+    const auto truncated=static_cast<std::uint32_t>(static_cast<std::int32_t>(std::bit_cast<float>(in_range)));
+    const auto saturated=negative ? 0x80000000U : 0x7fffffffU;
+    return exponent<127 ? 0U : exponent>=158 ? saturated : truncated;
 }
 inline std::uint32_t min_max_scalar(std::uint32_t a, std::uint32_t b, bool maximum) {
     const auto key=[](std::uint32_t value) { return (value>>31) ? ~value : value|0x80000000U; };
@@ -45,9 +45,10 @@ inline std::uint32_t integer_to_scaled_scalar(std::uint32_t bits,unsigned scale)
 }
 inline std::uint32_t scaled_scalar_to_integer(std::uint32_t bits,unsigned scale) {
     const auto exponent=(bits>>23)&255;
-    if (!exponent) return 0;
-    if (exponent+scale>=158) return bits>>31 ? 0x80000000U : 0x7fffffffU;
-    return scalar_to_integer(bits+(scale<<23));
+    // Exponent zero is signed zero; a scaled exponent at or beyond 158 saturates.
+    const auto saturated=bits>>31 ? 0x80000000U : 0x7fffffffU;
+    const auto converted=scalar_to_integer(exponent && exponent+scale<158 ? bits+(scale<<23) : 0U);
+    return !exponent ? 0U : exponent+scale>=158 ? saturated : converted;
 }
 struct ScalarFlagResult { std::uint32_t bits, flags; bool supported=true; };
 inline ScalarFlagResult divide_finite(std::uint32_t a,std::uint32_t b,bool extended=false) {

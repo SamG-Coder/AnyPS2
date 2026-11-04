@@ -120,45 +120,75 @@ public:
         pending.push_back({"i32",remaining,offset});
         commit();
     }
-    // Status reduction is a function of the published MAC word. For queue slots
-    // filled in this block, reuse the producer's reduced Z/S/U/O bits instead
-    // of reducing the stored MAC word again; unread MAC words then become dead.
-    std::array<std::string,4> queued_status_bits{};
+    // The four-entry MAC queue is tracked at conversion time. A slot holds an
+    // entry value (valid by the entry mask), a value produced in this block
+    // (valid), or a stale value (invalid). Publication becomes straight-line
+    // selects; queue memory is written once by commit_mac_queue. Stale slot
+    // contents follow the per-pair queue exactly, including that an idle
+    // queue (no valid slot) is not shifted.
+    struct MacSlot { std::string mac,sticky,bits,valid; };
+    std::array<MacSlot,4> mac_queue{};
     std::string status_with(const std::string& bits,const std::string& previous) {
         return value("or i32 "+value("and i32 "+previous+", 4080")+", "+value("or i32 "+bits+", "+value("shl i32 "+bits+", 6")));
     }
-    void advance_mac() {
+    std::string select_value(const std::string& condition,const std::string& type,const std::string& yes,const std::string& no) {
+        if (condition=="true" || yes==no) return yes;
+        if (condition=="false") return no;
+        return value("select i1 "+condition+", "+type+" "+yes+", "+type+" "+no);
+    }
+    // The queue mask has four validity bits; producers only set bit 3.
+    void load_mac_queue() {
         const auto mask=load("i32",offsetof(State,pending_mac_mask));
-        const auto idle=value("icmp eq i32 "+mask+", 0");
-        const auto label="mac_queue"+std::to_string(next_++);
-        out<<"  br i1 "<<idle<<", label %"<<label<<"_idle, label %"<<label<<"_active\n"<<label<<"_active:\n";
-        const auto previous=value("select i1 "+idle+", i32 "+load("i32",offsetof(State,mac))+
-            ", i32 "+load("i32",offsetof(State,visible_mac)));
-        const auto ready=value("icmp ne i32 "+value("and i32 "+mask+", 1")+", 0");
-        const auto visible=value("select i1 "+ready+", i32 "+load("i32",offsetof(State,pending_mac))+", i32 "+previous);
-        pending.push_back({"i32",visible,offsetof(State,visible_mac)});
-        const auto previous_status=value("select i1 "+idle+", i32 "+load("i32",offsetof(State,status))+
-            ", i32 "+load("i32",offsetof(State,visible_status)));
-        const auto final_status=queued_status_bits[0].empty() ?
-            value("call i32 @nt_ee_vector_status_flags(i32 "+load("i32",offsetof(State,pending_mac))+", i32 "+previous_status+")") :
-            status_with(queued_status_bits[0],previous_status);
-        for (unsigned i=0;i<3;++i) queued_status_bits[i]=queued_status_bits[i+1];
-        queued_status_bits[3].clear();
-        const auto published_status=value("or i32 "+final_status+", "+load("i32",offsetof(State,pending_product_sticky)));
-        pending.push_back({"i32",value("select i1 "+ready+", i32 "+published_status+", i32 "+previous_status),offsetof(State,visible_status)});
-        for (unsigned i=0;i<3;++i) {
-            pending.push_back({"i32",load("i32",offsetof(State,pending_mac)+(i+1)*4),offsetof(State,pending_mac)+i*4});
-            pending.push_back({"i32",load("i32",offsetof(State,pending_product_sticky)+(i+1)*4),offsetof(State,pending_product_sticky)+i*4});
+        for (unsigned i=0;i<4;++i)
+            mac_queue[i]={load("i32",offsetof(State,pending_mac)+i*4),load("i32",offsetof(State,pending_product_sticky)+i*4),"",
+                value("icmp ne i32 "+value("and i32 "+mask+", "+std::to_string(1U<<i))+", 0")};
+    }
+    void push_mac(const std::string& mac,const std::string& sticky,const std::string& bits) {
+        mac_queue[3]={mac,sticky,bits,"true"};
+    }
+    void commit_mac_queue() {
+        std::string mask="0";
+        for (unsigned i=0;i<4;++i) {
+            pending.push_back({"i32",mac_queue[i].mac,offsetof(State,pending_mac)+i*4});
+            pending.push_back({"i32",mac_queue[i].sticky,offsetof(State,pending_product_sticky)+i*4});
+            if (mac_queue[i].valid=="false") continue;
+            const auto bit=mac_queue[i].valid=="true" ? std::to_string(1U<<i) :
+                value("shl i32 "+value("zext i1 "+mac_queue[i].valid+" to i32")+", "+std::to_string(i));
+            mask=mask=="0" ? bit : value("or i32 "+mask+", "+bit);
         }
-        pending.push_back({"i32",value("lshr i32 "+mask+", 1"),offsetof(State,pending_mac_mask)});
+        pending.push_back({"i32",mask,offsetof(State,pending_mac_mask)});
         commit();
-        out<<"  br label %"<<label<<"_done\n"<<label<<"_idle:\n";
-        // No queued result can become visible. Stale queue slots are not read
-        // until a producer writes them and sets the corresponding validity bit.
-        pending.push_back({"i32",load("i32",offsetof(State,mac)),offsetof(State,visible_mac)});
-        pending.push_back({"i32",load("i32",offsetof(State,status)),offsetof(State,visible_status)});
+    }
+    void advance_mac() {
+        std::string any_valid="false";
+        for (const auto& slot:mac_queue) {
+            if (slot.valid=="false") continue;
+            if (slot.valid=="true" || any_valid=="true") { any_valid="true"; continue; }
+            any_valid=any_valid=="false" ? slot.valid : value("or i1 "+any_valid+", "+slot.valid);
+        }
+        const auto idle=any_valid=="true" ? std::string("false") : any_valid=="false" ? std::string("true") : value("xor i1 "+any_valid+", true");
+        // An idle queue synchronizes the visible flags with the latest results.
+        const auto previous=select_value(idle,"i32",load("i32",offsetof(State,mac)),load("i32",offsetof(State,visible_mac)));
+        const auto previous_status=select_value(idle,"i32",load("i32",offsetof(State,status)),load("i32",offsetof(State,visible_status)));
+        const auto& head=mac_queue[0];
+        pending.push_back({"i32",select_value(head.valid,"i32",head.mac,previous),offsetof(State,visible_mac)});
+        if (head.valid!="false") {
+            const auto reduced=head.bits.empty() ?
+                value("call i32 @nt_ee_vector_status_flags(i32 "+head.mac+", i32 "+previous_status+")") : status_with(head.bits,previous_status);
+            const auto published=value("or i32 "+reduced+", "+head.sticky);
+            pending.push_back({"i32",select_value(head.valid,"i32",published,previous_status),offsetof(State,visible_status)});
+        } else pending.push_back({"i32",previous_status,offsetof(State,visible_status)});
         commit();
-        out<<"  br label %"<<label<<"_done\n"<<label<<"_done:\n";
+        std::array<MacSlot,4> shifted{mac_queue[1],mac_queue[2],mac_queue[3],mac_queue[3]};
+        shifted[3].valid="false";
+        // When idle every slot is already invalid, so validity follows the shift.
+        for (unsigned i=0;i<4;++i) {
+            auto& slot=mac_queue[i];
+            slot.mac=select_value(idle,"i32",slot.mac,shifted[i].mac);
+            slot.sticky=select_value(idle,"i32",slot.sticky,shifted[i].sticky);
+            slot.bits=idle=="false" ? shifted[i].bits : idle=="true" ? slot.bits : std::string();
+            slot.valid=idle=="true" ? std::string("false") : shifted[i].valid;
+        }
         advance_visibility(offsetof(State,mac_read_delay));
     }
     void advance_clip(unsigned steps=1) {
@@ -335,9 +365,9 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         <<"declare i64 @nt_ee_add_finite(i32, i32, i32) nounwind willreturn memory(none)\n"
         <<"declare i64 @nt_ee_multiply_finite(i32, i32) nounwind willreturn memory(none)\n"
         <<"declare i64 @nt_ee_multiply_accumulate_finite(i32, i32, i32, i32) nounwind willreturn memory(none)\n"
-        <<"declare i64 @nt_vu_add_fast(i32, i32, i32) nounwind willreturn memory(none)\n"
-        <<"declare i64 @nt_vu_multiply_fast(i32, i32) nounwind willreturn memory(none)\n"
-        <<"declare i64 @nt_vu_multiply_accumulate_fast(i32, i32, i32, i32) nounwind willreturn memory(none)\n"
+        <<"declare <8 x i32> @nt_vu_vector_add_fast(<4 x i32>, <4 x i32>, i32) nounwind willreturn memory(none)\n"
+        <<"declare <8 x i32> @nt_vu_vector_multiply_fast(<4 x i32>, <4 x i32>) nounwind willreturn memory(none)\n"
+        <<"declare <8 x i32> @nt_vu_vector_multiply_accumulate_fast(<4 x i32>, <4 x i32>, <4 x i32>, i32) nounwind willreturn memory(none)\n"
         <<"declare i32 @nt_ee_vector_lane_flags(i64, i32) nounwind willreturn memory(none)\n"
         <<"declare i32 @nt_ee_vector_status_flags(i32, i32) nounwind willreturn memory(none)\n"
         <<"declare i64 @nt_vu_divide_finite(i32, i32) nounwind willreturn memory(none)\n"
@@ -356,6 +386,7 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         writer.out<<"  %state_tail = getelementptr i8, ptr %state, i64 "<<Writer::data_begin<<"\n"
                   <<"  %output_tail = getelementptr i8, ptr %output, i64 "<<Writer::data_end<<"\n";
     writer.copy_state(false);
+    writer.load_mac_queue();
     for (std::size_t index=0;index<pairs.size();++index) {
         const auto& pair=pairs[index];
         if (pair.address>=(unit ? 2048U : 512U) || (index && pair.address!=pairs[index-1].address+1) ||
@@ -412,6 +443,9 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         std::array<std::string,4> packed_lanes{};
         if (!clipping && arithmetic) {
             std::string unsupported="0";
+            // Fast blocks evaluate all written lanes in one four-lane helper;
+            // unwritten lanes are zero and cannot request the exact block.
+            std::array<std::string,3> vectors{"zeroinitializer","zeroinitializer","zeroinitializer"};
             for (unsigned lane=0;lane<4;++lane) {
                 if (!((outer ? 14U : upper.mask)&(8U>>lane))) continue;
                 const auto left=writer.vector(upper.left,outer ? (lane+1)%3 : lane);
@@ -419,14 +453,34 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
                     upper.operand==Operand::quotient ? writer.load("i32",offsetof(State,quotient)) :
                     writer.vector(upper.right,upper.operand==Operand::vector ? lane : static_cast<unsigned>(upper.operand)-static_cast<unsigned>(Operand::x));
                 const auto accumulator=accumulate ? writer.load("i32",offsetof(State,accumulator)+lane*4) : "0";
-                const auto family=fast_numeric ? std::string("nt_vu_") : std::string("nt_ee_");
-                const auto suffix=fast_numeric ? std::string("_fast") : std::string("_finite");
+                if (fast_numeric) {
+                    const std::array<std::string,3> lanes{accumulator,left,right};
+                    for (unsigned i=0;i<3;++i)
+                        vectors[i]=writer.value("insertelement <4 x i32> "+vectors[i]+", i32 "+lanes[i]+", i32 "+std::to_string(lane));
+                    continue;
+                }
                 packed_lanes[lane]=writer.value(accumulate ?
-                    "call i64 @"+family+"multiply_accumulate"+suffix+"(i32 "+accumulator+", i32 "+left+", i32 "+right+", i32 "+(subtract_product ? "1" : "0")+")" : (upper.operation==Arithmetic::multiply || outer) ?
-                    "call i64 @"+family+"multiply"+suffix+"(i32 "+left+", i32 "+right+")" :
-                    "call i64 @"+family+"add"+suffix+"(i32 "+left+", i32 "+right+", i32 "+(upper.operation==Arithmetic::subtract ? "1" : "0")+")");
-                if (fast_numeric) exact_required=writer.value("or i64 "+exact_required+", "+packed_lanes[lane]);
-                else unsupported=writer.value("or i64 "+unsupported+", "+packed_lanes[lane]);
+                    "call i64 @nt_ee_multiply_accumulate_finite(i32 "+accumulator+", i32 "+left+", i32 "+right+", i32 "+(subtract_product ? "1" : "0")+")" : (upper.operation==Arithmetic::multiply || outer) ?
+                    "call i64 @nt_ee_multiply_finite(i32 "+left+", i32 "+right+")" :
+                    "call i64 @nt_ee_add_finite(i32 "+left+", i32 "+right+", i32 "+(upper.operation==Arithmetic::subtract ? "1" : "0")+")");
+                unsupported=writer.value("or i64 "+unsupported+", "+packed_lanes[lane]);
+            }
+            if (fast_numeric) {
+                const auto result=writer.value(accumulate ?
+                    "call <8 x i32> @nt_vu_vector_multiply_accumulate_fast(<4 x i32> "+vectors[0]+", <4 x i32> "+vectors[1]+", <4 x i32> "+vectors[2]+", i32 "+(subtract_product ? "1" : "0")+")" :
+                    (upper.operation==Arithmetic::multiply || outer) ?
+                    "call <8 x i32> @nt_vu_vector_multiply_fast(<4 x i32> "+vectors[1]+", <4 x i32> "+vectors[2]+")" :
+                    "call <8 x i32> @nt_vu_vector_add_fast(<4 x i32> "+vectors[1]+", <4 x i32> "+vectors[2]+", i32 "+(upper.operation==Arithmetic::subtract ? "1" : "0")+")");
+                for (unsigned lane=0;lane<4;++lane) {
+                    if (!((outer ? 14U : upper.mask)&(8U>>lane))) continue;
+                    // Rebuild the scalar packed encoding: product flags at bit 36, exact request at 62.
+                    const auto bits=writer.value("zext i32 "+writer.value("extractelement <8 x i32> "+result+", i32 "+std::to_string(lane))+" to i64");
+                    const auto info=writer.value("zext i32 "+writer.value("extractelement <8 x i32> "+result+", i32 "+std::to_string(lane+4))+" to i64");
+                    const auto product=writer.value("shl i64 "+writer.value("and i64 "+info+", 48")+", 32");
+                    const auto request=writer.value("shl i64 "+writer.value("and i64 "+info+", 1")+", 62");
+                    packed_lanes[lane]=writer.value("or i64 "+writer.value("or i64 "+bits+", "+product)+", "+request);
+                    exact_required=writer.value("or i64 "+exact_required+", "+packed_lanes[lane]);
+                }
             }
             // Fast helpers never report unsupported operands; they request the exact block.
             if (!fast_numeric) {
@@ -483,11 +537,9 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
             const auto final_status=status_bits.empty() ?
                 writer.value("call i32 @nt_ee_vector_status_flags(i32 "+mac+", i32 "+previous+")") : writer.status_with(status_bits,previous);
             const auto status=writer.value("or i32 "+final_status+", "+product_sticky);
-            writer.queued_status_bits[3]=status_bits;
-            writer.pending.push_back({"i32",product_sticky,offsetof(State,pending_product_sticky)+3*4});
+
             writer.pending.push_back({"i32",mac,offsetof(State,mac)});
-            writer.pending.push_back({"i32",mac,offsetof(State,pending_mac)+3*4});
-            writer.pending.push_back({"i32",writer.value("or i32 "+writer.load("i32",offsetof(State,pending_mac_mask))+", 8"),offsetof(State,pending_mac_mask)});
+            writer.push_mac(mac,product_sticky,status_bits);
             writer.pending.push_back({"i32",status,offsetof(State,status)});
             writer.pending.push_back({"i32","4",offsetof(State,mac_read_delay)});
         }
@@ -688,6 +740,8 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         writer.pending.push_back({"i16",delayed_value,offsetof(State,delayed_value)});
         writer.commit();
     }
+    // Delay helpers and the block boundary read the queue from VU state.
+    writer.commit_mac_queue();
     if (batch_q) writer.advance_scalar(true,pairs.size(),static_cast<unsigned>(pairs.size()));
     if (batch_p) writer.advance_scalar(false,pairs.size(),static_cast<unsigned>(pairs.size()));
     if (batch_clip) writer.advance_clip(static_cast<unsigned>(pairs.size()));

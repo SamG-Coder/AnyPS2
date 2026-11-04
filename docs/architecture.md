@@ -34,6 +34,15 @@ to 16 bytes. Generated LLVM derives offsets and access alignment from that C++
 layout. Artifact export version 3 requires regenerating older VU modules before
 linking; native layout changes do not alter program-visible PS2 addresses.
 
+Converted VU blocks are transactions that publish state only on success. A
+block containing vector arithmetic is emitted twice. The fast block evaluates
+lanes four at a time with host doubles, which give the exact chopped result for
+operands whose result stays in the normal range. The cold exact block uses the
+integer implementations. If any lane leaves that range, or the fast block
+reaches a failure exit, the exact block's result is returned instead; results
+and flags are identical either way. The MAC flag queue is tracked at conversion
+time and written to VU state once per block.
+
 Discovery is bounded and conservative. Executable-segment membership alone does
 not establish that bytes are instructions: tables, constants and VU payloads can
 occupy those segments. Unresolved callbacks remain coverage gaps. See
