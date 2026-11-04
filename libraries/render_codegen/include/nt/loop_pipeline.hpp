@@ -40,11 +40,26 @@ struct ElementStore {
 // register's entry value plus that base's stride times k. The function is proven
 // for iterations from depth on. Prologue and epilogue equivalence for the first
 // and last elements, entry state and live-out registers are separate proofs.
+// One flag-producing upper instruction (ADD/SUB/MUL/MADD/MSUB family) executed
+// by the element's iteration: the node each written lane receives, including
+// results that are never stored. They determine the status sticky bits.
+inline constexpr std::uint32_t no_element_node=0xffffffffU;
+struct ElementFlags {
+    unsigned pair=0;
+    std::array<std::uint32_t,4> lanes{no_element_node,no_element_node,no_element_node,no_element_node};
+    bool accumulate=false;  // MADD/MSUB: product flags are also sticky
+};
 struct PipelinedLoop {
     unsigned depth=0;
     std::vector<ElementNode> nodes;
     std::vector<ElementStore> stores;
     std::array<std::int32_t,16> strides{};
+    // Flag-producing instructions per iteration. Recovered when every such
+    // instruction reaches the same entry-independent steady state as the stores;
+    // otherwise flags is empty and flags_unrecovered explains why.
+    std::vector<ElementFlags> flags;
+    bool flag_instructions=false;
+    std::string flags_unrecovered;
 };
 struct PipelineRecovery {
     std::optional<PipelinedLoop> loop;
@@ -61,7 +76,11 @@ PipelineRecovery recover_pipelined_loop(std::span<const vu::Pair> pairs,unsigned
 //   output:     per element, a status word (nonzero if an operand is one the VU
 //               would stop on) followed by one word per ElementStore, in order
 // Element item covers element first+item. Rows wrap at the unit's data size.
-inline unsigned element_output_words(const PipelinedLoop& loop) { return 1+static_cast<unsigned>(loop.stores.size()); }
+// Status word, one word per store, then a sticky-flag word (status bits 6-11
+// produced by the element's iteration) when flags were recovered.
+inline unsigned element_output_words(const PipelinedLoop& loop) {
+    return 1+static_cast<unsigned>(loop.stores.size())+(loop.flags.empty() ? 0U : 1U);
+}
 // CPU entry: void nt_render_elements(const uint32_t* data,const uint32_t* parameters,uint32_t* output)
 void emit_element_kernel_llvm(std::ostream&,const PipelinedLoop&,unsigned unit,bool vulkan,std::string_view symbol="nt_render_elements");
 }

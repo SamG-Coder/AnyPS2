@@ -19,20 +19,16 @@ ElementRangeGuard analyze_element_range(std::span<const vu::Pair> pairs,unsigned
     const auto compared=left ? structure.compared_left : structure.compared_right;
     if ((!left && !right) || step>=0 || !compared.known || compared.base!=int(counter) || compared.offset!=step)
         throw std::invalid_argument("Element range requires the updated countdown at the backedge");
-    // Keep branch sampling out of the integer-result latency window. The
-    // accepted form matches the existing bounded-loop frontend's separation.
-    if (pairs.size()<5) throw std::invalid_argument("Countdown lacks branch separation");
-    for (std::size_t i=pairs.size()-4;i<pairs.size()-2;++i) {
-        const auto lower=vu::decode_lower(pairs[i],unit);
-        if ((lower.result.bank==vu::Bank::integer && lower.result.index==counter) ||
-            (lower.address_update!=vu::AddressUpdate::none && lower.address_register==counter))
-            throw std::invalid_argument("Countdown lacks branch separation");
-    }
+    // The branch is the second-to-last pair. When the pair before it updates the
+    // counter, the comparison reads the backed-up pre-update value.
+    if (pairs.size()<3) throw std::invalid_argument("Element range requires a branch and its delay slot after the body");
+    const unsigned trip_offset=vu::branch_backup_register(vu::decode_lower(pairs[pairs.size()-3],unit))==counter ? 1U : 0U;
     for (unsigned reg=1;reg<16;++reg)
         if (!structure.affine_update[reg])
             throw std::invalid_argument("Element range requires affine integer recurrences");
     ElementRangeGuard guard;
     guard.rows=unit ? 1024:256; guard.counter=counter; guard.step=static_cast<unsigned>(-std::int64_t(step)); guard.minimum_element=loop.depth;
+    guard.trip_offset=trip_offset;
     guard.steps=structure.steps; guard.integer_writes=structure.integer_writes;
     const auto& first=loop.stores.front();
     guard.output_base=first.base; guard.output_first=guard.output_last=first.row; guard.output_stride=first.stride;
@@ -95,16 +91,17 @@ void emit_element_range_llvm(std::ostream& out,const ElementRangeGuard& guard,st
     const auto letter=[](char c) { return (c>='a' && c<='z') || (c>='A' && c<='Z') || c=='_'; };
     if (symbol.empty() || !letter(symbol.front()) || std::any_of(symbol.begin(),symbol.end(),[&](char c) {
             return !letter(c) && !(c>='0' && c<='9'); })) throw std::invalid_argument("Invalid range-guard LLVM symbol");
-    if (!guard.step || guard.counter==0 || guard.counter>=16 || (guard.rows!=256 && guard.rows!=1024))
+    if (!guard.step || guard.counter==0 || guard.counter>=16 || guard.trip_offset>1 || (guard.rows!=256 && guard.rows!=1024))
         throw std::invalid_argument("Invalid element range guard");
     out<<"define i32 @"<<symbol<<"(ptr readonly %parameters) {\nentry:\n";
     Emitter e(out);
     const auto count=e.parameter(0),first=e.parameter(1),counter=e.base(int(guard.counter));
     e.require(e.value("icmp ne i64 "+count+", 0"),1);
-    e.require(e.value("icmp ne i64 "+counter+", 0"),1);
+    // A zero counter terminates only when the backed-up value is compared.
+    if (!guard.trip_offset) e.require(e.value("icmp ne i64 "+counter+", 0"),1);
     const auto remainder=e.value("urem i64 "+counter+", "+std::to_string(guard.step));
     e.require(e.value("icmp eq i64 "+remainder+", 0"),1);
-    const auto iterations=e.value("udiv i64 "+counter+", "+std::to_string(guard.step));
+    const auto iterations=e.add(e.value("udiv i64 "+counter+", "+std::to_string(guard.step)),std::to_string(guard.trip_offset));
     e.require(e.value("icmp ule i64 "+iterations+", "+std::to_string(guard.rows)),1);
     e.require(e.value("icmp uge i64 "+first+", "+std::to_string(guard.minimum_element)),2);
     e.require(e.value("icmp ule i64 "+e.add(first,count)+", "+iterations),1);
@@ -113,12 +110,24 @@ void emit_element_range_llvm(std::ostream& out,const ElementRangeGuard& guard,st
     // An unsigned bound test rejects both a negative result and an overflowed VI.
     for (unsigned reg=1;reg<16;++reg) {
         const auto initial=e.base(int(reg)); e.bound(initial,65535);
-        e.bound(e.add(initial,e.multiply(iterations,guard.steps[reg])),65535);
+        // With the backup the final update takes the counter below zero; that
+        // 16-bit wrap is executed by the original replayed final iteration.
+        const bool final_wrap=guard.trip_offset && reg==guard.counter;
+        e.bound(e.add(initial,e.multiply(final_wrap ? last:iterations,guard.steps[reg])),65535);
     }
     for (const auto& write:guard.integer_writes) {
         const auto initial=e.add(e.base(write.base),std::to_string(write.offset));
+        const auto step=write.base>0 && write.base<16 ? guard.steps[write.base]:0;
+        if (guard.trip_offset && write.base==int(guard.counter)) {
+            // Counter-derived values of the final iteration go below zero; that
+            // iteration is replayed by the original code. Bound the earlier ones.
+            const auto earlier=e.value("icmp ugt i64 "+iterations+", 1");
+            e.bound(e.value("select i1 "+earlier+", i64 "+initial+", i64 0"),65535);
+            e.bound(e.value("select i1 "+earlier+", i64 "+e.add(initial,e.multiply(e.add(last,"-1"),step))+", i64 0"),65535);
+            continue;
+        }
         e.bound(initial,65535);
-        e.bound(e.add(initial,e.multiply(last,write.base>0 && write.base<16 ? guard.steps[write.base]:0)),65535);
+        e.bound(e.add(initial,e.multiply(last,step)),65535);
     }
     const auto output_first=e.add(e.base(int(guard.output_base)),std::to_string(guard.output_first));
     const auto output_last=e.add(e.add(e.base(int(guard.output_base)),std::to_string(guard.output_last)),e.multiply(last,guard.output_stride));

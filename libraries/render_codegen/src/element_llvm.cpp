@@ -109,7 +109,7 @@ void emit_element_kernel_llvm(std::ostream& out,const PipelinedLoop& loop,unsign
     }
     const auto element=e.value("add i32 "+first+", %item");
     std::array<std::string,19> base_rows;
-    std::vector<std::string> names(loop.nodes.size());
+    std::vector<std::string> names(loop.nodes.size()),packed_results(loop.nodes.size());
     std::string failure="0";
     for (std::size_t id=0;id<loop.nodes.size();++id) {
         const auto& node=loop.nodes[id];
@@ -148,6 +148,7 @@ void emit_element_kernel_llvm(std::ostream& out,const PipelinedLoop& loop,unsign
             default: arguments=operand(node.b)+", "+operand(node.c); break;
             }
             const auto packed=e.value("call "+std::string(call_convention)+"i64 @"+helper(op).name+"("+arguments+")");
+            packed_results[id]=packed;
             names[id]=e.value("trunc i64 "+packed+" to i32");
             failure=e.value("or i32 "+failure+", "+e.value("trunc i64 "+e.value("lshr i64 "+packed+", 63")+" to i32"));
             break;
@@ -161,6 +162,29 @@ void emit_element_kernel_llvm(std::ostream& out,const PipelinedLoop& loop,unsign
     e.store(output,failure);
     for (std::size_t n=0;n<loop.stores.size();++n)
         e.store(e.value("add i32 "+output+", "+std::to_string(n+1)),names[loop.stores[n].node]);
+    if (!loop.flags.empty()) {
+        // Status sticky bits of the iteration, as the VU sets them: for each
+        // instruction's written lanes Z (zero magnitude), S (sign bit), U and O
+        // from the exact helper, shifted to ZS/SS/US/OS, plus MADD/MSUB product
+        // flags. OR is order-independent, so lanes and instructions combine freely.
+        std::string sticky="0";
+        for (const auto& flags:loop.flags) for (const auto node:flags.lanes) {
+            if (node==no_element_node) continue;
+            if (node>=loop.nodes.size() || packed_results[node].empty())
+                throw std::invalid_argument("Element flag lane is not an arithmetic result");
+            const auto& value=names[node]; const auto& packed=packed_results[node];
+            const auto zero=e.value("zext i1 "+e.value("icmp eq i32 "+e.value("and i32 "+value+", 2147483647")+", 0")+" to i32");
+            const auto sign=e.value("and i32 "+e.value("lshr i32 "+value+", 30")+", 2");
+            const auto range=e.value("trunc i64 "+e.value("lshr i64 "+packed+", 30")+" to i32");
+            const auto underflow=e.value("and i32 "+range+", 4");
+            const auto overflow=e.value("and i32 "+e.value("lshr i32 "+range+", 2")+", 8");
+            auto bits=e.value("or i32 "+e.value("or i32 "+zero+", "+sign)+", "+e.value("or i32 "+underflow+", "+overflow));
+            if (flags.accumulate)
+                bits=e.value("or i32 "+bits+", "+e.value("and i32 "+e.value("trunc i64 "+e.value("lshr i64 "+packed+", 36")+" to i32")+", 15"));
+            sticky=e.value("or i32 "+sticky+", "+e.value("shl i32 "+bits+", 6"));
+        }
+        e.store(e.value("add i32 "+output+", "+std::to_string(loop.stores.size()+1)),sticky);
+    }
     if (vulkan) out<<"  br label %done\n";
     else out<<"  %next = add i32 %item, 1\n  %more = icmp ult i32 %next, "<<count<<"\n  br i1 %more, label %body, label %done\n";
     out<<"done:\n  ret void\n}\n";

@@ -95,7 +95,16 @@ The CPU entry is `void nt_render_elements(const uint32_t* data, const uint32_t* 
 Element item covers element first+item; rows wrap at the unit's data size. A
 nonzero status word marks an element with an operand the VU would stop on; its
 stored words must not be used. Loads are relative to each base register's entry
-value, so the same compiled kernel serves any batch position and buffer.
+value, so the same compiled kernel serves any batch position and buffer. Parameter
+slot 18 numbers output records from a first record, after any startup prefix.
+
+When the loop has flag-producing arithmetic (ADD/SUB/MUL/MADD/MSUB forms), pipeline
+recovery also keeps every such instruction's written lanes, including results that
+are never stored, and requires them to reach the same steady state as the stores.
+Each record then ends with a sticky-flag word: the status bits 6-11 that the
+element's iteration sets (zero, sign, underflow and overflow of the written lanes,
+plus MADD/MSUB product flags), computed from the exact helpers. Outer-product
+forms reduce a MAC word that keeps earlier lane flags and are not recovered.
 
 ```sh
 ps2-vu-loop-probe --element <program-image.bin> <unit> <destination-index> <loop-head> cpu|vulkan
@@ -263,8 +272,12 @@ an assumed last-vertex value or hidden readback.
 
 `ps2-vu-loop-probe --element <image> <unit> <destination> <loop-head> guard`
 emits a native LLVM function `nt_render_element_guard(parameters)`. The converter
-accepts an affine countdown-to-zero loop with a separated counter update and one
-forward output stream. It rejects overlapping output records, integer stores and
+accepts an affine countdown-to-zero loop and one forward output stream. When the
+pair before the backedge updates the counter, the conditional branch compares the
+backed-up previous value (the VU's one-pair integer backup, shared with the VU code
+generator through `branch_backup_register`), so the loop runs counter/step+1 times;
+a zero counter is then a valid single iteration and the final update's wrap below
+zero is executed by the original replayed iteration. It rejects overlapping output records, integer stores and
 unproved integer recurrences. The compiled guard checks the actual launch values:
 positive divisible trip count, requested steady-state subrange, intermediate VI
 values, memory bounds, and input/output separation. It includes original reads
@@ -291,10 +304,19 @@ replaces execution that reaches the head as an ordinary pair, after validating
 the complete architectural state there, and reproduces running the loop from the
 head to its exit. Execution entering elsewhere runs the original compiled blocks
 until it reaches the head. The current subset accepts
-loads/stores, vector moves/rotations, ABS, MIN/MAX, integer/float conversions and
-self-updating integer counters. Flag-producing arithmetic, scalar-unit effects,
-kicks and other unproved side effects are rejected. Lane dependency analysis must
-prove that at most eight final iterations reconstruct every changed VF lane.
+loads/stores, vector moves/rotations, ABS, MIN/MAX, integer/float conversions,
+ADD/SUB/MUL/MADD/MSUB forms writing VF lanes or the accumulator, and self-updating
+integer counters. Outer products, clipping, scalar-unit (Q/P) effects, kicks and
+other unproved side effects are rejected. Lane dependency analysis must prove that
+a bounded number of final iterations reconstructs every changed VF and accumulator
+lane; at most eight iterations are replayed.
+
+With flag arithmetic, flags computed by those reconstructing iterations come from
+registers that are not yet exact, so they are discarded: the replay then clears the
+sticky bits and MAC queue and runs two further iterations on exact registers, which
+republish the queue, MAC and visible values. Sticky bits of the entry, the startup
+iterations and every steady element before that exact tail come from the startup
+state and the kernel records; they precede the tail and are therefore also visible.
 
 `ps2-vu-loop-probe --region <image> <unit> <destination> <head>
 boundary|elements|binding <entries...>` emits each reproducible LLVM module.

@@ -416,13 +416,7 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         if (upper.operation!=Arithmetic::nop && upper.destination==Destination::vector && upper.result && lower.result.bank==Bank::vector &&
             lower.result.index==upper.result)
             throw std::invalid_argument("VU simultaneous vector destinations require explicit priority lowering");
-        const auto delayed_register=lower.address_update!=AddressUpdate::none ? lower.address_register :
-            lower.operation!=LowerOperation::branch && lower.operation!=LowerOperation::load_integer &&
-                lower.operation!=LowerOperation::input_top && lower.operation!=LowerOperation::input_itop &&
-                lower.operation!=LowerOperation::mac_and && lower.operation!=LowerOperation::mac_or && lower.operation!=LowerOperation::mac_equal &&
-                lower.operation!=LowerOperation::clip_and && lower.operation!=LowerOperation::clip_or && lower.operation!=LowerOperation::clip_equal && lower.operation!=LowerOperation::clip_get &&
-                lower.operation!=LowerOperation::status_and && lower.operation!=LowerOperation::status_or && lower.operation!=LowerOperation::status_equal &&
-                lower.result.bank==Bank::integer ? lower.result.index : 0U;
+        const auto delayed_register=branch_backup_register(lower);
         const auto delayed_value=delayed_register ? writer.integer(delayed_register) : "0";
         // Read both sides before committing either result. Dependencies between
         // pairs can use native SSA/loads. Flag reads require proven visibility.

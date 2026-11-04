@@ -1,6 +1,7 @@
 #include <nt/loop_pipeline.hpp>
 #include <nt/vu_arithmetic.hpp>
 #include <nt/vu_lower.hpp>
+#include <algorithm>
 #include <map>
 #include <stdexcept>
 
@@ -77,6 +78,9 @@ public:
     std::array<std::int32_t,16> strides{};
     struct StoreEvent { unsigned iteration,pair,lane,base; std::int32_t row; std::uint32_t node; };
     std::vector<StoreEvent> stores;
+    struct FlagEvent { unsigned iteration,pair; std::array<std::uint32_t,4> lanes; bool accumulate; };
+    std::vector<FlagEvent> flags;
+    std::string flags_unrecovered;
     void iteration(std::span<const vu::Pair> pairs,unsigned iteration) {
         for (std::size_t n=0;n<pairs.size();++n) pair(pairs[n],iteration,n+2==pairs.size());
     }
@@ -122,7 +126,9 @@ private:
         // Both units read before either writes.
         std::vector<std::tuple<unsigned,unsigned,std::uint32_t>> vector_writes;
         std::vector<std::pair<unsigned,std::uint32_t>> accumulator_writes;
+        FlagEvent flag{iteration,pair.address,{no_element_node,no_element_node,no_element_node,no_element_node},false};
         const auto write=[&](unsigned lane,std::uint32_t node) {
+            flag.lanes[lane]=node;
             if (upper.destination==vu::Destination::accumulator) accumulator_writes.push_back({lane,node});
             else if (upper.destination==vu::Destination::vector) vector_writes.push_back({upper.result,lane,node});
         };
@@ -141,6 +147,8 @@ private:
                     accumulator_[lane],vectors_[upper.left][lane],right_operand(upper,lane)));
             break;
         case A::outer_multiply: case A::outer_subtract:
+            // Outer-product status reduces a MAC word that keeps the previous W flags.
+            if (flags_unrecovered.empty()) flags_unrecovered="outer-product flags depend on earlier MAC state";
             for (unsigned lane=0;lane<3;++lane) {
                 const auto left=vectors_[upper.left][(lane+1)%3],right=vectors_[upper.right][(lane+2)%3];
                 write(lane,upper.operation==A::outer_multiply ? graph_.operation(Op::multiply,left,right) :
@@ -157,6 +165,11 @@ private:
                     vectors_[upper.left][lane],0,0,upper.scale));
             break;
         default: fail("upper operation "+std::string(vu::name(upper.operation))+" is not an element operation");
+        }
+        if (upper.operation==A::add || upper.operation==A::subtract || upper.operation==A::multiply ||
+            upper.operation==A::multiply_add || upper.operation==A::multiply_subtract) {
+            flag.accumulate=upper.operation==A::multiply_add || upper.operation==A::multiply_subtract;
+            flags.push_back(flag);
         }
         std::vector<std::pair<unsigned,Integer>> integer_writes;
         std::optional<std::uint32_t> immediate;
@@ -315,9 +328,43 @@ PipelineRecovery recover_pipelined_loop(std::span<const vu::Pair> pairs,unsigned
         if (first+3>simulated_iterations) return {std::nullopt,"steady state not reached within the simulated iterations"};
         depth=std::max(depth,first);
     }
+    // Flags reach a steady state like stores: each instruction's lanes become
+    // entry-independent and equal the previous iteration's shifted by one element.
+    std::map<unsigned,std::vector<const Simulator::FlagEvent*>> flag_sites;
+    for (const auto& event:simulator.flags) flag_sites[event.pair].push_back(&event);
+    std::string flags_unrecovered=simulator.flags_unrecovered;
+    unsigned flag_depth=0;
+    for (const auto& [site,events]:flag_sites) {
+        if (!flags_unrecovered.empty()) break;
+        if (events.size()!=simulated_iterations) { flags_unrecovered="flag instruction does not execute once per iteration"; break; }
+        const auto independent=[&](const Simulator::FlagEvent& event) {
+            return std::none_of(event.lanes.begin(),event.lanes.end(),[&](std::uint32_t node) {
+                return node!=no_element_node && depends_on_entry(graph,node,entry_memo);
+            });
+        };
+        unsigned first=simulated_iterations-1;
+        while (first>0) {
+            const auto& previous=*events[first-1];
+            const auto& current=*events[first];
+            if (!independent(previous)) break;
+            Shifter shift(graph,simulator.strides,1);
+            bool same=true;
+            for (unsigned lane=0;lane<4;++lane)
+                same&=(previous.lanes[lane]==no_element_node) ? current.lanes[lane]==no_element_node :
+                    shift(previous.lanes[lane])==current.lanes[lane];
+            if (!same) break;
+            --first;
+        }
+        if (!independent(*events[first]) || first+3>simulated_iterations) {
+            flags_unrecovered="flag-producing instruction has no entry-independent steady state"; break;
+        }
+        flag_depth=std::max(flag_depth,first);
+    }
+    if (flags_unrecovered.empty()) depth=std::max(depth,flag_depth);
     // Express each store of iteration `depth` relative to element `depth`.
     PipelinedLoop result;
     result.depth=depth; result.strides=simulator.strides;
+    result.flag_instructions=!flag_sites.empty();
     std::map<std::uint32_t,std::uint32_t> remap;
     Shifter back(graph,simulator.strides,-static_cast<std::int32_t>(depth));
     const auto emit=[&](auto&& self,std::uint32_t id) -> std::uint32_t {
@@ -340,6 +387,15 @@ PipelineRecovery recover_pipelined_loop(std::span<const vu::Pair> pairs,unsigned
         result.stores.push_back({event.pair,event.lane,event.base,event.row-stride*static_cast<std::int32_t>(depth),stride,
             emit(emit,back(event.node))});
     }
+    if (flags_unrecovered.empty()) {
+        for (const auto& [site,events]:flag_sites) {
+            const auto& event=*events[depth];
+            ElementFlags flags{event.pair,{no_element_node,no_element_node,no_element_node,no_element_node},event.accumulate};
+            for (unsigned lane=0;lane<4;++lane)
+                if (event.lanes[lane]!=no_element_node) flags.lanes[lane]=emit(emit,back(event.lanes[lane]));
+            result.flags.push_back(flags);
+        }
+    } else result.flags_unrecovered=flags_unrecovered;
     return {std::move(result),{}};
 }
 }

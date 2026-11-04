@@ -12,9 +12,33 @@ namespace nt::render {
 namespace {
 using L=vu::LowerOperation;
 using A=vu::Arithmetic;
-using Lanes=std::array<std::array<bool,4>,32>;
-unsigned overwrite_horizon(std::span<const vu::Pair> body,unsigned unit) {
+// VF0-VF31, then the accumulator as register 32.
+constexpr unsigned accumulator_lanes=32;
+using Lanes=std::array<std::array<bool,4>,33>;
+bool flag_arithmetic(A operation) {
+    return operation==A::add || operation==A::subtract || operation==A::multiply ||
+        operation==A::multiply_add || operation==A::multiply_subtract;
+}
+unsigned upper_destination(const vu::Upper& upper) {
+    return upper.destination==vu::Destination::accumulator ? accumulator_lanes : upper.result;
+}
+bool writes_upper(const vu::Upper& upper,unsigned lane) {
+    return upper.operation!=A::nop && (upper.mask&(8U>>lane)) &&
+        (upper.destination==vu::Destination::accumulator || (upper.destination==vu::Destination::vector && upper.result));
+}
+// Lanes of the right operand read for one result lane, or none for I/Q operands.
+std::optional<std::pair<unsigned,unsigned>> right_lane(const vu::Upper& upper,unsigned lane) {
+    if (upper.operand==vu::Operand::immediate || upper.operand==vu::Operand::quotient || upper.operand==vu::Operand::none) return std::nullopt;
+    const auto component=upper.operand==vu::Operand::vector ? lane :
+        static_cast<unsigned>(upper.operand)-static_cast<unsigned>(vu::Operand::x);
+    if (component>=4) throw std::invalid_argument("Vector region scalar operand is not proved");
+    return std::pair{upper.right,component};
+}
+// Returns the number of final iterations whose original replay reconstructs
+// every changed VF/ACC lane and, with flag arithmetic, the MAC/status queue.
+unsigned overwrite_horizon(std::span<const vu::Pair> body,unsigned unit,bool& flags) {
     Lanes written{};
+    flags=false;
     for (const auto& pair:body) {
         if (pair.end || pair.interlock || pair.debug || pair.trap || pair.immediate)
             throw std::invalid_argument("Vector region contains an end, interlock, debug, trap or literal effect");
@@ -23,10 +47,11 @@ unsigned overwrite_horizon(std::span<const vu::Pair> body,unsigned unit) {
         switch (upper.operation) {
         case A::nop: case A::absolute: case A::minimum: case A::maximum:
         case A::integer_to_float: case A::float_to_integer: break;
-        default: throw std::invalid_argument("Vector region live-out flags or arithmetic are not yet proved");
+        case A::add: case A::subtract: case A::multiply: case A::multiply_add: case A::multiply_subtract: flags=true; break;
+        default: throw std::invalid_argument("Vector region upper operation "+std::string(vu::name(upper.operation))+" is not proved");
         }
-        if (upper.destination==vu::Destination::accumulator)
-            throw std::invalid_argument("Vector region accumulator live-out is not proved");
+        if (upper.destination==vu::Destination::accumulator && !flag_arithmetic(upper.operation))
+            throw std::invalid_argument("Vector region accumulator write is not proved");
         switch (lower.operation) {
         case L::load_quad: case L::store_quad: case L::move: case L::rotate: case L::branch: break;
         case L::integer_add_immediate: case L::integer_subtract_immediate:
@@ -39,12 +64,11 @@ unsigned overwrite_horizon(std::span<const vu::Pair> body,unsigned unit) {
         default: throw std::invalid_argument("Vector region lower side effect is not proved");
         }
         for (unsigned lane=0;lane<4;++lane) {
-            const bool up=upper.destination==vu::Destination::vector && upper.operation!=A::nop &&
-                upper.result && (upper.mask&(8U>>lane));
+            const bool up=writes_upper(upper,lane);
             const bool low=lower.result.bank==vu::Bank::vector && lower.result.index && (lower.mask&(8U>>lane));
-            if (up && low && upper.result==lower.result.index)
+            if (up && low && upper_destination(upper)==lower.result.index)
                 throw std::invalid_argument("Vector region has simultaneous writes to one vector lane");
-            if (up) written[upper.result][lane]=true;
+            if (up) written[upper_destination(upper)][lane]=true;
             if (low) written[lower.result.index][lane]=true;
         }
     }
@@ -56,15 +80,13 @@ unsigned overwrite_horizon(std::span<const vu::Pair> body,unsigned unit) {
             const auto lower=vu::decode_lower(pair,unit);
             auto next=tainted; // both units sample pre-pair values
             for (unsigned lane=0;lane<4;++lane) {
-                if (upper.destination==vu::Destination::vector && upper.operation!=A::nop && upper.result && (upper.mask&(8U>>lane))) {
+                if (writes_upper(upper,lane)) {
                     bool value=tainted[upper.left][lane];
-                    if ((upper.operation==A::minimum || upper.operation==A::maximum) && upper.operand!=vu::Operand::immediate) {
-                        const auto component=upper.operand==vu::Operand::vector ? lane :
-                            static_cast<unsigned>(upper.operand)-static_cast<unsigned>(vu::Operand::x);
-                        if (component>=4) throw std::invalid_argument("Vector region scalar operand is not proved");
-                        value=value || tainted[upper.right][component];
-                    }
-                    next[upper.result][lane]=value;
+                    if (upper.operation==A::minimum || upper.operation==A::maximum || flag_arithmetic(upper.operation))
+                        if (const auto right=right_lane(upper,lane)) value=value || tainted[right->first][right->second];
+                    if (upper.operation==A::multiply_add || upper.operation==A::multiply_subtract)
+                        value=value || tainted[accumulator_lanes][lane];
+                    next[upper_destination(upper)][lane]=value;
                 }
                 if (lower.result.bank==vu::Bank::vector && lower.result.index && (lower.mask&(8U>>lane))) {
                     next[lower.result.index][lane]=lower.operation==L::load_quad ? false :
@@ -74,7 +96,7 @@ unsigned overwrite_horizon(std::span<const vu::Pair> body,unsigned unit) {
             tainted=next;
         }
         bool any=false;
-        for (unsigned reg=1;reg<32;++reg) for (unsigned lane=0;lane<4;++lane) any|=tainted[reg][lane];
+        for (unsigned reg=1;reg<=accumulator_lanes;++reg) for (unsigned lane=0;lane<4;++lane) any|=tainted[reg][lane];
         if (!any) return iteration;
     }
     throw std::invalid_argument("Vector region live-out lanes depend on skipped iterations");
@@ -114,11 +136,24 @@ VectorRegionPlan analyze_vector_region(std::span<const vu::Pair> program,unsigne
     plan.unit=unit; plan.head=head; plan.exit=exit;
     const auto body=program.subspan(head-program.front().address,exit-head);
     plan.body.assign(body.begin(),body.end());
-    plan.drain=overwrite_horizon(body,unit);
+    bool flags=false;
+    plan.drain=overwrite_horizon(body,unit,flags);
+    // Flags of the first replayed iterations come from not yet reconstructed
+    // registers. With flag arithmetic, those iterations only warm up registers;
+    // two further iterations then run on exact values and republish the MAC queue
+    // (four results, visible four pairs later) from exact instructions.
+    if (flags) {
+        if (body.size()<4) throw std::invalid_argument("Vector region flag replay needs at least four pairs per iteration");
+        plan.flag_replay=2; plan.drain+=plan.flag_replay;
+    }
     plan.range=analyze_element_range(body,unit);
     const auto structure=analyze_loop_structure(body,unit);
     plan.loop=*recover_pipelined_loop(body,unit,structure).loop;
     plan.startup=plan.loop.depth;
+    if (flags && plan.loop.flags.empty())
+        throw std::invalid_argument("Vector region live-out flags are not proved: "+plan.loop.flags_unrecovered);
+    if (!flags && !plan.loop.flags.empty()) throw std::logic_error("Vector region flag analyses disagree");
+    if (plan.drain>8) throw std::invalid_argument("Vector region replay exceeds eight iterations");
     // Entry validation covers all original iterations, including short loops.
     // Shifted recovered loads are only used at or after the proven startup.
     plan.range.minimum_element=0;
@@ -135,13 +170,14 @@ void emit_vector_region_llvm(std::ostream& boundary,std::ostream& elements,std::
     vu::emit_llvm(b,plan.body,plan.unit,prefix+"_iteration");
     emit_element_kernel_llvm(e,plan.loop,plan.unit,false,prefix+"_elements");
     emit_element_range_llvm(m,plan.range,prefix+"_guard");
-    static_assert(offsetof(VectorRegion,strides)==32 && offsetof(VectorRegion,output)==96);
-    static_assert(sizeof(RegionStore)==16 && offsetof(VectorRegion,iteration)==1120 && sizeof(VectorRegion)==1144);
+    static_assert(offsetof(VectorRegion,strides)==40 && offsetof(VectorRegion,output)==104);
+    static_assert(sizeof(RegionStore)==16 && offsetof(VectorRegion,iteration)==1128 && sizeof(VectorRegion)==1152);
     m<<"declare i32 @"<<prefix<<"_iteration(ptr)\n"<<"declare void @"<<prefix<<"_elements(ptr, ptr, ptr)\n";
-    const std::string type="{ [8 x i32], [16 x i32], [64 x { i32, i32, i32, i32 }], ptr, ptr, ptr }";
-    m<<"@"<<prefix<<" = constant "<<type<<" { [8 x i32] [";
-    const unsigned fields[]{plan.unit,plan.head,plan.exit,plan.startup,plan.drain,plan.range.counter,plan.range.step,unsigned(plan.loop.stores.size())};
-    for (unsigned i=0;i<8;++i) m<<(i ? ", ":"")<<"i32 "<<fields[i];
+    const std::string type="{ [10 x i32], [16 x i32], [64 x { i32, i32, i32, i32 }], ptr, ptr, ptr }";
+    m<<"@"<<prefix<<" = constant "<<type<<" { [10 x i32] [";
+    const unsigned fields[]{plan.unit,plan.head,plan.exit,plan.startup,plan.drain,plan.range.counter,plan.range.step,
+        unsigned(plan.loop.stores.size()),plan.flag_replay,plan.range.trip_offset};
+    for (unsigned i=0;i<10;++i) m<<(i ? ", ":"")<<"i32 "<<fields[i];
     m<<"], [16 x i32] [";
     for (unsigned i=0;i<16;++i) m<<(i ? ", ":"")<<"i32 "<<plan.range.steps[i];
     m<<"], [64 x { i32, i32, i32, i32 }] [";

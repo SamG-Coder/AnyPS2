@@ -13,10 +13,10 @@
 // element kernels, range guards and conversion-time PACKED bindings. Each region
 // is drawn twice: executed on the CPU and kicked as a packet, and launched with
 // GPU-owned steady outputs. Pixels and materialized exit state must match.
-extern "C" const nt::render::VectorRegion region_0,region_1,region_2,region_3;
+extern "C" const nt::render::VectorRegion region_0,region_1,region_2,region_3,region_4;
 #define PACKET(n) extern "C" const nt::graphics::VectorRegister region_##n##_packet[]; \
     extern "C" const std::uint32_t region_##n##_packet_count,region_##n##_packet_words;
-PACKET(0) PACKET(1) PACKET(2) PACKET(3)
+PACKET(0) PACKET(1) PACKET(2) PACKET(3) PACKET(4)
 #undef PACKET
 namespace {
 using namespace nt::graphics;
@@ -49,8 +49,11 @@ nt::vu::State entry(const nt::render::VectorRegion& region,unsigned count,unsign
     for (auto& vector:s.vectors) for (auto& word:vector) word=random();
     for (auto& row:s.data) for (auto& word:row) word=random();
     for (auto& value:s.integers) value=std::uint16_t(random()%20);
-    s.integers[2]=8; s.integers[4]=72; s.integers[3]=136; s.integers[8]=std::uint16_t(count);
+    s.integers[2]=8; s.integers[4]=72; s.integers[3]=136; s.integers[8]=std::uint16_t(count-region.trip_offset);
     s.next_pair=region.head;
+    // Finite operands for the arithmetic variant: VF7 = VF1*1 + color*2, where
+    // small integer color words are zero as floats, so positions are unchanged.
+    for (unsigned lane=0;lane<4;++lane) { s.vectors[19][lane]=0x3f800000U; s.vectors[20][lane]=0x40000000U; }
     for (unsigned i=0;i<count;++i) {
         const float position[4]{float(2+random()%59)+0.25f*float(random()%4),float(3+random()%58),float(i+1),0};
         for (unsigned lane=0;lane<4;++lane) {
@@ -67,7 +70,7 @@ Packet kick(const nt::vu::State& s,unsigned count) {
 }
 unsigned compare(const Binding& binding,unsigned kernel,VulkanRenderer& gpu,VulkanRenderer& cpu) {
     const auto& region=*binding.region;
-    require(binding.count==2 && binding.words==region.stores+1,"Region packet binding does not match its kernel");
+    require(binding.count==2 && binding.words==region.stores+1+(region.flags ? 1U : 0U),"Region packet binding does not match its kernel");
     unsigned cases=0;
     for (unsigned primitive:{3U,4U,5U}) for (unsigned count:{1U,2U,3U,4U,7U,20U,60U}) {
         const auto start=entry(region,count,primitive*100+count);
@@ -110,14 +113,15 @@ unsigned compare(const Binding& binding,unsigned kernel,VulkanRenderer& gpu,Vulk
 }
 int main(int argc,char** argv) {
     try {
-        require(argc==5,"Usage: render-region-draw-tests <region-0.spv> ... <region-3.spv>");
+        require(argc==6,"Usage: render-region-draw-tests <region-0.spv> ... <region-4.spv>");
         const Binding bindings[]{{&region_0,region_0_packet,region_0_packet_count,region_0_packet_words},
             {&region_1,region_1_packet,region_1_packet_count,region_1_packet_words},
             {&region_2,region_2_packet,region_2_packet_count,region_2_packet_words},
-            {&region_3,region_3_packet,region_3_packet_count,region_3_packet_words}};
+            {&region_3,region_3_packet,region_3_packet_count,region_3_packet_words},
+            {&region_4,region_4_packet,region_4_packet_count,region_4_packet_words}};
         VulkanRenderer gpu(nullptr,true),cpu(nullptr,true);
         unsigned cases=0;
-        for (unsigned variant=0;variant<4;++variant) {
+        for (unsigned variant=0;variant<5;++variant) {
             const auto kernel=gpu.load_vector_kernel(shader(argv[variant+1]),bindings[variant].region->unit);
             cases+=compare(bindings[variant],kernel,gpu,cpu);
         }

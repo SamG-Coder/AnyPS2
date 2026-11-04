@@ -13,6 +13,11 @@ struct RegionStore { std::uint32_t base=0; std::int32_t row=0,stride=0; std::uin
 // State is the existing migration ABI; no instruction words or dispatch table.
 struct VectorRegion {
     std::uint32_t unit=0,head=0,exit=0,startup=0,drain=0,counter=0,step=0,stores=0;
+    // With flag arithmetic: the number of final replayed iterations that run on
+    // exact registers, and element records end with a status sticky-flag word.
+    // The other replayed iterations only reconstruct registers.
+    std::uint32_t flags=0;
+    std::uint32_t trip_offset=0;  // iterations are counter/step plus this (integer branch backup)
     std::array<std::int32_t,16> strides{};
     std::array<RegionStore,64> output{};
     RegionIteration iteration=nullptr;

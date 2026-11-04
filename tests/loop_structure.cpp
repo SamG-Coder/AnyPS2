@@ -84,11 +84,11 @@ void run() {
         const auto guard=analyze_element_range(nt::vu::frame(bytes,1,0),1);
         require(guard.counter==9 && guard.step==1 && guard.output_stride==2 && guard.minimum_element==0,
             "Vertex range analysis lost the loop recurrence");
-        const auto unsafe=vertex_program(1,false);
-        bool rejected=false;
-        try { (void)analyze_element_range(nt::vu::frame(unsafe,1,0),1); }
-        catch (const std::invalid_argument& e) { rejected=std::string(e.what()).find("branch separation")!=std::string::npos; }
-        require(rejected,"Counter in branch latency window accepted");
+        require(guard.trip_offset==0,"Separated countdown was given an extra iteration");
+        // A counter update in the pair before the branch is compared through the
+        // one-pair integer backup: the loop runs counter/step+1 times.
+        const auto adjacent=analyze_element_range(nt::vu::frame(vertex_program(1,false),1,0),1);
+        require(adjacent.trip_offset==1 && adjacent.counter==9 && adjacent.step==1,"Integer branch backup not modeled");
         for (bool delay_counter:{false,true}) {
             Builder b;
             b.pair(load_increment(1,3));
@@ -99,7 +99,7 @@ void run() {
             b.pair(delay_counter ? lower_nop:subtract_immediate(9,1));
             b.pair(); b.pair(); b.close(9);
             if (delay_counter) render_fixture::replace(b.bytes,unsigned(b.bytes.size()/8)-1,false,subtract_immediate(9,1));
-            rejected=false;
+            bool rejected=false;
             try { (void)analyze_element_range(nt::vu::frame(b.bytes,1,0),1); }
             catch (const std::invalid_argument& e) {
                 rejected=std::string(e.what()).find(delay_counter ? "updated countdown":"overlap across iterations")!=std::string::npos;
@@ -225,7 +225,7 @@ void run() {
             require(quotient.kind==ElementNodeKind::operation && quotient.a==static_cast<std::uint32_t>(ElementOperation::reciprocal_square_root) &&
                 loop.nodes[quotient.b].c==0 && loop.nodes[quotient.c].c==1,"Reciprocal square root operands not recovered");
         }
-        require(element_output_words(loop)==5,"Element output layout changed");
+        require(element_output_words(loop)==6 && loop.flags.size()==1,"Element output layout changed");
         bool rejected=false;
         try { std::ostringstream ignored; emit_element_kernel_llvm(ignored,loop,2,false); } catch (const std::invalid_argument&) { rejected=true; }
         require(rejected,"Element kernel accepted an invalid VU unit");

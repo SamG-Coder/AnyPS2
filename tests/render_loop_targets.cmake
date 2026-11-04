@@ -134,7 +134,7 @@ if(ANYPS2_RENDER_CLANG)
     target_link_libraries(emit-vector-region PRIVATE nt_render_codegen)
     set(region_prefix "${CMAKE_CURRENT_BINARY_DIR}/render-region")
     set(region_sources)
-    foreach(variant RANGE 0 3)
+    foreach(variant RANGE 0 4)
         list(APPEND region_sources "${region_prefix}-${variant}.bin")
         foreach(part boundary elements binding gpu packet)
             list(APPEND region_sources "${region_prefix}-${variant}.${part}.ll")
@@ -145,13 +145,25 @@ if(ANYPS2_RENDER_CLANG)
     add_custom_target(render-region-fixtures DEPENDS ${region_sources})
     set(region_objects)
     set(region_shaders)
-    foreach(variant RANGE 0 3)
+    # Original boundary code calls the production four-lane arithmetic helpers,
+    # which exist only as LLVM bitcode; link them as production modules do.
+    set(region_numeric "${CMAKE_CURRENT_BINARY_DIR}/render-region-numeric.bc")
+    add_custom_command(OUTPUT "${region_numeric}"
+        COMMAND "${ANYPS2_RENDER_CLANG}" -x c++ -std=c++20 -O2 -DNDEBUG -emit-llvm -c
+            "${CMAKE_CURRENT_SOURCE_DIR}/libraries/ee_native/src/numeric.cpp"
+            -I "${CMAKE_CURRENT_SOURCE_DIR}/libraries/runtime/include" -o "${region_numeric}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/libraries/ee_native/src/numeric.cpp" VERBATIM)
+    foreach(variant RANGE 0 4)
         foreach(part boundary elements binding packet)
             set(object "${region_prefix}-${variant}.${part}.o")
+            set(builtin)
+            if(part STREQUAL "boundary")
+                set(builtin -Xclang -mlink-builtin-bitcode -Xclang "${region_numeric}")
+            endif()
             add_custom_command(OUTPUT "${object}"
                 COMMAND "${ANYPS2_RENDER_CLANG}" -x ir -O2 -Werror -Wno-override-module -c
-                    "${region_prefix}-${variant}.${part}.ll" -o "${object}"
-                DEPENDS render-region-fixtures "${region_prefix}-${variant}.${part}.ll" VERBATIM)
+                    "${region_prefix}-${variant}.${part}.ll" ${builtin} -o "${object}"
+                DEPENDS render-region-fixtures "${region_prefix}-${variant}.${part}.ll" "${region_numeric}" VERBATIM)
             set_source_files_properties("${object}" PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
             list(APPEND region_objects "${object}")
         endforeach()

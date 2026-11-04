@@ -19,7 +19,8 @@
 extern "C" void nt_render_elements(const std::uint32_t*,const std::uint32_t*,std::uint32_t*);
 namespace {
 void require(bool value,const std::string& message) { if (!value) throw std::runtime_error(message); }
-constexpr unsigned rows=1024,words_per_element=5,input_base=1000,first=5,count=200;
+// Status, four stores, then the MULq sticky-flag word.
+constexpr unsigned rows=1024,words_per_element=6,input_base=1000,first=5,count=200;
 constexpr std::uint32_t canary=0x7fcabcdeU;
 
 std::vector<std::uint32_t> memory() {
@@ -46,6 +47,10 @@ std::vector<std::uint32_t> expected(const std::vector<std::uint32_t>& data) {
             const auto product=nt::numeric::multiply_finite(in[lane],quotient.bits,true);
             result[0]|=product.supported ? 0U : 1U;
             result[1+lane]=product.bits;
+            // ZS/SS/US/OS from the written lanes' zero, sign, underflow and overflow.
+            const unsigned bits=((product.bits&0x7fffffffU)==0 ? 1U:0U)|((product.bits>>31)<<1)|
+                (product.underflow ? 4U:0U)|(product.overflow ? 8U:0U);
+            result[5]|=bits<<6;
         }
     }
     return out;

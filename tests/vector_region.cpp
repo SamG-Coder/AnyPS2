@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-extern "C" const nt::render::VectorRegion region_0,region_1,region_2,region_3;
+extern "C" const nt::render::VectorRegion region_0,region_1,region_2,region_3,region_4;
 namespace {
 void require(bool ok,const char* message) { if (!ok) throw std::runtime_error(message); }
 nt::vu::State initial(const nt::render::VectorRegion& region,unsigned count,unsigned seed) {
@@ -20,7 +20,8 @@ nt::vu::State initial(const nt::render::VectorRegion& region,unsigned count,unsi
     for (auto& row:s.data) for (auto& word:row) word=random();
     for (auto& word:s.accumulator) word=random();
     for (auto& value:s.integers) value=std::uint16_t(random()%20);
-    s.integers[2]=8; s.integers[3]=136; s.integers[4]=64; s.integers[8]=std::uint16_t(count);
+    // The counter value that makes the original loop run `count` iterations.
+    s.integers[2]=8; s.integers[3]=136; s.integers[4]=64; s.integers[8]=std::uint16_t(count-region.trip_offset);
     s.next_pair=region.head; s.immediate=random(); s.quotient=random(); s.scalar_p=random();
     s.mac=random()&65535; s.status=random()&4095; s.clip=random()&0xffffff;
     s.visible_mac=s.mac; s.visible_status=s.status; s.visible_clip=s.clip;
@@ -30,6 +31,15 @@ nt::vu::State initial(const nt::render::VectorRegion& region,unsigned count,unsi
     // Finite positions, distinct colors; all unrelated memory remains a canary.
     for (unsigned i=0;i<count;++i) for (unsigned lane=0;lane<4;++lane)
         s.data[8+i][lane]=std::bit_cast<std::uint32_t>(float(int(random()%100)-50)/4.0f);
+    if (region.flags) {
+        // Finite arithmetic operands. One steady element overflows its product,
+        // so the overflow sticky bit can only come from the element kernel.
+        for (unsigned lane=0;lane<4;++lane) { s.vectors[19][lane]=0x3f800000U; s.vectors[20][lane]=0x40000000U; }
+        for (unsigned i=0;i<count;++i) for (unsigned lane=0;lane<4;++lane)
+            s.data[64+i][lane]=std::bit_cast<std::uint32_t>(float(int(random()%64)-32));
+        if (count>=7) s.data[64+count/2][1]=0x7f000000U;
+        s.status&=~0xfc0U; s.visible_status=s.status;
+    }
     return s;
 }
 nt::vu::State reference(const nt::render::VectorRegion& region,nt::vu::State s,unsigned count) {
@@ -73,10 +83,10 @@ void gpu_kernel(void* context,std::span<const std::uint32_t> data,std::span<cons
 }
 int main(int argc,char** argv) {
     try {
-        require(argc==1 || argc==5,"Expected zero or four AOT shader paths");
-        const nt::render::VectorRegion* regions[]{&region_0,&region_1,&region_2,&region_3};
+        require(argc==1 || argc==6,"Expected zero or five AOT shader paths");
+        const nt::render::VectorRegion* regions[]{&region_0,&region_1,&region_2,&region_3,&region_4};
         unsigned checks=0;
-        for (unsigned variant=0;variant<4;++variant) {
+        for (unsigned variant=0;variant<5;++variant) {
             const auto& region=*regions[variant];
             for (unsigned count:{1U,2U,3U,4U,7U,20U,60U}) for (unsigned seed=0;seed<8;++seed) {
                 auto state=initial(region,count,seed);
@@ -93,7 +103,8 @@ int main(int argc,char** argv) {
                 if (fault==0) state.next_pair++;
                 if (fault==1) state.quotient_pending=1;
                 if (fault==2) state.integers[2]=state.integers[3];
-                if (fault==3) state.integers[8]=0;
+                // Zero is a valid one-iteration count when the backed-up counter is compared.
+                if (fault==3) state.integers[8]=region.trip_offset ? 1000 : 0;
                 if (fault==4) state.pending_mac_mask=1;
                 if (fault==5) state.integers[3]=std::uint16_t(region.unit ? 1020:250);
                 rejects_unchanged(state,[&]{nt::render::execute_vector_region(region,state);});
@@ -103,7 +114,7 @@ int main(int argc,char** argv) {
             auto broken=region; broken.iteration=failed_boundary;
             rejects_unchanged(state,[&]{nt::render::execute_vector_region(broken,state);});
 #if defined(ANYPS2_REGION_VULKAN)
-            if (argc==5) {
+            if (argc==6) {
                 auto shader=vulkan_compute::read_shader(argv[variant+1]);
                 for (unsigned count:{7U,20U,60U}) {
                     state=initial(region,count,variant+42);

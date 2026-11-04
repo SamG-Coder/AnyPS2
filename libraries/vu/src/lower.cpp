@@ -182,4 +182,15 @@ std::string_view name(LowerOperation operation) {
     default: return "unsupported";
     }
 }
+unsigned branch_backup_register(const Lower& lower) {
+    using L=LowerOperation;
+    if (lower.address_update!=AddressUpdate::none) return lower.address_register;
+    switch (lower.operation) {
+    case L::branch: case L::load_integer: case L::input_top: case L::input_itop:
+    case L::mac_and: case L::mac_or: case L::mac_equal:
+    case L::clip_and: case L::clip_or: case L::clip_equal: case L::clip_get:
+    case L::status_and: case L::status_or: case L::status_equal: return 0;
+    default: return lower.result.bank==Bank::integer ? lower.result.index : 0U;
+    }
+}
 }

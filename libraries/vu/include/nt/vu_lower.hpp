@@ -27,5 +27,9 @@ struct Lower {
     AddressUpdate address_update=AddressUpdate::none;
 };
 Lower decode_lower(const Pair& pair,unsigned unit);
+// The VI register whose previous value a conditional branch in the next pair
+// compares (the one-pair integer backup), or 0. Integer ALU results and address
+// updates are backed up; loads, flag reads, TOP/ITOP and branches are not.
+unsigned branch_backup_register(const Lower&);
 std::string_view name(LowerOperation operation);
 }

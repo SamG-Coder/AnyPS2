@@ -255,7 +255,7 @@ void failures(VulkanRenderer& gpu,unsigned quotient) {
     VectorRegister color; color.reg=1; color.constant={200,80,40,128};
     VectorRegister xyz; xyz.reg=5; xyz.store={2,3,vector_constant_word,vector_constant_word};
     const std::array layout{color,xyz};
-    const VectorLaunch launch{quotient,writes,parameters,3,5,layout};
+    const VectorLaunch launch{quotient,writes,parameters,3,6,layout};
     drawing.submit_vectors(gpu,launch);
     const auto good=drawing.pixels();
     require(std::any_of(good.begin(),good.end(),[](auto x){return x!=0;}),"Failure fixture cannot draw a valid triangle");

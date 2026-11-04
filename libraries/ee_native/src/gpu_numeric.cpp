@@ -10,8 +10,13 @@ uint64_t pack(nt::numeric::FiniteFloatResult value) {
 }
 // Element operations return the VU result bits; bit 63 marks an operand the VU
 // would stop on, so a kernel can report the element instead of inventing a value.
+// Bits 32 (underflow), 35 (overflow) and 36-39 (MADD product Z/S/U/O) carry the
+// flags a recovered iteration contributes to the status sticky bits.
 constexpr uint64_t unsupported=1ULL<<63;
-uint64_t element(nt::numeric::FiniteFloatResult value) { return value.bits|(value.supported ? 0 : unsupported); }
+uint64_t element(nt::numeric::FiniteFloatResult value) {
+    return value.bits|(uint64_t(value.underflow)<<32)|(uint64_t(value.overflow)<<35)|
+        (uint64_t(value.product_flags&15U)<<36)|(value.supported ? 0 : unsupported);
+}
 uint64_t element(nt::numeric::ScalarFlagResult value) { return value.bits|(value.supported ? 0 : unsupported); }
 }
 
