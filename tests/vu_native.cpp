@@ -359,12 +359,19 @@ int run_core_tests() {
             nt::ee::NativeVuLaunch owner(binding);
             nt::ee::NativePacketSetup packets;
             owner.connect(packets);
+            // The diagnostic observer sees only submissions the owner accepted.
+            struct Observed { unsigned steps=0,launches=0; } observed;
+            packets.observe_context=&observed;
+            packets.observe_submission=[](void* raw,unsigned,std::span<const nt::ee::NativeSubmissionStep> steps) {
+                auto& o=*static_cast<Observed*>(raw);
+                for (const auto& step:steps) { ++o.steps; o.launches+=step.launch ? 1U : 0U; }
+            };
             const auto submit=[&](std::initializer_list<std::uint32_t> words) {
                 const auto bytes=std::span(reinterpret_cast<const std::uint8_t*>(words.begin()),words.size()*4);
                 return packets.consume(1,bytes,false);
             };
-            if (submit({0x17000000})!=nt::ee::Stop::unsupported_vector)
-                throw std::runtime_error("Uninitialized continuation accepted");
+            if (submit({0x17000000})!=nt::ee::Stop::unsupported_vector || observed.steps)
+                throw std::runtime_error("Uninitialized continuation accepted or observed");
             if (submit({0x03000020,0x02000010,0x04000007,0x14000000})!=nt::ee::Stop::budget ||
                 owner.state.next_pair!=2 || owner.state.integers[0]!=1)
                 throw std::runtime_error("Compiled E stop lost its continuation");
@@ -381,6 +388,7 @@ int run_core_tests() {
             if (submit({0x04000009,0x170007ff})!=nt::ee::Stop::unsupported_vector || owner.state!=before ||
                 packets.read(0x10003ce0).value!=top || consumer.accepted)
                 throw std::runtime_error("Rejected continuation committed state");
+            if (observed.launches!=1) throw std::runtime_error("Vector observer missed an accepted launch or saw a rejected one");
             consumer.accept=true;
             if (submit({0x04000009,0x170007ff})!=nt::ee::Stop::budget || owner.state.next_pair!=4 ||
                 owner.state.integers[0]!=2 || owner.state.input_top!=0x30 || owner.state.input_itop!=9 || consumer.accepted!=1)

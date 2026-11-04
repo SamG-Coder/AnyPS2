@@ -1,5 +1,6 @@
 #include "capture.hpp"
 #include "graphics_capture.hpp"
+#include "vector_capture.hpp"
 #include <nt/host_isa.hpp>
 #include <nt/ee_services.hpp>
 #include <nt/ee_platform.hpp>
@@ -184,7 +185,7 @@ nt::ee::Stop execute(nt::runtime::State* state,nt::ee::Memory* memory,std::uint6
 }
 int main(int argc,char** argv) {
     if (argc<2) {
-        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--profile-graphics] [--validate-graphics] [--verify-textures] [--run-seconds N] [--headless | --display-stop | --close-on-stop] [--strict-performance | --native-thread-cycles | --native-pmu] [--disc <image.iso>] [--disc-media cd|dvd] [--capture-vu <new-private-directory>] [--capture-stop <new-private-directory>] [--capture-graphics <new-private-directory> | --capture-display <new-private-directory>]\n";
+        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--profile-graphics] [--validate-graphics] [--verify-textures] [--run-seconds N] [--headless | --display-stop | --close-on-stop] [--strict-performance | --native-thread-cycles | --native-pmu] [--disc <image.iso>] [--disc-media cd|dvd] [--capture-vu <new-private-directory>] [--capture-vectors <new-private-directory>] [--capture-stop <new-private-directory>] [--capture-graphics <new-private-directory> | --capture-display <new-private-directory>]\n";
 #ifdef ANYPS2_NATIVE_IOP
         std::cerr<<"Linked IOP investigation: --probe-iop-reset <module.data> (stops without acknowledging reset)\n";
         std::cerr<<"Explicit selected-bundle execution: --iop-reset-session <module.data> --disc <image.iso>\n";
@@ -202,7 +203,7 @@ int main(int argc,char** argv) {
     try {
         std::uint64_t budget=1000000;
         unsigned run_seconds=0,disc_media=0;
-        std::filesystem::path disc,capture_directory,stop_directory,graphics_directory;
+        std::filesystem::path disc,capture_directory,stop_directory,graphics_directory,vector_directory;
         bool profile_graphics=false,validate_graphics=false,verify_textures=false,capture_display_only=false;
         bool has_budget=false,native_cycles=false,native_pmu=false,strict_performance=false,show_window=true,hold_window=true;
 #ifdef ANYPS2_NATIVE_IOP
@@ -251,6 +252,12 @@ int main(int argc,char** argv) {
                 stop_directory=argv[++index];
                 if (std::filesystem::exists(stop_directory))
                     throw std::runtime_error("Stop capture directory already exists");
+                continue;
+            }
+            if (text=="--capture-vectors") {
+                if (!vector_directory.empty() || index+1==argc) throw std::runtime_error("Expected one private vector capture directory");
+                vector_directory=argv[++index];
+                if (std::filesystem::exists(vector_directory)) throw std::runtime_error("Vector capture directory already exists");
                 continue;
             }
             if (text=="--capture-vu") {
@@ -447,7 +454,14 @@ int main(int argc,char** argv) {
         services.native_jobs_pending=[&] { return platform.packet_setup.working(); };
         if (profile_graphics) services.profile=&execution_profile;
         nt::ee::NativeGraphics::Profile display_profile{},previous_display{};
-        if (profile_graphics) platform.graphics.profile=&display_profile;
+        // Vector capture delimits frames by displayed-buffer changes.
+        if (profile_graphics || !vector_directory.empty()) platform.graphics.profile=&display_profile;
+        std::optional<probe::VectorCapture> vector_capture;
+        if (!vector_directory.empty()) {
+            vector_capture.emplace(vector_directory,std::span<const std::uint8_t>(ram.data(),ram.size()),&display_profile.buffer_changes);
+            platform.packet_setup.observe_context=&*vector_capture;
+            platform.packet_setup.observe_submission=probe::VectorCapture::observe;
+        }
         probe::ServiceCapture service_observation;
         if (!stop_directory.empty()) service_capture=&service_observation;
         active_services=&services;
@@ -779,6 +793,7 @@ int main(int argc,char** argv) {
         }
 #endif
         if (!capture_directory.empty()) capture.save(capture_directory);
+        if (vector_capture) vector_capture->save();
         if (!stop_directory.empty()) {
             probe::capture_stop(stop_directory,state,memory,stop,nt_ee_generated_input_identity());
             service_observation.save(stop_directory);
