@@ -611,7 +611,7 @@ int main(int argc,char** argv) {
                     <<" vsync_acknowledged="<<display_profile.vsync_acknowledged-previous_display.vsync_acknowledged
                     <<" scanout_missed="<<display_profile.scanout_missed-previous_display.scanout_missed
                     <<" draw_ms="<<(s.draw_ns-p.draw_ns)/1e6<<" write_ms="<<(s.write_ns-p.write_ns)/1e6
-                    <<" gpu_timing_supported="<<s.gpu_timing_supported<<" gpu_ms="<<(s.gpu_ns-p.gpu_ns)/1e6
+                    <<" gpu_timing_supported="<<s.gpu_timing_supported<<" gpu_ms="<<(s.gpu_ns-p.gpu_ns)/1e6<<" vector_gpu_ms="<<(s.vector_gpu_ns-p.vector_gpu_ns)/1e6
                     <<" wait_ms="<<(s.wait_ns-p.wait_ns)/1e6<<" upload_ms="<<(s.upload_ns-p.upload_ns)/1e6
                     <<" surface_lookup_ms="<<(s.surface_lookup_ns-p.surface_lookup_ns)/1e6
                     <<" texture_misses="<<(s.texture_misses-p.texture_misses)<<" texture_evictions="<<(s.texture_evictions-p.texture_evictions)

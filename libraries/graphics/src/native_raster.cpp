@@ -97,7 +97,7 @@ struct NativeRaster::Impl {
     VkQueryPool timestamps{}; double timestamp_period=0; unsigned timestamp_bits=0;
     // prologue holds vector batch compute work. It is submitted before command,
     // so a slot's draws run in render passes uninterrupted by that work.
-    struct Submission { VkCommandBuffer command{},prologue{}; VkFence fence{}; std::uint64_t serial=0; bool measured=false; };
+    struct Submission { VkCommandBuffer command{},prologue{},upload{}; VkFence fence{}; std::uint64_t serial=0; bool measured=false,prologue_measured=false; };
     std::array<Submission,frame_slots> slots{};
     unsigned slot=0; std::uint64_t submitted=0,completed=0;
     VkCommandPool pool{}; VkCommandBuffer command{};
@@ -233,7 +233,7 @@ void NativeRaster::Impl::begin() {
     prepare_slot();
     checked(vkResetCommandBuffer(command,0),"Reset native commands"); VkCommandBufferBeginInfo b{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO}; b.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     checked(vkBeginCommandBuffer(command,&b),"Begin native commands"); recording=true;
-    if (timestamps) { vkCmdResetQueryPool(command,timestamps,slot*2,2); vkCmdWriteTimestamp(command,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,timestamps,slot*2); }
+    if (timestamps) { vkCmdResetQueryPool(command,timestamps,slot*4,2); vkCmdWriteTimestamp(command,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,timestamps,slot*4); }
 }
 void NativeRaster::Impl::flush_batch() {
     if (!batch_count) return;
@@ -276,9 +276,14 @@ void NativeRaster::Impl::collect(unsigned index,bool wait) {
     completed=std::max(completed,entry.serial);
     if (timestamps) {
         std::uint64_t values[2]{};
-        checked(vkGetQueryPoolResults(device,timestamps,index*2,2,sizeof(values),values,sizeof(values[0]),VK_QUERY_RESULT_64_BIT),"Read native GPU timestamps");
+        checked(vkGetQueryPoolResults(device,timestamps,index*4,2,sizeof(values),values,sizeof(values[0]),VK_QUERY_RESULT_64_BIT),"Read native GPU timestamps");
         const auto mask=timestamp_bits==64 ? ~std::uint64_t(0) : (std::uint64_t(1)<<timestamp_bits)-1;
         stats.gpu_ns+=static_cast<std::uint64_t>(double((values[1]-values[0])&mask)*timestamp_period);
+        if (entry.prologue_measured) {
+            checked(vkGetQueryPoolResults(device,timestamps,index*4+2,2,sizeof(values),values,sizeof(values[0]),VK_QUERY_RESULT_64_BIT),
+                "Read native vector GPU timestamps");
+            stats.vector_gpu_ns+=static_cast<std::uint64_t>(double((values[1]-values[0])&mask)*timestamp_period);
+        }
     }
     if (vectors) { vectors->collect(index); collect_vectors(); }
     entry.measured=true;
@@ -310,19 +315,39 @@ void NativeRaster::Impl::flush(VkSemaphore acquired,VkSemaphore rendered,bool wa
     end_pass();
     if (recording) {
         auto& entry=slots[slot];
-        if (timestamps) vkCmdWriteTimestamp(command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timestamps,slot*2+1);
+        if (timestamps) vkCmdWriteTimestamp(command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timestamps,slot*4+1);
         checked(vkEndCommandBuffer(command),"End native commands"); checked(vkResetFences(device,1,&entry.fence),"Reset native fence");
-        const VkCommandBuffer buffers[]{entry.prologue,command};
-        VkSubmitInfo s{VK_STRUCTURE_TYPE_SUBMIT_INFO}; s.commandBufferCount=1; s.pCommandBuffers=&command;
+        // Vector work runs first: the staging upload with one assembly dispatch
+        // for host-record batches, then kernel launches, then the slot's draws.
+        std::array<VkCommandBuffer,3> buffers{};
+        unsigned count=0;
+        const bool vector_work=vectors && vectors->pending(slot);
+        if (vector_work) {
+            checked(vkResetCommandBuffer(entry.upload,0),"Reset native vector uploads");
+            VkCommandBufferBeginInfo ub{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO}; ub.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            checked(vkBeginCommandBuffer(entry.upload,&ub),"Begin native vector uploads");
+            if (timestamps) {
+                vkCmdResetQueryPool(entry.upload,timestamps,slot*4+2,2);
+                vkCmdWriteTimestamp(entry.upload,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,timestamps,slot*4+2);
+            }
+            vectors->record_upload(entry.upload,slot);
+            if (timestamps && !prologue_recording) vkCmdWriteTimestamp(entry.upload,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timestamps,slot*4+3);
+            checked(vkEndCommandBuffer(entry.upload),"End native vector uploads");
+            buffers[count++]=entry.upload;
+        }
         if (prologue_recording) {
-            // Vector compute results become visible to the slot's draws.
+            // Kernel results become visible to the slot's draws and the host.
             VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER}; b.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_TRANSFER_WRITE_BIT;
             b.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_HOST_READ_BIT;
             vkCmdPipelineBarrier(entry.prologue,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_HOST_BIT,0,1,&b,0,nullptr,0,nullptr);
+            if (timestamps) vkCmdWriteTimestamp(entry.prologue,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timestamps,slot*4+3);
             checked(vkEndCommandBuffer(entry.prologue),"End native vector commands");
-            s.commandBufferCount=2; s.pCommandBuffers=buffers; prologue_recording=false;
+            buffers[count++]=entry.prologue; prologue_recording=false;
         }
+        buffers[count++]=command;
+        entry.prologue_measured=timestamps!=VK_NULL_HANDLE && vector_work;
+        VkSubmitInfo s{VK_STRUCTURE_TYPE_SUBMIT_INFO}; s.commandBufferCount=count; s.pCommandBuffers=buffers.data();
         VkPipelineStageFlags stage=VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         if (acquired) { s.waitSemaphoreCount=1; s.pWaitSemaphores=&acquired; s.pWaitDstStageMask=&stage; s.signalSemaphoreCount=1; s.pSignalSemaphores=&rendered; }
         { Measure timing(stats.wait_ns,profiling); checked(vkQueueSubmit(queue,1,&s,entry.fence),"Submit native graphics"); }
@@ -366,7 +391,7 @@ void NativeRaster::Impl::initialize(unsigned family) {
     timestamp_bits=queue_properties.at(family).timestampValidBits; timestamp_period=properties.limits.timestampPeriod;
     stats.gpu_timing_supported=timestamp_bits!=0;
     if (timestamp_bits) {
-        VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO}; qi.queryType=VK_QUERY_TYPE_TIMESTAMP; qi.queryCount=frame_slots*2;
+        VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO}; qi.queryType=VK_QUERY_TYPE_TIMESTAMP; qi.queryCount=frame_slots*4;
         checked(vkCreateQueryPool(device,&qi,nullptr,&timestamps),"Create native GPU timestamps");
     }
     if (properties.limits.maxStorageBufferRange<record_bytes) throw std::runtime_error("Native draw records exceed storage buffer limit");
@@ -377,6 +402,7 @@ void NativeRaster::Impl::initialize(unsigned family) {
     for (auto& entry:slots) {
         checked(vkAllocateCommandBuffers(device,&ca,&entry.command),"Allocate native commands");
         checked(vkAllocateCommandBuffers(device,&ca,&entry.prologue),"Allocate native vector commands");
+        checked(vkAllocateCommandBuffers(device,&ca,&entry.upload),"Allocate native vector uploads");
         checked(vkCreateFence(device,&fi,nullptr,&entry.fence),"Create native fence");
     }
     VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO}; bi.size=staging_bytes*frame_slots; bi.usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -1124,7 +1150,7 @@ void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly&
     const DrawRecord record{target,{},color.width,std::min(color.height,depth.height),command.fog_color,0,
         command.levels.control,command.levels.q};
     const auto words=std::bit_cast<std::array<std::uint32_t,NativeVectors::record_words>>(record);
-    r.vectors->record(r.vector_commands(),r.slot,launch,assembly,words,first,count);
+    r.vectors->record(launch.kernel==vector_host_records ? VK_NULL_HANDLE : r.vector_commands(),r.slot,launch,assembly,words,first,count);
     r.records_used+=count; r.collect_vectors();
     // The GPU determines individual bounds. The host tracks a conservative union
     // (all vertices, or the scissor) for resource ownership and later hazards.

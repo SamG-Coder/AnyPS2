@@ -271,20 +271,22 @@ state snapshot. Consecutive runs with identical draw state join one batch; joine
 strips carry a restart flag so that no triangle spans the join. A batch is
 bounded by all of its vertices, as `plan_sprite` bounds a primitive, and textures
 that may alias the color or depth target keep the CPU planner. Batches extend the
-renderer's open instanced draw like consecutive CPU draws. Assembly compute runs
-in a per-slot prologue command buffer submitted before the slot's draws, reading
-host records in place; one barrier orders all of it. `ps2-native --gpu-triangles`
+renderer's open instanced draw like consecutive CPU draws. When a frame slot is
+submitted, its staging (records, plans and a batch table) is copied once to
+device memory and a single assembly dispatch covers every host-record batch of the
+slot; element-kernel launches follow in a prologue, then the slot's draws. `ps2-native --gpu-triangles`
 enables the path (off by default); the graphics profile reports
 `gpu_triangle_batches` and fallback reasons.
 
 A private local capture of 9,143 GT4 graphics batches replayed through the CPU
 planner and through this path produced identical complete GS memory at 91
 checkpoints and at the end; 11,015 GPU batches covered all but 263 vertex runs
-(textures that might alias their target). In headless 60-second GT4 runs on one
-host, the last 5-second window issued the same number of draw calls as the CPU
-planner with lower measured draw-pass GPU time (110 ms against 148 ms), but the
-render thread took 0.97 s against 0.74 s, mostly fence waits that include the
-unmeasured prologue. No speedup is claimed; the path stays opt-in.
+(textures that might alias their target). In repeated headless 60-second GT4 runs
+on one host, 5-second windows issued the same number of draw calls as the CPU
+planner with lower draw-pass GPU time (about 102 ms against 148 ms), plus about
+200 ms of vector work (`vector_gpu_ms`, which can include queue overlap), spread
+over about 6,300 small submissions. The render thread took about 0.88 s against
+0.75 s, mostly fence waits. No speedup is claimed; the path stays opt-in.
 
 Frame slots own staging and status memory until their queue fence completes.
 `RenderStatistics` exposes vector launches, resident hits/uploads, staged bytes

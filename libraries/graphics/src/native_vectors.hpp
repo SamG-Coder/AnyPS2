@@ -33,6 +33,13 @@ public:
     // owner's record buffer from the 68-word primitive template.
     void record(VkCommandBuffer command,unsigned slot,const VectorLaunch& launch,const VectorAssembly& assembly,
         std::span<const std::uint32_t,record_words> primitive,unsigned first_record,unsigned primitives);
+    // Kernel launches record their work into command; host-record launches only
+    // reserve their batch and need no command buffer (pass VK_NULL_HANDLE).
+    // record_upload then records the slot's staging upload and one assembly
+    // dispatch for all host-record batches; submit it after the slot's record()
+    // calls and before their command buffer.
+    bool pending(unsigned slot) const;
+    void record_upload(VkCommandBuffer command,unsigned slot);
     // After the slot's fence: adds element failures to the statistics, resets the slot.
     void collect(unsigned slot);
     void clear_resident();
