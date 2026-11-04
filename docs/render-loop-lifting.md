@@ -274,19 +274,23 @@ that may alias the color or depth target keep the CPU planner. Batches extend th
 renderer's open instanced draw like consecutive CPU draws. When a frame slot is
 submitted, its staging (records, plans and a batch table) is copied once to
 device memory and a single assembly dispatch covers every host-record batch of the
-slot; element-kernel launches follow in a prologue, then the slot's draws. `ps2-native --gpu-triangles`
-enables the path (off by default); the graphics profile reports
-`gpu_triangle_batches` and fallback reasons.
+slot; element-kernel launches come first in the same command buffer, which is
+submitted before the slot's draws. Draw records live in device-local memory the
+host can map, so assembly writes and draw reads stay in video memory. `ps2-native` uses the path by
+default when the renderer has ordered fragment access (`--cpu-triangles` disables
+it, `--gpu-triangles` requires it); the graphics profile reports
+`gpu_triangle_batches`, fallback reasons and `vector_gpu_ms`.
 
 A private local capture of 9,143 GT4 graphics batches replayed through the CPU
 planner and through this path produced identical complete GS memory at 91
 checkpoints and at the end; 11,015 GPU batches covered all but 263 vertex runs
 (textures that might alias their target). In repeated headless 60-second GT4 runs
 on one host, 5-second windows issued the same number of draw calls as the CPU
-planner with lower draw-pass GPU time (about 102 ms against 148 ms), plus about
-200 ms of vector work (`vector_gpu_ms`, which can include queue overlap), spread
-over about 6,300 small submissions. The render thread took about 0.88 s against
-0.75 s, mostly fence waits. No speedup is claimed; the path stays opt-in.
+planner. Render-thread time was within run-to-run variation of the CPU planner
+(about 0.74-0.76 s against 0.71-0.74 s): command submission and draw recording
+took less time, GS packet parsing slightly more. Draw passes took about 65 ms of
+GPU time against 73 ms, plus about 74 ms of assembly. No frame-rate or input-lag
+improvement is claimed from these headless runs.
 
 Frame slots own staging and status memory until their queue fence completes.
 `RenderStatistics` exposes vector launches, resident hits/uploads, staged bytes

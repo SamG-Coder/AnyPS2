@@ -326,18 +326,9 @@ void NativeVectors::record(VkCommandBuffer command,unsigned slot,const VectorLau
     const auto mirrored=[&](VkDeviceSize host_offset) { return static_cast<std::uint32_t>((v.mirror_offset+host_offset)/4); };
     const std::uint32_t items=std::max(launch.elements,primitives);
     const std::uint32_t record_word=host_records ? mirrored(host_output) : static_cast<std::uint32_t>(output/4);
-    if (host_records) {
-        // Assembled together with the slot's other host-record batches.
-        s.table.insert(s.table.end(),{s.items,mirrored(plan_offset),record_word,static_cast<std::uint32_t>(status/4)});
-        s.items+=items;
-    } else {
-        const std::uint32_t table[]{1,0,mirrored(plan_offset),record_word,static_cast<std::uint32_t>(status/4),items};
-        const auto table_offset=host_allocate(std::as_bytes(std::span(table)));
-        vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_COMPUTE,v.assembly);
-        const std::uint32_t offset=static_cast<std::uint32_t>(table_offset);
-        vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_COMPUTE,v.assembly_layout,0,1,&v.assembly_set,1,&offset);
-        vkCmdDispatch(command,(items+63)/64,1,1);
-    }
+    // Assembled by the slot's single dispatch, after its kernels and upload.
+    s.table.insert(s.table.end(),{s.items,mirrored(plan_offset),record_word,static_cast<std::uint32_t>(status/4)});
+    s.items+=items;
     // Batches write disjoint records. The owner's barrier after all vector work
     // makes records visible to draws and status words to the host.
     ++v.stats.launches;
@@ -361,9 +352,11 @@ void NativeVectors::record_upload(VkCommandBuffer command,unsigned slot) {
     }
     const VkBufferCopy copy{slot*host_slot_bytes,v.mirror_offset+slot*host_slot_bytes,s.host_used};
     vkCmdCopyBuffer(command,v.host,v.device_buffer,1,&copy);
-    barrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);
+    // The mirror, and kernel outputs recorded earlier in this buffer, before assembly.
+    barrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT|VK_ACCESS_SHADER_WRITE_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);
     if (s.table.empty()) return;
-    // One dispatch assembles every host-record batch of the slot.
+    // One dispatch assembles every batch of the slot.
     vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_COMPUTE,v.assembly);
     const auto offset=static_cast<std::uint32_t>(table_offset);
     vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_COMPUTE,v.assembly_layout,0,1,&v.assembly_set,1,&offset);

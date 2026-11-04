@@ -97,7 +97,7 @@ struct NativeRaster::Impl {
     VkQueryPool timestamps{}; double timestamp_period=0; unsigned timestamp_bits=0;
     // prologue holds vector batch compute work. It is submitted before command,
     // so a slot's draws run in render passes uninterrupted by that work.
-    struct Submission { VkCommandBuffer command{},prologue{},upload{}; VkFence fence{}; std::uint64_t serial=0; bool measured=false,prologue_measured=false; };
+    struct Submission { VkCommandBuffer command{},prologue{}; VkFence fence{}; std::uint64_t serial=0; bool measured=false,prologue_measured=false; };
     std::array<Submission,frame_slots> slots{};
     unsigned slot=0; std::uint64_t submitted=0,completed=0;
     VkCommandPool pool{}; VkCommandBuffer command{};
@@ -308,6 +308,10 @@ VkCommandBuffer NativeRaster::Impl::vector_commands() {
         checked(vkResetCommandBuffer(entry.prologue,0),"Reset native vector commands");
         VkCommandBufferBeginInfo b{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO}; b.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         checked(vkBeginCommandBuffer(entry.prologue,&b),"Begin native vector commands"); prologue_recording=true;
+        if (timestamps) {
+            vkCmdResetQueryPool(entry.prologue,timestamps,slot*4+2,2);
+            vkCmdWriteTimestamp(entry.prologue,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,timestamps,slot*4+2);
+        }
     }
     return entry.prologue;
 }
@@ -317,36 +321,19 @@ void NativeRaster::Impl::flush(VkSemaphore acquired,VkSemaphore rendered,bool wa
         auto& entry=slots[slot];
         if (timestamps) vkCmdWriteTimestamp(command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timestamps,slot*4+1);
         checked(vkEndCommandBuffer(command),"End native commands"); checked(vkResetFences(device,1,&entry.fence),"Reset native fence");
-        // Vector work runs first: the staging upload with one assembly dispatch
-        // for host-record batches, then kernel launches, then the slot's draws.
-        std::array<VkCommandBuffer,3> buffers{};
+        // Vector work runs first: kernel launches, then (recorded now, after all
+        // staging writes) the staging upload and one assembly dispatch.
+        std::array<VkCommandBuffer,2> buffers{};
         unsigned count=0;
-        const bool vector_work=vectors && vectors->pending(slot);
-        if (vector_work) {
-            checked(vkResetCommandBuffer(entry.upload,0),"Reset native vector uploads");
-            VkCommandBufferBeginInfo ub{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO}; ub.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-            checked(vkBeginCommandBuffer(entry.upload,&ub),"Begin native vector uploads");
-            if (timestamps) {
-                vkCmdResetQueryPool(entry.upload,timestamps,slot*4+2,2);
-                vkCmdWriteTimestamp(entry.upload,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,timestamps,slot*4+2);
-            }
-            vectors->record_upload(entry.upload,slot);
-            if (timestamps && !prologue_recording) vkCmdWriteTimestamp(entry.upload,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timestamps,slot*4+3);
-            checked(vkEndCommandBuffer(entry.upload),"End native vector uploads");
-            buffers[count++]=entry.upload;
-        }
+        entry.prologue_measured=false;
         if (prologue_recording) {
-            // Kernel results become visible to the slot's draws and the host.
-            VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER}; b.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_TRANSFER_WRITE_BIT;
-            b.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_HOST_READ_BIT;
-            vkCmdPipelineBarrier(entry.prologue,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_HOST_BIT,0,1,&b,0,nullptr,0,nullptr);
+            vectors->record_upload(entry.prologue,slot);
             if (timestamps) vkCmdWriteTimestamp(entry.prologue,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timestamps,slot*4+3);
             checked(vkEndCommandBuffer(entry.prologue),"End native vector commands");
             buffers[count++]=entry.prologue; prologue_recording=false;
+            entry.prologue_measured=timestamps!=VK_NULL_HANDLE;
         }
         buffers[count++]=command;
-        entry.prologue_measured=timestamps!=VK_NULL_HANDLE && vector_work;
         VkSubmitInfo s{VK_STRUCTURE_TYPE_SUBMIT_INFO}; s.commandBufferCount=count; s.pCommandBuffers=buffers.data();
         VkPipelineStageFlags stage=VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         if (acquired) { s.waitSemaphoreCount=1; s.pWaitSemaphores=&acquired; s.pWaitDstStageMask=&stage; s.signalSemaphoreCount=1; s.pSignalSemaphores=&rendered; }
@@ -402,7 +389,6 @@ void NativeRaster::Impl::initialize(unsigned family) {
     for (auto& entry:slots) {
         checked(vkAllocateCommandBuffers(device,&ca,&entry.command),"Allocate native commands");
         checked(vkAllocateCommandBuffers(device,&ca,&entry.prologue),"Allocate native vector commands");
-        checked(vkAllocateCommandBuffers(device,&ca,&entry.upload),"Allocate native vector uploads");
         checked(vkCreateFence(device,&fi,nullptr,&entry.fence),"Create native fence");
     }
     VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO}; bi.size=staging_bytes*frame_slots; bi.usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -426,7 +412,10 @@ void NativeRaster::Impl::initialize(unsigned family) {
     bi.size=record_bytes; bi.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     checked(vkCreateBuffer(device,&bi,nullptr,&records),"Create native draw records");
     vkGetBufferMemoryRequirements(device,records,&requirements);
-    record_memory=allocate(requirements,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    // Draw records are written sequentially by the host and by vector assembly,
+    // and read by every draw: prefer device-local memory the host can map.
+    record_memory=allocate(requirements,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     checked(vkBindBufferMemory(device,records,record_memory,0),"Bind native draw records");
     checked(vkMapMemory(device,record_memory,0,record_bytes,0,&record_mapping),"Map native draw records");
     VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO}; si.magFilter=si.minFilter=VK_FILTER_NEAREST;
@@ -1150,7 +1139,9 @@ void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly&
     const DrawRecord record{target,{},color.width,std::min(color.height,depth.height),command.fog_color,0,
         command.levels.control,command.levels.q};
     const auto words=std::bit_cast<std::array<std::uint32_t,NativeVectors::record_words>>(record);
-    r.vectors->record(launch.kernel==vector_host_records ? VK_NULL_HANDLE : r.vector_commands(),r.slot,launch,assembly,words,first,count);
+    // The slot's vector command buffer also receives the upload and assembly at submission.
+    const auto vector_commands=r.vector_commands();
+    r.vectors->record(launch.kernel==vector_host_records ? VK_NULL_HANDLE : vector_commands,r.slot,launch,assembly,words,first,count);
     r.records_used+=count; r.collect_vectors();
     // The GPU determines individual bounds. The host tracks a conservative union
     // (all vertices, or the scissor) for resource ownership and later hazards.

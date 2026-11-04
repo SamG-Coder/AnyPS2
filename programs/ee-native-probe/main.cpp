@@ -72,7 +72,8 @@ struct VuCapture {
 struct NativeGpu {
     std::unique_ptr<nt::graphics::VulkanRenderer> headless_renderer;
     nt::graphics::VulkanRenderer* renderer=nullptr;
-    bool verify_textures=false,profile_commands=false,gpu_triangles=false,gpu_triangles_enabled=false;
+    // GPU primitive assembly is the default where the renderer supports it.
+    bool verify_textures=false,profile_commands=false,gpu_triangles=true,gpu_triangles_required=false,gpu_triangles_enabled=false;
     nt::graphics::NativeDrawing drawing{true,nt::graphics::NativeDrawing::Completion::deferred};
     nt::graphics::NativeDrawing::Profile drawing_profile{};
     std::unique_ptr<nt::graphics::NativeDrawingWorker> worker;
@@ -86,9 +87,13 @@ struct NativeGpu {
         }
         // Enabled before the worker owns the drawing; the worker thread is its only user afterwards.
         if (gpu_triangles && !gpu_triangles_enabled && !worker) {
-            if (!drawing.assemble_triangles_on_gpu(*renderer))
+            if (drawing.assemble_triangles_on_gpu(*renderer)) gpu_triangles_enabled=true;
+            else if (gpu_triangles_required)
                 throw std::runtime_error("--gpu-triangles requires the native Vulkan renderer with ordered fragment access");
-            gpu_triangles_enabled=true;
+            else {
+                std::cerr<<"graphics: GPU primitive assembly unavailable (no ordered fragment access); using CPU planning\n";
+                gpu_triangles=false;
+            }
         }
         if (!worker) worker=std::make_unique<nt::graphics::NativeDrawingWorker>(drawing,*renderer);
     }
@@ -190,7 +195,7 @@ nt::ee::Stop execute(nt::runtime::State* state,nt::ee::Memory* memory,std::uint6
 }
 int main(int argc,char** argv) {
     if (argc<2) {
-        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--profile-graphics] [--validate-graphics] [--verify-textures] [--gpu-triangles] [--run-seconds N] [--headless | --display-stop | --close-on-stop] [--strict-performance | --native-thread-cycles | --native-pmu] [--disc <image.iso>] [--disc-media cd|dvd] [--capture-vu <new-private-directory>] [--capture-stop <new-private-directory>] [--capture-graphics <new-private-directory> | --capture-display <new-private-directory>]\n";
+        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--profile-graphics] [--validate-graphics] [--verify-textures] [--gpu-triangles | --cpu-triangles] [--run-seconds N] [--headless | --display-stop | --close-on-stop] [--strict-performance | --native-thread-cycles | --native-pmu] [--disc <image.iso>] [--disc-media cd|dvd] [--capture-vu <new-private-directory>] [--capture-stop <new-private-directory>] [--capture-graphics <new-private-directory> | --capture-display <new-private-directory>]\n";
 #ifdef ANYPS2_NATIVE_IOP
         std::cerr<<"Linked IOP investigation: --probe-iop-reset <module.data> (stops without acknowledging reset)\n";
         std::cerr<<"Explicit selected-bundle execution: --iop-reset-session <module.data> --disc <image.iso>\n";
@@ -209,7 +214,7 @@ int main(int argc,char** argv) {
         std::uint64_t budget=1000000;
         unsigned run_seconds=0,disc_media=0;
         std::filesystem::path disc,capture_directory,stop_directory,graphics_directory;
-        bool profile_graphics=false,validate_graphics=false,verify_textures=false,gpu_triangles=false,capture_display_only=false;
+        bool profile_graphics=false,validate_graphics=false,verify_textures=false,gpu_triangles=true,gpu_triangles_required=false,capture_display_only=false;
         bool has_budget=false,native_cycles=false,native_pmu=false,strict_performance=false,show_window=true,hold_window=true;
 #ifdef ANYPS2_NATIVE_IOP
         std::filesystem::path iop_data;
@@ -225,7 +230,8 @@ int main(int argc,char** argv) {
             if (text=="--headless") { show_window=false; continue; }
             if (text=="--validate-graphics") { validate_graphics=true; continue; }
             if (text=="--verify-textures") { verify_textures=true; continue; }
-            if (text=="--gpu-triangles") { gpu_triangles=true; continue; }
+            if (text=="--gpu-triangles") { gpu_triangles=gpu_triangles_required=true; continue; }
+            if (text=="--cpu-triangles") { gpu_triangles=false; continue; }
             if (text=="--profile-graphics") { profile_graphics=true; continue; }
             if (text=="--trace-services") { trace_services=true; continue; }
             if (text=="--run-seconds") {
@@ -344,7 +350,7 @@ int main(int argc,char** argv) {
         gpu.profile_commands=profile_graphics;
         if (profile_graphics) gpu.drawing.profile=&gpu.drawing_profile;
         gpu.verify_textures=verify_textures;
-        gpu.gpu_triangles=gpu_triangles;
+        gpu.gpu_triangles=gpu_triangles; gpu.gpu_triangles_required=gpu_triangles_required;
         if (!graphics_directory.empty()) gpu.capture=std::make_unique<probe::GraphicsCapture>(graphics_directory,capture_display_only);
         nt::ee::NativePlatform platform; platform.attach(memory);
         platform.scratchpad_copy.protection=native_code_overlap;
