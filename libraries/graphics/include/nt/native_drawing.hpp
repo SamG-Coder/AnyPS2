@@ -271,7 +271,6 @@ private:
         if (primitive<3 || primitive>5 || (attributes&~0x3ffU))
             throw std::invalid_argument("Vector drawing supports triangle list, strip and fan only");
         if ((attributes&16) && !textured) throw std::invalid_argument("Textured vector drawing is not supported");
-        if (attributes&32) throw std::invalid_argument("Fogged vector drawing is not supported");
         if (state.vertex_count || (state.unknown&unknown_vertices))
             throw std::invalid_argument("Vector drawing cannot continue an existing primitive; write PRIM first");
         if (elements<3 || vertex.empty() || vertex.size()>5)

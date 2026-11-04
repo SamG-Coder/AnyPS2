@@ -239,8 +239,8 @@ caller must match the kernel's unit, output stride and parameter layout.
 `NativeDrawing::submit_vectors(renderer, launch)` consumes current GS state plus
 an explicit PACKED vertex layout. Each layout word identifies an element store
 or a constant. It accepts independent triangle lists, strips and fans with one
-position write at the end of each vertex record. ST must precede RGBAQ. Texture,
-fog, continued primitives and unsupported layouts produce diagnostics. A batch
+position write at the end of each vertex record. ST must precede RGBAQ. Fog is
+supported; textures, continued primitives and unsupported layouts produce diagnostics. A batch
 is bounded to 4,096 primitive slots; wrapped or aliased target layouts outside
 the renderer's supported bounds are rejected.
 
@@ -264,8 +264,8 @@ vertex-queue state. Textured packets are included when their texture and mip pag
 cannot alias the color or depth target (a conservative GS page test) and, for
 perspective STQ, every primitive passes the per-draw validator's ST/Q range rules,
 checked on the host from the packet records; the palette is snapshotted in
-submission order as for CPU draws. Fogged packets and other cases keep the CPU
-planner. Element-kernel batches remain untextured, because their ST/Q values exist
+submission order as for CPU draws. Fog uses the per-vertex values and fog color
+as CPU draws do. Other cases keep the CPU planner. Element-kernel batches remain untextured, because their ST/Q values exist
 only on the device. `ps2-native --gpu-triangles` enables it; it is off by default.
 
 Frame slots own staging and status memory until their queue fence completes.

@@ -153,14 +153,20 @@ void compare(VulkanRenderer& gpu,VulkanRenderer& cpu,unsigned kernel) {
 // packets the GPU path does not reproduce.
 void packets(VulkanRenderer& gpu,VulkanRenderer& cpu) {
     unsigned batches=0;
-    for (unsigned primitive:{3U,4U,5U}) for (unsigned variant=0;variant<3;++variant) {
+    for (unsigned primitive:{3U,4U,5U}) for (unsigned variant=0;variant<4;++variant) {
         Fixture fixture;
         if (variant==1) fixture.memory[(100+4)*4+3]=std::bit_cast<std::uint32_t>(2048.0f); // ADC
+        // Fogged XYZF2 vertices: varied per-vertex fog from the W lane.
+        if (variant==3) for (unsigned i=0;i<Fixture::count;++i) fixture.memory[(100+i)*4+3]=std::bit_cast<std::uint32_t>(float(i*20));
         fixture.compile_cpu();
         NativeDrawing generated(true),packets(true);
         require(generated.assemble_triangles_on_gpu(gpu),"GPU packet assembly unavailable");
         setup(generated,gpu,primitive); setup(packets,cpu,primitive);
-        auto packet=fixture.packet();
+        if (variant==3) for (auto [drawing,renderer]:{std::pair{&generated,&gpu},std::pair{&packets,&cpu}}) {
+            const auto fog=registers({{0,primitive|8U|32U|64U},{0x3d,0x203040}});
+            drawing->submit(*renderer,std::span(&fog,1));
+        }
+        auto packet=variant==3 ? fixture.packet(4) : fixture.packet();
         std::vector<Packet> batch{packet};
         if (variant==2) {
             // Uses the GS color and vertex queue left by the GPU-assembled tag.
@@ -284,7 +290,7 @@ void contracts(VulkanRenderer& gpu,unsigned kernel) {
     rejects([&]{drawing.submit_vectors(gpu,fixture.launch(kernel));},"continue an existing primitive");
     setup(drawing,gpu,3);
     const auto launches=gpu.statistics().vector_launches;
-    for (auto [bits,reason]:{std::pair{16U,"Textured"},std::pair{32U,"Fogged"}}) {
+    for (auto [bits,reason]:{std::pair{16U,"Textured"}}) {
         submit(drawing,gpu,registers({{0,3U|bits}}));
         rejects([&]{drawing.submit_vectors(gpu,fixture.launch(kernel));},reason);
     }

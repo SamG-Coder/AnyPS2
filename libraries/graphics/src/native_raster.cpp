@@ -1027,7 +1027,7 @@ void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly&
     r.vectors->validate(launch);
     const auto count=vector_primitives(assembly.primitive,launch.elements);
     if (assembly.primitive<3 || assembly.primitive>5 || !count || count>records_per_slot ||
-        !(target.flags&triangle_flag) || (target.flags&(texture_flags|fog_flag|line_flag)) ||
+        !(target.flags&triangle_flag) || (target.flags&(texture_flags|line_flag)) ||
         ((target.flags&perspective_triangle_flag) && !(target.flags&1)) ||
         target.right>target.pitch*64 || target.left>=target.right || target.top>=target.bottom ||
         assembly.scissor!=std::array<std::uint32_t,4>{target.left,target.right-1,target.top,target.bottom-1} ||
