@@ -218,6 +218,43 @@ void packets(VulkanRenderer& gpu,VulkanRenderer& cpu) {
             (fixed ? "UV":"STQ")+" primitive "+std::to_string(primitive));
         ++batches;
     }
+    // An 8-bit indexed texture with a 256-entry CLUT: the batch snapshots the palette.
+    for (unsigned primitive:{3U,4U}) {
+        Fixture fixture;
+        NativeDrawing generated(true),packets(true);
+        require(generated.assemble_triangles_on_gpu(gpu),"GPU packet assembly unavailable");
+        for (auto [drawing,renderer]:{std::pair{&generated,&gpu},std::pair{&packets,&cpu}}) {
+            // 16x16 PSMT8 texels at block 0x1000 (64 quadwords).
+            Packet texels=registers({{0x50,(0x1000ULL<<32)|(2ULL<<48)|(19ULL<<56)},{0x51,0},{0x52,16ULL|(16ULL<<32)},{0x53,0}});
+            texels[0][0]&=~0x8000U;
+            texels.push_back({0x8000U|16U,0x08000000,0,0});
+            for (unsigned n=0;n<16;++n) texels.push_back({n*0x04030201U,n*0x01020304U+0x80,0xfedcba98U-n,n*0x11111111U});
+            drawing->submit(*renderer,std::span(&texels,1));
+            // 16x16 PSMCT32 CLUT at block 0x1100 (64 quadwords).
+            Packet clut=registers({{0x50,(0x1100ULL<<32)|(1ULL<<48)},{0x51,0},{0x52,16ULL|(16ULL<<32)},{0x53,0}});
+            clut[0][0]&=~0x8000U;
+            clut.push_back({0x8000U|64U,0x08000000,0,0});
+            for (unsigned n=0;n<64;++n) clut.push_back({0xff000000U|(n*0x030507U),0x80000000U|(n*0x070503U),0xff00ff00U^(n*0x0101U),0x40ffffffU-n});
+            drawing->submit(*renderer,std::span(&clut,1));
+            setup(*drawing,*renderer,primitive);
+            // TEX0: TBP 0x1000, TBW 2, PSMT8, 16x16, RGBA, decal; CBP 0x1100, PSMCT32, CLD load.
+            const auto texture=registers({{0,primitive|8U|16U|64U|256U},
+                {6,0x1000ULL|(2ULL<<14)|(19ULL<<20)|(4ULL<<26)|(4ULL<<30)|(1ULL<<34)|(1ULL<<35)|(0x1100ULL<<37)|(1ULL<<61)}});
+            drawing->submit(*renderer,std::span(&texture,1));
+        }
+        const auto source=fixture.packet();
+        Packet packet{{0x8000U|Fixture::count,0x30000000,3U|(1U<<4)|(5U<<8),0}};
+        for (unsigned i=0;i<Fixture::count;++i) {
+            const auto& xyz=source[1+i*2+1];
+            packet.push_back({(xyz[0]&1023U)/4,(xyz[1]&1023U)/4,0,0});
+            packet.push_back(source[1+i*2]); packet.push_back(xyz);
+        }
+        const auto before=generated.gpu_packet_batches();
+        generated.submit(gpu,std::span(&packet,1)); packets.submit(cpu,std::span(&packet,1));
+        require(generated.gpu_packet_batches()==before+1,"Eligible indexed packet was not assembled on the GPU");
+        require(generated.pixels()==packets.pixels(),"GPU-assembled indexed-texture pixels differ for primitive "+std::to_string(primitive));
+        ++batches;
+    }
     // A texture in the frame's pages keeps the CPU planner and still matches.
     Fixture fixture;
     NativeDrawing generated(true),packets(true);
