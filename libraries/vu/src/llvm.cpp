@@ -296,6 +296,9 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         <<"declare i64 @nt_ee_add_finite(i32, i32, i32) nounwind willreturn memory(none)\n"
         <<"declare i64 @nt_ee_multiply_finite(i32, i32) nounwind willreturn memory(none)\n"
         <<"declare i64 @nt_ee_multiply_accumulate_finite(i32, i32, i32, i32) nounwind willreturn memory(none)\n"
+        <<"declare i64 @nt_vu_add_fast(i32, i32, i32) nounwind willreturn memory(none)\n"
+        <<"declare i64 @nt_vu_multiply_fast(i32, i32) nounwind willreturn memory(none)\n"
+        <<"declare i64 @nt_vu_multiply_accumulate_fast(i32, i32, i32, i32) nounwind willreturn memory(none)\n"
         <<"declare i32 @nt_ee_vector_lane_flags(i64, i32) nounwind willreturn memory(none)\n"
         <<"declare i32 @nt_ee_vector_status_flags(i32, i32) nounwind willreturn memory(none)\n"
         <<"declare i64 @nt_vu_divide_finite(i32, i32) nounwind willreturn memory(none)\n"
@@ -365,23 +368,53 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         const bool arithmetic=outer || accumulate || upper.operation==Arithmetic::add || upper.operation==Arithmetic::subtract || upper.operation==Arithmetic::multiply;
         std::string product_sticky="0";
         std::string mac=outer ? writer.value("and i32 "+writer.load("i32",offsetof(State,mac))+", 4369") : "0";
-        if (!clipping && upper.operation!=Arithmetic::nop && (upper.result || arithmetic)) for (unsigned lane=0;lane<4;++lane) {
-            if (!((outer ? 14U : upper.mask)&(8U>>lane))) continue;
-            const auto left=writer.vector(upper.left,outer ? (lane+1)%3 : lane);
-            std::string value;
-            if (arithmetic) {
+        // Evaluate every lane with the exact-when-flagged host-float helpers, then
+        // take the integer implementation for the whole instruction only when a
+        // lane leaves their operand range. Both paths produce the same encoding.
+        std::array<std::string,4> packed_lanes{};
+        if (!clipping && arithmetic) {
+            const auto label=std::to_string(index);
+            std::array<std::array<std::string,3>,4> operands{};
+            std::string required="0";
+            writer.out<<"  br label %fast"<<label<<"\nfast"<<label<<":\n";
+            for (unsigned lane=0;lane<4;++lane) {
+                if (!((outer ? 14U : upper.mask)&(8U>>lane))) continue;
+                const auto left=writer.vector(upper.left,outer ? (lane+1)%3 : lane);
                 const auto right=outer ? writer.vector(upper.right,(lane+2)%3) : upper.operand==Operand::immediate ? writer.load("i32",offsetof(State,immediate)) :
                     upper.operand==Operand::quotient ? writer.load("i32",offsetof(State,quotient)) :
                     writer.vector(upper.right,upper.operand==Operand::vector ? lane : static_cast<unsigned>(upper.operand)-static_cast<unsigned>(Operand::x));
                 const auto accumulator=accumulate ? writer.load("i32",offsetof(State,accumulator)+lane*4) : "0";
-                const auto packed=writer.value(accumulate ?
+                operands[lane]={left,right,accumulator};
+                packed_lanes[lane]=writer.value(accumulate ?
+                    "call i64 @nt_vu_multiply_accumulate_fast(i32 "+accumulator+", i32 "+left+", i32 "+right+", i32 "+(subtract_product ? "1" : "0")+")" : (upper.operation==Arithmetic::multiply || outer) ?
+                    "call i64 @nt_vu_multiply_fast(i32 "+left+", i32 "+right+")" :
+                    "call i64 @nt_vu_add_fast(i32 "+left+", i32 "+right+", i32 "+(upper.operation==Arithmetic::subtract ? "1" : "0")+")");
+                required=writer.value("or i64 "+required+", "+packed_lanes[lane]);
+            }
+            const auto flagged=writer.value("and i64 "+required+", 4611686018427387904");
+            const auto ready=writer.value("icmp eq i64 "+flagged+", 0");
+            writer.out<<"  br i1 "<<ready<<", label %math"<<label<<", label %exact"<<label<<"\nexact"<<label<<":\n";
+            std::array<std::string,4> exact{};
+            std::string unsupported="0";
+            for (unsigned lane=0;lane<4;++lane) {
+                if (packed_lanes[lane].empty()) continue;
+                const auto& [left,right,accumulator]=operands[lane];
+                exact[lane]=writer.value(accumulate ?
                     "call i64 @nt_ee_multiply_accumulate_finite(i32 "+accumulator+", i32 "+left+", i32 "+right+", i32 "+(subtract_product ? "1" : "0")+")" : (upper.operation==Arithmetic::multiply || outer) ?
                     "call i64 @nt_ee_multiply_finite(i32 "+left+", i32 "+right+")" :
                     "call i64 @nt_ee_add_finite(i32 "+left+", i32 "+right+", i32 "+(upper.operation==Arithmetic::subtract ? "1" : "0")+")");
-                const auto unsupported=writer.value("and i64 "+packed+", 8589934592");
-                const auto ready=writer.value("icmp eq i64 "+unsupported+", 0");
-                const auto label=std::to_string(index)+"_"+std::to_string(lane);
-                writer.out<<"  br i1 "<<ready<<", label %math"<<label<<", label %numeric_failure\nmath"<<label<<":\n";
+                unsupported=writer.value("or i64 "+unsupported+", "+exact[lane]);
+            }
+            const auto supported=writer.value("icmp eq i64 "+writer.value("and i64 "+unsupported+", 8589934592")+", 0");
+            writer.out<<"  br i1 "<<supported<<", label %math"<<label<<", label %numeric_failure\nmath"<<label<<":\n";
+            for (unsigned lane=0;lane<4;++lane) if (!packed_lanes[lane].empty())
+                packed_lanes[lane]=writer.value("phi i64 ["+packed_lanes[lane]+", %fast"+label+"], ["+exact[lane]+", %exact"+label+"]");
+        }
+        if (!clipping && upper.operation!=Arithmetic::nop && (upper.result || arithmetic)) for (unsigned lane=0;lane<4;++lane) {
+            if (!((outer ? 14U : upper.mask)&(8U>>lane))) continue;
+            std::string value;
+            if (arithmetic) {
+                const auto& packed=packed_lanes[lane];
                 value=writer.value("trunc i64 "+packed+" to i32");
                 const auto flags=writer.value("call i32 @nt_ee_vector_lane_flags(i64 "+packed+", i32 "+std::to_string(lane)+")");
                 mac=writer.value("or i32 "+mac+", "+flags);
@@ -389,7 +422,7 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
                     const auto product=writer.value("trunc i64 "+writer.value("lshr i64 "+packed+", 36")+" to i32");
                     product_sticky=writer.value("or i32 "+product_sticky+", "+writer.value("shl i32 "+product+", 6"));
                 }
-            } else if (upper.operation==Arithmetic::absolute) value=writer.value("and i32 "+left+", 2147483647");
+            } else if (const auto left=writer.vector(upper.left,lane);upper.operation==Arithmetic::absolute) value=writer.value("and i32 "+left+", 2147483647");
             else if (upper.operation==Arithmetic::minimum || upper.operation==Arithmetic::maximum) {
                 const auto right=upper.operand==Operand::immediate ? writer.load("i32",offsetof(State,immediate)) :
                     writer.vector(upper.right,upper.operand==Operand::vector ? lane : static_cast<unsigned>(upper.operand)-static_cast<unsigned>(Operand::x));

@@ -3,12 +3,50 @@
 #include <nt/vu_quotient.hpp>
 #include <nt/vu_extended.hpp>
 #include <nt/vu_clip.hpp>
+#include <bit>
 namespace {
 std::uint64_t pack(nt::numeric::FiniteFloatResult result) {
     return result.bits | (std::uint64_t(result.underflow)<<32) | (std::uint64_t(!result.supported)<<33) | (std::uint64_t(result.overflow)<<35) | (std::uint64_t(result.product_flags)<<36);
 }
 std::uint64_t pack_flags(nt::numeric::ScalarFlagResult result) {
     return result.bits | (std::uint64_t(result.flags)<<32) | (std::uint64_t(!result.supported)<<63);
+}
+// Host-float lane arithmetic for the common operand range. The product of two
+// 24-bit significands has at most 48 bits and a sum of operands at most 24
+// exponents apart fits 49 bits, so the host double result is exact. Clearing
+// the low 29 double significand bits then chops to the 24-bit result, and the
+// float conversion of that representable value is exact in every rounding mode.
+// Operands that can reach exponent 255, overflow or underflow set
+// exact_path_required; callers then use the integer implementations above.
+constexpr std::uint64_t exact_path_required=1ULL<<62;
+struct FastLane { std::uint32_t bits; bool exact; };
+inline double host_double(std::uint32_t bits) { return double(std::bit_cast<float>(bits)); }
+inline std::uint32_t chop_to_float(double value) {
+    const auto chopped=std::bit_cast<std::uint64_t>(value)&~((1ULL<<29)-1);
+    return std::bit_cast<std::uint32_t>(float(std::bit_cast<double>(chopped)));
+}
+// Matches multiply_finite(..., true) when exact.
+inline FastLane fast_multiply(std::uint32_t a,std::uint32_t b) {
+    const auto ea=(a>>23)&255U,eb=(b>>23)&255U;
+    const bool zero=!ea || !eb;
+    // Exponent-zero operands are signed zero; their bits must not reach the host as denormals.
+    const auto left=ea ? a : a&0x80000000U,right=eb ? b : b&0x80000000U;
+    const bool exact=ea!=255 && eb!=255 && (zero || (ea+eb>=128 && ea+eb<=380));
+    return {chop_to_float(host_double(left)*host_double(right)),exact};
+}
+// Matches add_subtract_finite(..., true) when exact.
+inline FastLane fast_add(std::uint32_t a,std::uint32_t b,bool subtract) {
+    const auto signed_b=b^(subtract ? 0x80000000U : 0U);
+    const auto ea=(a>>23)&255U,eb=(b>>23)&255U;
+    // Exponents 25..253 cannot cancel below the normal range or carry into 255.
+    const bool exact=(!ea || (ea>=25 && ea<=253)) && (!eb || (eb>=25 && eb<=253));
+    const auto left=ea ? a : a&0x80000000U,right=eb ? signed_b : signed_b&0x80000000U;
+    const auto sum=chop_to_float(host_double(left)+host_double(right));
+    // Beyond 24 exponents an opposing addend chops to the preceding encoding;
+    // a host double sum does not retain that sticky information.
+    const auto borrow=(a^signed_b)>>31;
+    const auto bits=!ea || !eb ? sum : ea>eb+24 ? a-borrow : eb>ea+24 ? signed_b-borrow : sum;
+    return {bits,exact};
 }
 }
 // Fixed-width C ABI keeps the LLVM caller independent of C++ struct-return rules.
@@ -109,4 +147,24 @@ extern "C" std::uint64_t nt_ee_reciprocal_square_root_finite(std::uint32_t left,
     const auto root=nt::numeric::square_root_finite(right,true);
     if (!root.supported) return pack_flags(root);
     return pack_flags(nt::numeric::divide_finite(left,root.bits,true));
+}
+
+// Exact-when-flagged lane forms of nt_ee_add_finite, nt_ee_multiply_finite and
+// nt_ee_multiply_accumulate_finite. Branch-free so converted VU code can
+// evaluate all lanes and take the exact integer path once per instruction.
+extern "C" std::uint64_t nt_vu_add_fast(std::uint32_t left,std::uint32_t right,std::uint32_t subtract) {
+    const auto lane=fast_add(left,right,subtract!=0);
+    return lane.bits|(lane.exact ? 0 : exact_path_required);
+}
+extern "C" std::uint64_t nt_vu_multiply_fast(std::uint32_t left,std::uint32_t right) {
+    const auto lane=fast_multiply(left,right);
+    return lane.bits|(lane.exact ? 0 : exact_path_required);
+}
+extern "C" std::uint64_t nt_vu_multiply_accumulate_fast(std::uint32_t accumulator,std::uint32_t left,
+                                                       std::uint32_t right,std::uint32_t subtract) {
+    const auto product=fast_multiply(left,right);
+    const auto sum=fast_add(accumulator,product.bits,subtract!=0);
+    // An exact product never underflows or overflows: its stage flags are Z and S.
+    const auto product_flags=((product.bits&0x7fffffffU) ? 0U : 1U)|((product.bits>>31)<<1);
+    return sum.bits|(std::uint64_t(product_flags)<<36)|(product.exact && sum.exact ? 0 : exact_path_required);
 }

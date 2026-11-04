@@ -16,6 +16,11 @@
 #include <stdexcept>
 
 extern "C" std::uint64_t nt_ee_multiply_accumulate_finite(std::uint32_t,std::uint32_t,std::uint32_t,std::uint32_t);
+extern "C" std::uint64_t nt_ee_add_finite(std::uint32_t,std::uint32_t,std::uint32_t);
+extern "C" std::uint64_t nt_ee_multiply_finite(std::uint32_t,std::uint32_t);
+extern "C" std::uint64_t nt_vu_add_fast(std::uint32_t,std::uint32_t,std::uint32_t);
+extern "C" std::uint64_t nt_vu_multiply_fast(std::uint32_t,std::uint32_t);
+extern "C" std::uint64_t nt_vu_multiply_accumulate_fast(std::uint32_t,std::uint32_t,std::uint32_t,std::uint32_t);
 extern "C" nt::vu::Result nt_vu_generated(nt::vu::State*);
 extern "C" nt::ee::Stop nt_ee_generated_run(nt::runtime::State*,nt::ee::Memory*,std::uint64_t);
 extern "C" const nt::vu::Block* nt_vu_data_blocks();
@@ -1421,8 +1426,49 @@ int run_core_tests() {
         return 0;
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }
+// Host-float lane helpers must reproduce the integer encoding and flags exactly
+// whenever they do not request the exact path, and must request it at every
+// range boundary the integer implementation handles specially.
+void test_fast_lane_arithmetic() {
+    std::uint64_t state=0x9e3779b97f4a7c15ULL;
+    const auto next=[&] { state^=state<<13; state^=state>>7; state^=state<<17; return std::uint32_t(state); };
+    // Bias exponents toward zero, the fast-range limits and exponent 255.
+    constexpr std::array<std::uint32_t,14> edges{0,1,24,25,26,63,64,127,128,190,252,253,254,255};
+    const auto operand=[&] {
+        const auto r=next();
+        const auto exponent=(r&3)==0 ? edges[(r>>2)%edges.size()] : (r>>2)&255;
+        const auto mantissa=(r>>16)&1 ? next()&0x7fffff : ((r>>17)&1 ? 0x7fffff : 0);
+        return (next()&0x80000000U)|(exponent<<23)|mantissa;
+    };
+    std::uint64_t compared=0,fast=0;
+    const auto check=[&](std::uint64_t candidate,std::uint64_t exact,const char* operation,std::uint32_t a,std::uint32_t b,std::uint32_t c) {
+        ++compared;
+        if (candidate>>62) return;
+        ++fast;
+        if (candidate!=exact)
+            throw std::runtime_error(std::string("Fast VU ")+operation+" differs: "+std::to_string(a)+" "+std::to_string(b)+" "+
+                std::to_string(c)+" fast="+std::to_string(candidate)+" exact="+std::to_string(exact));
+    };
+    for (unsigned i=0;i<8000000;++i) {
+        auto a=operand(),b=operand(),c=operand();
+        // Near-cancellation and wide alignment cases for addition.
+        if ((i&7)==0) b=(a^0x80000000U)+(next()%5)-2;
+        if ((i&7)==1) b=(a&0x80000000U)|((((a>>23)&255)-std::min((a>>23)&255,24U+next()%8))<<23)|(next()&0x7fffff);
+        const auto subtract=next()&1;
+        check(nt_vu_add_fast(a,b,subtract),nt_ee_add_finite(a,b,subtract),"add",a,b,subtract);
+        check(nt_vu_multiply_fast(a,b),nt_ee_multiply_finite(a,b),"multiply",a,b,0);
+        check(nt_vu_multiply_accumulate_fast(c,a,b,subtract),nt_ee_multiply_accumulate_finite(c,a,b,subtract),"multiply-accumulate",c,a,b);
+    }
+    // The fast path must remain the common case for ordinary operands.
+    if (fast*2<compared) throw std::runtime_error("Fast VU lane arithmetic rarely applies");
+    for (const auto boundary:{0x7f800000U,0x7f800001U,0xff800000U})
+        if (!(nt_vu_add_fast(boundary,0x3f800000U,0)>>62) || !(nt_vu_multiply_fast(boundary,0x3f800000U)>>62))
+            throw std::runtime_error("Exponent 255 must use the exact VU path");
+    if (!(nt_vu_multiply_fast(0x00800000U,0x00800000U)>>62) || !(nt_vu_multiply_fast(0x7f000000U,0x7f000000U)>>62))
+        throw std::runtime_error("Product underflow and overflow must use the exact VU path");
+}
 int main() {
-    try { test_async_submission(); test_streamed_launches(false); test_streamed_launches(true); }
+    try { test_fast_lane_arithmetic(); test_async_submission(); test_streamed_launches(false); test_streamed_launches(true); }
     catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
     return run_core_tests();
 }
