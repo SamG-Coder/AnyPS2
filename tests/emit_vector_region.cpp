@@ -57,7 +57,12 @@ int main(int argc,char** argv) {
             save(prefix+".binding.ll",binding.str()); save(prefix+".gpu.ll",gpu.str());
             save(prefix+".packet.ll",packet.str());
             nt::write_file(prefix+".bin",program(variant));
-            reject(pairs,unit,{head,head+1},head,"Exported interior entry accepted");
+            const auto same=[&](std::vector<nt::vu::Pair> image,std::vector<unsigned> exported,const char* message) {
+                const auto other=nt::render::analyze_vector_region(image,unit,exported,head);
+                if (other.startup!=plan.startup || other.drain!=plan.drain || other.exit!=plan.exit) throw std::runtime_error(message);
+            };
+            // Other paths into the body run original compiled code up to the head.
+            same(pairs,{head,head+1},"Exported interior entry changed the region proof");
             auto incomplete=pairs; incomplete.resize(incomplete.size()-2);
             reject(incomplete,unit,{head},head,"Undeclared exit continuation accepted");
             auto prefixed=nt::Bytes{};
@@ -66,13 +71,13 @@ int main(int argc,char** argv) {
             reject(nt::vu::frame(prefixed,unit,head),unit,{head},head+1,"External delay-slot entry accepted");
             auto invalid=program(variant);
             render_fixture::replace(invalid,unsigned(invalid.size()/8)-1,false,(36U<<25)|(1U<<11));
-            reject(nt::vu::frame(invalid,unit,head),unit,{head},head,"Indirect entry uncertainty accepted");
+            same(nt::vu::frame(invalid,unit,head),{head},"Register jump changed the region proof");
             invalid=program(variant);
             // External tail branch to an interior pair of the selected loop.
             const auto source=unsigned(invalid.size()/8)-2;
             render_fixture::replace(invalid,source,true,render_fixture::upper_nop);
             render_fixture::replace(invalid,source,false,(32U<<25)|((1U-source-1U)&0x7ffU));
-            reject(nt::vu::frame(invalid,unit,head),unit,{head},head,"External interior branch accepted");
+            same(nt::vu::frame(invalid,unit,head),{head},"External interior branch changed the region proof");
             invalid=program(variant);
             render_fixture::replace(invalid,0,true,(15U<<21)|(1U<<16)|(2U<<11)|(8U<<6)|0x28U);
             reject(nt::vu::frame(invalid,unit,head),unit,{head},head,"Unreconstructed flags accepted");

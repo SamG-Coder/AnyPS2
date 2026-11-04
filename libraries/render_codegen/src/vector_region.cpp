@@ -98,19 +98,18 @@ VectorRegionPlan analyze_vector_region(std::span<const vu::Pair> program,unsigne
     const unsigned exit=selected->branch+2;
     if (exit>program.back().address || exit>=(unit ? 2048U:512U))
         throw std::invalid_argument("Vector region requires a declared non-wrapping exit continuation");
-    const auto interior=[&](unsigned address){return address>head && address<exit;};
-    for (const auto entry:entries) {
+    for (const auto entry:entries)
         if (entry<program.front().address || entry>program.back().address) throw std::invalid_argument("Vector region entry is outside its image");
-        if (interior(entry)) throw std::invalid_argument("Vector region has an exported interior entry");
-    }
-    for (const auto& pair:program) {
-        const auto control=vu::control(pair,unit);
-        if (control.branch==vu::Branch::register_jump || control.branch==vu::Branch::register_call)
-            throw std::invalid_argument("Vector region image has unresolved indirect entry paths");
-        if (control.target && interior(*control.target)) throw std::invalid_argument("Vector region has a branch into its interior");
-        if (pair.address<head && pair.address+1>=head && (control.branch!=vu::Branch::none || pair.end))
-            throw std::invalid_argument("Vector region entry is an external delay slot");
-    }
+    // Other paths into the loop body need no proof. The service replaces only
+    // execution that reaches the head as an ordinary pair, after validating the
+    // complete architectural state there, and reproduces running the loop from
+    // the head to its exit. Execution entering the body elsewhere (exports,
+    // direct or register jumps, launch-supplied ITOP targets) runs the original
+    // compiled blocks until it reaches the head. A head that executes as a
+    // branch delay slot is never an ordinary entry, so it stays rejected.
+    const auto before=std::find_if(program.begin(),program.end(),[&](const vu::Pair& pair){return pair.address+1==head;});
+    if (before!=program.end() && (vu::control(*before,unit).branch!=vu::Branch::none || before->end))
+        throw std::invalid_argument("Vector region entry is an external delay slot");
     VectorRegionPlan plan;
     plan.unit=unit; plan.head=head; plan.exit=exit;
     const auto body=program.subspan(head-program.front().address,exit-head);

@@ -284,8 +284,13 @@ of region entry, startup/drain equivalence, live-out state or graphics ordering.
 ## Native region execution
 
 `analyze_vector_region(image, unit, entries, head)` requires the complete declared
-image and export entries. It rejects interior entries, indirect-entry uncertainty,
-external delay-slot entry and an undeclared exit. The current subset accepts
+image and export entries. It rejects a head that executes as a branch delay slot
+and an undeclared exit. Other paths into the loop body (interior exports, direct
+or register jumps, launch-supplied ITOP targets) need no proof: the service only
+replaces execution that reaches the head as an ordinary pair, after validating
+the complete architectural state there, and reproduces running the loop from the
+head to its exit. Execution entering elsewhere runs the original compiled blocks
+until it reaches the head. The current subset accepts
 loads/stores, vector moves/rotations, ABS, MIN/MAX, integer/float conversions and
 self-updating integer counters. Flag-producing arithmetic, scalar-unit effects,
 kicks and other unproved side effects are rejected. Lane dependency analysis must
