@@ -265,7 +265,7 @@ int main(int argc,char** argv) {
             gradient.draw.flags|=depth_test_flag|depth_write_flag;
             gradient.draw.depth_base=32; gradient.draw.test=1<<17;
             actual.assign(actual.size(),0); expected=actual;
-            compare(std::array{gradient});
+            compare(std::array{SpriteCommand{gradient.draw,{},gradient.triangle}});
             for (unsigned x=1;x<5;++x) {
                 if (actual[rgba_word(0,1,x,2)]!=(0x80000000U|(x-1)*0x202020U) ||
                     actual[rgba_word(32,1,x,2)^0x600] != 99+x)
@@ -276,7 +276,7 @@ int main(int argc,char** argv) {
             antialiased.draw.flags|=coverage_flag|256|depth_test_flag|depth_write_flag;
             antialiased.draw.blend=0x44; antialiased.draw.depth_base=32; antialiased.draw.test=1<<17;
             actual.assign(actual.size(),0); expected=actual;
-            compare(std::array{antialiased});
+            compare(std::array{SpriteCommand{antialiased.draw,{},antialiased.triangle}});
             for (unsigned x=1;x<5;++x) for (unsigned y=2;y<=3;++y)
                 if (actual[rgba_word(0,1,x,y)]!=(y==2 ? 0x60606060U : 0x1f1f1f1fU) ||
                     actual[rgba_word(32,1,x,y)^0x600])
@@ -877,6 +877,20 @@ int main(int argc,char** argv) {
             native.synchronize(); asynchronous.poll_completions(native);
             if (asynchronous.completed_finishes()!=32 || asynchronous.pixels()[0]!=0x8000001fU)
                 throw std::runtime_error("Deferred FINISH lost completion or draw ordering");
+            {
+                // A failing queued job surfaces at the join; later jobs are not recorded.
+                NativeDrawingWorker failing(asynchronous,native);
+                auto truncated=batch; truncated.pop_back(); truncated[0][0]=0x0008;
+                batch[5][0]=0x80000077U; failing.submit(std::span(&batch,1));
+                failing.submit(std::span(&truncated,1));
+                bool reported=false;
+                try {
+                    batch[5][0]=0x80000088U; failing.submit(std::span(&batch,1));
+                    failing.wait();
+                } catch (const std::invalid_argument&) { reported=true; }
+                if (!reported || asynchronous.pixels()[0]!=0x80000077U)
+                    throw std::runtime_error("Queued drawing failure was not reported in order");
+            }
             std::uint64_t token=0;
             for (unsigned i=0;i<20;++i) {
                 const PixelWrite write{rgba_word(64,1,0,0),0x80000040U+i,0xffffffffU};

@@ -71,6 +71,10 @@ cmake --build build --config Release --parallel 8
 ctest --test-dir build -C Release -N
 ```
 
+Converted VU code targets `x86-64-v3` (AVX2) by default, and converted programs
+check the CPU at startup. For older x86-64 processors, configure with
+`-DANYPS2_NATIVE_ISA=x86-64` (or `x86-64-v2`; `x86-64-v4` selects AVX-512).
+
 Select related Release tests from the listing; see [testing](docs/testing.md).
 Visible presentation tests are opt-in and disabled by default.
 Initial configuration downloads the pinned zlib importer dependency. Tests use synthetic fixtures; passing them does not establish compatibility with a commercial game.

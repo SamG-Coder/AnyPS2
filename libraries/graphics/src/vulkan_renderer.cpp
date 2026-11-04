@@ -469,15 +469,30 @@ void validate_sprite(const Sprite& draw) {
             throw std::runtime_error("Invalid native depth surface");
         if (draw.mask!=0xffffffffU && ((draw.test>>17)&3)!=0 &&
             ((draw.flags&depth_write_flag) || ((draw.test>>17)&3)>=2)) {
-            std::array<bool,512> pages{};
             const auto color_page_height=(draw.flags&color_16_flag) ? 64U : 32U;
-            for (unsigned y=draw.top/color_page_height;y<=(draw.bottom-1)/color_page_height;++y)
-                for (unsigned x=draw.left/64;x<=(draw.right-1)/64;++x)
-                    pages[(draw.base/32+y*draw.pitch+x)%512]=true;
-            for (unsigned y=draw.top/32;y<=(draw.bottom-1)/32;++y)
-                for (unsigned x=draw.left/64;x<=(draw.right-1)/64;++x)
-                    if (pages[(draw.depth_base/32+y*draw.pitch+x)%512])
-                        throw std::runtime_error("Overlapping native color and depth surfaces");
+            const auto overlap=[](auto&& color_pages,auto&& depth_pages) {
+                std::array<bool,512> pages{};
+                color_pages([&](unsigned page) { pages[page]=true; });
+                bool found=false;
+                depth_pages([&](unsigned page) { found|=pages[page]; });
+                return found;
+            };
+            const auto pages_of=[&](unsigned base,unsigned height) {
+                return [&draw,base,height](auto&& visit) {
+                    for (unsigned y=draw.top/height;y<=(draw.bottom-1)/height;++y)
+                        for (unsigned x=draw.left/64;x<=(draw.right-1)/64;++x)
+                            visit((base/32+y*draw.pitch+x)%512);
+                };
+            };
+            const auto color_pages=pages_of(draw.base,color_page_height),depth_pages=pages_of(draw.depth_base,32);
+            // Primitives inside one color page and one depth page compare directly.
+            const bool single=draw.top/color_page_height==(draw.bottom-1)/color_page_height &&
+                draw.top/32==(draw.bottom-1)/32 && draw.left/64==(draw.right-1)/64;
+            const bool overlapping=single ?
+                (draw.base/32+(draw.top/color_page_height)*draw.pitch+draw.left/64)%512==
+                (draw.depth_base/32+(draw.top/32)*draw.pitch+draw.left/64)%512 :
+                overlap(color_pages,depth_pages);
+            if (overlapping) throw std::runtime_error("Overlapping native color and depth surfaces");
         }
     }
     if ((draw.flags&1) && ((!(draw.flags&triangle_flag) && (!draw.dx || !draw.dy)) || !draw.texture_pitch || !draw.texture_width ||
@@ -507,61 +522,63 @@ void VulkanRenderer::sprite(std::span<std::uint32_t> memory,const Sprite& draw,s
 }
 void VulkanRenderer::validate(std::span<const SpriteCommand> commands) {
     if (commands.size()>65536) throw std::runtime_error("Vulkan draw batch exceeds bound");
-    for (const auto& command:commands) {
-        validate_sprite(command.draw);
-        if (const auto control=command.levels.control) {
-            const auto levels=texture_lod_levels(control),mode=texture_lod_mip_mode(control);
-            if (!(command.draw.flags&1) || !(control&texture_lod_enabled) || levels>6 || mode>2 || (levels!=0)!=(mode!=0) ||
-                (control&0xf000fc00U) || std::any_of(command.levels.base.begin(),command.levels.base.end(),[](auto b) { return b>16383; }) ||
-                std::any_of(command.levels.pitch.begin(),command.levels.pitch.end(),[](auto p) { return p>63; }))
-                throw std::runtime_error("Invalid native texture level plan");
+    for (const auto& command:commands) validate(command.draw,command.triangle,command.fog_color,command.fog,command.levels);
+}
+void VulkanRenderer::validate(const Sprite& draw,const std::array<RasterVertex,3>& triangle,
+        std::uint32_t fog_color,std::uint32_t fog,const TextureLevels& levels) {
+    validate_sprite(draw);
+    if (const auto control=levels.control) {
+        const auto count=texture_lod_levels(control),mode=texture_lod_mip_mode(control);
+        if (!(draw.flags&1) || !(control&texture_lod_enabled) || count>6 || mode>2 || (count!=0)!=(mode!=0) ||
+            (control&0xf000fc00U) || std::any_of(levels.base.begin(),levels.base.end(),[](auto b) { return b>16383; }) ||
+            std::any_of(levels.pitch.begin(),levels.pitch.end(),[](auto p) { return p>63; }))
+            throw std::runtime_error("Invalid native texture level plan");
+    }
+    if (fog>255 || fog_color>0xffffffU ||
+        std::any_of(triangle.begin(),triangle.end(),[](const RasterVertex& v) { return v.fog>255; }))
+        throw std::runtime_error("Invalid native fog parameters");
+    if (draw.flags&line_flag) {
+        const auto& v=triangle;
+        for (unsigned i=0;i<2;++i)
+            if (v[i].x < -65535 || v[i].x>65535 || v[i].y < -65535 || v[i].y>65535)
+                throw std::runtime_error("Invalid Vulkan line vertex");
+        if (v[0].x==v[1].x && v[0].y==v[1].y)
+            throw std::runtime_error("Degenerate Vulkan line");
+    }
+    if (draw.flags&triangle_flag) {
+        for (const auto& vertex:triangle)
+            if (vertex.x < -65535 || vertex.x>65535 || vertex.y < -65535 || vertex.y>65535 || vertex.u>16383 || vertex.v>16383)
+                throw std::runtime_error("Invalid Vulkan triangle vertex");
+        const auto& v=triangle;
+        if (draw.flags&depth_test_flag) {
+            const auto [left,right]=vertex_range(v[0].x,v[1].x,v[2].x);
+            const auto [top,bottom]=vertex_range(v[0].y,v[1].y,v[2].y);
+            if (right-left>65535 || bottom-top>65535)
+                throw std::runtime_error("Native depth interpolation exceeds coordinate bound");
         }
-        if (command.fog>255 || command.fog_color>0xffffffU ||
-            std::any_of(command.triangle.begin(),command.triangle.end(),[](const RasterVertex& v) { return v.fog>255; }))
-            throw std::runtime_error("Invalid native fog parameters");
-        if (command.draw.flags&line_flag) {
-            const auto& v=command.triangle;
-            for (unsigned i=0;i<2;++i)
-                if (v[i].x < -65535 || v[i].x>65535 || v[i].y < -65535 || v[i].y>65535)
-                    throw std::runtime_error("Invalid Vulkan line vertex");
-            if (v[0].x==v[1].x && v[0].y==v[1].y)
-                throw std::runtime_error("Degenerate Vulkan line");
-        }
-        if (command.draw.flags&triangle_flag) {
-            for (const auto& vertex:command.triangle)
-                if (vertex.x < -65535 || vertex.x>65535 || vertex.y < -65535 || vertex.y>65535 || vertex.u>16383 || vertex.v>16383)
-                    throw std::runtime_error("Invalid Vulkan triangle vertex");
-            const auto& v=command.triangle;
-            if (command.draw.flags&depth_test_flag) {
-                const auto [left,right]=std::minmax({v[0].x,v[1].x,v[2].x});
-                const auto [top,bottom]=std::minmax({v[0].y,v[1].y,v[2].y});
-                if (right-left>65535 || bottom-top>65535)
-                    throw std::runtime_error("Native depth interpolation exceeds coordinate bound");
-            }
-            if (command.draw.flags&perspective_triangle_flag) {
-                for (const auto& vertex:v) {
-                    if (!std::isfinite(vertex.s) || !std::isfinite(vertex.t) || !std::isfinite(vertex.q) ||
-                        std::abs(vertex.q)<1e-20f || std::abs(vertex.q)>1e20f ||
-                        std::abs(vertex.s)>1e20f || std::abs(vertex.t)>1e20f ||
-                        std::signbit(vertex.q)!=std::signbit(v[0].q) ||
-                        std::abs(double(vertex.s)/vertex.q*command.draw.texture_width*16)>0x3fffffff ||
-                        std::abs(double(vertex.t)/vertex.q*command.draw.texture_height*16)>0x3fffffff) {
-                        std::ostringstream detail;
-                        detail<<"Unsupported native triangle ST/Q range or zero crossing; texture="
-                            <<command.draw.texture_width<<'x'<<command.draw.texture_height<<" bounds=("
-                            <<command.draw.left<<','<<command.draw.top<<','<<command.draw.right<<','<<command.draw.bottom<<')'
-                            <<std::hexfloat;
-                        for (unsigned i=0;i<v.size();++i)
-                            detail<<" vertex["<<i<<"]=("<<v[i].x<<','<<v[i].y<<") STQ=("
-                                <<v[i].s<<','<<v[i].t<<','<<v[i].q<<')';
-                        throw std::runtime_error(detail.str());
-                    }
+        if (draw.flags&perspective_triangle_flag) {
+            for (const auto& vertex:v) {
+                if (!std::isfinite(vertex.s) || !std::isfinite(vertex.t) || !std::isfinite(vertex.q) ||
+                    std::abs(vertex.q)<1e-20f || std::abs(vertex.q)>1e20f ||
+                    std::abs(vertex.s)>1e20f || std::abs(vertex.t)>1e20f ||
+                    std::signbit(vertex.q)!=std::signbit(v[0].q) ||
+                    std::abs(double(vertex.s)/vertex.q*draw.texture_width*16)>0x3fffffff ||
+                    std::abs(double(vertex.t)/vertex.q*draw.texture_height*16)>0x3fffffff) {
+                    std::ostringstream detail;
+                    detail<<"Unsupported native triangle ST/Q range or zero crossing; texture="
+                        <<draw.texture_width<<'x'<<draw.texture_height<<" bounds=("
+                        <<draw.left<<','<<draw.top<<','<<draw.right<<','<<draw.bottom<<')'
+                        <<std::hexfloat;
+                    for (unsigned i=0;i<v.size();++i)
+                        detail<<" vertex["<<i<<"]=("<<v[i].x<<','<<v[i].y<<") STQ=("
+                            <<v[i].s<<','<<v[i].t<<','<<v[i].q<<')';
+                    throw std::runtime_error(detail.str());
                 }
             }
-            const auto area=(std::int64_t(v[1].x)-v[0].x)*(std::int64_t(v[2].y)-v[0].y)-
-                (std::int64_t(v[1].y)-v[0].y)*(std::int64_t(v[2].x)-v[0].x);
-            if (area<=0) throw std::runtime_error("Vulkan triangle must have positive area");
         }
+        const auto area=(std::int64_t(v[1].x)-v[0].x)*(std::int64_t(v[2].y)-v[0].y)-
+            (std::int64_t(v[1].y)-v[0].y)*(std::int64_t(v[2].x)-v[0].x);
+        if (area<=0) throw std::runtime_error("Vulkan triangle must have positive area");
     }
 }
 void VulkanRenderer::sprites(std::span<std::uint32_t> memory,std::span<const SpriteCommand> commands) {

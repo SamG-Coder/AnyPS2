@@ -28,7 +28,7 @@ std::uint64_t pack_flags(nt::numeric::ScalarFlagResult result) {
 constexpr std::uint64_t exact_path_required=1ULL<<62;
 // One definition serves scalar lanes and, under Clang, four-lane vectors.
 // Comparisons yield bool or lane masks; selects and bitwise logic work on both.
-template<class U32> struct LaneTypes { using F32=float; using F64=double; using U64=std::uint64_t; };
+template<class U32> struct LaneTypes { using F32=float; using F64=double; using U64=std::uint64_t; using S32=std::int32_t; };
 NT_LANE_HELPER inline double to_double(float value) { return static_cast<double>(value); }
 NT_LANE_HELPER inline float to_float(double value) { return static_cast<float>(value); }
 #if defined(__clang__)
@@ -38,10 +38,18 @@ template<> struct LaneTypes<U32x4> {
     using F32=float __attribute__((ext_vector_type(4)));
     using F64=double __attribute__((ext_vector_type(4)));
     using U64=std::uint64_t __attribute__((ext_vector_type(4)));
+    using S32=std::int32_t __attribute__((ext_vector_type(4)));
 };
 NT_LANE_HELPER inline LaneTypes<U32x4>::F64 to_double(LaneTypes<U32x4>::F32 value) { return __builtin_convertvector(value,LaneTypes<U32x4>::F64); }
 NT_LANE_HELPER inline LaneTypes<U32x4>::F32 to_float(LaneTypes<U32x4>::F64 value) { return __builtin_convertvector(value,LaneTypes<U32x4>::F32); }
+using I64x4=long long __attribute__((ext_vector_type(4)));
+NT_LANE_HELPER inline LaneTypes<U32x4>::F64 magnitude(LaneTypes<U32x4>::F64 value) { return __builtin_elementwise_abs(value); }
+NT_LANE_HELPER inline U32x4 double_mask(I64x4 condition) {
+    return std::bit_cast<U32x4>(__builtin_convertvector(condition,LaneTypes<U32x4>::S32));
+}
 #endif
+NT_LANE_HELPER inline double magnitude(double value) { return value<0 ? -value : value; }
+NT_LANE_HELPER inline std::uint32_t double_mask(bool condition) { return condition ? 0xffffffffU : 0U; }
 template<class U32> struct FastLanes { U32 bits; U32 exact; };
 template<class U32> NT_LANE_HELPER inline auto host_double(U32 bits) {
     return to_double(std::bit_cast<typename LaneTypes<U32>::F32>(bits));
@@ -55,32 +63,36 @@ template<class U32> NT_LANE_HELPER inline U32 chop_to_float(typename LaneTypes<U
 template<class U32,class Condition> NT_LANE_HELPER inline U32 lane_mask(Condition condition) {
     return condition ? U32(0xffffffffU) : U32(0U);
 }
-// Matches multiply_finite(..., true) where exact is set.
-template<class U32> NT_LANE_HELPER inline FastLanes<U32> fast_multiply(U32 a,U32 b) {
-    const U32 ea=(a>>23)&255U,eb=(b>>23)&255U;
-    const U32 zero=lane_mask<U32>(ea==0U)|lane_mask<U32>(eb==0U);
-    // Exponent-zero operands are signed zero; their bits must not reach the host as denormals.
-    const U32 left=ea!=0U ? a : a&0x80000000U,right=eb!=0U ? b : b&0x80000000U;
-    const U32 sum=ea+eb;
-    const U32 exact=lane_mask<U32>(ea!=255U)&lane_mask<U32>(eb!=255U)&(zero|(lane_mask<U32>(sum>=128U)&lane_mask<U32>(sum<=380U)));
-    return {chop_to_float<U32>(host_double(left)*host_double(right)),exact};
+// Exponent-zero encodings are VU signed zeros. Clear their significands before
+// host conversion: that is exactly their VU value, and host denormal inputs
+// would also take slow microcode paths.
+template<class U32> NT_LANE_HELPER inline auto vu_double(U32 bits) {
+    return host_double(bits&((bits&0x7f800000U)!=0U ? U32(0xffffffffU) : U32(0x80000000U)));
 }
-// Matches add_subtract_finite(..., true) where exact is set.
+// Exponent-255 inputs become host infinities or NaNs, which fail the range
+// comparison. A result is the chopped VU encoding when its magnitude is below
+// 2^128 and is either at least 2^-126 or exactly zero, matching the VU
+// overflow and underflow boundaries.
+template<class F64> NT_LANE_HELPER inline auto in_range(F64 value) {
+    const auto size=magnitude(value);
+    return double_mask((size<0x1p128) & ((size>=0x1p-126) | (value==0.0)));
+}
+// Matches multiply_finite(..., true) where exact is set. Products of
+// nonzero normal operands are never zero in double precision.
+template<class U32> NT_LANE_HELPER inline FastLanes<U32> fast_multiply(U32 a,U32 b) {
+    const auto product=vu_double(a)*vu_double(b);
+    return {chop_to_float<U32>(product),in_range(product)};
+}
+// Matches add_subtract_finite(..., true) where exact is set. Operands within
+// 29 exponents sum exactly in double precision. Beyond that, an opposing
+// addend can round the host sum back to the larger operand; the exact chopped
+// result is then its preceding encoding. Any other host sum chops correctly.
 template<class U32> NT_LANE_HELPER inline FastLanes<U32> fast_add(U32 a,U32 b,std::uint32_t subtract) {
     const U32 signed_b=b^(subtract ? 0x80000000U : 0U);
-    const U32 ea=(a>>23)&255U,eb=(b>>23)&255U;
-    // Exponents 25..253 cannot cancel below the normal range or carry into 255.
-    const U32 exact=(lane_mask<U32>(ea==0U)|(lane_mask<U32>(ea>=25U)&lane_mask<U32>(ea<=253U)))&
-                    (lane_mask<U32>(eb==0U)|(lane_mask<U32>(eb>=25U)&lane_mask<U32>(eb<=253U)));
-    const U32 left=ea!=0U ? a : a&0x80000000U,right=eb!=0U ? signed_b : signed_b&0x80000000U;
-    const U32 sum=chop_to_float<U32>(host_double(left)+host_double(right));
-    // Beyond 24 exponents an opposing addend chops to the preceding encoding;
-    // a host double sum does not retain that sticky information.
-    const U32 borrow=(a^signed_b)>>31;
-    const U32 nonzero=lane_mask<U32>(ea!=0U)&lane_mask<U32>(eb!=0U);
-    const U32 wide=ea>eb+24U ? a-borrow : signed_b-borrow;
-    const U32 aligned=lane_mask<U32>(ea>eb+24U)|lane_mask<U32>(eb>ea+24U);
-    return {(nonzero&aligned)!=0U ? wide : sum,exact};
+    const auto x=vu_double(a),y=vu_double(signed_b),sum=x+y;
+    const U32 absorbed=double_mask((x!=0.0) & (y!=0.0) & ((sum==x) | (sum==y)));
+    const U32 borrow=absorbed&((a^signed_b)>>31);
+    return {chop_to_float<U32>(sum)-borrow,in_range(sum)};
 }
 // An exact product never underflows or overflows: its stage flags are Z and S.
 template<class U32> NT_LANE_HELPER inline U32 product_flags(U32 product) {

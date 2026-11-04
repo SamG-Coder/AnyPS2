@@ -1,5 +1,6 @@
 #include "capture.hpp"
 #include "graphics_capture.hpp"
+#include <nt/host_isa.hpp>
 #include <nt/ee_services.hpp>
 #include <nt/ee_platform.hpp>
 #include <nt/ee_sif_command_peer.hpp>
@@ -191,6 +192,13 @@ int main(int argc,char** argv) {
 #endif
         return 2;
     }
+#ifdef ANYPS2_NATIVE_ISA
+    if (!nt::host_supports_isa(ANYPS2_NATIVE_ISA)) {
+        std::cerr<<"Converted code requires an " ANYPS2_NATIVE_ISA " CPU; this host lacks required instructions. "
+                   "Reconfigure with -DANYPS2_NATIVE_ISA=x86-64 and rebuild.\n";
+        return 2;
+    }
+#endif
     try {
         std::uint64_t budget=1000000;
         unsigned run_seconds=0,disc_media=0;

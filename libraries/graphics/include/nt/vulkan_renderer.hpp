@@ -4,10 +4,14 @@
 #include <span>
 #include <string>
 #include <array>
+#include <algorithm>
 #include <nt/image_upload.hpp>
 #include <nt/native_scanout.hpp>
 
 namespace nt::graphics {
+// Per-primitive bounds; std::minmax over an initializer list is a runtime-dispatched call.
+struct VertexRange { int low,high; };
+inline VertexRange vertex_range(int a,int b,int c) { return {std::min(a,std::min(b,c)),std::max(a,std::max(b,c))}; }
 struct Sprite {
     std::uint32_t left, top, right, bottom, base, pitch, color, mask;
     std::uint32_t texture_base=0, texture_pitch=0, texture_width=0, texture_height=0;
@@ -43,6 +47,11 @@ inline constexpr std::uint32_t texture_lod_enabled=1, texture_lod_minify_linear=
 inline constexpr std::uint32_t texture_lod_constant=1U<<7;
 inline constexpr unsigned texture_lod_levels(std::uint32_t control) { return (control>>1)&7; }
 inline constexpr unsigned texture_lod_mip_mode(std::uint32_t control) { return (control>>5)&3; } // 0 none, 1 nearest, 2 linear.
+// A planned primitive before palette snapshot and texture-level planning.
+struct PlannedPrimitive {
+    Sprite draw;
+    std::array<RasterVertex,3> triangle{};
+};
 struct SpriteCommand {
     Sprite draw;
     std::array<std::uint32_t,256> palette{};
@@ -84,6 +93,9 @@ public:
     void sprites(std::span<std::uint32_t> memory, std::span<const SpriteCommand> commands);
     // Resident clients exclusively own this renderer's working storage.
     static void validate(std::span<const SpriteCommand> commands);
+    // Validates one draw's fields; the palette contents need no validation.
+    static void validate(const Sprite& draw,const std::array<RasterVertex,3>& triangle,
+        std::uint32_t fog_color,std::uint32_t fog,const TextureLevels& levels);
     void upload(std::span<const std::uint32_t> memory);
     void draw(std::span<const SpriteCommand> commands);
     void write(std::span<const PixelWrite> writes);

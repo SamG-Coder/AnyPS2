@@ -69,10 +69,8 @@ public:
         if (draws.empty()) { state_=candidate; return; }
         // Validate every draw before recording any part of this submission.
         // Parsing already validated uploads/palette addresses and state changes.
-        for (const auto& operation:draws) if (const auto* draw=std::get_if<Draw>(&operation)) {
-            const SpriteCommand command{draw->sprite,{},draw->triangle,draw->fog_color,draw->fog,draw->levels};
-            VulkanRenderer::validate(std::span(&command,1));
-        }
+        for (const auto& operation:draws) if (const auto* draw=std::get_if<Draw>(&operation))
+            VulkanRenderer::validate(draw->sprite,draw->triangle,draw->fog_color,draw->fog,draw->levels);
         account(&Profile::validate_ns);
         if (resident_) {
             if (renderer_ && renderer_!=&renderer) throw std::invalid_argument("Resident drawing renderer changed");

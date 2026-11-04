@@ -1,3 +1,7 @@
+# Converted VU code targets an x86-64 microarchitecture level. The program
+# verifies the host CPU before entering converted code.
+set(ANYPS2_NATIVE_ISA "x86-64-v3" CACHE STRING "Host x86-64 level for converted VU code: x86-64, x86-64-v2, x86-64-v3 or x86-64-v4")
+set_property(CACHE ANYPS2_NATIVE_ISA PROPERTY STRINGS x86-64 x86-64-v2 x86-64-v3 x86-64-v4)
 # Reuse the native numeric implementation inside LLVM optimization. Imported
 # helpers are internalized, so each module can inline them without duplicate
 # public symbols or a second implementation of the arithmetic semantics.

@@ -22,12 +22,12 @@ function(anyps2_bind_vu target)
         # Allow small arithmetic bodies to inline there; retain larger slow paths.
         add_custom_command(OUTPUT "${object}"
         COMMAND "${ANYPS2_CLANG}" -x ir -target x86_64-pc-windows-msvc
-            -Werror -Wno-override-module -O3 -mllvm -inline-cold-callsite-threshold=150 -c "${module}"
+            -Werror -Wno-override-module -O3 -march=${ANYPS2_NATIVE_ISA} -mllvm -inline-cold-callsite-threshold=150 -c "${module}"
             -Xclang -mlink-builtin-bitcode -Xclang "${numeric_bitcode}" -o "${object}"
         DEPENDS "${module}" "${numeric_bitcode}" VERBATIM)
         add_dependencies(${target} anyps2-numeric-bitcode)
         target_sources(${target} PRIVATE "${object}")
         target_include_directories(${target} PRIVATE "${ANYPS2_ROOT}/libraries/vu/include")
-        target_compile_definitions(${target} PRIVATE ${definition}=1)
+        target_compile_definitions(${target} PRIVATE ${definition}=1 ANYPS2_NATIVE_ISA="${ANYPS2_NATIVE_ISA}")
     endforeach()
 endfunction()

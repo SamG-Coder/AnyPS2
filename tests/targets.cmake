@@ -84,7 +84,7 @@ if(BUILD_TESTING)
             set(object "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/vu-${fixture}.obj")
             list(APPEND vu_fixture_objects "${object}")
             list(APPEND vu_fixture_commands COMMAND "${ANYPS2_CLANG}" -x ir
-                -target x86_64-pc-windows-msvc -Werror -Wno-override-module -c -O3 -mllvm -inline-cold-callsite-threshold=150 "${source}"
+                -target x86_64-pc-windows-msvc -Werror -Wno-override-module -c -O3 -march=${ANYPS2_NATIVE_ISA} -mllvm -inline-cold-callsite-threshold=150 "${source}"
                 -Xclang -mlink-builtin-bitcode -Xclang "${vu_numeric_bitcode}" -o "${object}")
         endforeach()
         add_custom_command(OUTPUT ${vu_fixture_objects}

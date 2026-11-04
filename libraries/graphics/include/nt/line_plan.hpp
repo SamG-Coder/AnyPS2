@@ -8,7 +8,7 @@ inline int nearest_pixel(int coordinate) {
     const int value=coordinate+8;
     return value>=0 ? value/16 : (value-15)/16;
 }
-inline std::optional<SpriteCommand> plan_line_or_point(std::uint64_t frame,std::uint64_t offset,
+inline std::optional<PlannedPrimitive> plan_line_or_point(std::uint64_t frame,std::uint64_t offset,
     std::uint64_t scissor,std::array<RasterVertex,2> vertices,bool point,bool shaded,bool antialiased=false) {
     for (auto& v:vertices) {
         if (v.x<0 || v.x>65535 || v.y<0 || v.y>65535)
@@ -28,6 +28,6 @@ inline std::optional<SpriteCommand> plan_line_or_point(std::uint64_t frame,std::
     if (!bounds) return {};
     bounds->depth=b.z;
     if (!point) bounds->flags|=line_flag|(shaded ? shaded_triangle_flag : 0);
-    return SpriteCommand{*bounds,{}, {a,b,{}}};
+    return PlannedPrimitive{*bounds,{a,b,{}}};
 }
 }

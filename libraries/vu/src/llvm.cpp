@@ -323,7 +323,7 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
     }
     const bool fast_numeric=path==NumericPath::fast;
     const bool exact_fallback=path==NumericPath::exact && symbol.ends_with("_exact");
-    std::string exact_required="0";
+    std::string exact_required="zeroinitializer";
     Writer writer;
     // A scalar publication can cross an observer-free native region as one
     // operation. Q's status bits are disjoint from MAC current/sticky bits;
@@ -378,6 +378,7 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         <<"declare i64 @nt_vu_efu_square_root_finite(i32) nounwind willreturn memory(none)\n"
         <<"declare i32 @nt_vu_clip_flags(i32, i32, i32, i32) nounwind willreturn memory(none)\n"
         <<"declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n"
+        <<"declare i32 @llvm.vector.reduce.or.v4i32(<4 x i32>)\n"
         // Exact-path reruns are rare: lay out fast blocks for the committed path.
         <<"!0 = !{!\"branch_weights\", i32 1, i32 4000}\n";
     writer.out<<"define i32 @"<<symbol<<"(ptr align "<<alignof(State)<<" %output)"<<(exact_fallback ? " cold noinline optsize" : "")<<" {\nentry:\n"
@@ -471,15 +472,16 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
                     (upper.operation==Arithmetic::multiply || outer) ?
                     "call <8 x i32> @nt_vu_vector_multiply_fast(<4 x i32> "+vectors[1]+", <4 x i32> "+vectors[2]+")" :
                     "call <8 x i32> @nt_vu_vector_add_fast(<4 x i32> "+vectors[1]+", <4 x i32> "+vectors[2]+", i32 "+(upper.operation==Arithmetic::subtract ? "1" : "0")+")");
+                // Exact-path requests stay in a vector accumulator, reduced once at commit.
+                const auto info=writer.value("shufflevector <8 x i32> "+result+", <8 x i32> poison, <4 x i32> <i32 4, i32 5, i32 6, i32 7>");
+                exact_required=writer.value("or <4 x i32> "+exact_required+", "+info);
                 for (unsigned lane=0;lane<4;++lane) {
                     if (!((outer ? 14U : upper.mask)&(8U>>lane))) continue;
-                    // Rebuild the scalar packed encoding: product flags at bit 36, exact request at 62.
+                    // Rebuild the scalar packed encoding: bits, and product flags at bit 36.
                     const auto bits=writer.value("zext i32 "+writer.value("extractelement <8 x i32> "+result+", i32 "+std::to_string(lane))+" to i64");
-                    const auto info=writer.value("zext i32 "+writer.value("extractelement <8 x i32> "+result+", i32 "+std::to_string(lane+4))+" to i64");
-                    const auto product=writer.value("shl i64 "+writer.value("and i64 "+info+", 48")+", 32");
-                    const auto request=writer.value("shl i64 "+writer.value("and i64 "+info+", 1")+", 62");
-                    packed_lanes[lane]=writer.value("or i64 "+writer.value("or i64 "+bits+", "+product)+", "+request);
-                    exact_required=writer.value("or i64 "+exact_required+", "+packed_lanes[lane]);
+                    if (!accumulate) { packed_lanes[lane]=bits; continue; }
+                    const auto flags=writer.value("zext i32 "+writer.value("extractelement <8 x i32> "+result+", i32 "+std::to_string(lane+4))+" to i64");
+                    packed_lanes[lane]=writer.value("or i64 "+bits+", "+writer.value("shl i64 "+writer.value("and i64 "+flags+", 48")+", 32"));
                 }
             }
             // Fast helpers never report unsupported operands; they request the exact block.
@@ -777,7 +779,8 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         writer.pending.push_back({"i32","0",offsetof(State,clip_read_delay)}); writer.commit();
     }
     if (fast_numeric) {
-        const auto required=writer.value("icmp ne i64 "+writer.value("and i64 "+exact_required+", 4611686018427387904")+", 0");
+        const auto requests=writer.value("call i32 @llvm.vector.reduce.or.v4i32(<4 x i32> "+exact_required+")");
+        const auto required=writer.value("icmp ne i32 "+writer.value("and i32 "+requests+", 1")+", 0");
         writer.out<<"  br i1 "<<required<<", label %exact_block, label %commit_block, !prof !0\nexact_block:\n"
             <<"  %exact_result = call i32 @"<<symbol<<"_exact(ptr %output)\n  ret i32 %exact_result\ncommit_block:\n";
     }

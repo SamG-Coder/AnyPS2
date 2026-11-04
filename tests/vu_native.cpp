@@ -1463,7 +1463,11 @@ void test_fast_lane_arithmetic() {
         auto a=operand(),b=operand(),c=operand();
         // Near-cancellation and wide alignment cases for addition.
         if ((i&7)==0) b=(a^0x80000000U)+(next()%5)-2;
-        if ((i&7)==1) b=(a&0x80000000U)|((((a>>23)&255)-std::min((a>>23)&255,24U+next()%8))<<23)|(next()&0x7fffff);
+        // Wide alignment across the shortcut, double-rounding band and beyond.
+        if ((i&7)==1) b=(next()&0x80000000U)|((((a>>23)&255)-std::min((a>>23)&255,20U+next()%52))<<23)|(next()&0x7fffff);
+        if ((i&7)==2) a=(next()&0x80000000U)|((((b>>23)&255)-std::min((b>>23)&255,20U+next()%52))<<23)|(next()&0x7fffff);
+        // Denormal encodings are VU zeros but must not reach the host as denormals.
+        if ((i&15)==3) a=(a&0x807fffffU);
         const auto subtract=next()&1;
         check(nt_vu_add_fast(a,b,subtract),nt_ee_add_finite(a,b,subtract),"add",a,b,subtract);
         check(nt_vu_multiply_fast(a,b),nt_ee_multiply_finite(a,b),"multiply",a,b,0);
