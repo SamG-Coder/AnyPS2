@@ -104,6 +104,9 @@ public:
     void upload(std::span<const std::uint32_t> memory);
     void draw(std::span<const SpriteCommand> commands);
     // Precompiled element kernels only; no runtime instruction translation.
+    // GPU primitive assembly for PACKED triangle batches. False when the device
+    // lacks ordered fragment access or the renderer is the reference path.
+    bool enable_vector_drawing();
     unsigned load_vector_kernel(std::span<const std::uint32_t> spirv,unsigned unit);
     void draw_vectors(const VectorLaunch& launch,const VectorAssembly& assembly,const Sprite& target);
     void write(std::span<const PixelWrite> writes);

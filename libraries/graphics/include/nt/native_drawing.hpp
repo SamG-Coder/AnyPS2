@@ -46,68 +46,33 @@ public:
             pending_finishes_.pop_front(); ++completed_finishes_;
         }
     }
+    // Opt-in GPU primitive assembly for kicked PACKED triangle packets whose
+    // layout and GS state the GPU path supports (see plan_vectors). Each such tag
+    // becomes one batch drawn from its own vertex records; GS state is still
+    // updated from the same registers, so it remains exact. Other packets keep
+    // the CPU planner. Requires resident storage and renderer vector support.
+    bool assemble_triangles_on_gpu(VulkanRenderer& renderer) {
+        if (!resident_ || (renderer_ && renderer_!=&renderer) || !renderer.enable_vector_drawing()) return false;
+        gpu_packets_=true;
+        return true;
+    }
+    std::uint64_t gpu_packet_batches() const { return gpu_packet_batches_; }
     // The converter supplies a precompiled element kernel and a PACKED output
     // layout. This entry never reads vertex results back to the CPU.
     void submit_vectors(VulkanRenderer& renderer,const VectorLaunch& launch) {
         if (!resident_) throw std::invalid_argument("Vector drawing requires resident storage");
         if (renderer_ && renderer_!=&renderer) throw std::invalid_argument("Resident drawing renderer changed");
-        const auto primitive=state_.primitive&7;
-        const auto attributes=state_.use_primitive ? state_.primitive : state_.attributes;
-        if (primitive<3 || primitive>5 || (attributes&~0x3ffU))
-            throw std::invalid_argument("Vector drawing supports triangle list, strip and fan only");
-        if (attributes&16) throw std::invalid_argument("Textured vector drawing is not supported");
-        if (attributes&32) throw std::invalid_argument("Fogged vector drawing is not supported");
-        if (state_.vertex_count || (state_.unknown&unknown_vertices))
-            throw std::invalid_argument("Vector drawing cannot continue an existing primitive; write PRIM first");
-        if (launch.elements<3 || launch.vertex.empty() || launch.vertex.size()>5)
-            throw std::invalid_argument("Invalid vector vertex layout or element count");
-        VectorAssembly assembly{};
-        for (auto& store:assembly.store) store.fill(vector_constant_word);
-        assembly.primitive=primitive; assembly.shaded=bool(attributes&8); assembly.coverage=bool(attributes&128);
-        for (unsigned i=0;i<launch.vertex.size();++i) {
-            const auto& reg=launch.vertex[i];
-            unsigned kind=0;
-            switch (reg.reg) {
-            case 1: kind=0; break;
-            case 2:
-                if (assembly.present&1) throw std::invalid_argument("Vector ST must precede RGBAQ");
-                kind=1; break;
-            case 3: kind=2; break;
-            case 10: kind=3; break;
-            case 4: case 5: case 12: case 13:
-                if (i+1!=launch.vertex.size()) throw std::invalid_argument("Vector position must end the vertex record");
-                kind=4; assembly.xyz_register=reg.reg; break;
-            default: throw std::invalid_argument("Unsupported vector PACKED register: "+std::to_string(reg.reg));
-            }
-            if (assembly.present&(1U<<kind)) throw std::invalid_argument("Duplicate vector PACKED register");
-            assembly.present|=1U<<kind; assembly.store[kind]=reg.store; assembly.constant[kind]=reg.constant;
-            for (auto word:reg.store) if (word!=vector_constant_word && (launch.element_words<2 || word>=launch.element_words-1))
-                throw std::invalid_argument("Vector register names a missing store word");
-        }
-        if (!(assembly.present&16)) throw std::invalid_argument("Vector vertex layout lacks a position");
-        const unsigned written=(assembly.present&15)|((assembly.xyz_register&1) ? 0U : 8U);
-        if (state_.unknown&15U&~written)
-            throw std::invalid_argument("Vector drawing requires GS registers whose values are still GPU-owned");
-        const auto& context=state_.contexts[(attributes>>9)&1];
-        assembly.offset_x=int(context.offset&65535); assembly.offset_y=int((context.offset>>32)&65535);
-        assembly.scissor={unsigned(context.scissor&2047),unsigned((context.scissor>>16)&2047),
-            unsigned((context.scissor>>32)&2047),unsigned((context.scissor>>48)&2047)};
-        assembly.state={state_.color,state_.q,state_.s,state_.t,state_.uv,state_.fog};
-        auto target=sprite_target(context.frame);
-        target.left=assembly.scissor[0]; target.right=assembly.scissor[1]+1;
-        target.top=assembly.scissor[2]; target.bottom=assembly.scissor[3]+1;
-        target.flags|=triangle_flag|(assembly.shaded ? shaded_triangle_flag : 0);
-        configure_draw(state_,context,attributes,target);
+        const auto plan=plan_vectors(state_,launch.vertex,launch.elements,launch.element_words);
         if (!renderer_) { renderer.upload(pixels_); renderer_=&renderer; }
-        renderer.draw_vectors(launch,assembly,target);
-        dirty_=true; last_draw_=target;
-        submitted_draws_+=vector_primitives(primitive,launch.elements);
+        renderer.draw_vectors(launch,plan.assembly,plan.target);
+        dirty_=true; last_draw_=plan.target;
+        submitted_draws_+=vector_primitives(plan.assembly.primitive,launch.elements);
         // No guessed last-vertex values. A later packet must overwrite these
         // latches (and restart a continued primitive) before consuming them.
-        state_.unknown|=written;
-        if (assembly.present&2) state_.unknown|=unknown_packed_q;
+        state_.unknown|=plan.written;
+        if (plan.assembly.present&2) state_.unknown|=unknown_packed_q;
         else { state_.packed_q=0x3f800000; state_.unknown&=~unknown_packed_q; }
-        if (primitive!=3 || launch.elements%3) state_.unknown|=unknown_vertices;
+        if (plan.assembly.primitive!=3 || launch.elements%3) state_.unknown|=unknown_vertices;
     }
     void submit(VulkanRenderer& renderer,std::span<const Packet> packets) {
         auto marked=profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
@@ -121,6 +86,7 @@ public:
         // calls, but release its contents on success and on validation failure.
         struct ReleaseWorkspace { Workspace& workspace; ~ReleaseWorkspace() { workspace.clear(); } } release{workspace_};
         auto candidate=state_;
+        candidate.gpu_packets=gpu_packets_ && resident_;
         auto& draws=workspace_.operations;
         std::size_t total=0;
         for (const auto& packet:packets) {
@@ -154,7 +120,12 @@ public:
                 }
                 // Preserve palette, resource-upload and FINISH boundaries.
                 flush();
-                if (const auto* load=std::get_if<PaletteLoad>(&operation)) {
+                if (const auto* batch=std::get_if<PacketVectors>(&operation)) {
+                    const VectorLaunch launch{vector_host_records,{},{},batch->elements,batch->words,
+                        std::span(batch->layout).first(batch->registers),nullptr,batch->records};
+                    renderer.draw_vectors(launch,batch->assembly,batch->target);
+                    dirty_=true;
+                } else if (const auto* load=std::get_if<PaletteLoad>(&operation)) {
                     std::array<std::uint32_t,256> words{};
                     const auto selected=std::span(words).first(load->addresses.size());
                     renderer.read_words(load->addresses,selected);
@@ -180,6 +151,9 @@ public:
             state_=candidate;
             for (const auto& operation:draws) if (const auto* draw=std::get_if<Draw>(&operation)) {
                 ++submitted_draws_; last_draw_=draw->sprite;
+            } else if (const auto* batch=std::get_if<PacketVectors>(&operation)) {
+                submitted_draws_+=vector_primitives(batch->assembly.primitive,batch->elements);
+                ++gpu_packet_batches_; last_draw_=batch->target;
             } else if (std::holds_alternative<Finish>(operation) && completion_==Completion::synchronous) ++completed_finishes_;
             account(&Profile::submit_ns);
             return;
@@ -219,7 +193,15 @@ private:
     struct Draw { Sprite sprite; unsigned bank; std::array<RasterVertex,3> triangle{}; std::uint32_t fog_color=0,fog=0; bool palette16=false; std::uint64_t texa=0; TextureLevels levels{}; };
     struct Finish {};
     struct CancelDownload {};
-    using Operation=std::variant<Draw,ImageWrites,PaletteLoad,Finish,ImageDownload,CancelDownload>;
+    // A kicked PACKED triangle tag drawn by GPU primitive assembly from its records.
+    struct PacketVectors {
+        VectorAssembly assembly;
+        Sprite target;
+        std::array<VectorRegister,5> layout{};
+        unsigned registers=0,elements=0,words=0;
+        std::vector<std::uint32_t> records;
+    };
+    using Operation=std::variant<Draw,ImageWrites,PaletteLoad,Finish,ImageDownload,CancelDownload,PacketVectors>;
     struct Workspace {
         std::vector<Operation> operations;
         std::vector<SpriteCommand> commands;
@@ -236,6 +218,10 @@ private:
     };
     struct State {
         unsigned unknown=0; // RGBAQ, ST, UV, FOG, then queue and PACKED Q below.
+        // While set, triangle kicks update GS state without planning a draw: their
+        // primitives are drawn by a PacketVectors batch. Never set across tags.
+        bool suppress_draws=false;
+        bool gpu_packets=false;
         std::array<Context,2> contexts;
         unsigned primitive=0,attributes=0,color=0,x=0,y=0;
         unsigned scan_mask=0;
@@ -256,6 +242,94 @@ private:
         std::uint64_t palette_config=0;
     } state_;
     static constexpr unsigned unknown_vertices=1U<<5,unknown_packed_q=1U<<6;
+    bool gpu_packets_=false;
+    std::uint64_t gpu_packet_batches_=0;
+    struct VectorPlan { VectorAssembly assembly; Sprite target; unsigned written=0; };
+    // Data-independent part of GPU primitive assembly from the current GS state.
+    // Throws std::invalid_argument for anything the GPU path does not reproduce.
+    static VectorPlan plan_vectors(const State& state,std::span<const VectorRegister> vertex,unsigned elements,unsigned element_words) {
+        const auto primitive=state.primitive&7;
+        const auto attributes=state.use_primitive ? state.primitive : state.attributes;
+        if (primitive<3 || primitive>5 || (attributes&~0x3ffU))
+            throw std::invalid_argument("Vector drawing supports triangle list, strip and fan only");
+        if (attributes&16) throw std::invalid_argument("Textured vector drawing is not supported");
+        if (attributes&32) throw std::invalid_argument("Fogged vector drawing is not supported");
+        if (state.vertex_count || (state.unknown&unknown_vertices))
+            throw std::invalid_argument("Vector drawing cannot continue an existing primitive; write PRIM first");
+        if (elements<3 || vertex.empty() || vertex.size()>5)
+            throw std::invalid_argument("Invalid vector vertex layout or element count");
+        VectorPlan plan;
+        auto& assembly=plan.assembly;
+        for (auto& store:assembly.store) store.fill(vector_constant_word);
+        assembly.primitive=primitive; assembly.shaded=bool(attributes&8); assembly.coverage=bool(attributes&128);
+        for (unsigned i=0;i<vertex.size();++i) {
+            const auto& reg=vertex[i];
+            unsigned kind=0;
+            switch (reg.reg) {
+            case 1: kind=0; break;
+            case 2:
+                if (assembly.present&1) throw std::invalid_argument("Vector ST must precede RGBAQ");
+                kind=1; break;
+            case 3: kind=2; break;
+            case 10: kind=3; break;
+            case 4: case 5: case 12: case 13:
+                if (i+1!=vertex.size()) throw std::invalid_argument("Vector position must end the vertex record");
+                kind=4; assembly.xyz_register=reg.reg; break;
+            default: throw std::invalid_argument("Unsupported vector PACKED register: "+std::to_string(reg.reg));
+            }
+            if (assembly.present&(1U<<kind)) throw std::invalid_argument("Duplicate vector PACKED register");
+            assembly.present|=1U<<kind; assembly.store[kind]=reg.store; assembly.constant[kind]=reg.constant;
+            for (auto word:reg.store) if (word!=vector_constant_word && (element_words<2 || word>=element_words-1))
+                throw std::invalid_argument("Vector register names a missing store word");
+        }
+        if (!(assembly.present&16)) throw std::invalid_argument("Vector vertex layout lacks a position");
+        plan.written=(assembly.present&15)|((assembly.xyz_register&1) ? 0U : 8U);
+        if (state.unknown&15U&~plan.written)
+            throw std::invalid_argument("Vector drawing requires GS registers whose values are still GPU-owned");
+        const auto& context=state.contexts[(attributes>>9)&1];
+        assembly.offset_x=int(context.offset&65535); assembly.offset_y=int((context.offset>>32)&65535);
+        assembly.scissor={unsigned(context.scissor&2047),unsigned((context.scissor>>16)&2047),
+            unsigned((context.scissor>>32)&2047),unsigned((context.scissor>>48)&2047)};
+        assembly.state={state.color,state.q,state.s,state.t,state.uv,state.fog};
+        auto& target=plan.target;
+        target=sprite_target(context.frame);
+        target.left=assembly.scissor[0]; target.right=assembly.scissor[1]+1;
+        target.top=assembly.scissor[2]; target.bottom=assembly.scissor[3]+1;
+        target.flags|=triangle_flag|(assembly.shaded ? shaded_triangle_flag : 0);
+        configure_draw(state,context,attributes,target);
+        return plan;
+    }
+    // A PACKED tag of only vertex registers, with the position last, is drawn
+    // by GPU assembly when its GS state qualifies. NOP slots carry no data.
+    static bool vector_packet(const State& state,std::span<const Quadword> payload,unsigned nreg,
+        std::uint64_t registers,unsigned vertices,std::vector<Operation>& draws) {
+        PacketVectors batch;
+        std::array<unsigned,16> slots{};
+        for (unsigned i=0;i<nreg;++i) {
+            const auto reg=unsigned((registers>>(i*4))&15);
+            if (reg==15) continue;
+            if (reg!=1 && reg!=2 && reg!=3 && reg!=10 && reg!=4 && reg!=5 && reg!=12 && reg!=13) return false;
+            if (batch.registers==batch.layout.size()) return false;
+            auto& entry=batch.layout[batch.registers];
+            entry.reg=reg;
+            for (unsigned word=0;word<4;++word) entry.store[word]=batch.registers*4+word;
+            slots[batch.registers++]=i;
+        }
+        batch.elements=vertices; batch.words=1+batch.registers*4;
+        const auto primitives=vector_primitives(state.primitive&7,vertices);
+        if (!batch.registers || !primitives || primitives>4096) return false;
+        try {
+            const auto plan=plan_vectors(state,std::span(batch.layout).first(batch.registers),vertices,batch.words);
+            batch.assembly=plan.assembly; batch.target=plan.target;
+        } catch (const std::invalid_argument&) { return false; }
+        batch.records.assign(std::size_t(vertices)*batch.words,0);
+        for (unsigned vertex=0;vertex<vertices;++vertex) for (unsigned n=0;n<batch.registers;++n) {
+            const auto& q=payload[std::size_t(vertex)*nreg+slots[n]];
+            std::copy(q.begin(),q.end(),batch.records.begin()+std::ptrdiff_t(vertex)*batch.words+1+n*4);
+        }
+        draws.emplace_back(std::move(batch));
+        return true;
+    }
     std::vector<std::uint8_t> download_;
     std::size_t download_offset_=0;
     bool resident_=false;
@@ -359,7 +433,7 @@ private:
             state.vertex_count=primitive==3 ? 0 : 2;
             if (primitive==4) state.vertices[0]=state.vertices[1];
             if (primitive!=3) state.vertices[1]=state.vertices[2];
-            if (reg==12 || reg==13) return;
+            if (reg==12 || reg==13 || state.suppress_draws) return;
             if (attributes&~0x3ffU) throw std::invalid_argument("Unsupported native triangle attributes: "+std::to_string(attributes));
             const auto& context=state.contexts[(attributes>>9)&1];
             if (auto draw=plan_triangle(context.frame,context.offset,context.scissor,vertices,(attributes&8)!=0,(attributes&128)!=0)) {
@@ -448,6 +522,10 @@ private:
                 state.upload.append(packet.subspan(cursor,count),writes);
                 draws.emplace_back(std::move(writes));
             }
+            // Only the triangle kicks of this tag are suppressed; register state
+            // is still updated by the loop below.
+            state.suppress_draws=state.gpu_packets && !format && entries && (low&0x7fffU)>=3 &&
+                vector_packet(state,packet.subspan(cursor,count),unsigned(nreg),registers,unsigned(low&0x7fffU),draws);
             unsigned register_index=0;
             for (std::uint64_t index=0;format<2 && index<entries;++index) {
                 const auto reg=unsigned((registers>>(register_index*4))&15);
@@ -471,6 +549,7 @@ private:
                     command(state,target,(q[0]&65535)|(std::uint64_t(q[1]&65535)<<16)|(std::uint64_t(z)<<32)|fog,draws);
                 } else throw std::invalid_argument("Unsupported packed native graphics register");
             }
+            state.suppress_draws=false;
             cursor+=static_cast<std::size_t>(count);
             if (low&0x8000U) {
                 if (cursor!=packet.size()) throw std::invalid_argument("Trailing data after graphics end tag");

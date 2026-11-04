@@ -31,6 +31,9 @@ struct VectorMemoryWrite {
 // ABI of an AOT-generated launch-range guard. No runtime instruction analysis.
 enum class VectorRangeStatus : std::uint32_t { valid=0, count=1, startup=2, wrap=3, alias=4 };
 using VectorRangeGuard=std::uint32_t (*)(const std::uint32_t*);
+// VectorLaunch::kernel value for a batch whose records all come from the host
+// prefix, such as a kicked PACKED packet: no element kernel or memory writes.
+inline constexpr unsigned vector_host_records=0xffffffffU;
 // One element-kernel launch and the PACKED vertex layout of its output.
 struct VectorLaunch {
     unsigned kernel=0;                      // VulkanRenderer::load_vector_kernel result

@@ -613,6 +613,7 @@ void VulkanRenderer::upload(std::span<const std::uint32_t> memory) {
     throw std::runtime_error("Reference renderer operation is unavailable in native output");
 #endif
 }
+bool VulkanRenderer::enable_vector_drawing() { return impl_->native && impl_->native->enable_vectors(); }
 unsigned VulkanRenderer::load_vector_kernel(std::span<const std::uint32_t> spirv,unsigned unit) {
     if (!impl_->native) throw std::invalid_argument("Vector kernels require the native image renderer");
     if (impl_->api_version<VK_API_VERSION_1_3 || !impl_->shader_int8)

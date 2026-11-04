@@ -254,6 +254,15 @@ conservative scissor union and submits one instanced draw. Color/depth ordering
 uses the existing ordered-fragment pipeline. No generated vertex packets or
 framebuffer images make a CPU round trip during submission.
 
+`NativeDrawing::assemble_triangles_on_gpu(renderer)` applies the same assembly to
+ordinary kicked packets. A PACKED tag whose registers are only RGBAQ, ST, UV, FOG,
+NOP and one final position, with GS state that `submit_vectors` would accept, is
+drawn as one batch from its own vertex records (`vector_host_records`: no element
+kernel or memory writes). The same registers still pass through the GS state
+machine with draw planning suppressed, so later CPU packets see exact register and
+vertex-queue state. Other packets keep the CPU planner. `ps2-native --gpu-triangles`
+enables it; it is off by default.
+
 Frame slots own staging and status memory until their queue fence completes.
 `RenderStatistics` exposes vector launches, resident hits/uploads, staged bytes
 and failed-element counts. A failed element suppresses all primitives using it;

@@ -1008,15 +1008,19 @@ void NativeRaster::write(std::span<const PixelWrite> writes) {
         for (unsigned page=first/2048;page<=last/2048;++page) r.backing_revisions[page]=r.revision;
     }
 }
-unsigned NativeRaster::load_vector_kernel(std::span<const std::uint32_t> spirv,unsigned unit) {
+bool NativeRaster::enable_vectors() {
     auto& r=*impl_;
-    if (!r.ordered_fragments) throw std::invalid_argument("Vector batches require ordered fragment access for overlapping primitives");
+    if (!r.ordered_fragments) return false;
     if (!r.vectors) r.vectors=std::make_unique<NativeVectors>(r.physical,r.device,r.records,record_bytes,frame_slots);
-    return r.vectors->load_kernel(spirv,unit);
+    return true;
+}
+unsigned NativeRaster::load_vector_kernel(std::span<const std::uint32_t> spirv,unsigned unit) {
+    if (!enable_vectors()) throw std::invalid_argument("Vector batches require ordered fragment access for overlapping primitives");
+    return impl_->vectors->load_kernel(spirv,unit);
 }
 void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly& assembly,const Sprite& target) {
     auto& r=*impl_; Measure timing(r.stats.draw_ns,r.profiling);
-    if (!r.initialized || !r.vectors) throw std::invalid_argument("Vector drawing requires initialized storage and a loaded kernel");
+    if (!r.initialized || !r.vectors) throw std::invalid_argument("Vector drawing requires initialized storage and enabled vector batches");
     r.vectors->validate(launch);
     const auto count=vector_primitives(assembly.primitive,launch.elements);
     if (assembly.primitive<3 || assembly.primitive>5 || !count || count>records_per_slot ||

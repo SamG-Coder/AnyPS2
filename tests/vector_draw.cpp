@@ -148,6 +148,45 @@ void compare(VulkanRenderer& gpu,VulkanRenderer& cpu,unsigned kernel) {
     }
     std::cout<<cases<<" list/strip/fan cases and second frames match CPU packet pixels\n";
 }
+// Kicked PACKED packets drawn by GPU primitive assembly from their own records
+// must equal the CPU planner, leave exact GS state behind, and fall back for
+// packets the GPU path does not reproduce.
+void packets(VulkanRenderer& gpu,VulkanRenderer& cpu) {
+    unsigned batches=0;
+    for (unsigned primitive:{3U,4U,5U}) for (unsigned variant=0;variant<3;++variant) {
+        Fixture fixture;
+        if (variant==1) fixture.memory[(100+4)*4+3]=std::bit_cast<std::uint32_t>(2048.0f); // ADC
+        fixture.compile_cpu();
+        NativeDrawing generated(true),packets(true);
+        require(generated.assemble_triangles_on_gpu(gpu),"GPU packet assembly unavailable");
+        setup(generated,gpu,primitive); setup(packets,cpu,primitive);
+        auto packet=fixture.packet();
+        std::vector<Packet> batch{packet};
+        if (variant==2) {
+            // Uses the GS color and vertex queue left by the GPU-assembled tag.
+            batch.push_back({{0x8001U,0x10000000,5,0},{40*16+32,20*16+48,7,0}});
+        }
+        const auto before=generated.gpu_packet_batches();
+        generated.submit(gpu,batch); packets.submit(cpu,batch);
+        require(generated.gpu_packet_batches()==before+1,"Eligible packet was not assembled on the GPU");
+        require(generated.pixels()==packets.pixels(),"GPU-assembled packet pixels differ for primitive "+
+            std::to_string(primitive)+" variant "+std::to_string(variant));
+        batches+=1;
+    }
+    // Textured triangles keep the CPU planner and still match.
+    Fixture fixture;
+    NativeDrawing generated(true),packets(true);
+    require(generated.assemble_triangles_on_gpu(gpu),"GPU packet assembly unavailable");
+    setup(generated,gpu,3); setup(packets,cpu,3);
+    const auto textured=registers({{0,3U|8U|16U|64U},{6,(1ULL<<34)|(6ULL<<26)|(6ULL<<30)|(2ULL<<14)}});
+    generated.submit(gpu,std::span(&textured,1)); packets.submit(cpu,std::span(&textured,1));
+    const auto before=generated.gpu_packet_batches();
+    const auto packet=fixture.packet();
+    generated.submit(gpu,std::span(&packet,1)); packets.submit(cpu,std::span(&packet,1));
+    require(generated.gpu_packet_batches()==before,"Textured packet was assembled on the GPU");
+    require(generated.pixels()==packets.pixels(),"Fallback textured packet pixels differ");
+    std::cout<<batches<<" GPU-assembled packets match CPU packet pixels and GS state\n";
+}
 void ranges(VulkanRenderer& gpu,unsigned kernel) {
     Fixture fixture;
     const auto original=fixture.parameters;
@@ -211,7 +250,7 @@ void contracts(VulkanRenderer& gpu,unsigned kernel) {
         rejects([&]{drawing.submit_vectors(gpu,fixture.launch(kernel));},reason);
     }
     setup(drawing,gpu,3);
-    auto bad=fixture.launch(kernel); bad.kernel=~0U;
+    auto bad=fixture.launch(kernel); bad.kernel=~0U-1;
     rejects([&]{drawing.submit_vectors(gpu,bad);},"Unknown vector element kernel");
     fixture.layout[0].store[0]=0xfffffffeU;
     rejects([&]{drawing.submit_vectors(gpu,fixture.launch(kernel));},"missing store word");
@@ -280,7 +319,7 @@ int main(int argc,char** argv) {
         VulkanRenderer gpu(nullptr,true),cpu(nullptr,true);
         const auto kernel=gpu.load_vector_kernel(shader(argv[1]),1);
         const auto quotient=gpu.load_vector_kernel(shader(argv[2]),1);
-        compare(gpu,cpu,kernel); ranges(gpu,kernel); contracts(gpu,kernel); failures(gpu,quotient);
+        compare(gpu,cpu,kernel); packets(gpu,cpu); ranges(gpu,kernel); contracts(gpu,kernel); failures(gpu,quotient);
         gpu.synchronize(); cpu.synchronize();
         require(!gpu.validation_errors(),gpu.validation_message());
         require(!cpu.validation_errors(),cpu.validation_message());
