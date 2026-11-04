@@ -1,6 +1,9 @@
 add_executable(render-loop-tests tests/render_loop.cpp)
 target_link_libraries(render-loop-tests PRIVATE nt_render_codegen)
 add_test(NAME render-loop-lifting COMMAND render-loop-tests)
+add_executable(render-loop-structure-tests tests/loop_structure.cpp)
+target_link_libraries(render-loop-structure-tests PRIVATE nt_render_codegen)
+add_test(NAME render-loop-structure COMMAND render-loop-structure-tests)
 foreach(variant 0 1)
     set(prefix "${CMAKE_CURRENT_BINARY_DIR}/render-loop-${variant}")
     add_custom_command(OUTPUT "${prefix}.cpu.ll" "${prefix}.gpu.ll" "${prefix}.json" "${prefix}.bin"

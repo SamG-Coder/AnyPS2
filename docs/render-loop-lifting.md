@@ -31,6 +31,35 @@ packet emission, I/Q publication, partial memory transfers and control flags.
 Later passes may broaden those cases using actual dependency analysis; they must
 not delete an unsupported operation just because it appears locally dead.
 
+## General loop structure analysis
+
+`analyze_loop_structure` reports the structure of any conditional backward loop
+instead of matching one instruction order. It symbolically executes one iteration,
+including the branch delay slot, with integer registers as entry register plus
+constant. It recovers induction steps and the tested counter, memory accesses with
+per-iteration strides (including post-increment and pre-decrement forms), vectors
+read before written (live-in), loop invariants, and accumulator, Q, P and clip
+values carried to the next iteration. Graphics kicks, internal branches, flag
+tests, non-affine addresses and stationary stores are listed as blockers. Values
+whose iteration-final definition is a load are reported as prefetched streams.
+
+The report is evidence for lifting, not installability: pipeline latency between
+units is not modeled, and entry state, live-out registers and flags, and external
+entries still need separate proofs. `find_loop_regions` lists every backward
+conditional branch in a program image.
+
+```sh
+ps2-vu-loop-probe --structure <program-image.bin> <unit> <destination-index>
+```
+
+prints one line per loop. On a private commercial VU1 image, the hot loops had
+affine counters and constant-stride streams with large invariant register sets
+and no packet or flag effects; their remaining blocker was software pipelining
+(values and the accumulator handed to the next iteration). The next frontend step
+is to recover the per-element function from such modulo-scheduled loops by
+symbolically executing several iterations and proving that each store depends
+only on fixed-offset stream elements and invariants.
+
 ## Conditional independence and binding
 
 `analyze_vertex_loop` returns an immutable `VertexLoop`. `bind_vertex_loop` takes
