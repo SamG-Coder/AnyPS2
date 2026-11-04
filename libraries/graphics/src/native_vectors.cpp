@@ -175,6 +175,16 @@ void NativeVectors::validate(const VectorLaunch& launch) const {
         launch.parameters.size()!=156 || launch.parameters[0]!=launch.elements)
         throw std::invalid_argument("Invalid vector launch element range or parameters");
     if (v.output_bytes(launch)>launch_output_bytes) throw std::invalid_argument("Vector launch output exceeds its bound");
+    if (launch.range_guard) {
+        switch (static_cast<VectorRangeStatus>(launch.range_guard(launch.parameters.data()))) {
+        case VectorRangeStatus::valid: break;
+        case VectorRangeStatus::count: throw std::invalid_argument("Vector loop count does not cover the requested elements");
+        case VectorRangeStatus::startup: throw std::invalid_argument("Vector elements precede the recovered steady state");
+        case VectorRangeStatus::wrap: throw std::invalid_argument("Vector loop integer or memory range wraps");
+        case VectorRangeStatus::alias: throw std::invalid_argument("Vector loop input and output ranges alias");
+        default: throw std::invalid_argument("Unknown vector range-guard status");
+        }
+    }
     for (const auto& write:launch.writes)
         if (write.words.empty() || write.words.size()%4 || write.row>=rows || write.words.size()/4>rows-write.row)
             throw std::invalid_argument("Vector memory write is outside VU data memory");

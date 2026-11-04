@@ -6,11 +6,15 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 
 // Original synthetic VU vertex loop, AOT-compiled for the host and Vulkan.
 extern "C" const nt::graphics::VectorRegister nt_render_vertex_layout[];
 extern "C" const std::uint32_t nt_render_vertex_layout_count,nt_render_vertex_layout_words,nt_render_vertex_layout_minimum_element;
 static_assert(sizeof(nt::graphics::VectorRegister)==9*sizeof(std::uint32_t));
+extern "C" std::uint32_t nt_render_vertex_guard(const std::uint32_t*);
+extern "C" std::uint32_t nt_render_pipelined_guard(const std::uint32_t*);
+extern "C" std::uint32_t nt_render_step2_guard(const std::uint32_t*);
 extern "C" void nt_render_elements(const std::uint32_t*,const std::uint32_t*,std::uint32_t*);
 namespace {
 using namespace nt::graphics;
@@ -55,14 +59,14 @@ struct Fixture {
             memory[(200+i)*4+3]=64;
         }
         nt::render::ElementEntry entry;
-        entry.integers[3]=100; entry.integers[5]=200; entry.integers[4]=300;
+        entry.integers[3]=100; entry.integers[5]=200; entry.integers[4]=300; entry.integers[9]=count;
         parameters=nt::render::element_parameters(entry,0,count);
         writes={VectorMemoryWrite{100,std::span(memory).subspan(400,count*4),true},
             VectorMemoryWrite{200,std::span(memory).subspan(800,count*4),false}};
         compile_cpu();
     }
     void compile_cpu() { nt_render_elements(memory.data(),parameters.data(),output.data()); }
-    VectorLaunch launch(unsigned kernel) const { return {kernel,writes,parameters,count,9,layout}; }
+    VectorLaunch launch(unsigned kernel) const { return {kernel,writes,parameters,count,9,layout,nt_render_vertex_guard}; }
     Packet packet(unsigned xyz=5) const {
         Packet packet{{0x8000U|count,0x20000000,1U|(xyz<<4),0}};
         for (unsigned i=0;i<count;++i) {
@@ -143,6 +147,50 @@ void compare(VulkanRenderer& gpu,VulkanRenderer& cpu,unsigned kernel) {
         ++cases;
     }
     std::cout<<cases<<" list/strip/fan cases and second frames match CPU packet pixels\n";
+}
+void ranges(VulkanRenderer& gpu,unsigned kernel) {
+    Fixture fixture;
+    const auto original=fixture.parameters;
+    NativeDrawing drawing(true);
+    setup(drawing,gpu,3);
+    const auto launches=gpu.statistics().vector_launches;
+    for (auto [index,value,status,diagnostic]:{
+            std::tuple{5U,300U,VectorRangeStatus::alias,"ranges alias"},
+            {7U,299U,VectorRangeStatus::alias,"ranges alias"},
+            {5U,1020U,VectorRangeStatus::wrap,"range wraps"},
+            {6U,1010U,VectorRangeStatus::wrap,"range wraps"},
+            {10U,65536U,VectorRangeStatus::wrap,"range wraps"},
+            {11U,0U,VectorRangeStatus::count,"loop count"},
+            {11U,11U,VectorRangeStatus::count,"loop count"},
+            {1U,1U,VectorRangeStatus::count,"loop count"}}) {
+        fixture.parameters=original; fixture.parameters[index]=value;
+        require(nt_render_vertex_guard(fixture.parameters.data())==static_cast<unsigned>(status),"Compiled range guard returned wrong status");
+        rejects([&]{drawing.submit_vectors(gpu,fixture.launch(kernel));},diagnostic);
+    }
+    require(gpu.statistics().vector_launches==launches,"Invalid range recorded GPU work");
+    auto parameters=original;
+    parameters[11]=24;
+    require(nt_render_step2_guard(parameters.data())==0,"Divisible countdown rejected");
+    parameters[11]=25;
+    require(nt_render_step2_guard(parameters.data())==unsigned(VectorRangeStatus::count),"Nonterminating countdown accepted");
+    // Exercise inclusive memory boundaries and subranges through the compiled guard.
+    for (unsigned count:{1U,3U,12U,20U}) {
+        parameters=original; parameters[0]=count; parameters[11]=count;
+        parameters[5]=1024-count; parameters[6]=400; parameters[7]=100;
+        require(nt_render_vertex_guard(parameters.data())==0,"Disjoint range ending at last row rejected");
+        parameters[5]++;
+        require(nt_render_vertex_guard(parameters.data())==unsigned(VectorRangeStatus::wrap),"Wrapped final load accepted");
+    }
+    parameters=original; parameters[0]=6; parameters[1]=6;
+    require(nt_render_vertex_guard(parameters.data())==0,"Valid steady subrange rejected");
+    parameters=original;
+    require(nt_render_pipelined_guard(parameters.data())==unsigned(VectorRangeStatus::startup),"Unrecovered startup accepted");
+    parameters[0]=11; parameters[1]=1;
+    require(nt_render_pipelined_guard(parameters.data())==0,"Pipelined steady subrange rejected");
+    parameters[5]=0;
+    require(nt_render_pipelined_guard(parameters.data())==0,"Legal previous-iteration load incorrectly treated as wrapped");
+    parameters[0]=0;
+    require(nt_render_vertex_guard(parameters.data())==unsigned(VectorRangeStatus::count),"Empty range accepted");
 }
 void contracts(VulkanRenderer& gpu,unsigned kernel) {
     NativeDrawing drawing(true);
@@ -232,7 +280,7 @@ int main(int argc,char** argv) {
         VulkanRenderer gpu(nullptr,true),cpu(nullptr,true);
         const auto kernel=gpu.load_vector_kernel(shader(argv[1]),1);
         const auto quotient=gpu.load_vector_kernel(shader(argv[2]),1);
-        compare(gpu,cpu,kernel); contracts(gpu,kernel); failures(gpu,quotient);
+        compare(gpu,cpu,kernel); ranges(gpu,kernel); contracts(gpu,kernel); failures(gpu,quotient);
         gpu.synchronize(); cpu.synchronize();
         require(!gpu.validation_errors(),gpu.validation_message());
         require(!cpu.validation_errors(),cpu.validation_message());

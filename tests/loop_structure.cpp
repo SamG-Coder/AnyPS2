@@ -2,6 +2,7 @@
 #include <nt/loop_structure.hpp>
 #include <nt/loop_pipeline.hpp>
 #include <nt/element_packet.hpp>
+#include <nt/element_range.hpp>
 #include <algorithm>
 #include <fstream>
 #include <sstream>
@@ -57,14 +58,15 @@ nt::render::PipelinedLoop quotient_loop() {
 }
 // Each element copies a color row and converts a position row to 12.4 fixed
 // point, storing both through one pointer: a PACKED RGBAQ, XYZ2 vertex record.
-nt::Bytes vertex_program() {
+nt::Bytes vertex_program(unsigned step=1,bool separated=true,bool pipelined=false) {
     Builder b;
+    if (pipelined) { b.pair(store_increment(2,4)); b.pair(store_increment(6,4)); }
     b.pair(load_increment(1,3));
     b.pair(load_increment(2,5));
     b.pair(lower_nop,float_to_fixed4(6,1));
-    b.pair(store_increment(2,4));
-    b.pair(store_increment(6,4));
-    b.pair(subtract_immediate(9,1));
+    if (!pipelined) { b.pair(store_increment(2,4)); b.pair(store_increment(6,4)); }
+    b.pair(subtract_immediate(9,step));
+    if (separated) { b.pair(); b.pair(); }
     b.close(9);
     return b.bytes;
 }
@@ -77,6 +79,34 @@ nt::render::PipelinedLoop vertex_loop() {
 }
 void run() {
     using namespace nt::render;
+    {
+        const auto bytes=vertex_program();
+        const auto guard=analyze_element_range(nt::vu::frame(bytes,1,0),1);
+        require(guard.counter==9 && guard.step==1 && guard.output_stride==2 && guard.minimum_element==0,
+            "Vertex range analysis lost the loop recurrence");
+        const auto unsafe=vertex_program(1,false);
+        bool rejected=false;
+        try { (void)analyze_element_range(nt::vu::frame(unsafe,1,0),1); }
+        catch (const std::invalid_argument& e) { rejected=std::string(e.what()).find("branch separation")!=std::string::npos; }
+        require(rejected,"Counter in branch latency window accepted");
+        for (bool delay_counter:{false,true}) {
+            Builder b;
+            b.pair(load_increment(1,3));
+            b.pair(render_fixture::store(1,4,0));
+            // Stride one with stores at rows zero and one overlaps the next record.
+            b.pair(render_fixture::store(1,4,1));
+            b.pair(render_fixture::add(4,delay_counter ? 2:1));
+            b.pair(delay_counter ? lower_nop:subtract_immediate(9,1));
+            b.pair(); b.pair(); b.close(9);
+            if (delay_counter) render_fixture::replace(b.bytes,unsigned(b.bytes.size()/8)-1,false,subtract_immediate(9,1));
+            rejected=false;
+            try { (void)analyze_element_range(nt::vu::frame(b.bytes,1,0),1); }
+            catch (const std::invalid_argument& e) {
+                rejected=std::string(e.what()).find(delay_counter ? "updated countdown":"overlap across iterations")!=std::string::npos;
+            }
+            require(rejected,"Unsafe loop range accepted");
+        }
+    }
     // Straight-line loop: uniform rows, a vertex stream, an output stream and a countdown.
     {
         const auto c=render_fixture::configuration(0);
@@ -272,6 +302,15 @@ int main(int argc,char** argv) {
                 if (fixture=="vertex" && !vulkan) {
                     const auto binding=nt::render::bind_element_packet(loop,4,0,2ULL<<60,0x51);
                     nt::render::emit_element_packet_llvm(out,binding,"nt_render_vertex_layout");
+                    for (unsigned step:{1U,2U}) {
+                        const auto bytes=vertex_program(step);
+                        const auto guard=nt::render::analyze_element_range(nt::vu::frame(bytes,1,0),1);
+                        nt::render::emit_element_range_llvm(out,guard,step==1 ? "nt_render_vertex_guard" : "nt_render_step2_guard");
+                    }
+                    const auto pipelined=vertex_program(1,true,true);
+                    const auto guard=nt::render::analyze_element_range(nt::vu::frame(pipelined,1,0),1);
+                    require(guard.minimum_element==1,"Pipelined guard lacks startup boundary");
+                    nt::render::emit_element_range_llvm(out,guard,"nt_render_pipelined_guard");
                 }
             }
             return 0;

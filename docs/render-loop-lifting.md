@@ -259,6 +259,28 @@ restore them. Strips, fans and incomplete lists also require a PRIM write before
 another batch can consume their vertex queue. This is deliberate rejection, not
 an assumed last-vertex value or hidden readback.
 
+## Compiled launch-range guards
+
+`ps2-vu-loop-probe --element <image> <unit> <destination> <loop-head> guard`
+emits a native LLVM function `nt_render_element_guard(parameters)`. The converter
+accepts an affine countdown-to-zero loop with a separated counter update and one
+forward output stream. It rejects overlapping output records, integer stores and
+unproved integer recurrences. The compiled guard checks the actual launch values:
+positive divisible trip count, requested steady-state subrange, intermediate VI
+values, memory bounds, and input/output separation. It includes original reads
+as well as shifted loads in the recovered element graph.
+
+Pass the linked function through `VectorLaunch::range_guard`. The renderer runs
+it before recording the batch and reports count, startup, wrap or alias failures.
+This is ordinary native code over launch parameters, with no runtime VU decoding
+or translation. Explicit low-level kernel tests may omit the guard; recovered
+region integrations must supply the matching compiler-generated function.
+
+These checks are conservative: memory wrap and overlapping row envelopes are
+rejected even when a more detailed lane analysis could prove them safe. Passing
+this guard establishes only count/range eligibility. It does not replace proofs
+of region entry, startup/drain equivalence, live-out state or graphics ordering.
+
 ## Validation and limits
 
 The original synthetic loop fixtures compile and execute native LLVM functions;
@@ -267,8 +289,9 @@ The draw test compares complete framebuffer storage against the production CPU
 packet planner for lists, strips and fans, including ADC, XYZ3, winding changes,
 degenerate/off-scissor culling, flat/shaded color, coverage and depth. It also
 checks second-frame resident hits, interleaved CPU/GPU draws, slot reuse, stale
-GS-state diagnostics and failed-element reporting. It runs headlessly with Vulkan
-validation; no presentation window or commercial assets are needed.
+GS-state diagnostics and failed-element reporting. Compiled launch guards are
+checked with aliased/wrapped streams, invalid countdowns and pipelined startup.
+It runs headlessly with Vulkan validation; no presentation window or commercial assets are needed.
 
 In a normal build with the LLVM SPIR-V toolchain configured:
 

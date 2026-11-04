@@ -36,6 +36,8 @@ struct LoopStructure {
     unsigned unit=1,head=0,branch=0,pairs=0;
     vu::Branch exit_branch=vu::Branch::none;
     unsigned compare_left=0,compare_right=0;
+    AffineInteger compared_left{},compared_right{}; // values sampled at the backedge
+    std::vector<AffineInteger> integer_writes; // intermediate values, before narrowing
     std::optional<unsigned> counter;            // induction register tested by the backedge
     std::array<std::int32_t,16> steps{};        // per-iteration change of each integer register
     std::array<bool,16> affine_update{};        // final value is entry + constant

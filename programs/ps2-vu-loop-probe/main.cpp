@@ -2,6 +2,7 @@
 #include <nt/loop_structure.hpp>
 #include <nt/loop_pipeline.hpp>
 #include <nt/element_packet.hpp>
+#include <nt/element_range.hpp>
 #include <charconv>
 #include <iostream>
 #include <sstream>
@@ -82,7 +83,7 @@ int main(int argc,char** argv) {
         try {
             const auto unit=decimal(argv[3]),destination=decimal(argv[4]),head=decimal(argv[5]);
             const std::string_view target=argv[6];
-            if (!binding_mode && target!="cpu" && target!="vulkan") throw std::invalid_argument("Expected cpu or vulkan");
+            if (!binding_mode && target!="cpu" && target!="vulkan" && target!="guard") throw std::invalid_argument("Expected cpu, vulkan or guard");
             const auto program=nt::vu::frame(nt::read_file(argv[2],unit ? 16384 : 4096),unit,destination);
             for (const auto& region:nt::render::find_loop_regions(program,unit)) {
                 if (region.head!=head) continue;
@@ -93,6 +94,9 @@ int main(int argc,char** argv) {
                     const auto binding=nt::render::bind_element_packet(*recovered.loop,decimal(argv[6]),number<std::int32_t>(argv[7]),
                         number<std::uint64_t>(argv[8],16),number<std::uint64_t>(argv[9],16));
                     nt::render::emit_element_packet_llvm(std::cout,binding,"nt_render_vertex_layout");
+                } else if (target=="guard") {
+                    const auto guard=nt::render::analyze_element_range(body,unit);
+                    nt::render::emit_element_range_llvm(std::cout,guard,"nt_render_element_guard");
                 } else nt::render::emit_element_kernel_llvm(std::cout,*recovered.loop,unit,target=="vulkan");
                 return std::cout ? 0 : 1;
             }
@@ -111,7 +115,7 @@ int main(int argc,char** argv) {
         std::cerr<<"Usage: ps2-vu-loop-probe <isolated-loop.bin> <unit:0|1> <destination-index> "
                    "<manifest|cpu-llvm|spirv-llvm> --native-f32\n"
                    "       ps2-vu-loop-probe --structure <program-image.bin> <unit:0|1> <destination-index>\n"
-                   "       ps2-vu-loop-probe --element <program-image.bin> <unit> <destination> <loop-head> cpu|vulkan\n"
+                   "       ps2-vu-loop-probe --element <program-image.bin> <unit> <destination> <loop-head> cpu|vulkan|guard\n"
                    "       ps2-vu-loop-probe --element-binding <program-image.bin> <unit> <destination> <loop-head> "
                    "<base-register> <first-row> <tag-low-hex> <registers-hex>\n";
         return 2;

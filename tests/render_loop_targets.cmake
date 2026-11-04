@@ -55,6 +55,10 @@ if(ANYPS2_RENDER_CLANG)
                 "${vertex_prefix}.bin" 1 0 0 4 0 2000000000000000 51)
             set_tests_properties(render-element-binding-probe PROPERTIES PASS_REGULAR_EXPRESSION
                 "nt_render_vertex_layout = constant")
+            add_test(NAME render-element-range-probe COMMAND ps2-vu-loop-probe --element
+                "${vertex_prefix}.bin" 1 0 0 guard)
+            set_tests_properties(render-element-range-probe PROPERTIES PASS_REGULAR_EXPRESSION
+                "define i32 @nt_render_element_guard")
             if(WIN32)
                 set(vertex_object "${vertex_prefix}.obj")
             else()

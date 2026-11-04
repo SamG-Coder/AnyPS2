@@ -6,6 +6,7 @@ add_library(nt_render_codegen
     libraries/render_codegen/src/vertex_loop.cpp
     libraries/render_codegen/src/loop_structure.cpp
     libraries/render_codegen/src/loop_pipeline.cpp
+    libraries/render_codegen/src/element_range.cpp
     libraries/render_codegen/src/element_packet.cpp
     libraries/render_codegen/src/element_llvm.cpp
     libraries/render_codegen/src/vertex_loop_llvm.cpp)

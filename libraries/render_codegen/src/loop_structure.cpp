@@ -48,7 +48,9 @@ public:
     void read_accumulator() { if (!accumulator_written_) accumulator_live_in_=true; }
     void write_accumulator() { accumulator_written_=true; }
     AffineInteger integer(unsigned index) const { return index<16 ? integers_[index] : unknown(); }
-    void set_integer(unsigned index,AffineInteger value) { if (index && index<16) pending_integers_.push_back({index,value}); }
+    void set_integer(unsigned index,AffineInteger value) {
+        if (index && index<16) { pending_integers_.push_back({index,value}); out_.integer_writes.push_back(value); }
+    }
     void read_quotient() { out_.uses_quotient=true; if (!quotient_written_) quotient_live_in_=true; }
     void write_quotient() { quotient_written_=true; }
     void read_p() { out_.uses_p=true; if (!p_written_) p_live_in_=true; }
@@ -60,10 +62,12 @@ public:
         auto base=integer(address_register);
         if (update==vu::AddressUpdate::decrement) {
             base=add(base,{-1,-1,true});
-            if (address_register) integers_[address_register]=base;
+            if (address_register) { integers_[address_register]=base; out_.integer_writes.push_back(base); }
         }
         out_.accesses.push_back({kind,pair,reg,lanes,add(base,{-1,offset,true}),0});
-        if (update==vu::AddressUpdate::increment && address_register) integers_[address_register]=add(base,{-1,1,true});
+        if (update==vu::AddressUpdate::increment && address_register) {
+            integers_[address_register]=add(base,{-1,1,true}); out_.integer_writes.push_back(integers_[address_register]);
+        }
     }
     void commit() {
         for (const auto& [index,value]:pending_integers_) integers_[index]=value;
@@ -200,6 +204,7 @@ LoopStructure analyze_loop_structure(std::span<const vu::Pair> pairs,unsigned un
         iteration.commit();
     }
     iteration.finish();
+    out.compared_left=compared_left.value_or(unknown()); out.compared_right=compared_right.value_or(unknown());
     if (unsupported) out.blockers.push_back("unsupported VU operation");
     // The counter is the compared register that changes by a constant per iteration.
     for (const auto reg:{exit.source,exit.target_register})

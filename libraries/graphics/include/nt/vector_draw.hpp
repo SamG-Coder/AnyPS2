@@ -28,6 +28,9 @@ struct VectorMemoryWrite {
     std::span<const std::uint32_t> words;  // four words per row
     bool resident=false;
 };
+// ABI of an AOT-generated launch-range guard. No runtime instruction analysis.
+enum class VectorRangeStatus : std::uint32_t { valid=0, count=1, startup=2, wrap=3, alias=4 };
+using VectorRangeGuard=std::uint32_t (*)(const std::uint32_t*);
 // One element-kernel launch and the PACKED vertex layout of its output.
 struct VectorLaunch {
     unsigned kernel=0;                      // VulkanRenderer::load_vector_kernel result
@@ -36,6 +39,7 @@ struct VectorLaunch {
     unsigned elements=0;                    // one vertex per element
     unsigned element_words=0;               // status word plus store words per element
     std::span<const VectorRegister> vertex; // registers of one vertex, XYZ register last
+    VectorRangeGuard range_guard=nullptr; // optional for explicit low-level kernels; required by recovered regions
 };
 // Host-planned, data-independent part of primitive assembly. Field order is
 // the GPU plan layout in vector_assembly.comp.
