@@ -49,10 +49,10 @@ public:
             case 0: return {Stop::budget,gif_paused_ ? 8U : 0U};
             case 0x10: return {Stop::budget,gif_mode_};
             case 0x20:
-                if (gif_stream_.pending()) return {Stop::unsupported_system};
+                if (gif_stream_.pending() || direct_stream_.pending()) return {Stop::unsupported_system};
                 return {Stop::budget,gif_mode_|(gif_paused_ ? 8U : 0U)|(units_[1].path3_masked ? 2U : 0U)};
             case 0x40: case 0x50: case 0x60: case 0x70: case 0x80: case 0x90: case 0xa0:
-                return gif_stream_.pending() ? IoRead{Stop::unsupported_system} : IoRead{Stop::budget,0};
+                return gif_stream_.pending() || direct_stream_.pending() ? IoRead{Stop::unsupported_system} : IoRead{Stop::budget,0};
             default: return {Stop::unsupported_system};
             }
         }
@@ -82,7 +82,7 @@ public:
         if (address%16) return Stop::unsupported_system;
         if (address<0x10003800 && working()) return Stop::native_wait;
         if (address==0x10003000) {
-            if (value&1) { gif_paused_=false; gif_mode_=0; gif_stream_={}; }
+            if (value&1) { gif_paused_=false; gif_mode_=0; gif_stream_={}; direct_stream_={}; }
             else gif_paused_=(value&8)!=0;
             return Stop::budget;
         }
@@ -167,7 +167,7 @@ private:
     Stop consume_segment(unsigned channel,std::span<const std::uint8_t> bytes,bool vector_active,std::size_t& consumed,
                          std::span<const NativePacketOrigin> origins={},std::size_t source_offset=0) {
         if (channel==2) {
-            if (gif_paused_ || units_[1].path3_masked || !graphics.submit) return Stop::unsupported_system;
+            if (gif_paused_ || units_[1].path3_masked || direct_stream_.pending() || !graphics.submit) return Stop::unsupported_system;
             // Descriptor-only submissions carry no GIF data. They complete
             // without inventing a packet or disturbing a partial stream.
             if (bytes.empty()) return Stop::budget;
@@ -184,6 +184,7 @@ private:
         if (units_[channel].stopped || units_[channel].broken || units_[channel].interrupt_stall || vector_active)
             return Stop::unsupported_system;
         auto next=units_[channel];
+        auto next_direct=direct_stream_;
         std::vector<NativeUploadView> uploads;
         std::vector<NativeVectorDataView> data;
         std::vector<NativeVectorPlan> data_plans;
@@ -322,7 +323,9 @@ private:
                 const auto count=code&65535U,size=(count ? count : 65536U)*16U;
                 if (size>bytes.size()-offset) return Stop::invalid_state;
                 if (size>65536U*16U-drawing_bytes) return Stop::unsupported_system;
-                try { graphics::append_packets(drawing,bytes.subspan(offset,size)); }
+                // DIRECT extents are transport fragments, not GIF packet
+                // boundaries. Retain the same bounded framing used by path 3.
+                try { next_direct.append(bytes.subspan(offset,size),drawing); }
                 catch (const std::invalid_argument&) { return Stop::unsupported_system; }
                 drawing_bytes+=size; offset+=size;
                 break;
@@ -398,6 +401,7 @@ private:
             }
         }
         if (!drawing_vectors && !drawing.empty() && !graphics.submit(graphics.context,drawing)) return Stop::unsupported_system;
+        if (channel==1) direct_stream_=std::move(next_direct);
         if (sequence_pending && sequence_pending(launch_context,channel)) {
             deferred_[channel]=Deferred{next,notify}; consumed=offset; rejected_command_=0;
             return Stop::budget;
@@ -427,7 +431,7 @@ private:
     std::array<std::optional<Deferred>,2> deferred_{};
     std::array<Pending,2> pending_{};
     unsigned interrupt_events_=0;
-    graphics::PacketStream gif_stream_;
+    graphics::PacketStream gif_stream_,direct_stream_;
     bool gif_paused_=false;
     std::uint32_t gif_mode_=0;
 };

@@ -97,6 +97,21 @@ public:
         return true;
     }
     bool sample_state(unsigned index,nt::audio::StreamState& state) override { state=samples.at(index); return opened; }
+    bool append_voice(unsigned index,std::span<const std::int16_t> pcm) override {
+        if (!allow_configure) return false;
+        auto& target=sample_pcm.at(index); target.insert(target.end(),pcm.begin(),pcm.end());
+        samples.at(index).queued=true; return true;
+    }
+    bool revise_voices(const nt::audio::VoiceRevisionBuilder& build) override {
+        if (!allow_configure) return false;
+        std::vector<nt::audio::VoiceRevision> edits;
+        if (!build(samples,edits)) return false;
+        for (const auto& edit:edits)
+            if (edit.voice>=48 || edit.begin<samples[edit.voice].frames || edit.begin>sample_pcm[edit.voice].size() ||
+                edit.pcm.size()>sample_pcm[edit.voice].size()-edit.begin) return false;
+        for (const auto& edit:edits) std::copy(edit.pcm.begin(),edit.pcm.end(),sample_pcm[edit.voice].begin()+edit.begin);
+        return true;
+    }
     bool configure_envelope(unsigned index,const nt::audio::EnvelopeSpec& spec) override { specs.at(index)=spec; return allow_configure; }
     bool envelope_state(unsigned index,nt::audio::EnvelopeState& state) override { state=envelopes.at(index); return opened; }
     bool release_voice(unsigned index) override { if (index>=48) return false; ++releases; return opened; }
@@ -979,8 +994,9 @@ int main() {
             check(call(17,0,8,0x19000,0x1000,64).first.reason==NativeStop::unmapped_code && output.starts==2,
                   "Identical bank re-upload interrupted active native samples");
             data[0x19002]^=1;
-            check(call(17,0,8,0x19000,0x1000,64).first.reason==NativeStop::import_request && output.starts==2,
-                  "An active immutable sample accepted silent source mutation");
+            const auto current_pcm=output.sample_pcm[0];
+            check(call(17,0,8,0x19000,0x1000,64).first.reason==NativeStop::unmapped_code && output.starts==2 &&
+                  output.sample_pcm[0]==current_pcm,"Sample refill replaced the device's current decoded block");
             data[0x19002]^=1;
             check(call(7,0x1600,1).first.reason==NativeStop::unmapped_code && output.releases==1 && output.samples[0].queued,
                   "Key-off discarded the sample instead of starting release");
@@ -1001,13 +1017,63 @@ int main() {
             check(call(17,0,8,0x19000,0x1000,64).first.reason==NativeStop::unmapped_code &&
                   call(7,0x1500,1).first.reason==NativeStop::unmapped_code,"Looping voice did not start");
             output.samples[0].frames=28;
-            check(call(8,0x1700).second.registers[2]==1,"First loop end was not observed");
+            check(call(8,0x1700).second.registers[2]==1 && call(10,0x2100).second.registers[2]==0x1000,
+                  "Consumed loop header did not update ENDX and repeat address");
             call(7,0x1700,0);
             check(call(8,0x1700).second.registers[2]==0,"Acknowledged loop completion reappeared without progress");
             output.samples[0].frames=56;
             check(call(8,0x1700).second.registers[2]==1,"Subsequent loop end did not relatch completion");
             output.envelopes[0]={}; sound.take();
             const auto snapshot=data;
+            // An unfinished uploaded stream must start without a fabricated end.
+            // Refills outside the queued range become audible in later PCM.
+            std::fill_n(data.begin()+0x19000,64,0);
+            data[0x19000]=12; data[0x19001]=6; data[0x19002]=0x21;
+            check(call(17,0,8,0x19000,0x1fe000,64).first.reason==NativeStop::unmapped_code &&
+                  call(9,0x2000,0x1fe000).first.reason==NativeStop::unmapped_code &&
+                  call(5,0x200,4096).first.reason==NativeStop::unmapped_code &&
+                  call(7,0x1500,1).first.reason==NativeStop::unmapped_code && output.sample_pcm[0].size()==896,
+                  "Compiled open-ended key-on did not queue bounded native PCM");
+            call(7,0x1700,0);
+            check(call(8,0x1700).second.registers[2]==0,"Open stream fabricated ENDX");
+            check(call(27,0x13108,0x1aa00).first.reason==NativeStop::unmapped_code &&
+                  call(9,0x1f00,0x1fe000).first.reason==NativeStop::unmapped_code,
+                  "Stream interrupt callback setup failed");
+            check(!sound.take(),"Queued audio raised an interrupt before native consumption");
+            output.samples[0].frames=1;
+            const auto sample_irq=sound.take();
+            check(sample_irq && sample_irq->address==0x13108 && sample_irq->argument==1 &&
+                  sample_irq->second_argument==0x1aa00,"Consumed audio did not deliver its registered callback");
+            sound.finish(0);
+            check(call(10,0x2200).second.registers[2]==0x1fe002,
+                  "Compiled voice position returned a decode-ahead address");
+            check(call(5,0x200,0).first.reason==NativeStop::unmapped_code && output.voice_mix[0].rate==0 &&
+                  call(6,0x200).second.registers[2]==0 && output.samples[0].queued &&
+                  call(5,0x200,4096).first.reason==NativeStop::unmapped_code && output.voice_mix[0].rate==1,
+                  "Compiled pitch hold/resume lost source ownership or native rate");
+            check(!sound.take(),"Same audio frame delivered the callback twice");
+            call(27,0,0);
+            data[0x19001]=1; data[0x19002]=7;
+            check(call(17,0,8,0x19000,0x1fe000,16).first.reason==NativeStop::unmapped_code && output.sample_pcm[0][0]==1 &&
+                  call(17,0,8,0x19000,0x1fe200,16).first.reason==NativeStop::unmapped_code,
+                  "Stream refill lost the current decoded block or rejected unread media");
+            data[0x19001]=0; data[0x19002]=0x65;
+            const auto before_refill=output.sample_pcm[0];
+            output.allow_configure=false;
+            check(call(17,0,8,0x19000,0x1fe010,16).first.reason==NativeStop::import_request &&
+                  output.sample_pcm[0]==before_refill && sound.sample_storage()[0x1fe012]==0,
+                  "Rejected native revision partially changed encoded or decoded audio");
+            output.allow_configure=true;
+            check(call(17,0,8,0x19000,0x1fe010,16).first.reason==NativeStop::unmapped_code &&
+                  output.sample_pcm[0][28]==5 && output.sample_pcm[0][29]==6 && output.samples[0].frames==1 &&
+                  output.sample_pcm[0][0]==1,"Future streamed PCM was not revised without restarting playback");
+            output.samples[0]={896,false}; sound.take();
+            check(!sound.failure() && output.sample_pcm[0].size()==924 && output.sample_pcm[0][896]==7 &&
+                  call(8,0x1700).second.registers[2]==0 && call(10,0x2200).second.registers[2]==0x1fe202,
+                  "Stream refill reset history, position or fabricated early completion");
+            output.samples[0]={924,false}; sound.take();
+            check(call(8,0x1700).second.registers[2]==1,"Consumed stream end did not latch ENDX");
+            data=snapshot;
             check(call(5,0x980,0x8000).first.reason==NativeStop::import_request && data==snapshot && output.initializations==2,
                   "Unimplemented sound operation returned success or changed state");
             check(call(4,2).first.reason==NativeStop::import_request && output.initializations==2,"Unsupported sound mode changed output");

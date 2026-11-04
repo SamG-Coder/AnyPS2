@@ -10,7 +10,40 @@
 #define NOMINMAX
 #include <windows.h>
 #include "../libraries/audio/src/windows_reverb.hpp"
+#include "../libraries/audio/src/windows_envelope.hpp"
 namespace {
+void verify_stationary_envelope() {
+    using namespace nt::audio;
+    auto observation=std::make_shared<windows::EnvelopeObservation>();
+    Microsoft::WRL::ComPtr<IXAPO> processor;
+    processor.Attach(new windows::EnvelopeEffect(observation));
+    Microsoft::WRL::ComPtr<IXAPOParameters> controls;
+    if (FAILED(processor.As(&controls))) throw std::runtime_error("Envelope controls unavailable");
+    WAVEFORMATEX format{WAVE_FORMAT_IEEE_FLOAT,1,48000,192000,4,32,0};
+    XAPO_LOCKFORPROCESS_PARAMETERS locked{&format,64};
+    if (FAILED(processor->LockForProcess(1,&locked,1,&locked))) throw std::runtime_error("Envelope format rejected");
+    windows::EnvelopeParameters parameters;
+    parameters.active=true; parameters.spec.curves[0]={32768,64,false};
+    parameters.spec.curves[3]={32768,-1024,false};
+    std::array<float,64> input,output{}; input.fill(0.25f);
+    const auto process=[&](bool silent) {
+        controls->SetParameters(&parameters,sizeof(parameters));
+        XAPO_PROCESS_BUFFER_PARAMETERS source{input.data(),silent ? XAPO_BUFFER_SILENT : XAPO_BUFFER_VALID,64};
+        XAPO_PROCESS_BUFFER_PARAMETERS destination{output.data(),XAPO_BUFFER_VALID,64};
+        processor->Process(1,&source,1,&destination,TRUE);
+        return destination.BufferFlags;
+    };
+    process(false); const auto before=output.back();
+    parameters.hold=true; input.fill(-1);
+    if (process(true)!=XAPO_BUFFER_VALID || output.front()<=before || output.back()<=output.front())
+        throw std::runtime_error("Stationary source lost its held sample or advancing envelope");
+    parameters.hold=false; process(false);
+    if (output.front()>=0) throw std::runtime_error("Resumed source retained its held sample");
+    parameters.hold=true; parameters.release=true; process(true);
+    if (output.back()!=0 || (observation->value.load()&0x10000))
+        throw std::runtime_error("Stationary source release failed to reach silence");
+    processor->UnlockForProcess();
+}
 void verify_reverb(nt::audio::ReverbSpace space) {
     Microsoft::WRL::ComPtr<IUnknown> effect;
     Microsoft::WRL::ComPtr<IXAPO> processor;
@@ -57,6 +90,7 @@ int main() {
         if (output->ready() || output->voices()) throw std::runtime_error("Output started without initialization");
         if (!output->open() || !output->ready()) throw std::runtime_error("Cannot open the native output device");
 #ifdef _WIN32
+        verify_stationary_envelope();
         for (const auto space:{nt::audio::ReverbSpace::room,nt::audio::ReverbSpace::studio_small,
                               nt::audio::ReverbSpace::studio_medium,nt::audio::ReverbSpace::studio_large,
                               nt::audio::ReverbSpace::hall,nt::audio::ReverbSpace::space,nt::audio::ReverbSpace::pipe})
@@ -112,6 +146,66 @@ int main() {
         if (output->submit_sample(24,mono,470,20) || !output->submit_sample(24,mono,0,0))
             throw std::runtime_error("Native sample replay or loop bounds failed");
         if (!output->stop_voice(24)) throw std::runtime_error("Native sample cleanup failed");
+        const nt::audio::VoiceSample streaming{25,mono,0,0,{}};
+        if (!output->start_voices(std::span(&streaming,1)) || !output->append_voice(25,mono) ||
+            !output->append_voice(25,mono) || !output->configure_voice(25,{{0,0},{},1}))
+            throw std::runtime_error("Native queued voice initialization failed");
+        mono.assign(480,123); // All three submitted buffers must remain owned.
+        const auto queued_deadline=std::chrono::steady_clock::now()+std::chrono::seconds(3);
+        do {
+            if (!output->sample_state(25,state)) throw std::runtime_error("Native queued cursor unavailable");
+            if (!state.queued) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        } while (std::chrono::steady_clock::now()<queued_deadline);
+        if (state.queued || state.frames!=1440 || !output->stop_voice(25))
+            throw std::runtime_error("Native appended PCM lost its cumulative cursor or buffer ownership");
+        // Real device clock: zero pitch holds the source cursor while the
+        // downstream envelope advances, releases and survives pitch resumption.
+        mono.assign(48000,4096);
+        nt::audio::EnvelopeSpec slow;
+        slow.curves[0]={32768,1,false}; slow.curves[3]={32768,-128,false};
+        const nt::audio::VoiceSample held{26,mono,0,0,slow};
+        if (!output->configure_voice(26,{{0,0},{},0}) || !output->start_voices(std::span(&held,1)))
+            throw std::runtime_error("Zero-pitch key-on failed");
+        const auto wait_for=[&](auto condition) {
+            const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(3);
+            do {
+                if (condition()) return;
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            } while (std::chrono::steady_clock::now()<end);
+            throw std::runtime_error("Stationary-source audio observation timed out");
+        };
+        nt::audio::EnvelopeState gain;
+        wait_for([&] { return output->envelope_state(26,gain) && gain.level>=480; });
+        if (!output->sample_state(26,state) || state.frames!=0 || !state.queued)
+            throw std::runtime_error("Zero pitch consumed source samples");
+        if (!output->configure_voice(26,{{0,0},{},1})) throw std::runtime_error("Pitch resume failed");
+        wait_for([&] { return output->sample_state(26,state) && state.frames>=960; });
+        if (!output->configure_voice(26,{{0,0},{},0})) throw std::runtime_error("Active zero-pitch change failed");
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        output->sample_state(26,state); output->envelope_state(26,gain);
+        const auto held_position=state.frames; const auto held_level=gain.level;
+        wait_for([&] { return output->envelope_state(26,gain) && gain.level>held_level+480; });
+        if (!output->sample_state(26,state) || state.frames!=held_position)
+            throw std::runtime_error("Held source cursor advanced with its envelope");
+        if (!output->configure_voice(26,{{0,0},{},1})) throw std::runtime_error("Second pitch resume failed");
+        wait_for([&] { return output->sample_state(26,state) && state.frames>held_position+480; });
+        const auto prior_cursor=state.frames;
+        if (!output->revise_voices([&](std::span<const nt::audio::StreamState> states,std::vector<nt::audio::VoiceRevision>& edits) {
+            if (states[26].frames<prior_cursor) return false;
+            const auto begin=states[26].frames+128;
+            edits.push_back({26,begin,std::vector<std::int16_t>(48000-begin,2048)});
+            return true;
+        }) || !output->sample_state(26,state) || state.frames<prior_cursor || !state.queued)
+            throw std::runtime_error("Native PCM revision reset or lost the live playback cursor");
+        if (output->revise_voices([](std::span<const nt::audio::StreamState>,std::vector<nt::audio::VoiceRevision>& edits) {
+            edits.push_back({26,0,{123}}); return true;
+        })) throw std::runtime_error("Native revision overwrote consumed PCM");
+        wait_for([&] { return output->sample_state(26,state) && state.frames>prior_cursor+480; });
+        if (!output->configure_voice(26,{{0,0},{},0}) || !output->release_voice(26))
+            throw std::runtime_error("Held key-off failed");
+        wait_for([&] { return output->envelope_state(26,gain) && !gain.active && !gain.level; });
+        if (!output->stop_voice(26)) throw std::runtime_error("Held voice cleanup failed");
         output->close();
         if (output->ready() || output->voices()) throw std::runtime_error("Native audio resources survived close");
         if (!output->open() || !output->initialize(false)) throw std::runtime_error("Native audio output did not reopen");

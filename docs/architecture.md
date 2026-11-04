@@ -57,12 +57,25 @@ occupy those segments. Unresolved callbacks remain coverage gaps. See
   their bytes are accepted. BDEC decodes six MPEG coefficient blocks, applies
   inverse quantization and an integer Q20 inverse DCT, and delivers planar 16-bit
   samples to a checked RAM/scratchpad destination. Input, output and command
-  completion are separate. The IDCT is checked against the mathematical transform
+  completion are separate. Queued input excludes the decoder's bounded look-ahead,
+  so callers can refill partial symbols without losing retained bits.
+  The IDCT is checked against the mathematical transform
   within one sample; bit-identical hardware rounding is not established. CSC converts
   planar 8-bit YCbCr batches to RGBA32 with defined coefficient rounding and alpha
   thresholds. Whole-picture IDEC, RGB16 conversion and PACK remain unsupported.
 - Input uses SDL gamepad capabilities and haptics. Audio uses native XAudio2 owners
-  for supported sample services. Unsupported device features are not advertised.
+  for supported sample services. Open-ended ADPCM streams decode into bounded
+  owned PCM queues; the host playback cursor drives refill and end notifications.
+  Voice position reports the encoded word corresponding to consumed PCM, rather
+  than modeling the console decoder's internal prefetch distance.
+  Per-voice envelopes run on downstream 48 kHz native mixing stages. Zero pitch
+  stops source consumption and holds its last resampled value while the envelope
+  continues; source stop/resume and hold changes commit together in XAudio2.
+  Stream refills preserve the current decoded block and revise unplayed PCM from
+  saved predictor/loop checkpoints at a native processing-pass boundary. Failed
+  revisions leave both encoded data and queued PCM unchanged. Revisions that
+  shorten an already queued extent remain unsupported; they are never padded
+  with silence. Unsupported device features are not advertised.
 
 Diagnostic hardware models remain for investigation and synthetic regressions.
 They are not evidence of native conversion and must not become runtime fallbacks.

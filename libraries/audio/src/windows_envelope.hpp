@@ -6,7 +6,7 @@
 
 namespace nt::audio::windows {
 struct EnvelopeObservation { std::atomic<std::uint32_t> value{0x10000}; };
-struct EnvelopeParameters { EnvelopeSpec spec; bool release=false; };
+struct EnvelopeParameters { EnvelopeSpec spec; bool release=false,active=false,hold=false; };
 class EnvelopeEffect final : public CXAPOParametersBase {
 public:
     explicit EnvelopeEffect(std::shared_ptr<EnvelopeObservation> observation)
@@ -22,16 +22,22 @@ public:
     void STDMETHODCALLTYPE Process(UINT32,const XAPO_PROCESS_BUFFER_PARAMETERS* input,UINT32,
                                    XAPO_PROCESS_BUFFER_PARAMETERS* output,BOOL enabled) override {
         const auto parameters=*reinterpret_cast<const EnvelopeParameters*>(BeginProcess());
+        if (!parameters.active) {
+            output->ValidFrameCount=input->ValidFrameCount;
+            output->BufferFlags=XAPO_BUFFER_SILENT;
+            EndProcess(); return;
+        }
         if (parameters.release && !released_) { envelope_.release(); released_=true; }
         auto* destination=static_cast<float*>(output->pBuffer);
         const auto* source=static_cast<const float*>(input->pBuffer);
         const bool silent=input->BufferFlags==XAPO_BUFFER_SILENT;
         for (unsigned frame=0;frame<input->ValidFrameCount;++frame) {
+            if (!parameters.hold) held_sample_=silent ? 0.0f : source[frame];
             const auto gain=enabled ? envelope_.next(parameters.spec) : 1.0f;
-            destination[frame]=silent ? 0.0f : source[frame]*gain;
+            destination[frame]=held_sample_*gain;
         }
         output->ValidFrameCount=input->ValidFrameCount;
-        output->BufferFlags=silent ? XAPO_BUFFER_SILENT : XAPO_BUFFER_VALID;
+        output->BufferFlags=silent && !parameters.hold ? XAPO_BUFFER_SILENT : XAPO_BUFFER_VALID;
         const auto state=envelope_.state();
         observation_->value.store(state.level|(state.active ? 0x10000U : 0U),std::memory_order_relaxed);
         EndProcess();
@@ -44,5 +50,6 @@ private:
     std::shared_ptr<EnvelopeObservation> observation_;
     Envelope envelope_;
     bool released_=false;
+    float held_sample_=0;
 };
 }

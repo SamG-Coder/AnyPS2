@@ -158,7 +158,12 @@ void run_video_block_tests() {
         check(f.write(0x10002000,0x2c080000)==Stop::budget);
         f.upload(std::span(data).first(16));
         check(f.ram[512]==0xcd && !(f.platform.completions.status()&8));
-        f.upload(std::span(data).subspan(16));
+        for (std::size_t offset=16;offset<data.size();offset+=16) {
+            // Model a producer that only refills when the input queue is empty.
+            // A partial VLC in the decoder cache must not strand this producer.
+            check(((f.read(0x10002020)>>8)&15)==0);
+            f.upload(std::span(data).subspan(offset,16));
+        }
         check(f.platform.video.decoded_blocks()==1 && (f.platform.completions.status()&8)!=0 && !(f.read(0x10002010)&0x80000000));
         const auto actual=f.samples();
         check(actual[0]!=actual[1]);

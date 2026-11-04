@@ -2,6 +2,7 @@
 #include <nt/audio.hpp>
 #include <nt/audio_pitch.hpp>
 #include <nt/adpcm.hpp>
+#include <nt/adpcm_stream.hpp>
 #include <nt/iop_native_libraries.hpp>
 #include <nt/iop_native_callbacks.hpp>
 #include <nt/iop_native_heap.hpp>
@@ -20,6 +21,8 @@ public:
     const auto& transfer_arguments() const { return transfer_arguments_; }
     unsigned rejected_voice() const { return rejected_voice_; }
     audio::SampleError sample_error() const { return sample_error_; }
+    std::span<const std::uint8_t> sample_storage() const { return samples_; }
+    const auto& last_call() const { return last_call_; }
     std::array<std::uint32_t,3> rejected_sample() const {
         const auto& voice=voices_[rejected_voice_];
         return {voice.start,voice.loop,voice.pitch};
@@ -68,6 +71,7 @@ public:
     std::optional<NativeResult> failure() const override { return failure_; }
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
         if (request.kind!=NativeServiceKind::libsd) return {};
+        last_call_={request.selector,request.arguments[0],request.arguments[1],request.arguments[2],request.arguments[3]};
         if (request.selector==0) {
             if (request.interrupt_context) return {NativeServiceStatus::unavailable};
             if (registered_) return {NativeServiceStatus::unavailable};
@@ -128,6 +132,7 @@ public:
         }
     }
 private:
+    std::array<std::uint32_t,5> last_call_{};
     const char* transfer_failure_="none";
     std::array<std::uint32_t,5> transfer_arguments_{};
     std::array<std::uint32_t,3> transfer_overlap_{};
@@ -149,8 +154,8 @@ private:
     }
     struct Playback {
         bool active=false;
-        std::uint32_t begin=0,end=0,loop_frames=0;
-        std::uint64_t next_end_frame=0;
+        std::optional<audio::AdpcmStream> stream;
+        std::uint64_t observed_frames=0;
     };
     struct Voice {
         std::array<std::uint16_t,2> volume{},envelope{};
@@ -168,41 +173,64 @@ private:
             curve((b>>8)&31,(b&0x4000) ? -sustain_step-1 : sustain_step,(b&0x8000)!=0),
             curve(b&31,-8,(b&32)!=0)}},static_cast<std::uint32_t>((a&15)+1)<<11};
     }
-    bool refresh_voice(unsigned index) {
+    bool refresh_voice(unsigned index,bool refill=true) {
         auto& playback=playback_[index];
         if (!playback.active) return true;
         audio::StreamState stream; audio::EnvelopeState envelope;
-        if (!output_.sample_state(index,stream) || !output_.envelope_state(index,envelope)) return false;
-        if (stream.frames>=playback.next_end_frame) {
-            cores_[index/24].end_mask|=1U<<(index%24);
-            playback.next_end_frame=playback.loop_frames ? playback.next_end_frame+
-                ((stream.frames-playback.next_end_frame)/playback.loop_frames+1)*playback.loop_frames : UINT64_MAX;
+        if (!output_.sample_state(index,stream)) return false;
+        if (playback.stream) {
+            auto& decoder=*playback.stream;
+            for (const auto& block:decoder.pending()) {
+                if (block.loop_start && block.begin>=playback.observed_frames && block.begin<stream.frames)
+                    voices_[index].loop=block.address;
+                if (block.end && block.begin+28>playback.observed_frames && block.begin+28<=stream.frames)
+                    cores_[index/24].end_mask|=1U<<(index%24);
+                if (block.begin>=playback.observed_frames && block.begin<stream.frames)
+                    for (unsigned core=0;core<2;++core)
+                        if (cores_[core].irq_enabled && cores_[core].interrupt_address==block.address && handlers_[2].address) {
+                            if (callbacks_.size()>=1024) return false;
+                            callbacks_.push_back({handlers_[2].address,1U<<core,handlers_[2].argument,handlers_[2].gp});
+                        }
+            }
+            playback.observed_frames=stream.frames; decoder.retire(stream.frames);
+            const auto target=stream.frames+stream_blocks(voices_[index])*28;
+            while (refill && !decoder.finished() && decoder.frames()+8*28<=target) {
+                auto next=decoder;
+                std::vector<std::int16_t> pcm;
+                const auto result=next.decode(samples_,8,pcm);
+                if (result!=audio::SampleError::none) { rejected_voice_=index; sample_error_=result; return false; }
+                if (!output_.append_voice(index,pcm)) return false;
+                decoder=std::move(next);
+            }
+            if (!output_.sample_state(index,stream)) return false;
         }
+        if (!output_.envelope_state(index,envelope)) return false;
         if (!stream.queued || !envelope.active) {
             if (stream.queued && !output_.stop_voice(index)) return false;
             playback.active=false;
         }
         return true;
     }
+    static unsigned stream_blocks(const Voice& voice) {
+        // About 19 ms of source PCM at the current pitch, bounded independently
+        // of program polling frequency. The audio engine owns elapsed frames.
+        return std::clamp((32U*voice.pitch+4095)/4096,8U,128U);
+    }
     NativeServiceReply key_on(unsigned core,std::uint32_t mask) {
-        std::array<audio::RawSample,24> decoded;
+        std::array<std::vector<std::int16_t>,24> decoded;
+        std::array<std::optional<audio::AdpcmStream>,24> streams;
         std::vector<audio::VoiceSample> starts;
         sample_error_=audio::SampleError::none;
         for (unsigned voice=0;voice<24;++voice) if (mask&(1U<<voice)) {
             const auto index=core*24+voice; const auto& v=voices_[index];
-            if (!v.pitch) { rejected_voice_=index; sample_error_=audio::SampleError::unsupported; return unavailable(); }
-            const auto error=audio::decode_raw_sample(samples_,v.start,v.loop,decoded[voice]);
+            streams[voice].emplace(v.start,v.loop);
+            const auto error=streams[voice]->decode(samples_,stream_blocks(v),decoded[voice]);
             if (error!=audio::SampleError::none) { rejected_voice_=index; sample_error_=error; return unavailable(); }
-            const auto& sample=decoded[voice].sample;
-            starts.push_back({index,sample.pcm,sample.loop_begin,sample.loop_length,envelope_spec(v)});
+            starts.push_back({index,decoded[voice],0,0,envelope_spec(v)});
         }
         if (!output_.start_voices(starts)) return unavailable();
         for (const auto& start:starts) {
-            const auto& decoded_sample=decoded[start.voice%24];
-            playback_[start.voice]={true,voices_[start.voice].start,decoded_sample.source_end,
-                decoded_sample.sample.loop_length ? (decoded_sample.source_end-decoded_sample.repeat_address)/16*28 : 0,
-                decoded_sample.first_end_frame};
-            if (decoded_sample.sample.loop_length) voices_[start.voice].loop=decoded_sample.repeat_address;
+            playback_[start.voice]={true,std::move(streams[start.voice%24]),0};
         }
         cores_[core].end_mask&=~mask;
         return returned();
@@ -270,7 +298,7 @@ private:
             else return unavailable();
             if (!writing) return returned(*field);
             if (kind<2 && (value&0x8000)) return unavailable(); // Dynamic gain sweeps need a timed envelope.
-            if (kind==2 && (value>0x3fff || (!value && playback_[index].active))) return unavailable();
+            if (kind==2 && value>0x3fff) return unavailable();
             if (kind==2 && value>0 && value<4) return unavailable(); // Below the native resampler's range.
             *field=value;
             if (kind>=3 && !output_.configure_envelope(index,envelope_spec(v))) return unavailable();
@@ -319,7 +347,13 @@ private:
     NativeServiceReply address(std::uint16_t entry,std::uint32_t value,bool writing) {
         const unsigned core=entry&1U,kind=entry>>8,voice=(entry&0x3e)>>1;
         // The address interface selects core/voice independently of bits 6-7.
-        if (kind<0x1c || kind>0x21 || (kind<0x20 && voice) || voice>=24) return unavailable();
+        if (kind<0x1c || kind>0x22 || (kind<0x20 && voice) || voice>=24) return unavailable();
+        if (kind==0x22) {
+            const auto index=core*24+voice;
+            if (writing || !refresh_voice(index) || !playback_[index].stream) return unavailable();
+            return returned(playback_[index].stream->source_position(playback_[index].observed_frames));
+        }
+        if (!writing && kind==0x21 && !refresh_voice(core*24+voice)) return unavailable();
         std::uint32_t* field=nullptr;
         if (kind==0x1d) field=&cores_[core].effect_end;
         else if (kind==0x1c) field=&cores_[core].effect_begin;
@@ -358,6 +392,51 @@ private:
         const auto& handler=handlers_[core];
         if (handler.address) callbacks_.push_back({handler.address,core,handler.argument,handler.gp});
     }
+    bool write_samples(std::uint32_t destination,std::span<const std::uint8_t> bytes) {
+        auto target=std::span(samples_).subspan(destination,bytes.size());
+        if (std::equal(bytes.begin(),bytes.end(),target.begin())) return true;
+        std::vector<unsigned> affected;
+        for (unsigned index=0;index<playback_.size();++index) {
+            // Observe consumption before replacing data, but do not queue more
+            // PCM from the old bytes immediately before this refill.
+            if (!refresh_voice(index,false)) { transfer_failure_="host-voice-state"; return false; }
+            const auto& playback=playback_[index];
+            if (playback.active && playback.stream && playback.stream->overlaps(destination,static_cast<unsigned>(bytes.size())))
+                affected.push_back(index);
+        }
+        if (affected.empty()) { std::copy(bytes.begin(),bytes.end(),target.begin()); return true; }
+        struct Restore {
+            std::span<std::uint8_t> target;
+            std::vector<std::uint8_t> old;
+            bool committed=false;
+            ~Restore() { if (!committed) std::copy(old.begin(),old.end(),target.begin()); }
+        } restore{target,{target.begin(),target.end()}};
+        std::copy(bytes.begin(),bytes.end(),target.begin());
+        std::array<std::optional<audio::AdpcmStream>,48> revised;
+        bool decode_failed=false;
+        const auto accepted=output_.revise_voices([&](std::span<const audio::StreamState> states,std::vector<audio::VoiceRevision>& edits) {
+            if (states.size()!=playback_.size()) return false;
+            for (const auto index:affected) {
+                auto& decoder=revised[index]; decoder=playback_[index].stream;
+                audio::VoiceRevision edit; edit.voice=index;
+                const auto result=decoder->revise(samples_,states[index].frames,destination,
+                    static_cast<unsigned>(bytes.size()),edit.begin,edit.pcm);
+                if (result!=audio::SampleError::none) {
+                    rejected_voice_=index; sample_error_=result;
+                    decode_failed=true;
+                    transfer_failure_="stream-revision-decode"; return false;
+                }
+                if (!edit.pcm.empty()) edits.push_back(std::move(edit));
+            }
+            return true;
+        });
+        if (!accepted) {
+            if (!decode_failed) transfer_failure_="host-stream-revision";
+            return false;
+        }
+        for (const auto index:affected) playback_[index].stream=std::move(revised[index]);
+        restore.committed=true; return true;
+    }
     NativeServiceReply voice_transfer(const NativeServiceRequest& request,std::span<std::uint8_t> ram) {
         const auto& a=request.arguments; const unsigned core=a[0]&1,mode=a[1]&0xffff;
         transfer_failure_="none"; transfer_overlap_={};
@@ -381,23 +460,7 @@ private:
                 if (nt_iop_native_code_word(word)) return {NativeServiceStatus::code_write,0,a[2]};
             std::copy_n(samples_.begin()+destination,count,ram.begin()+*source);
         } else {
-            // Snapshot PCM cannot silently observe later edits to its encoded
-            // source. Explicitly reject active streaming mutation for now.
-            for (unsigned index=0;index<playback_.size();++index) {
-                if (!refresh_voice(index)) { transfer_failure_="host-voice-state"; return unavailable(); }
-                const auto& playback=playback_[index];
-                if (playback.active && destination<playback.end && destination+count>playback.begin) {
-                    const auto begin=std::max(destination,playback.begin),end=std::min(destination+count,playback.end);
-                    // Re-uploading an unchanged sample preserves the native PCM
-                    // snapshot, even when other samples in the bank change.
-                    const auto bytes=ram.subspan(*source+begin-destination,end-begin);
-                    if (!std::equal(bytes.begin(),bytes.end(),samples_.begin()+begin)) {
-                        transfer_overlap_={playback.begin,playback.end,playback.loop_frames};
-                        rejected_voice_=index; transfer_failure_="active-sample-write"; return unavailable();
-                    }
-                }
-            }
-            std::copy_n(ram.begin()+*source,count,samples_.begin()+destination);
+            if (!write_samples(destination,ram.subspan(*source,count))) return unavailable();
         }
         cores_[core].transfer_address=destination+count; completed_[core]=true;
         // The direct native copy has finished. Defer the compiled interrupt

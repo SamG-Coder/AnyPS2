@@ -712,6 +712,9 @@ int main(int argc,char** argv) {
                 std::cout<<"native_sample_start="<<nt::hex32(sample[0])
                          <<" repeat="<<nt::hex32(sample[1])<<" pitch="<<sample[2]<<'\n';
             }
+            std::cout<<"native_sound_call=";
+            for (auto value:iop_reset->sound().last_call()) std::cout<<nt::hex32(value)<<' ';
+            std::cout<<'\n';
             std::cout<<"native_sample_transfer_overlap=";
             for (auto value:iop_reset->sound().transfer_overlap()) std::cout<<nt::hex32(value)<<' ';
             std::cout<<'\n';
@@ -770,8 +773,10 @@ int main(int argc,char** argv) {
 #endif
 #endif
 #ifdef ANYPS2_NATIVE_IOP
-            if (iop_reset && iop_reset->invoked())
+            if (iop_reset && iop_reset->invoked()) {
                 probe::capture_iop(stop_directory,iop_reset->data(),iop_reset->active_state());
+                nt::write_file(stop_directory/"sound-samples.bin",iop_reset->sound().sample_storage());
+            }
 #endif
             if (gpu.drawing.submitted_draws()) {
                 const auto& pixels=gpu.drawing.pixels();
@@ -844,10 +849,13 @@ int main(int argc,char** argv) {
         if (cdvd && !cdvd->error().empty()) std::cerr<<"disc initialization: "<<cdvd->error()<<'\n';
         if (!gpu.error.empty()) std::cerr<<"graphics: "<<gpu.error<<'\n';
         std::cout<<" video_decoded_blocks="<<platform.video.decoded_blocks()<<" video_converted_blocks="<<platform.video.converted_blocks();
-        if ((memory.fault_address>=0x10002000 && memory.fault_address<0x10002040) ||
+        if ((platform.video.read(0x10002010).value&0x80000000U) ||
+            (memory.fault_address>=0x10002000 && memory.fault_address<0x10002040) ||
             (memory.fault_address>=0x1000b000 && memory.fault_address<=0x1000b480)) {
             std::cout<<" video_control="<<nt::hex32(platform.video.read(0x10002010).value)
                 <<" video_position="<<nt::hex32(platform.video.read(0x10002020).value)
+                <<" video_output_control="<<nt::hex32(platform.video_output.read(0x1000b000).value)
+                <<" video_output_remaining="<<platform.video_output.read(0x1000b020).value
                 <<" video_resets="<<platform.video.resets()
                 <<" video_input_pending="<<platform.video.submission_pending()
                 <<" video_submission_control="<<nt::hex32(platform.video_submission.read(0x10008000).value)

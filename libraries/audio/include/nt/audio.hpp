@@ -3,6 +3,8 @@
 #include <nt/audio_envelope.hpp>
 #include <memory>
 #include <span>
+#include <functional>
+#include <vector>
 
 namespace nt::audio {
 struct StereoGain { float left=0, right=0; };
@@ -29,6 +31,12 @@ struct VoiceSample {
     EnvelopeSpec envelope;
 };
 struct StreamState { std::uint64_t frames=0; bool queued=false; };
+struct VoiceRevision {
+    unsigned voice=0;
+    std::uint64_t begin=0;
+    std::vector<std::int16_t> pcm;
+};
+using VoiceRevisionBuilder=std::function<bool(std::span<const StreamState>,std::vector<VoiceRevision>&)>;
 // Native output ownership. No console register file or instruction interface.
 class Output {
 public:
@@ -47,6 +55,12 @@ public:
     virtual bool submit_sample(unsigned,std::span<const std::int16_t>,std::uint32_t,std::uint32_t) { return false; }
     virtual bool sample_state(unsigned,StreamState&) { return false; }
     virtual bool start_voices(std::span<const VoiceSample>) { return false; }
+    // Append owned PCM without resetting the voice, envelope or playback cursor.
+    virtual bool append_voice(unsigned,std::span<const std::int16_t>) { return false; }
+    // Build against stable device cursors, then atomically revise owned unplayed
+    // PCM in place. Buffer extents, resampler state and envelopes are retained.
+    // The builder must not call the output recursively.
+    virtual bool revise_voices(const VoiceRevisionBuilder&) { return false; }
     virtual bool configure_envelope(unsigned,const EnvelopeSpec&) { return false; }
     virtual bool release_voice(unsigned) { return false; }
     virtual bool envelope_state(unsigned,EnvelopeState&) { return false; }

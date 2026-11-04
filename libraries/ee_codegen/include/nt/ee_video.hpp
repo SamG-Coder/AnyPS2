@@ -25,8 +25,8 @@ public:
         case 0x10002030: return {Stop::budget,peek_};
         case 0x10002004: case 0x10002034:
             return {Stop::budget,(pending_==Command::peek || pending_==Command::vlc) ? 0x80000000U : 0U};
-        case 0x10002010: return {Stop::budget,format_|(coded_pattern_<<8)|(start_code_ ? 0x8000U : 0U)|(std::uint32_t(std::min<std::size_t>(8,output().size()/16))<<4)|(decode_error_ ? 0x4000U : 0U)|(pending_!=Command::none ? 0x80000000U : 0U)|std::uint32_t(input_.size()/16)};
-        case 0x10002020: return {Stop::budget,bit_offset_|(std::uint32_t(input_.size()/16)<<8)};
+        case 0x10002010: return {Stop::budget,format_|(coded_pattern_<<8)|(start_code_ ? 0x8000U : 0U)|(std::uint32_t(std::min<std::size_t>(8,output().size()/16))<<4)|(decode_error_ ? 0x4000U : 0U)|(pending_!=Command::none ? 0x80000000U : 0U)|queued_qwords()};
+        case 0x10002020: return {Stop::budget,bit_offset_|(queued_qwords()<<8)|(cached_qwords_<<16)};
         default: return {Stop::unsupported_system};
         }
     }
@@ -90,12 +90,12 @@ public:
         case 5: // Load a complete intra/non-intra quantization matrix.
             decode_error_=false; start_code_=false;
             bit_offset_+=value&63U;
-            pending_=Command::matrix; matrix_index_=(value>>27)&1;
+            pending_=Command::matrix; matrix_index_=(value>>27)&1; table_offset_=0;
             process();
             return Stop::budget;
         case 6: // Sixteen packed 16-bit vector-quantization colors.
             decode_error_=false; start_code_=false;
-            pending_=Command::palette;
+            pending_=Command::palette; table_offset_=0;
             process();
             return Stop::budget;
         case 7:
@@ -133,7 +133,7 @@ public:
     void cancel_input() { submitted_.clear(); submitted_offset_=0; }
     bool submission_pending() const { return submitted_offset_<submitted_.size(); }
     Stop append(std::span<const std::uint8_t> bytes) {
-        if (submission_pending() || bytes.size()!=16 || input_.size()>128-bytes.size()) return Stop::unsupported_system;
+        if (submission_pending() || bytes.size()!=16 || queued_qwords()>=8) return Stop::unsupported_system;
         input_.insert(input_.end(),bytes.begin(),bytes.end());
         process();
         return Stop::budget;
@@ -145,7 +145,7 @@ public:
     std::uint64_t resets() const { return resets_; }
 private:
     void clear_input(std::uint32_t offset) {
-        input_.clear(); bit_offset_=offset; pending_=Command::none;
+        input_.clear(); bit_offset_=offset; cached_qwords_=0; pending_=Command::none;
         // Reset/clear affects accepted input, not the owner's unsubmitted tail.
         // The caller decides whether its outstanding submission is cancelled.
     }
@@ -153,12 +153,23 @@ private:
         const auto count=std::min<std::size_t>((bit_offset_/128)*16,input_.size());
         input_.erase(input_.begin(),input_.begin()+count);
         bit_offset_-=static_cast<unsigned>(count*8);
+        cached_qwords_-=std::min(cached_qwords_,static_cast<unsigned>(count/16));
     }
     void feed() {
-        const auto count=std::min<std::size_t>(128-input_.size(),submitted_.size()-submitted_offset_);
+        const auto count=std::min<std::size_t>((8-queued_qwords())*16,submitted_.size()-submitted_offset_);
         input_.insert(input_.end(),submitted_.begin()+submitted_offset_,submitted_.begin()+submitted_offset_+count);
         submitted_offset_+=count; accepted_bytes_+=count;
         if (submitted_offset_==submitted_.size()) { submitted_.clear(); submitted_offset_=0; }
+    }
+    unsigned queued_qwords() const { return static_cast<unsigned>(input_.size()/16)-cached_qwords_; }
+    bool prepare(unsigned bits) {
+        compact_input(); feed();
+        // Up to two quadwords belong to the bit reader's look-ahead. They are
+        // no longer queued input, including when a symbol needs another chunk.
+        const auto needed=(bit_offset_+bits+127)/128;
+        cached_qwords_=std::max(cached_qwords_,std::min(needed,static_cast<unsigned>(input_.size()/16)));
+        feed();
+        return cached_qwords_*128>=bit_offset_+bits;
     }
     std::uint8_t byte_at(unsigned bit) const {
         const auto byte=bit/8,shift=bit%8;
@@ -178,7 +189,7 @@ private:
             if (output_ready_) return;
             if (!color_remaining_) { pending_=Command::none; completed_=true; return; }
             while (color_offset_<color_input_.size()) {
-                if (input_.size()*8<bit_offset_+8) return;
+                if (!prepare(8)) return;
                 color_input_[color_offset_++]=byte_at(bit_offset_); bit_offset_+=8;
                 compact_input(); feed();
             }
@@ -189,8 +200,9 @@ private:
         if (pending_==Command::picture) {
             if (!picture_decoded_) {
                 for (;;) {
+                    if (!prepare(32)) return;
                     const auto previous=bit_offset_;
-                    const auto status=decoder_.process(input_,bit_offset_);
+                    const auto status=decoder_.process(std::span<const std::uint8_t>(input_).first(cached_qwords_*16),bit_offset_);
                     const bool progressed=previous!=bit_offset_;
                     compact_input(); feed();
                     if (status==media::MpegBlockDecoder::Result::malformed) {
@@ -204,16 +216,15 @@ private:
                     }
                     // A full native input window with consumed bytes can refill;
                     // otherwise wait for another owned submission/programmed write.
-                    if (!progressed || input_.size()*8<bit_offset_+32) return;
+                    if (!progressed) return;
                 }
             }
             if (output_ready_) return;
-            if (input_.size()*8<bit_offset_+32) return;
+            if (!prepare(32)) return;
             if ((word_at(bit_offset_)>>24)==0) {
                 bit_offset_=(bit_offset_+7)&~7U;
                 for (;;) {
-                    compact_input(); feed();
-                    if (input_.size()*8<bit_offset_+32) return;
+                    if (!prepare(32)) return;
                     const auto prefix=word_at(bit_offset_)>>8;
                     if (prefix) { start_code_=prefix==1; decode_error_=prefix!=1; break; }
                     bit_offset_+=8;
@@ -222,26 +233,29 @@ private:
             peek_=word_at(bit_offset_); pending_=Command::none; completed_=true;
             return;
         }
-        const auto required=pending_==Command::matrix ? 512U : pending_==Command::palette ? 256U : 32U;
-        if (input_.size()*8<bit_offset_+required) return;
-        if (pending_==Command::vlc) {
+        if (pending_==Command::matrix || pending_==Command::palette) {
+            const auto destination=pending_==Command::matrix ? std::span<std::uint8_t>(matrices_[matrix_index_]) : std::span<std::uint8_t>(palette_);
+            while (table_offset_<destination.size()) {
+                if (!prepare(8)) return;
+                table_storage_[table_offset_++]=byte_at(bit_offset_); bit_offset_+=8;
+            }
+            std::copy_n(table_storage_.begin(),destination.size(),destination.begin());
+        } else if (pending_==Command::vlc) {
+            if (!prepare(32)) return;
             const auto prefix=word_at(bit_offset_);
             const video_vlc::Entry* match=nullptr;
             for (const auto& entry:vlc_) if ((prefix>>(32-entry.bits))==entry.code) { match=&entry; break; }
             const auto consumed=match ? match->bits : 0U;
             // Keep this operation pending until its look-ahead is available.
             // Retrying must not advance the stream twice.
-            if (input_.size()*8<bit_offset_+consumed+32) return;
+            if (!prepare(consumed+32)) return;
             result_=match ? match->result : 0U;
             decode_error_=!match;
             bit_offset_+=consumed;
             peek_=word_at(bit_offset_);
         } else if (pending_==Command::peek) {
+            if (!prepare(32)) return;
             result_=peek_=word_at(bit_offset_);
-        } else {
-            const auto destination=pending_==Command::matrix ? std::span<std::uint8_t>(matrices_[matrix_index_]) : std::span<std::uint8_t>(palette_);
-            for (unsigned i=0;i<destination.size();++i) destination[i]=byte_at(bit_offset_+i*8);
-            bit_offset_+=required;
         }
         compact_input(); feed();
         pending_=Command::none; completed_=true;
@@ -262,6 +276,9 @@ private:
     bool decode_error_=false;
     std::span<const video_vlc::Entry> vlc_;
     std::vector<std::uint8_t> input_;
+    unsigned cached_qwords_=0;
+    std::array<std::uint8_t,64> table_storage_{};
+    unsigned table_offset_=0;
     std::array<std::array<std::uint8_t,64>,2> matrices_{};
     std::array<std::uint8_t,32> palette_{};
     unsigned matrix_index_=0;

@@ -84,7 +84,7 @@ int main() {
             check((read(0x10002010)&0x80000000U)!=0 && (platform.interrupts.read(0x1000f000).value&256)==0);
             check(upload()==nt::ee::Stop::budget && (read(0x10002010)&0x80000000U)==0);
             check(std::all_of(platform.video.matrix(1).begin(),platform.video.matrix(1).end(),[](auto byte) { return byte==0x99; }));
-            check(read(0x10002020)==0x103); acknowledge();
+            check(read(0x10002020)==0x10003); acknowledge();
             check(write(0x10002000,0x50000000)==nt::ee::Stop::budget);
             check((read(0x10002010)&0x80000000U)!=0);
             check(write(0x10002010,0x40000000)==nt::ee::Stop::budget && read(0x10002020)==0 &&
@@ -174,6 +174,9 @@ int main() {
             };
             upload_ones();
             check(read(0x10002004)==0xffffffff80000000ULL && (read(0x10002020)&127)==96);
+            // The remaining bits are held by the reader, not queued input.
+            // A producer polling IFC must be able to supply the next chunk.
+            check(((read(0x10002020)>>8)&15)==0 && ((read(0x10002020)>>16)&3)==1);
             check((platform.interrupts.read(0x1000f000).value&256)==0);
             upload_ones();
             check(read(0x10002000,true)==0x10001 && read(0x10002030,true)==0xffffffff && (read(0x10002020)&127)==97);
@@ -3315,6 +3318,40 @@ int main() {
             check(platform.packet_setup.read(0x10003800).value==0x800 && platform.packet_setup.read(0x10003850).value==2);
             check(platform.interrupts.read(0x1000f000).value==(1U<<4) && platform.completions.status()==1);
             check(write(0x10003810,8)==nt::ee::Stop::budget && !platform.packet_setup.read(0x10003800).value);
+        }
+        {
+            // A GIF image can span DIRECT/DIRECTHL extents and submissions.
+            // Rejected suffixes must leave the previously accepted prefix intact.
+            std::vector<std::uint8_t> ram(0x2000);
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform;
+            platform.attach(memory);
+            struct Sink { bool ready=true; std::vector<nt::graphics::Packet> packets; } sink;
+            platform.packet_setup.graphics={&sink,[](void* raw,std::span<const nt::graphics::Packet> packets) {
+                auto& sink=*static_cast<Sink*>(raw);
+                if (!sink.ready) return false;
+                sink.packets.insert(sink.packets.end(),packets.begin(),packets.end()); return true;
+            }};
+            const auto write=[&](unsigned address,unsigned value) {
+                nt::runtime::State state; state.pc=0x360000; state.set(4,address); state.set(8,value);
+                return nt_ee_generated_run(&state,&memory,1);
+            };
+            const auto submit=[&](std::span<const std::uint32_t> words) {
+                std::memcpy(ram.data()+0x1000,words.data(),words.size_bytes());
+                check(write(0x10009010,0x1000)==nt::ee::Stop::budget);
+                check(write(0x10009020,static_cast<unsigned>(words.size_bytes()/16))==nt::ee::Stop::budget);
+                return write(0x10009000,0x101);
+            };
+            check(write(0x1000e000,1)==nt::ee::Stop::budget);
+            const std::array<std::uint32_t,8> header{0,0,0,0x51000001,0x8002,0x08000000,0,0};
+            check(submit(header)==nt::ee::Stop::budget && sink.packets.empty() && platform.completions.status()==2);
+            const std::array<std::uint32_t,8> malformed{0x51000001,1,2,3,4,0x7b000000,0,0};
+            check(submit(malformed)==nt::ee::Stop::unsupported_system && sink.packets.empty());
+            const std::array<std::uint32_t,12> pixels{0,0,0,0x50000002,1,2,3,4,5,6,7,8};
+            sink.ready=false;
+            check(submit(pixels)==nt::ee::Stop::unsupported_system && sink.packets.empty());
+            sink.ready=true;
+            check(submit(pixels)==nt::ee::Stop::budget && sink.packets.size()==1 && sink.packets[0].size()==3);
+            check(sink.packets[0][0][0]==0x8002 && sink.packets[0][1][0]==1 && sink.packets[0][2][3]==8);
         }
         run_ee_batch_tests();
         run_ee_file_rpc_tests();

@@ -1,6 +1,7 @@
 #include <nt/ee_audsrv_rpc.hpp>
 #include <nt/ee_sif_command_peer.hpp>
 #include <nt/ee_bootstrap_modules.hpp>
+#include <nt/adpcm_stream.hpp>
 #include <iostream>
 #include <stdexcept>
 
@@ -79,6 +80,55 @@ int main() {
         envelope.next(shape);
         check(!envelope.state().active && !envelope.state().level,"Native release did not reach silence");
 
+        {
+            std::array<std::uint8_t,64> bytes{};
+            for (unsigned i=0;i<64;i+=16) { bytes[i]=12; bytes[i+2]=0x21; }
+            nt::audio::AdpcmStream stream(48,0);
+            std::vector<std::int16_t> pcm;
+            check(stream.decode(bytes,2,pcm)==nt::audio::SampleError::none && pcm.size()==56 &&
+                  stream.pending()[0].address==48 && stream.pending()[1].address==0,
+                  "Streaming source wrap lost bounded media data");
+            stream.retire(28);
+            check(!stream.overlaps(48,16) && stream.overlaps(0,16),"Consumed source blocks retained queue ownership");
+            check(stream.source_position(28)==2 && stream.source_position(36)==6,
+                  "Compressed source position reported queued rather than consumed PCM");
+            bytes[16]=12; bytes[17]=7; bytes[18]=0x43;
+            check(stream.decode(bytes,2,pcm)==nt::audio::SampleError::none && pcm[56]==3 && pcm[84]==3 &&
+                  stream.pending()[1].end && !stream.finished(),"Updated loop media was not decoded from its current bytes");
+            bytes[17]=1;
+            check(stream.decode(bytes,8,pcm)==nt::audio::SampleError::none && stream.finished() && pcm.size()==140,
+                  "Real stream end did not stop decoding");
+        }
+        {
+            std::array<std::uint8_t,64> bytes;
+            bytes.fill(0x21);
+            for (unsigned i=0;i<64;i+=16) { bytes[i]=0x1c; bytes[i+1]=0; }
+            bytes[1]=4; bytes[49]=3;
+            nt::audio::AdpcmStream cursor(0,0);
+            std::vector<std::int16_t> original;
+            check(cursor.decode(bytes,12,original)==nt::audio::SampleError::none,"Loop revision setup");
+            auto replacement=bytes;
+            for (unsigned i=0;i<64;i+=16) std::fill_n(replacement.begin()+i+2,14,0x43);
+            std::vector<std::int16_t> expected;
+            nt::audio::AdpcmHistory history;
+            for (unsigned i=0;i<16;++i)
+                check(nt::audio::decode_adpcm_block(std::span(i<2 ? bytes : replacement).subspan((i%4)*16,16),history,expected)==nt::audio::SampleError::none,
+                      "Independent revised stream decode");
+            std::uint64_t begin=0; std::vector<std::int16_t> revised;
+            check(cursor.revise(replacement,35,0,64,begin,revised)==nt::audio::SampleError::none && begin==56 &&
+                  revised.size()==280 && std::equal(revised.begin(),revised.end(),expected.begin()+56),
+                  "Refill lost predictor history, current-block ownership or repeated loop visits");
+            std::vector<std::int16_t> tail;
+            check(cursor.decode(replacement,4,tail)==nt::audio::SampleError::none &&
+                  std::equal(tail.begin(),tail.end(),expected.begin()+336),"Refill did not commit future predictor state");
+            const auto saved=cursor;
+            replacement[32]=0xfc;
+            check(cursor.revise(replacement,35,32,16,begin,revised)==nt::audio::SampleError::unsupported && cursor.frames()==saved.frames(),
+                  "Malformed refill changed the committed decoder cursor");
+            replacement=bytes; replacement[33]=1;
+            check(cursor.revise(replacement,35,32,16,begin,revised)==nt::audio::SampleError::unsupported && cursor.frames()==saved.frames(),
+                  "Shortened queued stream was silently padded or partially committed");
+        }
         std::vector<std::uint8_t> ram(0x10000);
         Memory memory{}; memory.data=ram.data(); memory.size=ram.size();
         NativeCompletions completions; memory.completions=&completions;

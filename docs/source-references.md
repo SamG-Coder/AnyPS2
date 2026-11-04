@@ -258,6 +258,7 @@ pinned in the tables; live documentation URLs do not imply a newer source pin.
 - [nf-winbase-readthreadprofilingdata](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-readthreadprofilingdata)
 - [nf-xaudio2-ixaudio2-createmasteringvoice](https://learn.microsoft.com/en-us/windows/win32/api/xaudio2/nf-xaudio2-ixaudio2-createmasteringvoice)
 - [nf-xaudio2-ixaudio2sourcevoice-getstate](https://learn.microsoft.com/en-us/windows/win32/api/xaudio2/nf-xaudio2-ixaudio2sourcevoice-getstate)
+- [XAudio2 processing callbacks](https://learn.microsoft.com/en-us/windows/win32/xaudio2/xaudio2-callbacks)
 - [nf-xaudio2-ixaudio2sourcevoice-submitsourcebuffer](https://learn.microsoft.com/en-us/windows/win32/api/xaudio2/nf-xaudio2-ixaudio2sourcevoice-submitsourcebuffer)
 - [nf-xaudio2-ixaudio2voice-seteffectchain](https://learn.microsoft.com/en-us/windows/win32/api/xaudio2/nf-xaudio2-ixaudio2voice-seteffectchain)
 - [nf-xaudio2-ixaudio2voice-setoutputmatrix](https://learn.microsoft.com/en-us/windows/win32/api/xaudio2/nf-xaudio2-ixaudio2voice-setoutputmatrix)
