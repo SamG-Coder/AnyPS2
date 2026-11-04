@@ -1,6 +1,7 @@
 #include <nt/render_loop.hpp>
 #include <nt/loop_structure.hpp>
 #include <nt/loop_pipeline.hpp>
+#include <nt/element_packet.hpp>
 #include <charconv>
 #include <iostream>
 #include <sstream>
@@ -66,26 +67,33 @@ void report_structures(const std::vector<nt::vu::Pair>& program,unsigned unit,st
         else out<<"] pipeline=[no: "<<recovered.reason<<"]\n";
     }
 }
-unsigned decimal(std::string_view text) {
-    unsigned value=0;
-    const auto parsed=std::from_chars(text.data(),text.data()+text.size(),value);
-    if (parsed.ec!=std::errc{} || parsed.ptr!=text.data()+text.size()) throw std::invalid_argument("Expected a decimal argument");
+template<class T> T number(std::string_view text,int base=10) {
+    T value=0;
+    if (base==16 && text.starts_with("0x")) text.remove_prefix(2);
+    const auto parsed=std::from_chars(text.data(),text.data()+text.size(),value,base);
+    if (parsed.ec!=std::errc{} || parsed.ptr!=text.data()+text.size()) throw std::invalid_argument("Invalid numeric argument");
     return value;
 }
+unsigned decimal(std::string_view text) { return number<unsigned>(text); }
 }
 int main(int argc,char** argv) {
-    if (argc==7 && std::string_view(argv[1])=="--element") {
+    const bool binding_mode=argc==10 && std::string_view(argv[1])=="--element-binding";
+    if ((argc==7 && std::string_view(argv[1])=="--element") || binding_mode) {
         try {
             const auto unit=decimal(argv[3]),destination=decimal(argv[4]),head=decimal(argv[5]);
             const std::string_view target=argv[6];
-            if (target!="cpu" && target!="vulkan") throw std::invalid_argument("Expected cpu or vulkan");
+            if (!binding_mode && target!="cpu" && target!="vulkan") throw std::invalid_argument("Expected cpu or vulkan");
             const auto program=nt::vu::frame(nt::read_file(argv[2],unit ? 16384 : 4096),unit,destination);
             for (const auto& region:nt::render::find_loop_regions(program,unit)) {
                 if (region.head!=head) continue;
                 const auto body=std::span(program).subspan(region.head-program.front().address,region.branch+2-region.head);
                 const auto recovered=nt::render::recover_pipelined_loop(body,unit,nt::render::analyze_loop_structure(body,unit));
                 if (!recovered.loop) throw std::invalid_argument("Loop not recovered: "+recovered.reason);
-                nt::render::emit_element_kernel_llvm(std::cout,*recovered.loop,unit,target=="vulkan");
+                if (binding_mode) {
+                    const auto binding=nt::render::bind_element_packet(*recovered.loop,decimal(argv[6]),number<std::int32_t>(argv[7]),
+                        number<std::uint64_t>(argv[8],16),number<std::uint64_t>(argv[9],16));
+                    nt::render::emit_element_packet_llvm(std::cout,binding,"nt_render_vertex_layout");
+                } else nt::render::emit_element_kernel_llvm(std::cout,*recovered.loop,unit,target=="vulkan");
                 return std::cout ? 0 : 1;
             }
             throw std::invalid_argument("No loop starts at that pair");
@@ -102,18 +110,14 @@ int main(int argc,char** argv) {
     if (argc!=6 || std::string_view(argv[5])!="--native-f32") {
         std::cerr<<"Usage: ps2-vu-loop-probe <isolated-loop.bin> <unit:0|1> <destination-index> "
                    "<manifest|cpu-llvm|spirv-llvm> --native-f32\n"
-                   "       ps2-vu-loop-probe --structure <program-image.bin> <unit:0|1> <destination-index>\n";
+                   "       ps2-vu-loop-probe --structure <program-image.bin> <unit:0|1> <destination-index>\n"
+                   "       ps2-vu-loop-probe --element <program-image.bin> <unit> <destination> <loop-head> cpu|vulkan\n"
+                   "       ps2-vu-loop-probe --element-binding <program-image.bin> <unit> <destination> <loop-head> "
+                   "<base-register> <first-row> <tag-low-hex> <registers-hex>\n";
         return 2;
     }
     try {
-        const auto number=[](std::string_view text) {
-            unsigned value=0;
-            const auto parsed=std::from_chars(text.data(),text.data()+text.size(),value);
-            if (parsed.ec!=std::errc{} || parsed.ptr!=text.data()+text.size())
-                throw std::invalid_argument("Expected a decimal argument");
-            return value;
-        };
-        const auto unit=number(argv[2]),destination=number(argv[3]);
+        const auto unit=decimal(argv[2]),destination=decimal(argv[3]);
         const auto bytes=nt::read_file(argv[1],2048);
         const auto loop=nt::render::analyze_vertex_loop(nt::vu::frame(bytes,unit,destination),unit);
         std::ostringstream output;

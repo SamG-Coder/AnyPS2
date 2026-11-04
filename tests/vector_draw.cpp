@@ -8,6 +8,9 @@
 #include <string>
 
 // Original synthetic VU vertex loop, AOT-compiled for the host and Vulkan.
+extern "C" const nt::graphics::VectorRegister nt_render_vertex_layout[];
+extern "C" const std::uint32_t nt_render_vertex_layout_count,nt_render_vertex_layout_words,nt_render_vertex_layout_minimum_element;
+static_assert(sizeof(nt::graphics::VectorRegister)==9*sizeof(std::uint32_t));
 extern "C" void nt_render_elements(const std::uint32_t*,const std::uint32_t*,std::uint32_t*);
 namespace {
 using namespace nt::graphics;
@@ -36,9 +39,11 @@ struct Fixture {
     static constexpr unsigned count=12;
     std::vector<std::uint32_t> memory=std::vector<std::uint32_t>(4096);
     std::vector<std::uint32_t> parameters,output=std::vector<std::uint32_t>(count*9);
-    std::array<VectorRegister,2> layout{{{1,{0,1,2,3},{}},{5,{4,5,6,7},{}}}};
+    std::vector<VectorRegister> layout;
     std::array<VectorMemoryWrite,2> writes;
-    Fixture() {
+    Fixture():layout(nt_render_vertex_layout,nt_render_vertex_layout+nt_render_vertex_layout_count) {
+        require(layout.size()==2 && nt_render_vertex_layout_words==9 && nt_render_vertex_layout_minimum_element==0,
+            "Compiled element binding does not match the fixture ABI");
         const float xy[count][2]{{5.25f,5},{28,6.5f},{6,29},{36,8},{58,27},{33,30},
             {5,40},{18,58},{30,39},{45,42},{55,57},{62,38}};
         for (unsigned i=0;i<count;++i) {
@@ -62,8 +67,17 @@ struct Fixture {
         Packet packet{{0x8000U|count,0x20000000,1U|(xyz<<4),0}};
         for (unsigned i=0;i<count;++i) {
             require(output[i*9]==0,"Vertex fixture reported unsupported arithmetic");
-            packet.push_back({output[i*9+1],output[i*9+2],output[i*9+3],output[i*9+4]});
-            packet.push_back({output[i*9+5],output[i*9+6],output[i*9+7],output[i*9+8]});
+            for (unsigned reg=0;reg<2;++reg) {
+                Quadword packed{};
+                for (unsigned lane=0;lane<4;++lane) {
+                    const auto index=layout[reg].store[lane];
+                    packed[lane]=index==vector_constant_word ? layout[reg].constant[lane] : output[i*9+1+index];
+                    const auto expected=reg==0 ? memory[(200+i)*4+lane] :
+                        static_cast<std::uint32_t>(std::bit_cast<float>(memory[(100+i)*4+lane])*16.0f);
+                    require(packed[lane]==expected,"Compiled mapping does not reconstruct the original PACKED word");
+                }
+                packet.push_back(packed);
+            }
         }
         return packet;
     }
@@ -153,7 +167,7 @@ void contracts(VulkanRenderer& gpu,unsigned kernel) {
     rejects([&]{drawing.submit_vectors(gpu,bad);},"Unknown vector element kernel");
     fixture.layout[0].store[0]=0xfffffffeU;
     rejects([&]{drawing.submit_vectors(gpu,fixture.launch(kernel));},"missing store word");
-    fixture.layout[0].store[0]=0;
+    fixture.layout[0].store[0]=nt_render_vertex_layout[0].store[0];
     require(gpu.statistics().vector_launches==launches,"Rejected batch recorded GPU work");
     // All vertex latches written by a GPU record become unknown, even when
     // this untextured draw does not use ST/UV/FOG. Restore them explicitly.

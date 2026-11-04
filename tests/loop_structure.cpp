@@ -1,6 +1,7 @@
 #include "render_loop_fixture.hpp"
 #include <nt/loop_structure.hpp>
 #include <nt/loop_pipeline.hpp>
+#include <nt/element_packet.hpp>
 #include <algorithm>
 #include <fstream>
 #include <sstream>
@@ -56,7 +57,7 @@ nt::render::PipelinedLoop quotient_loop() {
 }
 // Each element copies a color row and converts a position row to 12.4 fixed
 // point, storing both through one pointer: a PACKED RGBAQ, XYZ2 vertex record.
-nt::render::PipelinedLoop vertex_loop() {
+nt::Bytes vertex_program() {
     Builder b;
     b.pair(load_increment(1,3));
     b.pair(load_increment(2,5));
@@ -65,7 +66,12 @@ nt::render::PipelinedLoop vertex_loop() {
     b.pair(store_increment(6,4));
     b.pair(subtract_immediate(9,1));
     b.close(9);
-    auto recovered=nt::render::recover_pipelined_loop(nt::vu::frame(b.bytes,1,0),1,b.analyze());
+    return b.bytes;
+}
+nt::render::PipelinedLoop vertex_loop() {
+    const auto bytes=vertex_program();
+    const auto pairs=nt::vu::frame(bytes,1,0);
+    auto recovered=nt::render::recover_pipelined_loop(pairs,1,nt::render::analyze_loop_structure(pairs,1));
     if (!recovered.loop) throw std::runtime_error("Vertex loop not recovered: "+recovered.reason);
     return *recovered.loop;
 }
@@ -125,6 +131,56 @@ void run() {
             else require(node.kind==ElementNodeKind::operation && node.a==static_cast<std::uint32_t>(ElementOperation::float_to_integer) &&
                 node.value==4 && loop.nodes[node.b].kind==ElementNodeKind::load && loop.nodes[node.b].a==3,"Fixed-point position not recovered");
         }
+    }
+    // Bind by symbolic row/lane, never by emission order or chosen VU registers.
+    {
+        const auto original=vertex_loop();
+        for (unsigned rotation=0;rotation<8;++rotation) {
+            auto loop=original;
+            loop.depth=2; loop.strides[11]=2;
+            for (auto& store:loop.stores) { store.base=11; store.row-=7; }
+            std::rotate(loop.stores.begin(),loop.stores.begin()+rotation,loop.stores.end());
+            const auto binding=bind_element_packet(loop,11,-7,2ULL<<60,0x51);
+            require(binding.minimum_element==2 && binding.base==11 && binding.first_row==-7,
+                "Binding dropped its steady-state or origin constraint");
+            for (unsigned row=0;row<2;++row) for (unsigned lane=0;lane<4;++lane) {
+                const auto index=binding.vertex[row].store[lane];
+                require(index<loop.stores.size() && loop.stores[index].row==static_cast<int>(row)-7 &&
+                    loop.stores[index].lane==lane,"Binding depends on register allocation or store order");
+            }
+        }
+        const auto rejects=[&](const PipelinedLoop& loop,std::uint64_t tag,std::uint64_t regs,const char* reason) {
+            try { (void)bind_element_packet(loop,4,0,tag,regs); }
+            catch (const std::invalid_argument& error) {
+                require(std::string_view(error.what()).find(reason)!=std::string_view::npos,"Wrong packet-binding diagnostic"); return;
+            }
+            throw std::runtime_error("Unsafe element packet binding accepted");
+        };
+        auto loop=original; loop.stores.pop_back();
+        rejects(loop,2ULL<<60,0x51,"unwritten lane");
+        loop=original; loop.stores.push_back(loop.stores.front());
+        rejects(loop,2ULL<<60,0x51,"Overlapping");
+        loop=original; loop.stores[0].base=7;
+        rejects(loop,2ULL<<60,0x51,"stream and stride");
+        loop=original; loop.stores[0].stride=3;
+        rejects(loop,2ULL<<60,0x51,"stream and stride");
+        loop=original; loop.stores[0].row=2;
+        rejects(loop,2ULL<<60,0x51,"outside");
+        rejects(original,(2ULL<<60)|(1ULL<<58),0x51,"PACKED");
+        rejects(original,(2ULL<<60)|(1ULL<<46),0x51,"PRE");
+        rejects(original,2ULL<<60,0x15,"position must end");
+        rejects(original,2ULL<<60,0x5e,"Unsupported");
+        // A constant store is immutable metadata; missing unused ST padding is
+        // legal, but missing coordinates remain an explicit failure.
+        loop=original;
+        loop.nodes.push_back({ElementNodeKind::constant,0,0,0,0,73});
+        loop.stores[0].node=static_cast<unsigned>(loop.nodes.size()-1);
+        const auto constant=bind_element_packet(loop,4,0,2ULL<<60,0x51);
+        require(constant.vertex[0].store[0]==nt::graphics::vector_constant_word && constant.vertex[0].constant[0]==73,
+            "Constant packet word was not folded");
+        loop=original; loop.stores.erase(loop.stores.begin()+3);
+        const auto padding=bind_element_packet(loop,4,0,2ULL<<60,0x52);
+        require(padding.vertex[0].store[3]==nt::graphics::vector_constant_word,"Unused ST padding requires a store");
     }
     // A WAITQ-published quotient feeds every lane of the element's product.
     {
@@ -201,10 +257,22 @@ int main(int argc,char** argv) {
         if (argc==4 && std::string_view(argv[1])=="--emit-element") {
             const std::string_view fixture=argv[2];
             if (fixture!="quotient" && fixture!="vertex") throw std::invalid_argument("Unknown element fixture");
-            const auto loop=fixture=="vertex" ? vertex_loop() : quotient_loop();
+            auto loop=fixture=="vertex" ? vertex_loop() : quotient_loop();
+            if (fixture=="vertex") {
+                // Output ABI order need not equal packet memory order.
+                std::reverse(loop.stores.begin(),loop.stores.end());
+                const auto bytes=vertex_program();
+                std::ofstream binary(std::string(argv[3])+".bin",std::ios::binary);
+                binary.write(reinterpret_cast<const char*>(bytes.data()),bytes.size());
+                if (!binary) throw std::runtime_error("Cannot write vertex fixture");
+            }
             for (const bool vulkan:{false,true}) {
                 std::ofstream out(std::string(argv[3])+(vulkan ? ".gpu.ll" : ".cpu.ll"),std::ios::binary);
                 nt::render::emit_element_kernel_llvm(out,loop,1,vulkan);
+                if (fixture=="vertex" && !vulkan) {
+                    const auto binding=nt::render::bind_element_packet(loop,4,0,2ULL<<60,0x51);
+                    nt::render::emit_element_packet_llvm(out,binding,"nt_render_vertex_layout");
+                }
             }
             return 0;
         }

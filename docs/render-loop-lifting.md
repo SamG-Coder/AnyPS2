@@ -194,6 +194,30 @@ Automatic menu capture and whole-program region discovery remain unimplemented.
 `ANYPS2_TEST_RENDER_SPIRV=ON` also compiles and validates both loop shaders through
 the existing LLVM/SPIR-V build chain. That option does not run a GPU or draw a frame.
 
+## Compiled packet bindings
+
+`bind_element_packet` maps recovered store rows and lanes to a declared PACKED
+GIF tag. Its inputs include the proven symbolic payload base and first row; it
+does not infer a tag or payload origin from vertex values. Store emission order
+and register allocation do not determine the mapping. Constant stores become
+constant layout words. Duplicate writes, missing consumed lanes, mismatched
+streams/strides, unsupported register layouts and implicit PRE updates are
+rejected. Unused PACKED padding may be absent.
+
+`emit_element_packet_llvm` emits immutable native layout symbols, the output
+stride and the minimum steady-state element. These link alongside the compiled
+CPU code; the runtime consumes the layout without analyzing VU instructions.
+The draw regression uses this emitted binding with deliberately reordered stores.
+The probe can emit the binding separately:
+
+```sh
+ps2-vu-loop-probe --element-binding <program-image.bin> <unit> <destination> <loop-head> <base-register> <first-row> <tag-low-hex> <registers-hex>
+```
+
+This proves the store-to-packet mapping only. It does not prove runtime input/output
+non-aliasing, loop counts, prologue/epilogue equivalence or dead live-out state.
+Those checks still gate automatic installation in a converted program.
+
 ## GPU-resident drawing
 
 `VulkanRenderer::load_vector_kernel(spirv, unit)` loads a build-time compiled

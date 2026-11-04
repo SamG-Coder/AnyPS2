@@ -6,9 +6,10 @@ add_library(nt_render_codegen
     libraries/render_codegen/src/vertex_loop.cpp
     libraries/render_codegen/src/loop_structure.cpp
     libraries/render_codegen/src/loop_pipeline.cpp
+    libraries/render_codegen/src/element_packet.cpp
     libraries/render_codegen/src/element_llvm.cpp
     libraries/render_codegen/src/vertex_loop_llvm.cpp)
-target_include_directories(nt_render_codegen PUBLIC libraries/render_codegen/include)
+target_include_directories(nt_render_codegen PUBLIC libraries/render_codegen/include libraries/graphics/include)
 target_link_libraries(nt_render_codegen PUBLIC nt_vu nt_gpu_codegen)
 target_compile_features(nt_render_codegen PUBLIC cxx_std_20)
 add_executable(ps2-vu-render-probe programs/ps2-vu-render-probe/main.cpp)

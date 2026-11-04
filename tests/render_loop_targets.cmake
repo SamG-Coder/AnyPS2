@@ -47,10 +47,14 @@ if(ANYPS2_RENDER_CLANG)
         set_tests_properties(render-element-vulkan-execution PROPERTIES LABELS "gpu" TIMEOUT 60)
         if(TARGET nt_vulkan)
             set(vertex_prefix "${CMAKE_CURRENT_BINARY_DIR}/render-vertex")
-            add_custom_command(OUTPUT "${vertex_prefix}.cpu.ll" "${vertex_prefix}.gpu.ll"
+            add_custom_command(OUTPUT "${vertex_prefix}.cpu.ll" "${vertex_prefix}.gpu.ll" "${vertex_prefix}.bin"
                 COMMAND render-loop-structure-tests --emit-element vertex "${vertex_prefix}"
                 DEPENDS render-loop-structure-tests VERBATIM)
-            add_custom_target(render-vertex-fixture DEPENDS "${vertex_prefix}.cpu.ll" "${vertex_prefix}.gpu.ll")
+            add_custom_target(render-vertex-fixture DEPENDS "${vertex_prefix}.cpu.ll" "${vertex_prefix}.gpu.ll" "${vertex_prefix}.bin")
+            add_test(NAME render-element-binding-probe COMMAND ps2-vu-loop-probe --element-binding
+                "${vertex_prefix}.bin" 1 0 0 4 0 2000000000000000 51)
+            set_tests_properties(render-element-binding-probe PROPERTIES PASS_REGULAR_EXPRESSION
+                "nt_render_vertex_layout = constant")
             if(WIN32)
                 set(vertex_object "${vertex_prefix}.obj")
             else()
