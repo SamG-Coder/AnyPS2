@@ -32,11 +32,23 @@ struct RasterVertex {
     float s=0,t=0,q=1;
     std::uint32_t z=0,fog=0;
 };
+// TEX1 level-of-detail sampling. Level 0 is described by Sprite; levels 1-6
+// use the same format, palette and wrap mode at their MIPTBP base and width.
+struct TextureLevels {
+    std::uint32_t control=0; // texture_lod_* fields; zero selects Sprite filtering only.
+    float q=1; // Sprite Q. Triangles interpolate their vertex Q per pixel.
+    std::array<std::uint32_t,6> base{},pitch{};
+};
+inline constexpr std::uint32_t texture_lod_enabled=1, texture_lod_minify_linear=1U<<4;
+inline constexpr std::uint32_t texture_lod_constant=1U<<7;
+inline constexpr unsigned texture_lod_levels(std::uint32_t control) { return (control>>1)&7; }
+inline constexpr unsigned texture_lod_mip_mode(std::uint32_t control) { return (control>>5)&3; } // 0 none, 1 nearest, 2 linear.
 struct SpriteCommand {
     Sprite draw;
     std::array<std::uint32_t,256> palette{};
     std::array<RasterVertex,3> triangle{};
     std::uint32_t fog_color=0,fog=0;
+    TextureLevels levels{};
 };
 struct RenderStatistics {
     std::uint64_t submissions=0,sprites=0,upload_bytes=0,readback_bytes=0;

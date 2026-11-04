@@ -50,8 +50,10 @@ const std::uint32_t texture_decode_code[]=
 ;
 constexpr unsigned decode_sets_per_slot=64;
 #endif
-struct DrawRecord { Sprite draw; std::array<RasterVertex,3> vertices; unsigned width,height,fog_color,fog; };
-static_assert(sizeof(DrawRecord)==264);
+struct DrawRecord { Sprite draw; std::array<RasterVertex,3> vertices; unsigned width,height,fog_color,fog; std::uint32_t lod_control; float lod_q; };
+static_assert(sizeof(DrawRecord)==272);
+// Binding 0 holds level 0 followed by MIPTBP levels 1-6.
+constexpr unsigned texture_level_slots=7;
 constexpr unsigned records_per_slot=4096;
 constexpr VkDeviceSize record_bytes=sizeof(DrawRecord)*records_per_slot*frame_slots;
 struct Region {
@@ -65,6 +67,17 @@ Region region(unsigned base,unsigned pitch,unsigned width,unsigned height,unsign
 }
 unsigned texture_extent(unsigned size,unsigned mode,unsigned lo,unsigned hi) {
     return mode==2 ? hi+1 : mode==3 ? (lo|hi)+1 : size;
+}
+// A mip level is the level-0 texture at its MIPTBP address with dimensions
+// and region-clamp/repeat coordinates divided by 2^level.
+SpriteCommand texture_level_command(const SpriteCommand& command,unsigned level) {
+    auto result=command;
+    auto& d=result.draw;
+    d.texture_base=command.levels.base[level-1]; d.texture_pitch=command.levels.pitch[level-1];
+    d.texture_width=std::max(1U,d.texture_width>>level); d.texture_height=std::max(1U,d.texture_height>>level);
+    d.min_u>>=level; d.max_u>>=level; d.min_v>>=level; d.max_v>>=level;
+    result.levels={};
+    return result;
 }
 }
 struct NativeRaster::Impl {
@@ -139,7 +152,7 @@ struct NativeRaster::Impl {
     // Fixed keys avoid a heap allocation for every primitive's texture lookup.
     std::map<std::array<std::uint32_t,261>,Texture> textures;
     std::map<std::pair<Image*,Image*>,VkFramebuffer> framebuffers;
-    std::map<std::tuple<Image*,Image*,Image*>,VkDescriptorSet> sets;
+    std::map<std::array<Image*,2+texture_level_slots>,VkDescriptorSet> sets;
     std::map<std::pair<Image*,Image*>,VkDescriptorSet> present_sets;
     std::map<VkImage,VkFramebuffer> present_framebuffers;
     std::vector<VkImageView> present_views;
@@ -176,13 +189,15 @@ struct NativeRaster::Impl {
     Image& surface(unsigned base,unsigned pitch,unsigned height,bool depth,bool scratch=false,bool display=false,const Sprite* draw=nullptr,unsigned format=0);
     Image& display_surface(unsigned base,unsigned pitch,unsigned height);
     Image& texture(const SpriteCommand&);
+    using TextureSet=std::array<Image*,texture_level_slots>;
+    TextureSet textures_for(const SpriteCommand&);
     Image& reconstruct(const DisplayPlan&);
 #ifdef ANYPS2_LLVM_TEXTURES
     void decode_texture(Image&,const SpriteCommand&,Region);
     void initialize_texture_decoder();
 #endif
     VkDescriptorSet allocate_set(VkDescriptorSetLayout);
-    VkDescriptorSet bind_target(Image&,Image&,Image&,const Sprite&);
+    VkDescriptorSet bind_target(Image&,Image&,const TextureSet&,const Sprite&);
 };
 VkDeviceMemory NativeRaster::Impl::allocate(VkMemoryRequirements requirements,VkMemoryPropertyFlags flags,VkMemoryPropertyFlags preferred) {
     VkPhysicalDeviceMemoryProperties p{}; vkGetPhysicalDeviceMemoryProperties(physical,&p);
@@ -217,7 +232,7 @@ void NativeRaster::Impl::append_draw(VkDescriptorSet set,const SpriteCommand& c)
     const unsigned vertices=(c.draw.flags&triangle_flag) ? 3 : 6;
     if (batch_count && (set!=batch_set || selected!=batch_pipeline || vertices!=batch_vertices)) flush_batch();
     const unsigned index=slot*records_per_slot+records_used++;
-    const DrawRecord record{c.draw,c.triangle,current_width,current_height,c.fog_color,c.fog};
+    const DrawRecord record{c.draw,c.triangle,current_width,current_height,c.fog_color,c.fog,c.levels.control,c.levels.q};
     std::memcpy(static_cast<std::byte*>(record_mapping)+index*sizeof(DrawRecord),&record,sizeof(record));
     if (!batch_count) { batch_first=index; batch_set=set; batch_pipeline=selected; batch_vertices=vertices; }
     ++batch_count;
@@ -343,7 +358,7 @@ void NativeRaster::Impl::initialize(unsigned family) {
     VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO}; si.magFilter=si.minFilter=VK_FILTER_NEAREST;
     si.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST; si.addressModeU=si.addressModeV=si.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; si.maxLod=0;
     checked(vkCreateSampler(device,&si,nullptr,&sampler),"Create native sampler");
-    std::array<VkDescriptorSetLayoutBinding,4> bindings{{{0,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr},
+    std::array<VkDescriptorSetLayoutBinding,4> bindings{{{0,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,texture_level_slots,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr},
         {1,VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr},{2,VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr},
         {3,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,nullptr}}};
     if (ordered_fragments) bindings[1].descriptorType=bindings[2].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -351,7 +366,7 @@ void NativeRaster::Impl::initialize(unsigned family) {
     checked(vkCreateDescriptorSetLayout(device,&dl,nullptr,&descriptors),"Create native descriptors");
     const VkDescriptorSetLayoutBinding pb{0,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,2,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr}; dl.bindingCount=1; dl.pBindings=&pb;
     checked(vkCreateDescriptorSetLayout(device,&dl,nullptr,&present_descriptors),"Create display descriptors");
-    std::array<VkDescriptorPoolSize,4> sizes{{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,32768},{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,32768},{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,32768},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,32768}}};
+    std::array<VkDescriptorPoolSize,4> sizes{{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,32768*texture_level_slots},{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,32768},{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,32768},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,32768}}};
     VkDescriptorPoolCreateInfo dp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO}; dp.maxSets=32768; dp.poolSizeCount=4; dp.pPoolSizes=sizes.data();
     checked(vkCreateDescriptorPool(device,&dp,nullptr,&descriptor_pool),"Create native descriptor pool");
     VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO}; pl.setLayoutCount=1; pl.pSetLayouts=&descriptors;
@@ -866,7 +881,16 @@ VkDescriptorSet NativeRaster::Impl::allocate_set(VkDescriptorSetLayout set_layou
     VkDescriptorSetAllocateInfo a{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO}; a.descriptorPool=descriptor_pool; a.descriptorSetCount=1; a.pSetLayouts=&set_layout;
     VkDescriptorSet set{}; checked(vkAllocateDescriptorSets(device,&a,&set),"Allocate native resource set"); return set;
 }
-VkDescriptorSet NativeRaster::Impl::bind_target(Image& color,Image& depth,Image& texture,const Sprite& draw) {
+NativeRaster::Impl::TextureSet NativeRaster::Impl::textures_for(const SpriteCommand& command) {
+    TextureSet result{};
+    const auto levels=texture_lod_levels(command.levels.control);
+    // Resolve levels before level 0 so the level-0 lookup remains most recent.
+    for (unsigned level=1;level<=levels;++level) result[level]=&texture(texture_level_command(command,level));
+    result[0]=&texture(command);
+    for (unsigned level=levels+1;level<texture_level_slots;++level) result[level]=result[0];
+    return result;
+}
+VkDescriptorSet NativeRaster::Impl::bind_target(Image& color,Image& depth,const TextureSet& textures,const Sprite& draw) {
     Measure timing(stats.target_bind_ns,profiling);
     if (sets.size()>=8192) clear_views();
     auto& fb=framebuffers[{&color,&depth}];
@@ -890,12 +914,22 @@ VkDescriptorSet NativeRaster::Impl::bind_target(Image& color,Image& depth,Image&
         vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_DEPENDENCY_BY_REGION_BIT,1,&b,0,nullptr,0,nullptr);
     }
     if (!ordered_fragments) hazards.add(draw.left,draw.top,draw.right,draw.bottom);
-    auto& set=sets[{&color,&depth,&texture}];
+    std::array<Image*,2+texture_level_slots> key{&color,&depth};
+    std::copy(textures.begin(),textures.end(),key.begin()+2);
+    auto& set=sets[key];
     if (!set) {
         set=allocate_set(descriptors);
-        const VkDescriptorImageInfo images[]{{sampler,texture.view,VK_IMAGE_LAYOUT_GENERAL},{VK_NULL_HANDLE,color.view,VK_IMAGE_LAYOUT_GENERAL},{VK_NULL_HANDLE,depth.view,VK_IMAGE_LAYOUT_GENERAL}};
+        std::array<VkDescriptorImageInfo,texture_level_slots+2> images{};
+        for (unsigned level=0;level<texture_level_slots;++level) images[level]={sampler,textures[level]->view,VK_IMAGE_LAYOUT_GENERAL};
+        images[texture_level_slots]={VK_NULL_HANDLE,color.view,VK_IMAGE_LAYOUT_GENERAL};
+        images[texture_level_slots+1]={VK_NULL_HANDLE,depth.view,VK_IMAGE_LAYOUT_GENERAL};
         std::array<VkWriteDescriptorSet,4> writes{};
-        for (unsigned i=0;i<3;++i) { writes[i].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[i].dstSet=set; writes[i].dstBinding=i; writes[i].descriptorCount=1; writes[i].descriptorType=i ? VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; writes[i].pImageInfo=&images[i]; }
+        for (unsigned i=0;i<3;++i) {
+            writes[i].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[i].dstSet=set; writes[i].dstBinding=i;
+            writes[i].descriptorCount=i ? 1 : texture_level_slots;
+            writes[i].descriptorType=i ? VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[i].pImageInfo=i ? &images[texture_level_slots+i-1] : images.data();
+        }
         if (ordered_fragments) writes[1].descriptorType=writes[2].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         const VkDescriptorBufferInfo buffer{records,0,record_bytes};
         writes[3].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[3].dstSet=set; writes[3].dstBinding=3; writes[3].descriptorCount=1;
@@ -974,7 +1008,8 @@ void NativeRaster::draw(std::span<const SpriteCommand> commands) {
     // A draw-only run cannot modify a disjoint texture. Resolve resources once
     // for compatible consecutive draws, but retain the ordinary alias/feedback
     // path whenever a target can write texture storage or another attachment.
-    Impl::Image *cached_color=nullptr,*cached_depth=nullptr,*cached_texture=nullptr;
+    Impl::Image *cached_color=nullptr,*cached_depth=nullptr;
+    Impl::TextureSet cached_textures{};
     SpriteCommand cached_command{};
     const auto same_texture=[](const SpriteCommand& a,const SpriteCommand& b) {
         const auto& x=a.draw; const auto& y=b.draw;
@@ -984,7 +1019,8 @@ void NativeRaster::draw(std::span<const SpriteCommand> commands) {
             x.texture_width==y.texture_width && x.texture_height==y.texture_height &&
             x.clamp_u==y.clamp_u && x.clamp_v==y.clamp_v &&
             x.min_u==y.min_u && x.max_u==y.max_u && x.min_v==y.min_v && x.max_v==y.max_v &&
-            (!(x.flags&64) || a.palette==b.palette);
+            (!(x.flags&64) || a.palette==b.palette) &&
+            a.levels.control==b.levels.control && a.levels.base==b.levels.base && a.levels.pitch==b.levels.pitch;
     };
     const auto emit=[&](SpriteCommand c,unsigned height) {
         ++r.surface_scope;
@@ -1011,20 +1047,23 @@ void NativeRaster::draw(std::span<const SpriteCommand> commands) {
         color.scope=r.surface_scope; color.last_use=++r.surface_use;
         auto& depth=reuse ? *cached_depth : r.surface((d.flags&depth_test_flag) ? d.depth_base : 0,d.pitch,height,true,!(d.flags&depth_test_flag),false,&d);
         depth.scope=r.surface_scope; depth.last_use=++r.surface_use;
-        auto& texture=reuse ? *cached_texture : r.texture(c);
+        const auto textures=reuse ? cached_textures : r.textures_for(c);
         if (!reuse) {
             cached_color=nullptr;
-            const auto source=(d.flags&1) ? region(d.texture_base,d.texture_pitch,texture.width,texture.height,
-                (d.flags&indexed8_flag) ? 2U : (d.flags&64) ? 1U : 0U) : Region{};
-            const bool full_texture=!(d.flags&1) ||
-                (texture.width==texture_extent(d.texture_width,d.clamp_u,d.min_u,d.max_u) &&
-                 texture.height==texture_extent(d.texture_height,d.clamp_v,d.min_v,d.max_v));
-            if (full_texture && color.valid && depth.valid && !color.region.overlaps(depth.region) &&
-                !source.overlaps(color.region) && !source.overlaps(depth.region)) {
-                cached_color=&color; cached_depth=&depth; cached_texture=&texture; cached_command=c;
+            bool disjoint=color.valid && depth.valid && !color.region.overlaps(depth.region);
+            for (unsigned level=0;disjoint && level<=texture_lod_levels(c.levels.control);++level) {
+                const auto planned=level ? texture_level_command(c,level).draw : d;
+                const auto& texture=*textures[level];
+                const auto source=(d.flags&1) ? region(planned.texture_base,planned.texture_pitch,texture.width,texture.height,
+                    (d.flags&indexed8_flag) ? 2U : (d.flags&64) ? 1U : 0U) : Region{};
+                const bool full_texture=!(d.flags&1) ||
+                    (texture.width==texture_extent(planned.texture_width,planned.clamp_u,planned.min_u,planned.max_u) &&
+                     texture.height==texture_extent(planned.texture_height,planned.clamp_v,planned.min_v,planned.max_v));
+                disjoint=full_texture && !source.overlaps(color.region) && !source.overlaps(depth.region);
             }
+            if (disjoint) { cached_color=&color; cached_depth=&depth; cached_textures=textures; cached_command=c; }
         }
-        const auto set=r.bind_target(color,depth,texture,d);
+        const auto set=r.bind_target(color,depth,textures,d);
         { Measure timing(r.stats.draw_record_ns,r.profiling); r.append_draw(set,c); }
         ++r.revision;
         { Measure timing(r.stats.invalidate_ns,r.profiling);

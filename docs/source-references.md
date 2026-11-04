@@ -60,6 +60,8 @@ The principal source areas consulted at those pins are:
   The image importer independently implements PSMCT16/PSMCT16S address-bit
   permutations checked against the public GS format tables. Palette conversion
   preserves CSM1/CSM2 selection, shared 16/32-bit entry storage and draw-time TEXA expansion.
+  TEX1 LOD level rounding, MIPTBP level addressing and per-level clamp scaling follow
+  `GSRendererSW.cpp`/`GSDrawScanline.cpp` behavior; no PCSX2 source is imported.
 - **Video initialization:** PCSX2 `IPU/IPU.cpp`, `IPU/IPU.h`, `IPU/IPUdma.cpp`
   and `IPU/IPU_MultiISA.cpp` for reset,
   bitstream-position clearing, format/threshold settings, table upload, header

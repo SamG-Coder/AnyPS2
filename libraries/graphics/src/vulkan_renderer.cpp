@@ -509,6 +509,13 @@ void VulkanRenderer::validate(std::span<const SpriteCommand> commands) {
     if (commands.size()>65536) throw std::runtime_error("Vulkan draw batch exceeds bound");
     for (const auto& command:commands) {
         validate_sprite(command.draw);
+        if (const auto control=command.levels.control) {
+            const auto levels=texture_lod_levels(control),mode=texture_lod_mip_mode(control);
+            if (!(command.draw.flags&1) || !(control&texture_lod_enabled) || levels>6 || mode>2 || (levels!=0)!=(mode!=0) ||
+                (control&0xf000fc00U) || std::any_of(command.levels.base.begin(),command.levels.base.end(),[](auto b) { return b>16383; }) ||
+                std::any_of(command.levels.pitch.begin(),command.levels.pitch.end(),[](auto p) { return p>63; }))
+                throw std::runtime_error("Invalid native texture level plan");
+        }
         if (command.fog>255 || command.fog_color>0xffffffU ||
             std::any_of(command.triangle.begin(),command.triangle.end(),[](const RasterVertex& v) { return v.fog>255; }))
             throw std::runtime_error("Invalid native fog parameters");
@@ -583,8 +590,8 @@ void VulkanRenderer::draw(std::span<const SpriteCommand> commands) {
 #if ANYPS2_REFERENCE_RENDERER
 
     validate(commands);
-    for (const auto& command:commands) if (command.draw.flags&fog_flag)
-        throw std::runtime_error("Fog requires the native Vulkan image renderer");
+    for (const auto& command:commands) if ((command.draw.flags&fog_flag) || command.levels.control)
+        throw std::runtime_error("Fog and LOD texture sampling require the native Vulkan image renderer");
     auto& v=*impl_;
     if (!v.initialized) throw std::runtime_error("Graphics storage was not initialized");
     for (const auto& command:commands) {

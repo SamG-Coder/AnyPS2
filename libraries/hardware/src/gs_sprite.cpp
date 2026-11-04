@@ -26,9 +26,11 @@ void Gs::draw_sprite(const Vertex& first, const Vertex& last) {
     if (drawing_[0x4a+context]&1) draw.flags |= 32;
     if (attributes&(1U<<4)) {
         try {
-            graphics::plan_sprite_texture(draw,static_cast<unsigned>(attributes),drawing_[6+context],drawing_[0x14+context],
-                drawing_[8+context],static_cast<std::uint32_t>(drawing_[0x3b]),offset,first.x,first.y,last.x,last.y,
-                static_cast<std::uint32_t>(first.uv),static_cast<std::uint32_t>(last.uv));
+            const auto levels=graphics::plan_sprite_texture(draw,static_cast<unsigned>(attributes),drawing_[6+context],drawing_[0x14+context],
+                drawing_[8+context],static_cast<std::uint32_t>(drawing_[0x3b]),{drawing_[0x34+context],drawing_[0x36+context]},
+                offset,first.x,first.y,last.x,last.y,static_cast<std::uint32_t>(first.uv),static_cast<std::uint32_t>(last.uv),1.0f);
+            // This diagnostic model has no level-of-detail path; native drawing owns it.
+            if (levels.control) throw std::invalid_argument("LOD-dependent texture sampling requires the native drawing service");
         } catch (const std::invalid_argument& error) { throw runtime::MemoryFault(error.what()); }
     }
     writable_local();

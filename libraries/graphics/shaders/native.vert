@@ -11,6 +11,7 @@ struct DrawData {
     uint depth_base,depth;
     Vertex vertices[3];
     uint target_width,target_height,fog_color,fog;
+    uint lod_control; float lod_q;
 };
 layout(std430,set=0,binding=3) readonly buffer DrawRecords { DrawData items[]; } records;
 

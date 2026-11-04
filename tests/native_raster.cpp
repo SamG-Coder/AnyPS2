@@ -2,6 +2,7 @@
 #include "palette16_textures.hpp"
 #include <nt/vulkan_renderer.hpp>
 #include <nt/native_drawing_worker.hpp>
+#include <nt/sprite_texture.hpp>
 #include <chrono>
 #include <iostream>
 #include <stdexcept>
@@ -657,6 +658,66 @@ int main(int argc,char** argv) {
                 RasterVertex{2017-int(i*7),int(17+i),0x8011ff01,997,0},
                 RasterVertex{int(31+i),2011-int(i*11),0x80ff3173,0,499}};
             compare(std::array{t});
+        }
+        // TEX1 level-of-detail sampling: constant and Q-derived LOD, nearest
+        // and blended mip levels, and magnification below LOD zero.
+        {
+            const std::array<std::uint32_t,3> level_colors{0x80100000U,0x80002000U,0x80000030U};
+            std::vector<std::uint32_t> storage(actual.size(),0);
+            for (unsigned level=0;level<3;++level)
+                for (unsigned y=0;y<(16U>>level);++y) for (unsigned x=0;x<(16U>>level);++x)
+                    storage[rgba_word(64+64*level,1,x,y)]=level_colors[level];
+            const std::array<std::uint64_t,2> bases{128ULL|(1ULL<<14)|(192ULL<<20)|(1ULL<<34),0};
+            const auto lod_filter=[](unsigned lcm,unsigned max_level,unsigned magnify,unsigned minify,unsigned l,int k) {
+                return std::uint64_t(lcm)|(std::uint64_t(max_level)<<2)|(std::uint64_t(magnify)<<5)|
+                    (std::uint64_t(minify)<<6)|(std::uint64_t(l)<<19)|(std::uint64_t(std::uint32_t(k)&4095U)<<32);
+            };
+            const auto render=[&](SpriteCommand command,std::uint64_t filter,float q) {
+                bool linear=false;
+                command.levels=plan_texture_levels(filter,bases,linear);
+                command.levels.q=q;
+                if (linear) command.draw.flags|=128;
+                native.upload(storage); native.draw(std::array{command});
+                std::vector<std::uint32_t> result(storage.size()); native.read(result);
+                return result;
+            };
+            SpriteCommand sprite{{0,0,16,16,0,1,0x80808080,0}};
+            sprite.draw.texture_base=64; sprite.draw.texture_pitch=1;
+            sprite.draw.texture_width=sprite.draw.texture_height=16;
+            sprite.draw.dx=sprite.draw.dy=256; sprite.draw.du=sprite.draw.dv=256;
+            sprite.draw.flags=1|4|(1<<3);
+            const auto expect=[&](const std::vector<std::uint32_t>& pixels,unsigned x,unsigned y,std::uint32_t color,const char* name) {
+                if (pixels[rgba_word(0,1,x,y)]!=color)
+                    throw std::runtime_error(std::string("Texture LOD ")+name+" sampled "+std::to_string(pixels[rgba_word(0,1,x,y)]));
+                ++checks;
+            };
+            expect(render(sprite,lod_filter(1,2,0,2,0,16),1),5,5,level_colors[1],"constant nearest level");
+            expect(render(sprite,lod_filter(1,2,0,3,0,24),1),5,5,0x80001018U,"constant blended levels");
+            expect(render(sprite,lod_filter(0,2,0,2,0,0),0.25f),5,5,level_colors[2],"Q-derived level");
+            expect(render(sprite,lod_filter(0,2,0,4,1,-16),0.5f),5,5,level_colors[1],"scaled Q with bias");
+            expect(render(sprite,lod_filter(0,2,0,2,0,0),2.0f),5,5,level_colors[0],"magnification");
+            expect(render(sprite,lod_filter(0,0,0,1,0,0),0.5f),5,5,level_colors[0],"mixed filtering");
+            bool linear=false;
+            if (plan_texture_levels(lod_filter(1,4,0,0,0,0),bases,linear).control || linear ||
+                plan_texture_levels(lod_filter(1,2,1,5,0,-8),bases,linear).control || !linear)
+                throw std::runtime_error("Constant non-positive LOD must use the level-0 magnification filter");
+            // Per-pixel triangle Q selects level 0 at the left and level 2 at the right.
+            SpriteCommand triangle{{0,0,32,16,0,1,0x80808080,0}};
+            triangle.draw.texture_base=64; triangle.draw.texture_pitch=1;
+            triangle.draw.texture_width=triangle.draw.texture_height=16;
+            triangle.draw.flags=triangle_flag|1|4|(1<<3);
+            triangle.triangle={RasterVertex{0,0,0x80808080,0,0,0,0,1},RasterVertex{512,0,0x80808080,0,0,0,0,0.125f},
+                RasterVertex{0,256,0x80808080,0,0,0,0,1}};
+            triangle.triangle[2].v=0; triangle.triangle[1].q=0.0625f;
+            const auto varying=render(triangle,lod_filter(0,2,0,2,0,0),1);
+            expect(varying,1,2,level_colors[0],"triangle near Q");
+            expect(varying,26,1,level_colors[2],"triangle far Q");
+            for (const auto filter:{lod_filter(0,2,0,6,0,0),lod_filter(0,2,0,2,0,0)|(1ULL<<9),lod_filter(0,7,0,2,0,0)}) {
+                bool rejected=false;
+                try { plan_texture_levels(filter,bases,linear); } catch (const std::invalid_argument&) { rejected=true; }
+                if (!rejected) throw std::runtime_error("Reserved or automatic mipmap configuration was accepted");
+            }
+            native.upload(actual); // Restore the storage shared with later reference checks.
         }
         // Masked resource imports preserve dirty native colour contents.
         const std::array<PixelWrite,2> writes{{{0,0x55,0xff},{0,0x6600,0xff00}}};

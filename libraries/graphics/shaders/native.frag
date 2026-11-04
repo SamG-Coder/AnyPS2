@@ -17,12 +17,13 @@ struct DrawData {
     uint depth_base,depth;
     Vertex vertices[3];
     uint target_width,target_height,fog_color,fog;
+    uint lod_control; float lod_q;
 };
 layout(std430,set=0,binding=3) readonly buffer DrawRecords { DrawData items[]; } records;
 
 layout(location=0) flat in uint draw_index;
 #define draw records.items[draw_index]
-layout(set=0,binding=0) uniform usampler2D texture_image;
+layout(set=0,binding=0) uniform usampler2D texture_levels[7];
 #ifdef ANYPS2_ORDERED_FRAGMENTS
 layout(r32ui,set=0,binding=1) coherent uniform uimage2D color_image;
 layout(r32ui,set=0,binding=2) coherent uniform uimage2D depth_image;
@@ -44,10 +45,22 @@ uint wrap(int t,uint size,uint mode,uint low,uint high) {
     if(mode==2) return uint(clamp(t,int(low),int(high)));
     return (uint(t)&low)|high;
 }
-uint texel_at(int u,int v) {
-        uint tx=wrap(u,draw.texture_width,draw.clamp_u,draw.min_u,draw.max_u);
-        uint ty=wrap(v,draw.texture_height,draw.clamp_v,draw.min_v,draw.max_v);
-        uint texel=texelFetch(texture_image,ivec2(tx,ty),0).r;
+// Constant indices keep level selection valid without descriptor indexing.
+uint level_texel(uint level,ivec2 p) {
+    switch (level) {
+    case 0: return texelFetch(texture_levels[0],p,0).r;
+    case 1: return texelFetch(texture_levels[1],p,0).r;
+    case 2: return texelFetch(texture_levels[2],p,0).r;
+    case 3: return texelFetch(texture_levels[3],p,0).r;
+    case 4: return texelFetch(texture_levels[4],p,0).r;
+    case 5: return texelFetch(texture_levels[5],p,0).r;
+    default: return texelFetch(texture_levels[6],p,0).r;
+    }
+}
+uint texel_at(uint level,int u,int v) {
+        uint tx=wrap(u,max(draw.texture_width>>level,1u),draw.clamp_u,draw.min_u>>level,draw.max_u>>level);
+        uint ty=wrap(v,max(draw.texture_height>>level,1u),draw.clamp_v,draw.min_v>>level,draw.max_v>>level);
+        uint texel=level_texel(level,ivec2(tx,ty));
         if((draw.flags&2)!=0) {
             texel &= 0xffffff;
             uint alpha=((draw.texa&0x8000)!=0 && texel==0) ? 0 : (draw.texa&255);
@@ -60,6 +73,44 @@ uint interpolate(uint a,uint b,uint fraction) {
     for(uint channel=0;channel<4;++channel) {
         uint av=(a>>(channel*8))&255, bv=(b>>(channel*8))&255;
         result |= ((av*(16-fraction)+bv*fraction)>>4)<<(channel*8);
+    }
+    return result;
+}
+// uf/vf are level-0 texel coordinates with four fractional bits.
+uint sample_level(uint level,int uf,int vf,bool linear) {
+    uf>>=level; vf>>=level;
+    if(linear) {uf-=8;vf-=8;}
+    int u=floor_div(uf,16), v=floor_div(vf,16);
+    uint texel=texel_at(level,u,v);
+    if(linear) {
+        uint fu=uint(uf-u*16), fv=uint(vf-v*16);
+        uint top=interpolate(texel,texel_at(level,u+1,v),fu);
+        uint bottom=interpolate(texel_at(level,u,v+1),texel_at(level,u+1,v+1),fu);
+        texel=interpolate(top,bottom,fv);
+    }
+    return texel;
+}
+// GS LOD = K for LCM=1, otherwise -log2(|Q|)*2^L+K. LOD <= 0 magnifies level 0.
+// The level position uses 16 fractional bits as in the pinned reference;
+// adjacent-level blending uses its top 8 fractional bits.
+uint sample_texture(int uf,int vf,float q) {
+    uint control=draw.lod_control;
+    if ((control&1u)==0) return sample_level(0,uf,vf,(draw.flags&128)!=0);
+    float k=float(int(control<<4)>>20)/16.0;
+    float lod=(control&128u)!=0 ? k : -log2(abs(q))*float(1u<<((control>>8)&3u))+k;
+    if (!(lod>0.0)) return sample_level(0,uf,vf,(draw.flags&128)!=0);
+    bool linear=(control&16u)!=0;
+    uint levels=(control>>1)&7u,mode=(control>>5)&3u;
+    uint position=uint(min(lod,float(levels))*65536.0);
+    if (mode==0) return sample_level(0,uf,vf,linear);
+    if (mode==1) return sample_level(min((position+32768u)>>16,levels),uf,vf,linear);
+    uint level=position>>16,fraction=(position>>8)&255u;
+    uint near=sample_level(level,uf,vf,linear);
+    if (level>=levels || fraction==0) return near;
+    uint far=sample_level(level+1,uf,vf,linear),result=0;
+    for(uint channel=0;channel<4;++channel) {
+        uint a=(near>>(channel*8))&255,b=(far>>(channel*8))&255;
+        result|=((a*(256-fraction)+b*fraction)>>8)<<(channel*8);
     }
     return result;
 }
@@ -155,6 +206,7 @@ void main() {
     uint64_t fog_weight=uint64_t(draw.fog),fog_area=uint64_t(1);
     bool triangle_interior=true;
     int uf=0,vf=0;
+    float lod_q=draw.lod_q;
     if ((draw.flags&16777216)!=0) {
         int64_t numerator,denominator;
         bool aa=(draw.flags&1048576)!=0;
@@ -211,6 +263,10 @@ void main() {
             depth=uint((uint64_t(draw.vertices[0].z)*uint64_t(w0)+
                 uint64_t(draw.vertices[1].z)*uint64_t(w1)+uint64_t(draw.vertices[2].z)*uint64_t(w2))/uint64_t(area));
         if ((draw.flags&1)!=0) {
+            if ((draw.lod_control&1u)!=0) {
+                vec3 weights=vec3(float(w0),float(w1),float(w2))/float(area);
+                lod_q=draw.vertices[0].q*weights.x+draw.vertices[1].q*weights.y+draw.vertices[2].q*weights.z;
+            }
             if ((draw.flags&65536)!=0) {
                 vec3 weights=vec3(float(w0),float(w1),float(w2))/float(area);
                 vec3 stq=vertex_stq(0)*weights.x+vertex_stq(1)*weights.y+vertex_stq(2)*weights.z;
@@ -237,16 +293,7 @@ void main() {
             uf=draw.u0+floor_div((int(x)*16-draw.x0)*draw.du,draw.dx);
             vf=draw.v0+floor_div((int(y)*16-draw.y0)*draw.dv,draw.dy);
         }
-        bool linear=(draw.flags&128)!=0;
-        if(linear) {uf-=8;vf-=8;}
-        int u=floor_div(uf,16), v=floor_div(vf,16);
-        uint texel=texel_at(u,v);
-        if(linear) {
-            uint fu=uint(uf-u*16), fv=uint(vf-v*16);
-            uint top=interpolate(texel,texel_at(u+1,v),fu);
-            uint bottom=interpolate(texel_at(u,v+1),texel_at(u+1,v+1),fu);
-            texel=interpolate(top,bottom,fv);
-        }
+        uint texel=sample_texture(uf,vf,lod_q);
         uint function=(draw.flags>>3)&3;
         uint vertex_color=color;
         color=0;

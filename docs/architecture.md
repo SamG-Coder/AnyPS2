@@ -101,6 +101,12 @@ PSMCT16/PSMCT16S targets use Vulkan rasterization with packed write-mask and col
 quantization semantics. Switching between 16- and 32-bit storage views currently
 requires ordered host format conversion; color dithering remains unsupported
 when it can affect written channels.
+TEX1 level-of-detail sampling binds MIPTBP levels 1-6 as separate native textures
+and selects the magnification or minification filter per pixel. LOD is computed
+in single-precision floating point from interpolated Q (or the sprite's Q), with
+16 fractional bits for level selection and an 8-bit blend between adjacent levels;
+it is not a bit-exact model of the GS LOD unit. Automatic base addresses (MTBA)
+stop with a diagnostic when levels are sampled.
 Asynchronous VU1 submissions publish ordered graphics from completed launches
 while later compiled launches continue. A later failure stops execution and does
 not report submission completion; already accepted graphics remain submitted.

@@ -70,7 +70,7 @@ public:
         // Validate every draw before recording any part of this submission.
         // Parsing already validated uploads/palette addresses and state changes.
         for (const auto& operation:draws) if (const auto* draw=std::get_if<Draw>(&operation)) {
-            const SpriteCommand command{draw->sprite,{},draw->triangle,draw->fog_color,draw->fog};
+            const SpriteCommand command{draw->sprite,{},draw->triangle,draw->fog_color,draw->fog,draw->levels};
             VulkanRenderer::validate(std::span(&command,1));
         }
         account(&Profile::validate_ns);
@@ -85,7 +85,7 @@ public:
             };
             for (const auto& operation:draws) {
                 if (const auto* draw=std::get_if<Draw>(&operation)) {
-                    SpriteCommand command{draw->sprite,{},draw->triangle,draw->fog_color,draw->fog};
+                    SpriteCommand command{draw->sprite,{},draw->triangle,draw->fog_color,draw->fog,draw->levels};
                     snapshot_palette(std::span(command.palette).first((draw->sprite.flags&indexed8_flag) ? 256 : 16),candidate.palette,draw->bank,draw->palette16,draw->texa);
                     pending.push_back(command);
                     if (pending.size()==256) flush();
@@ -130,7 +130,7 @@ public:
         };
         for (const auto& operation:draws) {
             if (const auto* draw=std::get_if<Draw>(&operation)) {
-                SpriteCommand command{draw->sprite,{},draw->triangle,draw->fog_color,draw->fog};
+                SpriteCommand command{draw->sprite,{},draw->triangle,draw->fog_color,draw->fog,draw->levels};
                 snapshot_palette(std::span(command.palette).first((draw->sprite.flags&indexed8_flag) ? 256 : 16),candidate.palette,draw->bank,draw->palette16,draw->texa);
                 sprites.push_back(command);
             } else {
@@ -155,7 +155,7 @@ public:
     }
 private:
     using ImageWrites=std::vector<PixelWrite>;
-    struct Draw { Sprite sprite; unsigned bank; std::array<RasterVertex,3> triangle{}; std::uint32_t fog_color=0,fog=0; bool palette16=false; std::uint64_t texa=0; };
+    struct Draw { Sprite sprite; unsigned bank; std::array<RasterVertex,3> triangle{}; std::uint32_t fog_color=0,fog=0; bool palette16=false; std::uint64_t texa=0; TextureLevels levels{}; };
     struct Finish {};
     struct CancelDownload {};
     using Operation=std::variant<Draw,ImageWrites,PaletteLoad,Finish,ImageDownload,CancelDownload>;
@@ -229,8 +229,6 @@ private:
         case 8: case 9: state.contexts[reg-8].clamp=value; return;
         case 0x14: case 0x15: state.contexts[reg-0x14].filter=value; return;
         case 0x34: case 0x35: case 0x36: case 0x37:
-            // Mipmap sampling remains checked by plan_sprite_texture; setup
-            // alone does not require fetching any mip level.
             state.contexts[reg&1].mipmap_bases[(reg-0x34)/2]=value; return;
         case 0x3b: state.texa=value; return;
         case 0x3d: state.fog_color=std::uint32_t(value)&0xffffffU; return;
@@ -301,11 +299,12 @@ private:
             const auto& context=state.contexts[(attributes>>9)&1];
             if (auto draw=plan_triangle(context.frame,context.offset,context.scissor,vertices,(attributes&8)!=0,(attributes&128)!=0)) {
                 configure_draw(state,context,attributes,draw->draw);
+                TextureLevels levels{};
                 if (attributes&16) {
-                    plan_texture(draw->draw,context.texture,context.filter,context.clamp,state.texa);
+                    levels=plan_texture(draw->draw,context.texture,context.filter,context.clamp,state.texa,context.mipmap_bases);
                     if (!(attributes&256)) draw->draw.flags|=perspective_triangle_flag;
                 }
-                draws.push_back(Draw{draw->draw,unsigned((context.texture>>56)&(palette_is16(context.texture) ? 31 : 15)),draw->triangle,state.fog_color,state.fog,palette_is16(context.texture),state.texa});
+                draws.push_back(Draw{draw->draw,unsigned((context.texture>>56)&(palette_is16(context.texture) ? 31 : 15)),draw->triangle,state.fog_color,state.fog,palette_is16(context.texture),state.texa,levels});
             }
             return;
         }
@@ -329,11 +328,13 @@ private:
         if (draw) {
             draw->depth=z;
             configure_draw(state,context,attributes,*draw);
+            TextureLevels levels{};
             if (attributes&16) {
-                plan_sprite_texture(*draw,attributes,context.texture,context.filter,context.clamp,state.texa,context.offset,
-                    state.x,state.y,x,y,state.first_uv,state.uv);
+                // Sprites use the Q latched with their final vertex for LOD.
+                levels=plan_sprite_texture(*draw,attributes,context.texture,context.filter,context.clamp,state.texa,
+                    context.mipmap_bases,context.offset,state.x,state.y,x,y,state.first_uv,state.uv,std::bit_cast<float>(state.q));
             }
-            draws.push_back(Draw{*draw,unsigned((context.texture>>56)&(palette_is16(context.texture) ? 31 : 15)),{},state.fog_color,state.fog,palette_is16(context.texture),state.texa});
+            draws.push_back(Draw{*draw,unsigned((context.texture>>56)&(palette_is16(context.texture) ? 31 : 15)),{},state.fog_color,state.fog,palette_is16(context.texture),state.texa,levels});
         }
     }
     static void configure_draw(const State& state,const Context& context,unsigned attributes,Sprite& draw) {
