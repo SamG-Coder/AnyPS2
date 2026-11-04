@@ -29,9 +29,164 @@ static std::uint64_t stepping_timer_clock() { timer_now+=1000; return timer_now;
 void run_ee_batch_tests();
 void run_ee_file_rpc_tests();
 void run_scratchpad_tests();
+void run_video_block_tests();
 int main() {
     try {
         run_scratchpad_tests();
+        run_video_block_tests();
+        {
+            std::vector<std::uint8_t> video_bytes(0x1000);
+            nt::ee::NativePlatform platform; nt::ee::Memory memory{video_bytes.data(),video_bytes.size()}; platform.attach(memory);
+            nt::runtime::State state;
+            const auto write=[&](std::uint32_t address,std::uint32_t value,bool wide=false) {
+                state.pc=wide ? 0x3d0010 : 0x3d0020; state.set(4,address); state.set(8,value);
+                return nt_ee_generated_run(&state,&memory,1);
+            };
+            const auto read=[&](std::uint32_t address,bool wide=false) {
+                state.pc=wide ? 0x3d0018 : 0x3d0028; state.set(4,address);
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+                return state.gpr[9].lo;
+            };
+            const auto acknowledge=[&] {
+                check((platform.interrupts.read(0x1000f000).value&256)!=0);
+                check(platform.interrupts.write(0x1000f000,256)==nt::ee::Stop::budget);
+            };
+            check(write(0x10002000,0x90070123)==nt::ee::Stop::budget);
+            check(platform.video.thresholds()==std::array<std::uint32_t,2>{0x123,7});
+            acknowledge();
+            check(write(0x10002000,53,true)==nt::ee::Stop::budget && read(0x10002020)==53);
+            acknowledge();
+            check(write(0x10002010,0x41110000)==nt::ee::Stop::budget);
+            check(read(0x10002010)==0x01110000 && read(0x10002020)==0 && read(0x10002000,true)==0 &&
+                  read(0x10002030,true)==0 && platform.video.resets()==1 &&
+                  platform.video.thresholds()==std::array<std::uint32_t,2>{});
+            acknowledge();
+            check(write(0x10002010,0x00220000)==nt::ee::Stop::budget && read(0x10002010)==0x00220000);
+            check((platform.interrupts.read(0x1000f000).value&256)==0);
+            check(write(0x10002000,19)==nt::ee::Stop::budget); acknowledge();
+            const auto before=state.executed;
+            check(write(0x10002000,0x10000000)==nt::ee::Stop::unsupported_system &&
+                  state.executed==before && read(0x10002020)==19 && platform.video.resets()==1);
+            check(write(0x10002010,0x40030000)==nt::ee::Stop::unsupported_system &&
+                  read(0x10002010)==0x00220000 && read(0x10002020)==19 && (platform.interrupts.read(0x1000f000).value&256)==0);
+            check(write(0x10002010,0x40000000,true)==nt::ee::Stop::budget && read(0x10002020)==0 &&
+                  platform.video.resets()==2);
+            acknowledge();
+            // Tables arrive through compiled quadword stores. Busy/completion
+            // follow actual data availability, including an unaligned bit cursor.
+            check(write(0x10002000,0x58000003)==nt::ee::Stop::budget);
+            const auto upload=[&] {
+                state.pc=0x3d0000; state.set(4,0x10007010);
+                state.gpr[8]={0x3333333333333333ULL,0x3333333333333333ULL};
+                return nt_ee_generated_run(&state,&memory,1);
+            };
+            for (unsigned i=0;i<4;++i) check(upload()==nt::ee::Stop::budget);
+            check((read(0x10002010)&0x80000000U)!=0 && (platform.interrupts.read(0x1000f000).value&256)==0);
+            check(upload()==nt::ee::Stop::budget && (read(0x10002010)&0x80000000U)==0);
+            check(std::all_of(platform.video.matrix(1).begin(),platform.video.matrix(1).end(),[](auto byte) { return byte==0x99; }));
+            check(read(0x10002020)==0x103); acknowledge();
+            check(write(0x10002000,0x50000000)==nt::ee::Stop::budget);
+            check((read(0x10002010)&0x80000000U)!=0);
+            check(write(0x10002010,0x40000000)==nt::ee::Stop::budget && read(0x10002020)==0 &&
+                  (read(0x10002010)&0x80000000U)==0 && platform.video.matrix(1)[0]==0x99);
+            acknowledge();
+            check(upload()==nt::ee::Stop::budget && upload()==nt::ee::Stop::budget);
+            check(write(0x10002000,0x60000000)==nt::ee::Stop::budget && read(0x10002020)==0);
+            check(std::all_of(platform.video.palette().begin(),platform.video.palette().end(),[](auto byte) { return byte==0x33; }));
+            acknowledge();
+            for (unsigned i=0;i<256;++i) video_bytes[0x200+i]=static_cast<std::uint8_t>(i);
+            check(write(0x1000b410,0x200)==nt::ee::Stop::budget && write(0x1000b420,16)==nt::ee::Stop::budget);
+            check(write(0x1000b400,0x101)==nt::ee::Stop::budget && (read(0x1000b400)&0x100)!=0);
+            check((platform.completions.status()&16)==0);
+            std::fill_n(video_bytes.begin()+0x200,256,0xee); // Service owns its accepted batch.
+            check(write(0x10002000,0x50000000)==nt::ee::Stop::budget);
+            check(platform.video.matrix(0)[0]==0 && platform.video.matrix(0)[63]==63);
+            acknowledge();
+            check((read(0x1000b400)&0x100)!=0 && (platform.completions.status()&16)==0);
+            check(write(0x10002000,0x58000000)==nt::ee::Stop::budget);
+            check(platform.video.matrix(1)[0]==64 && platform.video.matrix(1)[63]==127);
+            acknowledge();
+            check(read(0x1000b400)==1 && read(0x1000b420)==0 && read(0x1000b410)==0x300 &&
+                  (platform.completions.status()&16)!=0 && (platform.completions.status()&1)==0);
+            check(write(0x10002000,0x40000000)==nt::ee::Stop::budget && read(0x10002000,true)==0x80818283);
+            acknowledge();
+            check(write(0x10002000,0x40000008)==nt::ee::Stop::budget && read(0x10002030,true)==0x81828384 &&
+                  (read(0x10002020)&127)==8);
+            acknowledge();
+            check(write(0x10002010,0x40000000)==nt::ee::Stop::budget && read(0x10002000,true)==0);
+            acknowledge();
+            check(write(0x10002000,0x40000000)==nt::ee::Stop::budget && read(0x10002004)==0xffffffff80000000ULL);
+            check((platform.interrupts.read(0x1000f000).value&256)==0);
+            check(upload()==nt::ee::Stop::budget && read(0x10002000,true)==0x33333333);
+            acknowledge();
+            check(write(0x10002000,0)==nt::ee::Stop::budget); acknowledge();
+            platform.completions.acknowledge(16);
+            // Resume a REF payload, then follow an END descriptor. Input is
+            // fixed-direction; bit zero is not a graphics-style direction gate.
+            video_bytes[0x200]=0x12; video_bytes[0x201]=0x34; video_bytes[0x202]=0x56; video_bytes[0x203]=0x78;
+            const std::uint32_t end_descriptor[4]{0x70000001,0,0,0};
+            std::memcpy(video_bytes.data()+0x400,end_descriptor,sizeof(end_descriptor));
+            std::fill_n(video_bytes.begin()+0x410,16,0xaa);
+            check(write(0x1000b410,0x200)==nt::ee::Stop::budget && write(0x1000b420,1)==nt::ee::Stop::budget &&
+                  write(0x1000b430,0x400)==nt::ee::Stop::budget);
+            check(write(0x1000f590,0x11201)==nt::ee::Stop::budget &&
+                  write(0x1000b400,0x30000104)==nt::ee::Stop::budget);
+            check(read(0x10002020)==0 && (platform.completions.status()&16)==0 && read(0x1000b420)==1);
+            // Paused work has not captured its source yet.
+            video_bytes[0x200]=0x9a;
+            check(write(0x1000f590,0x1201)==nt::ee::Stop::budget);
+            check((platform.completions.status()&16)!=0 && read(0x1000b420)==0);
+            check(write(0x10002000,0x40000000)==nt::ee::Stop::budget && read(0x10002000,true)==0x9a345678);
+            acknowledge();
+            check(write(0x10002000,0x4000003f)==nt::ee::Stop::budget);
+            acknowledge();
+            check(write(0x10002000,0x4000003f)==nt::ee::Stop::budget);
+            acknowledge();
+            check(write(0x10002000,0x40000002)==nt::ee::Stop::budget && read(0x10002000,true)==0xaaaaaaaa);
+            acknowledge();
+            // Original synthetic MPEG headers through the compiled command ABI.
+            // Check values, lengths, cursor and look-ahead across all table families.
+            struct Header { unsigned picture,table; const char* bits; std::uint32_t result; };
+            for (const auto header:std::array<Header,9>{{
+                {1,1,"1",0x10001}, {1,1,"01",0x20011},
+                {2,1,"001",0x30008}, {3,1,"000001",0x60011},
+                {0,0,"00000011000",0xb0021}, {0,0,"00000001000",0xb0023},
+                {0,2,"00000011001",0xbfff0}, {0,2,"1",0x10000},
+                {0,3,"11",0x2ffff}
+            }}) {
+                check(write(0x10002010,0x40000000|(header.picture<<24))==nt::ee::Stop::budget); acknowledge();
+                const auto bits=std::string("00000")+header.bits+"10100101101001011010010110100101";
+                std::array<std::uint8_t,16> source{};
+                for (unsigned i=0;i<bits.size();++i) if (bits[i]=='1') source[i/8]|=1U<<(7-i%8);
+                state.pc=0x3d0000; state.set(4,0x10007010); std::memcpy(&state.gpr[8],source.data(),16);
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+                check(write(0x10002000,0x30000005|(header.table<<26))==nt::ee::Stop::budget);
+                check(read(0x10002000,true)==header.result && read(0x10002030,true)==0xa5a5a5a5 &&
+                      (read(0x10002020)&127)==5+std::string(header.bits).size() && !(read(0x10002010)&0x4000));
+                acknowledge();
+            }
+            check(write(0x10002010,0x41000000)==nt::ee::Stop::budget); acknowledge();
+            check(write(0x10002000,96)==nt::ee::Stop::budget); acknowledge();
+            check(write(0x10002000,0x34000000)==nt::ee::Stop::budget);
+            const auto upload_ones=[&] {
+                state.pc=0x3d0000; state.set(4,0x10007010); state.gpr[8]={~0ULL,~0ULL};
+                check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+            };
+            upload_ones();
+            check(read(0x10002004)==0xffffffff80000000ULL && (read(0x10002020)&127)==96);
+            check((platform.interrupts.read(0x1000f000).value&256)==0);
+            upload_ones();
+            check(read(0x10002000,true)==0x10001 && read(0x10002030,true)==0xffffffff && (read(0x10002020)&127)==97);
+            acknowledge();
+            check(write(0x10002010,0x41000000)==nt::ee::Stop::budget); acknowledge();
+            state.pc=0x3d0000; state.set(4,0x10007010); state.gpr[8]={};
+            check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::budget);
+            check(write(0x10002000,0x34000000)==nt::ee::Stop::budget && read(0x10002000,true)==0 &&
+                  (read(0x10002010)&0x4000)!=0 && (read(0x10002020)&127)==0);
+            acknowledge();
+            check(write(0x10002010,0x40000000)==nt::ee::Stop::budget); acknowledge();
+            check(write(0x10002000,0x34000000)==nt::ee::Stop::unsupported_system && read(0x10002020)==0);
+        }
         {
             std::vector<std::uint8_t> bytes(1024);
             nt::ee::Memory memory{bytes.data(),bytes.size()};
@@ -2913,7 +3068,7 @@ int main() {
             sink.result=nt::ee::Stop::budget;
             check(read(0x1000e000)==1 && read(0x1000f520)==0x1201);
             check(write(0x1000e000,0)==nt::ee::Stop::budget);
-            for (const auto base:{0x1000b000U,0x1000b400U,0x1000c400U,0x1000c800U}) {
+            for (const auto base:{0x1000c400U,0x1000c800U}) {
                 for (const auto field:{0U,0x10U,0x20U,0x30U,0x40U,0x50U,0x80U}) {
                     check(write(base+field,0)==nt::ee::Stop::budget && read(base+field)==0);
                     check(write(base+field,0x100)==nt::ee::Stop::unsupported_system && read(base+field)==0);

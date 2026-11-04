@@ -9,6 +9,8 @@
 #include <nt/ee_packet_submission.hpp>
 #include <nt/ee_vector_owner.hpp>
 #include <nt/ee_scratchpad_copy.hpp>
+#include <nt/ee_video.hpp>
+#include <nt/ee_video_output.hpp>
 namespace nt::ee {
 class NativePlatform {
 public:
@@ -18,6 +20,11 @@ public:
         // Application startup owns a usable native submission queue. Explicit
         // guest suspension still gates it; completion requires real consumption.
         packet_submission.policy.enable_native_queue();
+        video_submission.consumer={this,[](void* raw,unsigned,std::span<const std::uint8_t> bytes) {
+            return static_cast<NativePlatform*>(raw)->video.submit(bytes);
+        },[](void* raw,unsigned) { return static_cast<NativePlatform*>(raw)->video.submission_pending(); }};
+        video_submission.consumer.accepted=[](void* raw,unsigned) { return static_cast<NativePlatform*>(raw)->video.accepted_bytes(); };
+        video_submission.consumer.cancel=[](void* raw,unsigned) { static_cast<NativePlatform*>(raw)->video.cancel_input(); };
     }
     NativePlatform(const NativePlatform&)=delete;
     NativePlatform& operator=(const NativePlatform&)=delete;
@@ -44,8 +51,11 @@ public:
     Stop (*debug_byte)(void*,std::uint8_t)=nullptr;
     NativeVectorOwner vector_owner;
     NativeGraphics graphics;
+    NativeVideo video;
+    NativeVideoOutput video_output;
     NativePacketSetup packet_setup;
     NativePacketSubmission packet_submission;
+    NativePacketSubmission video_submission{4,NativePacketSubmission::Direction::fixed_input};
     NativeScratchpadCopy scratchpad_copy;
     NativeInterrupts interrupts;
     NativeTimers timers;
@@ -80,10 +90,24 @@ private:
         }
     }
     static IoRead64 read64(void* context,std::uint32_t address) {
+        auto& self=*static_cast<NativePlatform*>(context);
+        if (NativeVideo::maps(address)) {
+            const auto low=self.video.read(address),high=self.video.read(address+4);
+            // Only CMD and TOP expose a 64-bit result/busy pair.
+            if (address!=0x10002000 && address!=0x10002030) return {Stop::unsupported_system};
+            return {low.status!=Stop::budget ? low.status : high.status,std::uint64_t(low.value)|(std::uint64_t(high.value)<<32)};
+        }
         if (address<0x12000000 || address>=0x12002000) return {Stop::memory_fault};
-        return static_cast<NativePlatform*>(context)->graphics.read(address);
+        return self.graphics.read(address);
     }
     static Stop write128(void* context,std::uint32_t address,runtime::Register value) {
+        if (address==0x10007010) {
+            auto& self=*static_cast<NativePlatform*>(context);
+            const auto bytes=std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(&value),sizeof(value));
+            const auto result=self.video.append(bytes);
+            if (result==Stop::budget) self.publish_video();
+            return result;
+        }
         // Programmed packet writes share the same native command consumer as
         // descriptor submissions, without inventing DMA completion events.
         if (address<0x10004000 || address>=0x10007000 || address%16) return Stop::memory_fault;
@@ -93,6 +117,7 @@ private:
         return self.packet_setup.consume(channel,bytes,self.vector_owner.storage.active);
     }
     static Stop write64(void* context,std::uint32_t address,std::uint64_t value) {
+        if (NativeVideo::maps(address)) return write(context,address,static_cast<std::uint32_t>(value));
         if (address<0x12000000 || address>=0x12002000) return Stop::memory_fault;
         auto& self=*static_cast<NativePlatform*>(context);
         return self.write_graphics(address,value);
@@ -105,11 +130,24 @@ private:
             return Stop::native_wait;
         return graphics.write(address,value);
     }
+    static bool video_input_address(std::uint32_t address) { return address>=0x1000b400 && address<=0x1000b480; }
+    static std::uint32_t video_input_descriptor(std::uint32_t address) { return 0x10008000+(address-0x1000b400); }
+    void publish_video() {
+        if (memory_) {
+            while (const auto copied=video_output.deliver(*memory_,packet_submission.policy.enabled(),video.output()))
+                video.consume_output(copied);
+        }
+        if (video.take_completion()) interrupts.raise(8);
+        if (memory_ && !video.submission_pending()) video_submission.complete(*memory_,0);
+    }
     static bool event_address(std::uint32_t address) { return address==0x1000f000 || address==0x1000f010; }
     static IoRead read(void* context,std::uint32_t address) {
         auto& self=*static_cast<NativePlatform*>(context);
         if (address==0x1000f130)
             return {self.debug_byte ? Stop::budget : Stop::unsupported_system,0};
+        if (NativeVideoOutput::maps(address)) return self.video_output.read(address);
+        if (video_input_address(address)) return self.video_submission.read(video_input_descriptor(address));
+        if (NativeVideo::maps(address)) return self.video.read(address);
         if (NativeGraphics::maps(address)) {
             const auto value=self.graphics.read(address); return {value.status,static_cast<std::uint32_t>(value.value)};
         }
@@ -131,6 +169,24 @@ private:
         auto& self=*static_cast<NativePlatform*>(context);
         if (address==0x1000f180)
             return self.debug_byte ? self.debug_byte(self.debug_context,static_cast<std::uint8_t>(value)) : Stop::unsupported_system;
+        if (NativeVideoOutput::maps(address)) {
+            if (!self.memory_) return Stop::invalid_state;
+            const auto status=self.video_output.write(*self.memory_,address,value);
+            if (status==Stop::budget) self.publish_video();
+            return status;
+        }
+        if (video_input_address(address)) {
+            if (!self.memory_) return Stop::invalid_state;
+            self.video_submission.policy=self.packet_submission.policy;
+            const auto result=self.video_submission.write(*self.memory_,video_input_descriptor(address),value);
+            if (result==Stop::budget) self.publish_video();
+            return result;
+        }
+        if (NativeVideo::maps(address)) {
+            const auto result=self.video.write(address,value);
+            if (result==Stop::budget) self.publish_video();
+            return result;
+        }
         if (NativeGraphics::maps(address)) return self.write_graphics(address,value);
         if (NativePacketSetup::maps(address)) {
             const auto result=self.packet_setup.write(address,value);
@@ -144,7 +200,14 @@ private:
             return resumed;
         }
         if (NativeScratchpadCopy::maps(address)) return self.memory_ ? self.scratchpad_copy.write(*self.memory_,self.packet_submission.policy,address,value) : Stop::invalid_state;
-        if (NativeSubmissionPolicy::maps(address)) return self.packet_submission.policy.write(address,value);
+        if (NativeSubmissionPolicy::maps(address)) {
+            const auto status=self.packet_submission.policy.write(address,value);
+            if (status!=Stop::budget || !self.memory_) return status;
+            self.video_submission.policy=self.packet_submission.policy;
+            const auto resumed=self.video_submission.resume(*self.memory_);
+            if (resumed==Stop::budget) self.publish_video();
+            return resumed;
+        }
         if (NativePacketSubmission::maps(address)) return self.memory_ ? self.packet_submission.write(*self.memory_,address,value) : Stop::invalid_state;
         if (NativeSifReceive::maps(address)) return self.sif_receive.write(address,value);
         if (address==0x1000e010) { self.completions.acknowledge(value); return Stop::budget; }

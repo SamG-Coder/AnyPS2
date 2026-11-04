@@ -317,6 +317,7 @@ int main(int argc,char** argv) {
         if (!graphics_directory.empty()) gpu.capture=std::make_unique<probe::GraphicsCapture>(graphics_directory,capture_display_only);
         nt::ee::NativePlatform platform; platform.attach(memory);
         platform.scratchpad_copy.protection=native_code_overlap;
+        platform.video_output.protection=native_code_overlap;
         platform.debug_byte=[](void*,std::uint8_t byte) {
             std::cerr.put(static_cast<char>(byte));
             return std::cerr ? nt::ee::Stop::budget : nt::ee::Stop::unsupported_system;
@@ -706,6 +707,11 @@ int main(int argc,char** argv) {
                      <<" native_sample_voice="<<iop_reset->sound().rejected_voice()
                      <<" native_sample_transfer="<<iop_reset->sound().transfer_failure()
                      <<" native_audio_error="<<iop_reset->audio().error()<<'\n';
+            if (iop_reset->sound().sample_error()!=nt::audio::SampleError::none) {
+                const auto sample=iop_reset->sound().rejected_sample();
+                std::cout<<"native_sample_start="<<nt::hex32(sample[0])
+                         <<" repeat="<<nt::hex32(sample[1])<<" pitch="<<sample[2]<<'\n';
+            }
             std::cout<<"native_sample_transfer_overlap=";
             for (auto value:iop_reset->sound().transfer_overlap()) std::cout<<nt::hex32(value)<<' ';
             std::cout<<'\n';
@@ -837,6 +843,20 @@ int main(int argc,char** argv) {
         }
         if (cdvd && !cdvd->error().empty()) std::cerr<<"disc initialization: "<<cdvd->error()<<'\n';
         if (!gpu.error.empty()) std::cerr<<"graphics: "<<gpu.error<<'\n';
+        std::cout<<" video_decoded_blocks="<<platform.video.decoded_blocks()<<" video_converted_blocks="<<platform.video.converted_blocks();
+        if ((memory.fault_address>=0x10002000 && memory.fault_address<0x10002040) ||
+            (memory.fault_address>=0x1000b000 && memory.fault_address<=0x1000b480)) {
+            std::cout<<" video_control="<<nt::hex32(platform.video.read(0x10002010).value)
+                <<" video_position="<<nt::hex32(platform.video.read(0x10002020).value)
+                <<" video_resets="<<platform.video.resets()
+                <<" video_input_pending="<<platform.video.submission_pending()
+                <<" video_submission_control="<<nt::hex32(platform.video_submission.read(0x10008000).value)
+                <<" video_submission_source="<<nt::hex32(platform.video_submission.read(0x10008010).value)
+                <<" video_submission_qwords="<<platform.video_submission.read(0x10008020).value
+                <<" video_submission_chain="<<nt::hex32(platform.video_submission.read(0x10008030).value)
+                <<" video_submission_source_status="<<unsigned(platform.video_submission.read(0x10008010).status)
+                <<" submissions_enabled="<<platform.packet_submission.policy.enabled();
+        }
         if (nt::ee::NativePacketSubmission::maps(memory.fault_address)) {
             const auto base=memory.fault_address&~0xfffU;
             const auto channel=(base-0x10008000)/0x1000;

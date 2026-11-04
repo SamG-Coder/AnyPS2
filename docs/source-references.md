@@ -30,6 +30,7 @@ applications are never bundled with these dependencies.
 | PCSX2 | `1f67c53b6723fcd6a90041a5b296f0e34a6a3222` | GPL-licensed behavioral reference for EE/IOP/VU instructions, public device interfaces and GS format/raster rules; no source linked or imported |
 | PS2SDK | `2a18d15da1332665451a9bcf9a0d4df9029c9490` | Public syscall/import ordinals, structures, RPC and module contracts; applicable file notices and AFL-2.0 remain upstream. audsrv implementation is LGPL-2.0 and is only an interface reference |
 | Play! | `1f27232772e484bfb79364b751b84f41f4c87481` | EE startup, thread/interrupt, module, file and sysclib behavior; retained [BSD attribution](third-party/Play-license.txt) |
+| Play! Framework | `587f278917acc0026bf5fc34b39f995fc26bd015` | MPEG coefficient, DC-size, coded-block-pattern, scan and quantizer tables adapted in `mpeg_tables.hpp`; BSD terms retained in that file and the [Play! notice](third-party/Play-license.txt). No framework IDCT implementation imported |
 | ps2tek | `1c9166066c3ab9ad089a4d12088acaa9476df4b6` | Public vector numeric, MAC/status and SIO2 interface documentation |
 | ARMSX2 | `05f55b8e197b6a5b31d2b258a3827a6b4769478b` | Published VU0 hardware-capture behavior; GPL-3.0-or-later, copyright 2026 ARMSX2 Dev Team. No implementation or test tables copied |
 | PS2DEV binutils | `3eb45ea37f0efd498d1de3cf9562de07197aefa8` | DVP overlay metadata: `include/elf/mips.h` (GPL-3.0-or-later), `gas/config/tc-dvp.c` (GPL-2.0-or-later); independent reader, no assembler copied |
@@ -58,6 +59,16 @@ The principal source areas consulted at those pins are:
   The image importer independently implements PSMCT16/PSMCT16S address-bit
   permutations checked against the public GS format tables. Palette conversion
   preserves CSM1/CSM2 selection, shared 16/32-bit entry storage and draw-time TEXA expansion.
+- **Video initialization:** PCSX2 `IPU/IPU.cpp`, `IPU/IPU.h`, `IPU/IPUdma.cpp`
+  and `IPU/IPU_MultiISA.cpp` for reset,
+  bitstream-position clearing, format/threshold settings, table upload, header
+  reads and completion events;
+  independent native command implementation, no PCSX2 decoder source imported.
+  Native MPEG header VLC tables in `ee_video_vlc.hpp` are adapted from Play!
+  `Source/ee/IPU_*Table.cpp` at the pin above, under its retained BSD notice.
+  These media-format tables decode video data, not executable instructions.
+  `IPU/yuv2rgb.cpp` documents the BT.601 coefficient precision and rounding used
+  as the color-conversion contract; no PCSX2 conversion implementation is imported.
 - **Input and audio:** PS2SDK PADMAN `sio2Cmds.c`, `padCmds.c`, `libpad.c`, audsrv,
   `iopheap.c`, `tools/adpenc/src/adpcm.c`, LIBSD `voice.c` and `block.c`;
   PCSX2 `SIO/Sio2.cpp`, `SIO/SioTypes.h`, `SIO/Pad/PadDualshock2.cpp` (command negotiation)

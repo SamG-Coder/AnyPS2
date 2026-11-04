@@ -17,6 +17,12 @@ public:
     std::vector<NativePacketOrigin> origins;
     std::uint32_t source=0,tag=0,tag_bits=0;
     struct CallStack { std::array<std::uint32_t,2> returns{}; unsigned size=0; } stack;
+    struct Chunk {
+        std::size_t begin,end;
+        std::uint32_t source,next_tag,tag_bits;
+        CallStack stack;
+    };
+    std::vector<Chunk> chunks;
     static Stop view(const Memory& memory,std::uint32_t raw,std::uint32_t size,
                      std::span<const std::uint8_t>& result) {
         const bool scratch=(raw&0x80000000U)!=0;
@@ -31,7 +37,7 @@ public:
     }
     using ReadView=Stop (*)(const Memory&,std::uint32_t,std::uint32_t,std::span<const std::uint8_t>&);
     Stop chain(const Memory& memory,std::uint32_t first,bool transfer_tags,bool interrupt_tags,
-               unsigned tag_bytes=8,ReadView read=view,bool with_stack=false) {
+               unsigned tag_bytes=8,ReadView read=view,bool with_stack=false,bool track_progress=false) {
         if ((tag_bytes!=8 && tag_bytes!=16) || !read || stack.size>stack.returns.size()) return Stop::invalid_state;
         tag=first;
         // Bound descriptor work independently of payload bytes, including empty chains.
@@ -71,6 +77,7 @@ public:
                 bytes.insert(bytes.end(),descriptor.end()-tag_bytes,descriptor.end());
             }
             if (!payload.empty()) {
+                if (track_progress) chunks.push_back({bytes.size(),bytes.size()+size,source,next,tag_bits,stack});
                 origins.push_back({bytes.size(),0});
                 bytes.insert(bytes.end(),payload.begin(),payload.end());
             }

@@ -20,6 +20,10 @@ public:
     const auto& transfer_arguments() const { return transfer_arguments_; }
     unsigned rejected_voice() const { return rejected_voice_; }
     audio::SampleError sample_error() const { return sample_error_; }
+    std::array<std::uint32_t,3> rejected_sample() const {
+        const auto& voice=voices_[rejected_voice_];
+        return {voice.start,voice.loop,voice.pitch};
+    }
     void connect(NativeHeapServices& heap) { heap_=&heap; }
     std::optional<NativeCallback> take() override {
         if (active_ || failure_) return {};

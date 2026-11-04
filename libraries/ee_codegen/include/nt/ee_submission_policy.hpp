@@ -42,7 +42,7 @@ private:
     // work remains unsupported. Never publish completion for initialization.
     static bool inactive_channel(std::uint32_t address) {
         const auto base=address&~0xffU,field=address&0xffU;
-        if (base!=0x1000b000 && base!=0x1000b400 && base!=0x1000c400 &&
+        if (base!=0x1000c400 &&
             base!=0x1000c800) return false;
         return (field<=0x50 && field%16==0) || field==0x80;
     }

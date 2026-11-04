@@ -51,6 +51,16 @@ occupy those segments. Unresolved callbacks remain coverage gaps. See
 - Disc access is read-only and bounded. Guest paths must not escape to arbitrary
   host files. The [legacy FILEIO contract](fileio.md) describes that endpoint;
   other native file/module services have separate support boundaries.
+- Video initialization supports reset, bitstream clearing, format/threshold settings
+  and uploaded quantization/palette tables. Bounded native input submissions feed
+  fixed-length and MPEG variable-length header reads and signal completion as
+  their bytes are accepted. BDEC decodes six MPEG coefficient blocks, applies
+  inverse quantization and an integer Q20 inverse DCT, and delivers planar 16-bit
+  samples to a checked RAM/scratchpad destination. Input, output and command
+  completion are separate. The IDCT is checked against the mathematical transform
+  within one sample; bit-identical hardware rounding is not established. CSC converts
+  planar 8-bit YCbCr batches to RGBA32 with defined coefficient rounding and alpha
+  thresholds. Whole-picture IDEC, RGB16 conversion and PACK remain unsupported.
 - Input uses SDL gamepad capabilities and haptics. Audio uses native XAudio2 owners
   for supported sample services. Unsupported device features are not advertised.
 

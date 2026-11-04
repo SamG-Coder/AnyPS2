@@ -7,8 +7,8 @@ publish their changes. See the [OSI license text](https://opensource.org/license
 
 ## Basis for the choice
 
-The recorded provenance identifies AnyPS2's implementation and synthetic fixtures
-as original work. The current build downloads zlib, HIDAPI and SDL separately; their
+The recorded provenance distinguishes AnyPS2's original implementation and synthetic
+fixtures from attributed adaptations. The current build downloads zlib, HIDAPI and SDL separately; their
 permissive terms can be retained alongside MIT. Consulting an emulator's documented
 interfaces is different from incorporating its implementation. The project records
 PCSX2 and God of War recompilation as references, not source donors or linked
@@ -25,7 +25,7 @@ that every historical line is independently authored.
 | zlib 1.3.1 | Downloaded importer dependency; retain the [zlib notice](third-party/zlib-LICENSE.txt) and identify modifications |
 | HIDAPI at `dbff4ea89f55a572aeb0c53a7b32ea70853ec260` | Downloaded Windows USB dependency; AnyPS2 selects its BSD option. Retain the [BSD notice](third-party/hidapi-license.txt) with binary distributions |
 | SDL at `bd9f6ca9ff0e9509f49980fc1b70837f54b6f244` | Static native gamepad provider; retain the [zlib-style SDL notice](third-party/SDL-license.txt) |
-| Play! | Public behavioral reference; retained [BSD notice](third-party/Play-license.txt), not relicensed as AnyPS2 |
+| Play! and Play! Framework | Behavioral references and adapted MPEG VLC/scan/quantizer tables in `ee_video_vlc.hpp` and `mpeg_tables.hpp`; retain the [BSD notice](third-party/Play-license.txt) in source and binary distributions. Adaptations are not relicensed as AnyPS2 |
 | LLVM/Clang, Visual Studio, Vulkan SDK and Windows APIs | External build tools/platform dependencies with their own terms; this source release does not redistribute them |
 | PS2DEV, PS2SDK and PCSX2 | Optional development/reference tools with their own licenses; not bundled into this source release or used as a native instruction fallback |
 | glampert cube demo | Separately acquired homebrew integration input; upstream source is MIT, while bundled assets require separate review. No demo source, assets, input ELF or converted binary is distributed here |
