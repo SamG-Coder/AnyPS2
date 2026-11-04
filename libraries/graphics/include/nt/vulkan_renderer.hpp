@@ -108,7 +108,9 @@ public:
     // lacks ordered fragment access or the renderer is the reference path.
     bool enable_vector_drawing();
     unsigned load_vector_kernel(std::span<const std::uint32_t> spirv,unsigned unit);
-    void draw_vectors(const VectorLaunch& launch,const VectorAssembly& assembly,const Sprite& target);
+    // command carries the batch's target state, palette snapshot and texture
+    // levels; its bounds are the conservative scissor rectangle.
+    void draw_vectors(const VectorLaunch& launch,const VectorAssembly& assembly,const SpriteCommand& command);
     void write(std::span<const PixelWrite> writes);
     void read(std::span<std::uint32_t> memory);
     void read_words(std::span<const unsigned> addresses,std::span<std::uint32_t> values);

@@ -14,7 +14,7 @@ public:
     // Vector batches need ordered fragment access; returns false without it.
     bool enable_vectors();
     unsigned load_vector_kernel(std::span<const std::uint32_t> spirv,unsigned unit);
-    void draw_vectors(const VectorLaunch&,const VectorAssembly&,const Sprite&);
+    void draw_vectors(const VectorLaunch&,const VectorAssembly&,const SpriteCommand&);
     void read(std::span<std::uint32_t> words);
     void read_words(std::span<const unsigned> addresses,std::span<std::uint32_t> values);
     void finish();

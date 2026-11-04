@@ -620,9 +620,9 @@ unsigned VulkanRenderer::load_vector_kernel(std::span<const std::uint32_t> spirv
         throw std::invalid_argument("LLVM vector kernels require Vulkan 1.3 and shaderInt8");
     return impl_->native->load_vector_kernel(spirv,unit);
 }
-void VulkanRenderer::draw_vectors(const VectorLaunch& launch,const VectorAssembly& assembly,const Sprite& target) {
+void VulkanRenderer::draw_vectors(const VectorLaunch& launch,const VectorAssembly& assembly,const SpriteCommand& command) {
     if (!impl_->native) throw std::invalid_argument("Vector batches require the native image renderer");
-    impl_->native->draw_vectors(launch,assembly,target);
+    impl_->native->draw_vectors(launch,assembly,command);
 }
 void VulkanRenderer::draw(std::span<const SpriteCommand> commands) {
     if (impl_->native) { impl_->native->draw(commands); return; }

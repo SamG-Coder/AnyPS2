@@ -1018,13 +1018,17 @@ unsigned NativeRaster::load_vector_kernel(std::span<const std::uint32_t> spirv,u
     if (!enable_vectors()) throw std::invalid_argument("Vector batches require ordered fragment access for overlapping primitives");
     return impl_->vectors->load_kernel(spirv,unit);
 }
-void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly& assembly,const Sprite& target) {
+void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly& assembly,const SpriteCommand& command) {
     auto& r=*impl_; Measure timing(r.stats.draw_ns,r.profiling);
+    const auto& target=command.draw;
+    // Textured batches need host-validated ST/Q values, so only host records may sample.
+    const auto texture_flags=(launch.kernel==vector_host_records) ? 0U : (1U|perspective_triangle_flag);
     if (!r.initialized || !r.vectors) throw std::invalid_argument("Vector drawing requires initialized storage and enabled vector batches");
     r.vectors->validate(launch);
     const auto count=vector_primitives(assembly.primitive,launch.elements);
     if (assembly.primitive<3 || assembly.primitive>5 || !count || count>records_per_slot ||
-        !(target.flags&triangle_flag) || (target.flags&(1|fog_flag|line_flag|perspective_triangle_flag)) ||
+        !(target.flags&triangle_flag) || (target.flags&(texture_flags|fog_flag|line_flag)) ||
+        ((target.flags&perspective_triangle_flag) && !(target.flags&1)) ||
         target.right>target.pitch*64 || target.left>=target.right || target.top>=target.bottom ||
         assembly.scissor!=std::array<std::uint32_t,4>{target.left,target.right-1,target.top,target.bottom-1} ||
         assembly.shaded!=unsigned(bool(target.flags&shaded_triangle_flag)) ||
@@ -1035,14 +1039,22 @@ void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly&
     for (const auto& kind:assembly.store) for (const auto store:kind)
         if (store!=vector_constant_word && store>=launch.element_words-1)
             throw std::invalid_argument("Vector register names a missing store word");
-    VulkanRenderer::validate_target(target);
+    {
+        // Target and texture-level rules of the per-draw validator; triangle
+        // rules hold by construction or were checked on the host.
+        // A fixed positive-area stand-in triangle selects the triangle rules.
+        auto shape=target; shape.flags&=~perspective_triangle_flag;
+        std::array<RasterVertex,3> triangle{};
+        triangle[1].x=16; triangle[2].y=16;
+        VulkanRenderer::validate(shape,triangle,command.fog_color,command.fog,command.levels);
+    }
     if (r.sets.size()>=8192) r.clear_views();
     ++r.surface_scope;
     const unsigned format=(target.flags&color_16_flag) ? ((target.flags&color_16s_flag) ? 10 : 2) : 0;
     auto& color=r.surface(target.base,target.pitch,target.bottom,false,false,false,&target,format);
     auto& depth=r.surface((target.flags&depth_test_flag) ? target.depth_base : 0,target.pitch,target.bottom,
         true,!(target.flags&depth_test_flag),false,&target);
-    const auto textures=r.textures_for(SpriteCommand{target});
+    const auto textures=r.textures_for(command);
     r.end_pass(); r.begin();
     if (r.records_used+count>records_per_slot || r.vectors->space(r.slot,launch)==NativeVectors::Space::slot_full) {
         r.flush(VK_NULL_HANDLE,VK_NULL_HANDLE,false); r.begin();
@@ -1051,7 +1063,8 @@ void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly&
         r.flush(); r.vectors->clear_resident(); r.begin();
     }
     const unsigned first=r.slot*records_per_slot+r.records_used;
-    const DrawRecord record{target,{},color.width,std::min(color.height,depth.height),0,0,0,1};
+    const DrawRecord record{target,{},color.width,std::min(color.height,depth.height),command.fog_color,0,
+        command.levels.control,command.levels.q};
     const auto words=std::bit_cast<std::array<std::uint32_t,NativeVectors::record_words>>(record);
     r.vectors->record(r.command,r.slot,launch,assembly,words,first,count);
     r.records_used+=count; r.collect_vectors();

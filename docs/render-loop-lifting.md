@@ -260,8 +260,13 @@ NOP and one final position, with GS state that `submit_vectors` would accept, is
 drawn as one batch from its own vertex records (`vector_host_records`: no element
 kernel or memory writes). The same registers still pass through the GS state
 machine with draw planning suppressed, so later CPU packets see exact register and
-vertex-queue state. Other packets keep the CPU planner. `ps2-native --gpu-triangles`
-enables it; it is off by default.
+vertex-queue state. Textured packets are included when their texture and mip pages
+cannot alias the color or depth target (a conservative GS page test) and, for
+perspective STQ, every primitive passes the per-draw validator's ST/Q range rules,
+checked on the host from the packet records; the palette is snapshotted in
+submission order as for CPU draws. Fogged packets and other cases keep the CPU
+planner. Element-kernel batches remain untextured, because their ST/Q values exist
+only on the device. `ps2-native --gpu-triangles` enables it; it is off by default.
 
 Frame slots own staging and status memory until their queue fence completes.
 `RenderStatistics` exposes vector launches, resident hits/uploads, staged bytes

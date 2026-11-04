@@ -11,6 +11,7 @@
 #include <variant>
 #include <deque>
 #include <chrono>
+#include <cmath>
 
 namespace nt::graphics {
 // Native command planning for a bounded GIF subset. No CPU/VU instruction code
@@ -62,9 +63,9 @@ public:
     void submit_vectors(VulkanRenderer& renderer,const VectorLaunch& launch) {
         if (!resident_) throw std::invalid_argument("Vector drawing requires resident storage");
         if (renderer_ && renderer_!=&renderer) throw std::invalid_argument("Resident drawing renderer changed");
-        const auto plan=plan_vectors(state_,launch.vertex,launch.elements,launch.element_words);
+        const auto plan=plan_vectors(state_,launch.vertex,launch.elements,launch.element_words,false);
         if (!renderer_) { renderer.upload(pixels_); renderer_=&renderer; }
-        renderer.draw_vectors(launch,plan.assembly,plan.target);
+        renderer.draw_vectors(launch,plan.assembly,SpriteCommand{plan.target});
         dirty_=true; last_draw_=plan.target;
         submitted_draws_+=vector_primitives(plan.assembly.primitive,launch.elements);
         // No guessed last-vertex values. A later packet must overwrite these
@@ -123,7 +124,11 @@ public:
                 if (const auto* batch=std::get_if<PacketVectors>(&operation)) {
                     const VectorLaunch launch{vector_host_records,{},{},batch->elements,batch->words,
                         std::span(batch->layout).first(batch->registers),nullptr,batch->records};
-                    renderer.draw_vectors(launch,batch->assembly,batch->target);
+                    SpriteCommand command{batch->target,{},{},batch->fog_color,0,batch->levels};
+                    if (batch->target.flags&64)
+                        snapshot_palette(std::span(command.palette).first((batch->target.flags&indexed8_flag) ? 256 : 16),
+                            candidate.palette,batch->bank,batch->palette16,batch->texa);
+                    renderer.draw_vectors(launch,batch->assembly,command);
                     dirty_=true;
                 } else if (const auto* load=std::get_if<PaletteLoad>(&operation)) {
                     std::array<std::uint32_t,256> words{};
@@ -200,6 +205,8 @@ private:
         std::array<VectorRegister,5> layout{};
         unsigned registers=0,elements=0,words=0;
         std::vector<std::uint32_t> records;
+        TextureLevels levels{};
+        unsigned bank=0; bool palette16=false; std::uint64_t texa=0; std::uint32_t fog_color=0;
     };
     using Operation=std::variant<Draw,ImageWrites,PaletteLoad,Finish,ImageDownload,CancelDownload,PacketVectors>;
     struct Workspace {
@@ -244,15 +251,26 @@ private:
     static constexpr unsigned unknown_vertices=1U<<5,unknown_packed_q=1U<<6;
     bool gpu_packets_=false;
     std::uint64_t gpu_packet_batches_=0;
-    struct VectorPlan { VectorAssembly assembly; Sprite target; unsigned written=0; };
+    struct VectorPlan { VectorAssembly assembly; Sprite target; unsigned written=0; TextureLevels levels{}; };
+    // Conservative GS page extent of a surface: 32-bit page geometry (64x32
+    // pixels per 2048-word page) covers at least the pages of every format.
+    struct Pages { unsigned first=0,count=0; };
+    static Pages surface_pages(unsigned first_page,unsigned pitch,unsigned height) {
+        return {first_page&511U,std::min(512U,std::max(1U,pitch)*((height+31)/32)+1)};
+    }
+    static bool overlaps(Pages a,Pages b) {
+        const auto inside=[](Pages range,unsigned page) { return ((page-range.first)&511U)<range.count; };
+        return inside(a,b.first) || inside(b,a.first);
+    }
     // Data-independent part of GPU primitive assembly from the current GS state.
     // Throws std::invalid_argument for anything the GPU path does not reproduce.
-    static VectorPlan plan_vectors(const State& state,std::span<const VectorRegister> vertex,unsigned elements,unsigned element_words) {
+    static VectorPlan plan_vectors(const State& state,std::span<const VectorRegister> vertex,unsigned elements,unsigned element_words,
+        bool textured) {
         const auto primitive=state.primitive&7;
         const auto attributes=state.use_primitive ? state.primitive : state.attributes;
         if (primitive<3 || primitive>5 || (attributes&~0x3ffU))
             throw std::invalid_argument("Vector drawing supports triangle list, strip and fan only");
-        if (attributes&16) throw std::invalid_argument("Textured vector drawing is not supported");
+        if ((attributes&16) && !textured) throw std::invalid_argument("Textured vector drawing is not supported");
         if (attributes&32) throw std::invalid_argument("Fogged vector drawing is not supported");
         if (state.vertex_count || (state.unknown&unknown_vertices))
             throw std::invalid_argument("Vector drawing cannot continue an existing primitive; write PRIM first");
@@ -297,7 +315,54 @@ private:
         target.top=assembly.scissor[2]; target.bottom=assembly.scissor[3]+1;
         target.flags|=triangle_flag|(assembly.shaded ? shaded_triangle_flag : 0);
         configure_draw(state,context,attributes,target);
+        if (attributes&16) {
+            plan.levels=plan_texture(target,context.texture,context.filter,context.clamp,state.texa,context.mipmap_bases);
+            if (!(attributes&256)) target.flags|=perspective_triangle_flag;
+            // Every primitive samples one snapshot, so texture storage must not be a
+            // target of the same batch (render-to-texture feedback keeps the CPU path).
+            const auto color=surface_pages(target.base/32,target.pitch,target.bottom);
+            const auto depth=surface_pages(target.depth_base/32,target.pitch,target.bottom);
+            for (unsigned level=0;level<=texture_lod_levels(plan.levels.control);++level) {
+                const auto base=level ? plan.levels.base[level-1] : target.texture_base;
+                const auto pitch=level ? plan.levels.pitch[level-1] : target.texture_pitch;
+                const auto texture=surface_pages(base/32,std::max(pitch,(target.texture_width>>level)/64),
+                    std::max(1U,target.texture_height>>level)+31);
+                if (overlaps(texture,color) || ((target.flags&depth_test_flag) && overlaps(texture,depth)))
+                    throw std::invalid_argument("Vector texture may alias its render target");
+            }
+        }
         return plan;
+    }
+    // VulkanRenderer::validate's perspective ST/Q range rules, applied on the host
+    // to every primitive slot of the batch (culled ones included, conservatively).
+    // A failing packet keeps the CPU planner, which then reports its diagnostic.
+    static bool perspective_valid(const State& state,const PacketVectors& batch) {
+        const auto& a=batch.assembly;
+        const auto word=[&](unsigned vertex,unsigned kind,unsigned n) {
+            const auto store=a.store[kind][n];
+            return store==vector_constant_word ? a.constant[kind][n] : batch.records[std::size_t(vertex)*batch.words+1+store];
+        };
+        const auto stq=[&](unsigned vertex) {
+            const auto s=(a.present&2) ? word(vertex,1,0) : state.s,t=(a.present&2) ? word(vertex,1,1) : state.t;
+            const auto q=(a.present&1) ? ((a.present&2) ? word(vertex,1,2) : 0x3f800000U) : state.q;
+            return std::array<float,3>{std::bit_cast<float>(s),std::bit_cast<float>(t),std::bit_cast<float>(q)};
+        };
+        const auto width=batch.target.texture_width,height=batch.target.texture_height;
+        const auto vertex_valid=[&](const std::array<float,3>& v) {
+            const auto [s,t,q]=v;
+            return std::isfinite(s) && std::isfinite(t) && std::isfinite(q) && std::abs(q)>=1e-20f && std::abs(q)<=1e20f &&
+                std::abs(s)<=1e20f && std::abs(t)<=1e20f &&
+                std::abs(double(s)/q*width*16)<=0x3fffffff && std::abs(double(t)/q*height*16)<=0x3fffffff;
+        };
+        const auto primitives=vector_primitives(a.primitive,batch.elements);
+        for (unsigned item=0;item<primitives;++item) {
+            const unsigned first=a.primitive==3 ? item*3 : a.primitive==4 ? item : 0;
+            const unsigned second=a.primitive==3 ? item*3+1 : item+1,third=a.primitive==3 ? item*3+2 : item+2;
+            const auto v0=stq(first),v1=stq(second),v2=stq(third);
+            if (!vertex_valid(v0) || !vertex_valid(v1) || !vertex_valid(v2) ||
+                std::signbit(v1[2])!=std::signbit(v0[2]) || std::signbit(v2[2])!=std::signbit(v0[2])) return false;
+        }
+        return true;
     }
     // A PACKED tag of only vertex registers, with the position last, is drawn
     // by GPU assembly when its GS state qualifies. NOP slots carry no data.
@@ -319,14 +384,21 @@ private:
         const auto primitives=vector_primitives(state.primitive&7,vertices);
         if (!batch.registers || !primitives || primitives>4096) return false;
         try {
-            const auto plan=plan_vectors(state,std::span(batch.layout).first(batch.registers),vertices,batch.words);
-            batch.assembly=plan.assembly; batch.target=plan.target;
+            const auto plan=plan_vectors(state,std::span(batch.layout).first(batch.registers),vertices,batch.words,true);
+            batch.assembly=plan.assembly; batch.target=plan.target; batch.levels=plan.levels;
         } catch (const std::invalid_argument&) { return false; }
         batch.records.assign(std::size_t(vertices)*batch.words,0);
         for (unsigned vertex=0;vertex<vertices;++vertex) for (unsigned n=0;n<batch.registers;++n) {
             const auto& q=payload[std::size_t(vertex)*nreg+slots[n]];
             std::copy(q.begin(),q.end(),batch.records.begin()+std::ptrdiff_t(vertex)*batch.words+1+n*4);
         }
+        if ((batch.target.flags&perspective_triangle_flag) && !perspective_valid(state,batch)) return false;
+        if (batch.target.flags&1) {
+            const auto& context=state.contexts[(state.use_primitive ? state.primitive : state.attributes)>>9&1];
+            batch.bank=unsigned((context.texture>>56)&(palette_is16(context.texture) ? 31 : 15));
+            batch.palette16=palette_is16(context.texture); batch.texa=state.texa;
+        }
+        batch.fog_color=state.fog_color;
         draws.emplace_back(std::move(batch));
         return true;
     }

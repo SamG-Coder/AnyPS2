@@ -173,7 +173,46 @@ void packets(VulkanRenderer& gpu,VulkanRenderer& cpu) {
             std::to_string(primitive)+" variant "+std::to_string(variant));
         batches+=1;
     }
-    // Textured triangles keep the CPU planner and still match.
+    // Textured triangles from a non-aliased texture: UV (FST) and perspective STQ.
+    const auto upload=[](NativeDrawing& drawing,VulkanRenderer& renderer) {
+        // An 8x8 32-bit texture at block 0x1000, away from the frame and depth pages.
+        Packet transfer=registers({{0x50,(0x1000ULL<<32)|(1ULL<<48)},{0x51,0},{0x52,8ULL|(8ULL<<32)},{0x53,0}});
+        transfer[0][0]&=~0x8000U;
+        transfer.push_back({0x8000U|16U,0x08000000,0,0}); // IMAGE, EOP, 16 quadwords
+        for (unsigned n=0;n<16;++n) transfer.push_back({0xff000000U|(n*0x111111U),0xff00ff00U^n,0x8020f040U+n,0x40804020U*n});
+        drawing.submit(renderer,std::span(&transfer,1));
+    };
+    for (bool fixed:{true,false}) for (unsigned primitive:{3U,4U,5U}) {
+        Fixture fixture;
+        NativeDrawing generated(true),packets(true);
+        require(generated.assemble_triangles_on_gpu(gpu),"GPU packet assembly unavailable");
+        for (auto [drawing,renderer]:{std::pair{&generated,&gpu},std::pair{&packets,&cpu}}) {
+            upload(*drawing,*renderer);
+            setup(*drawing,*renderer,primitive);
+            // TEX0: TBP 0x1000, TBW 1, 32-bit, 8x8, RGBA, decal.
+            const auto texture=registers({{0,primitive|8U|16U|64U|(fixed ? 256U:0U)},
+                {6,0x1000ULL|(1ULL<<14)|(3ULL<<26)|(3ULL<<30)|(1ULL<<34)|(1ULL<<35)}});
+            drawing->submit(*renderer,std::span(&texture,1));
+        }
+        const auto source=fixture.packet();
+        // Insert ST or UV before each vertex's RGBAQ: registers UV|ST, RGBAQ, XYZ2.
+        Packet packet{{0x8000U|Fixture::count,0x30000000,(fixed ? 3U:2U)|(1U<<4)|(5U<<8),0}};
+        for (unsigned i=0;i<Fixture::count;++i) {
+            const auto& xyz=source[1+i*2+1];
+            const float q=1.0f+float(i%3)*0.5f;
+            if (fixed) packet.push_back({(xyz[0]&1023U)/2,(xyz[1]&1023U)/2,0,0});
+            else packet.push_back({std::bit_cast<std::uint32_t>(float(xyz[0])/1024.0f*q),
+                std::bit_cast<std::uint32_t>(float(xyz[1])/1024.0f*q),std::bit_cast<std::uint32_t>(q),0});
+            packet.push_back(source[1+i*2]); packet.push_back(xyz);
+        }
+        const auto before=generated.gpu_packet_batches();
+        generated.submit(gpu,std::span(&packet,1)); packets.submit(cpu,std::span(&packet,1));
+        require(generated.gpu_packet_batches()==before+1,"Eligible textured packet was not assembled on the GPU");
+        require(generated.pixels()==packets.pixels(),std::string("GPU-assembled textured pixels differ: ")+
+            (fixed ? "UV":"STQ")+" primitive "+std::to_string(primitive));
+        ++batches;
+    }
+    // A texture in the frame's pages keeps the CPU planner and still matches.
     Fixture fixture;
     NativeDrawing generated(true),packets(true);
     require(generated.assemble_triangles_on_gpu(gpu),"GPU packet assembly unavailable");
