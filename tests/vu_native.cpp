@@ -86,6 +86,7 @@ extern "C" std::uint32_t nt_vu_continuation_count();
 extern "C" const std::uint8_t* nt_vu_continuation_image();
 extern "C" std::uint32_t nt_vu_continuation_size();
 extern "C" nt::vu::Result nt_vu_range(nt::vu::State*);
+extern "C" nt::vu::Result nt_vu_speculative(nt::vu::State*);
 extern "C" const nt::vu::Block* nt_vu_whole_blocks();
 extern "C" std::uint32_t nt_vu_whole_count();
 extern "C" const nt::vu::Block* nt_vu_mac_pipeline_blocks();
@@ -1429,6 +1430,15 @@ int run_core_tests() {
 // Host-float lane helpers must reproduce the integer encoding and flags exactly
 // whenever they do not request the exact path, and must request it at every
 // range boundary the integer implementation handles specially.
+// A host-float lane outside its exact range must not steer a compiled block
+// into a failure exit. 2^128 * 0.25 is finite in the VU range; a host
+// infinity would make the following DIV denominator unsupported.
+void test_speculative_block_failure() {
+    nt::vu::State state{};
+    state.vectors[0][0]=0x7f800000U; state.vectors[1][0]=0x3e800000U;
+    if (nt_vu_speculative(&state)!=nt::vu::Result::complete || state.vectors[2][0]!=0x7e800000U || state.quotient!=0)
+        throw std::runtime_error("Compiled VU block lost its exact result after a host-float range exit");
+}
 void test_fast_lane_arithmetic() {
     std::uint64_t state=0x9e3779b97f4a7c15ULL;
     const auto next=[&] { state^=state<<13; state^=state>>7; state^=state<<17; return std::uint32_t(state); };
@@ -1466,9 +1476,23 @@ void test_fast_lane_arithmetic() {
             throw std::runtime_error("Exponent 255 must use the exact VU path");
     if (!(nt_vu_multiply_fast(0x00800000U,0x00800000U)>>62) || !(nt_vu_multiply_fast(0x7f000000U,0x7f000000U)>>62))
         throw std::runtime_error("Product underflow and overflow must use the exact VU path");
+    // Every square-root radicand: both exponent parities and all significands,
+    // against a bit-serial integer reference independent of host floating point.
+    for (const std::uint32_t exponent:{127U,128U}) for (std::uint32_t mantissa=0;mantissa<0x800000U;++mantissa) {
+        const auto bits=(exponent<<23)|mantissa;
+        const auto radicand=std::uint64_t(mantissa|0x800000U)<<(exponent&1 ? 23 : 24);
+        std::uint64_t root=0;
+        for (std::uint64_t bit=1ULL<<23;bit;bit>>=1) if ((root|bit)*(root|bit)<=radicand) root|=bit;
+        if (radicand-root*root>root) ++root;
+        auto expected_exponent=(exponent+127)/2;
+        if (root==0x1000000) { root>>=1; ++expected_exponent; }
+        const auto expected=(expected_exponent<<23)|(std::uint32_t(root)&0x7fffffU);
+        if (nt::numeric::square_root_finite(bits).bits!=expected)
+            throw std::runtime_error("Square root differs from the integer reference at "+std::to_string(bits));
+    }
 }
 int main() {
-    try { test_fast_lane_arithmetic(); test_async_submission(); test_streamed_launches(false); test_streamed_launches(true); }
+    try { test_speculative_block_failure(); test_fast_lane_arithmetic(); test_async_submission(); test_streamed_launches(false); test_streamed_launches(true); }
     catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
     return run_core_tests();
 }

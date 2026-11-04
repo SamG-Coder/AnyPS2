@@ -120,6 +120,13 @@ public:
         pending.push_back({"i32",remaining,offset});
         commit();
     }
+    // Status reduction is a function of the published MAC word. For queue slots
+    // filled in this block, reuse the producer's reduced Z/S/U/O bits instead
+    // of reducing the stored MAC word again; unread MAC words then become dead.
+    std::array<std::string,4> queued_status_bits{};
+    std::string status_with(const std::string& bits,const std::string& previous) {
+        return value("or i32 "+value("and i32 "+previous+", 4080")+", "+value("or i32 "+bits+", "+value("shl i32 "+bits+", 6")));
+    }
     void advance_mac() {
         const auto mask=load("i32",offsetof(State,pending_mac_mask));
         const auto idle=value("icmp eq i32 "+mask+", 0");
@@ -132,7 +139,11 @@ public:
         pending.push_back({"i32",visible,offsetof(State,visible_mac)});
         const auto previous_status=value("select i1 "+idle+", i32 "+load("i32",offsetof(State,status))+
             ", i32 "+load("i32",offsetof(State,visible_status)));
-        const auto final_status=value("call i32 @nt_ee_vector_status_flags(i32 "+load("i32",offsetof(State,pending_mac))+", i32 "+previous_status+")");
+        const auto final_status=queued_status_bits[0].empty() ?
+            value("call i32 @nt_ee_vector_status_flags(i32 "+load("i32",offsetof(State,pending_mac))+", i32 "+previous_status+")") :
+            status_with(queued_status_bits[0],previous_status);
+        for (unsigned i=0;i<3;++i) queued_status_bits[i]=queued_status_bits[i+1];
+        queued_status_bits[3].clear();
         const auto published_status=value("or i32 "+final_status+", "+load("i32",offsetof(State,pending_product_sticky)));
         pending.push_back({"i32",value("select i1 "+ready+", i32 "+published_status+", i32 "+previous_status),offsetof(State,visible_status)});
         for (unsigned i=0;i<3;++i) {
@@ -223,7 +234,11 @@ private:
     unsigned next_=0;
 };
 }
-static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigned unit,std::string_view symbol,bool declarations,bool fallthrough=false) {
+// fast: host-float lane helpers with one exact-path decision per block.
+// exact: integer lane arithmetic only; the cold fallback of a fast block.
+enum class NumericPath { automatic, fast, exact };
+static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigned unit,std::string_view symbol,bool declarations,bool fallthrough=false,
+                        NumericPath path=NumericPath::automatic) {
     if (unit>1 || pairs.empty() || pairs.size()>2048) throw std::invalid_argument("Invalid VU native region");
     if (symbol.empty() || (symbol.front()>='0' && symbol.front()<='9') ||
         symbol.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")!=std::string_view::npos)
@@ -255,6 +270,30 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         for (const auto& family:missing) diagnostic+="\n  "+family;
         throw std::invalid_argument(diagnostic);
     }
+    // Blocks are transactions: state and data writes publish only at commit.
+    // A fast block evaluates every lane speculatively and, if any lane leaves
+    // the exact host-float range, discards its uncommitted work and returns
+    // the exact block's result instead. Nested delay helpers share caller
+    // state and remain exact-only.
+    if (path==NumericPath::automatic) {
+        const bool arithmetic=std::any_of(pairs.begin(),pairs.end(),[](const Pair& pair) {
+            switch (decode_upper(pair.upper).operation) {
+            case Arithmetic::add: case Arithmetic::subtract: case Arithmetic::multiply:
+            case Arithmetic::multiply_add: case Arithmetic::multiply_subtract:
+            case Arithmetic::outer_multiply: case Arithmetic::outer_subtract: return true;
+            default: return false;
+            }
+        });
+        if (!arithmetic || nested_branch) path=NumericPath::exact;
+        else {
+            emit_region(output,pairs,unit,std::string(symbol)+"_exact",declarations,fallthrough,NumericPath::exact);
+            declarations=false;
+            path=NumericPath::fast;
+        }
+    }
+    const bool fast_numeric=path==NumericPath::fast;
+    const bool exact_fallback=path==NumericPath::exact && symbol.ends_with("_exact");
+    std::string exact_required="0";
     Writer writer;
     // A scalar publication can cross an observer-free native region as one
     // operation. Q's status bits are disjoint from MAC current/sticky bits;
@@ -308,8 +347,10 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         <<"declare i64 @nt_vu_sine_finite(i32) nounwind willreturn memory(none)\n"
         <<"declare i64 @nt_vu_efu_square_root_finite(i32) nounwind willreturn memory(none)\n"
         <<"declare i32 @nt_vu_clip_flags(i32, i32, i32, i32) nounwind willreturn memory(none)\n"
-        <<"declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n";
-    writer.out<<"define i32 @"<<symbol<<"(ptr align "<<alignof(State)<<" %output) {\nentry:\n"
+        <<"declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n"
+        // Exact-path reruns are rare: lay out fast blocks for the committed path.
+        <<"!0 = !{!\"branch_weights\", i32 1, i32 4000}\n";
+    writer.out<<"define i32 @"<<symbol<<"(ptr align "<<alignof(State)<<" %output)"<<(exact_fallback ? " cold noinline optsize" : "")<<" {\nentry:\n"
         <<"  %state = alloca ["<<sizeof(State)-(writer.sparse_data ? Writer::data_size : 0)<<" x i8], align "<<alignof(State)<<"\n";
     if (writer.sparse_data)
         writer.out<<"  %state_tail = getelementptr i8, ptr %state, i64 "<<Writer::data_begin<<"\n"
@@ -368,15 +409,9 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         const bool arithmetic=outer || accumulate || upper.operation==Arithmetic::add || upper.operation==Arithmetic::subtract || upper.operation==Arithmetic::multiply;
         std::string product_sticky="0";
         std::string mac=outer ? writer.value("and i32 "+writer.load("i32",offsetof(State,mac))+", 4369") : "0";
-        // Evaluate every lane with the exact-when-flagged host-float helpers, then
-        // take the integer implementation for the whole instruction only when a
-        // lane leaves their operand range. Both paths produce the same encoding.
         std::array<std::string,4> packed_lanes{};
         if (!clipping && arithmetic) {
-            const auto label=std::to_string(index);
-            std::array<std::array<std::string,3>,4> operands{};
-            std::string required="0";
-            writer.out<<"  br label %fast"<<label<<"\nfast"<<label<<":\n";
+            std::string unsupported="0";
             for (unsigned lane=0;lane<4;++lane) {
                 if (!((outer ? 14U : upper.mask)&(8U>>lane))) continue;
                 const auto left=writer.vector(upper.left,outer ? (lane+1)%3 : lane);
@@ -384,38 +419,35 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
                     upper.operand==Operand::quotient ? writer.load("i32",offsetof(State,quotient)) :
                     writer.vector(upper.right,upper.operand==Operand::vector ? lane : static_cast<unsigned>(upper.operand)-static_cast<unsigned>(Operand::x));
                 const auto accumulator=accumulate ? writer.load("i32",offsetof(State,accumulator)+lane*4) : "0";
-                operands[lane]={left,right,accumulator};
+                const auto family=fast_numeric ? std::string("nt_vu_") : std::string("nt_ee_");
+                const auto suffix=fast_numeric ? std::string("_fast") : std::string("_finite");
                 packed_lanes[lane]=writer.value(accumulate ?
-                    "call i64 @nt_vu_multiply_accumulate_fast(i32 "+accumulator+", i32 "+left+", i32 "+right+", i32 "+(subtract_product ? "1" : "0")+")" : (upper.operation==Arithmetic::multiply || outer) ?
-                    "call i64 @nt_vu_multiply_fast(i32 "+left+", i32 "+right+")" :
-                    "call i64 @nt_vu_add_fast(i32 "+left+", i32 "+right+", i32 "+(upper.operation==Arithmetic::subtract ? "1" : "0")+")");
-                required=writer.value("or i64 "+required+", "+packed_lanes[lane]);
+                    "call i64 @"+family+"multiply_accumulate"+suffix+"(i32 "+accumulator+", i32 "+left+", i32 "+right+", i32 "+(subtract_product ? "1" : "0")+")" : (upper.operation==Arithmetic::multiply || outer) ?
+                    "call i64 @"+family+"multiply"+suffix+"(i32 "+left+", i32 "+right+")" :
+                    "call i64 @"+family+"add"+suffix+"(i32 "+left+", i32 "+right+", i32 "+(upper.operation==Arithmetic::subtract ? "1" : "0")+")");
+                if (fast_numeric) exact_required=writer.value("or i64 "+exact_required+", "+packed_lanes[lane]);
+                else unsupported=writer.value("or i64 "+unsupported+", "+packed_lanes[lane]);
             }
-            const auto flagged=writer.value("and i64 "+required+", 4611686018427387904");
-            const auto ready=writer.value("icmp eq i64 "+flagged+", 0");
-            writer.out<<"  br i1 "<<ready<<", label %math"<<label<<", label %exact"<<label<<"\nexact"<<label<<":\n";
-            std::array<std::string,4> exact{};
-            std::string unsupported="0";
-            for (unsigned lane=0;lane<4;++lane) {
-                if (packed_lanes[lane].empty()) continue;
-                const auto& [left,right,accumulator]=operands[lane];
-                exact[lane]=writer.value(accumulate ?
-                    "call i64 @nt_ee_multiply_accumulate_finite(i32 "+accumulator+", i32 "+left+", i32 "+right+", i32 "+(subtract_product ? "1" : "0")+")" : (upper.operation==Arithmetic::multiply || outer) ?
-                    "call i64 @nt_ee_multiply_finite(i32 "+left+", i32 "+right+")" :
-                    "call i64 @nt_ee_add_finite(i32 "+left+", i32 "+right+", i32 "+(upper.operation==Arithmetic::subtract ? "1" : "0")+")");
-                unsupported=writer.value("or i64 "+unsupported+", "+exact[lane]);
+            // Fast helpers never report unsupported operands; they request the exact block.
+            if (!fast_numeric) {
+                const auto label=std::to_string(index);
+                const auto supported=writer.value("icmp eq i64 "+writer.value("and i64 "+unsupported+", 8589934592")+", 0");
+                writer.out<<"  br i1 "<<supported<<", label %math"<<label<<", label %numeric_failure\nmath"<<label<<":\n";
             }
-            const auto supported=writer.value("icmp eq i64 "+writer.value("and i64 "+unsupported+", 8589934592")+", 0");
-            writer.out<<"  br i1 "<<supported<<", label %math"<<label<<", label %numeric_failure\nmath"<<label<<":\n";
-            for (unsigned lane=0;lane<4;++lane) if (!packed_lanes[lane].empty())
-                packed_lanes[lane]=writer.value("phi i64 ["+packed_lanes[lane]+", %fast"+label+"], ["+exact[lane]+", %exact"+label+"]");
         }
+        // Z/S/U/O status bits for this instruction's written lanes, as
+        // vector_status_flags reduces them from the MAC word.
+        std::string any_zero="0",any_bits="0",any_packed="0";
         if (!clipping && upper.operation!=Arithmetic::nop && (upper.result || arithmetic)) for (unsigned lane=0;lane<4;++lane) {
             if (!((outer ? 14U : upper.mask)&(8U>>lane))) continue;
             std::string value;
             if (arithmetic) {
                 const auto& packed=packed_lanes[lane];
                 value=writer.value("trunc i64 "+packed+" to i32");
+                any_zero=writer.value("or i1 "+(any_zero=="0" ? std::string("false") : any_zero)+", "+
+                    writer.value("icmp eq i32 "+writer.value("and i32 "+value+", 2147483647")+", 0"));
+                any_bits=writer.value("or i32 "+any_bits+", "+value);
+                any_packed=writer.value("or i64 "+any_packed+", "+packed);
                 const auto flags=writer.value("call i32 @nt_ee_vector_lane_flags(i64 "+packed+", i32 "+std::to_string(lane)+")");
                 mac=writer.value("or i32 "+mac+", "+flags);
                 if (accumulate) {
@@ -438,8 +470,20 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         }
         if (arithmetic) {
             const auto previous=writer.load("i32",offsetof(State,status));
-            const auto final_status=writer.value("call i32 @nt_ee_vector_status_flags(i32 "+mac+", i32 "+previous+")");
+            // OPMULA/OPMSUB retain the previous W flags in their MAC word.
+            std::string status_bits;
+            if (!outer) {
+                const auto sign=writer.value("and i32 "+writer.value("lshr i32 "+any_bits+", 30")+", 2");
+                const auto range=writer.value("trunc i64 "+writer.value("lshr i64 "+any_packed+", 30")+" to i32");
+                const auto underflow=writer.value("and i32 "+range+", 4");
+                const auto overflow=writer.value("and i32 "+writer.value("lshr i32 "+range+", 2")+", 8");
+                status_bits=writer.value("or i32 "+writer.value("or i32 "+writer.value("zext i1 "+any_zero+" to i32")+", "+sign)+", "+
+                    writer.value("or i32 "+underflow+", "+overflow));
+            }
+            const auto final_status=status_bits.empty() ?
+                writer.value("call i32 @nt_ee_vector_status_flags(i32 "+mac+", i32 "+previous+")") : writer.status_with(status_bits,previous);
             const auto status=writer.value("or i32 "+final_status+", "+product_sticky);
+            writer.queued_status_bits[3]=status_bits;
             writer.pending.push_back({"i32",product_sticky,offsetof(State,pending_product_sticky)+3*4});
             writer.pending.push_back({"i32",mac,offsetof(State,mac)});
             writer.pending.push_back({"i32",mac,offsetof(State,pending_mac)+3*4});
@@ -678,8 +722,23 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         writer.pending.push_back({"i32","0",offsetof(State,mac_read_delay)}); writer.commit();
         writer.pending.push_back({"i32","0",offsetof(State,clip_read_delay)}); writer.commit();
     }
+    if (fast_numeric) {
+        const auto required=writer.value("icmp ne i64 "+writer.value("and i64 "+exact_required+", 4611686018427387904")+", 0");
+        writer.out<<"  br i1 "<<required<<", label %exact_block, label %commit_block, !prof !0\nexact_block:\n"
+            <<"  %exact_result = call i32 @"<<symbol<<"_exact(ptr %output)\n  ret i32 %exact_result\ncommit_block:\n";
+    }
     writer.copy_state(true);
-    writer.out<<"  ret i32 "<<(graphics_block ? 6 : (branch_block || fallthrough) ? 2 : 0)<<"\nnumeric_failure:\n  ret i32 1\nschedule_failure:\n  ret i32 3\nmemory_failure:\n  ret i32 4\ncontext_failure:\n  ret i32 5\n}\n";
+    writer.out<<"  ret i32 "<<(graphics_block ? 6 : (branch_block || fallthrough) ? 2 : 0)<<'\n';
+    // A speculative lane outside the host-float range can steer a fast block
+    // into a failure exit. Every failure therefore reports the exact block's
+    // result; the exact block reaches the same exit only when it is genuine.
+    const std::array<std::pair<const char*,unsigned>,4> failures{{{"numeric_failure",1},{"schedule_failure",3},{"memory_failure",4},{"context_failure",5}}};
+    for (const auto& [label,code]:failures) {
+        writer.out<<label<<":\n";
+        if (fast_numeric) writer.out<<"  %"<<label<<"_exact = call i32 @"<<symbol<<"_exact(ptr %output)\n  ret i32 %"<<label<<"_exact\n";
+        else writer.out<<"  ret i32 "<<code<<'\n';
+    }
+    writer.out<<"}\n";
     output<<writer.out.str();
 }
 void emit_llvm(std::ostream& output,std::span<const Pair> pairs,unsigned unit,std::string_view symbol) {

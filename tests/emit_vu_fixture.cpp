@@ -51,6 +51,11 @@ int main(int argc,char** argv) {
     pair(0x80000335);
     save_block(".range","nt_vu_range",0);
     bytes.clear();
+    pair(0x80000335,(15U<<21)|(2U<<16)|(1U<<11)|(3U<<6)|42); // MUL VF3 = VF1 * VF2.
+    pair(0x80000000|(2U<<11)|(3U<<16)|(14U<<6)|60,0x400002ff); // DIV Q, VF2.x, VF3.x and E.
+    pair(0x80000335);
+    save_block(".speculative","nt_vu_speculative",0);
+    bytes.clear();
     pair(0x80000000|(1U<<11)|(1U<<16)|(1U<<6)|50); // VI1 += 1.
     pair((40U<<25)|(1U<<11)|(2U<<16)|3,(8U<<21)|(5U<<16)|(4U<<11)|(6U<<6)|40); // IBEQ sees old VI1; upper ADD.
     pair(0x80000000|(3U<<11)|(3U<<16)|(1U<<6)|50); // Always executed slot.

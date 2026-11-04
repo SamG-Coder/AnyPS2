@@ -2,6 +2,7 @@
 #include <nt/finite_arithmetic.hpp>
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstdint>
 
 namespace nt::numeric {
@@ -79,14 +80,14 @@ inline ScalarFlagResult square_root_finite(std::uint32_t bits,bool extended=fals
     if (!extended && exponent==255) return {0,0,false};
     if (!exponent) return {bits&0x80000000U,0};
     const auto significand=(bits&0x7fffffU)|0x800000U;
-    // The normalized radicand is an exact integer with at most 48 bits.
-    // Build its integer square root without relying on host FP rounding.
+    // The normalized radicand is an exact integer with at most 48 bits, so its
+    // host double conversion is exact. The host square root only proposes the
+    // integer root: the integer corrections establish floor(sqrt(N)) in any
+    // host rounding mode, without a bit-serial search.
     const auto radicand=std::uint64_t(significand)<<(exponent&1 ? 23 : 24);
-    std::uint64_t root=0;
-    for (std::uint64_t bit=1ULL<<23;bit;bit>>=1) {
-        const auto candidate=root|bit;
-        if (candidate*candidate<=radicand) root=candidate;
-    }
+    auto root=static_cast<std::uint64_t>(std::sqrt(static_cast<double>(radicand)));
+    while (root*root>radicand) --root;
+    while ((root+1)*(root+1)<=radicand) ++root;
     // sqrt(N) rounds above the midpoint iff N-root^2 > root. There is
     // no exact half-integer square root for an integer N, hence no tie.
     if (radicand-root*root>root) ++root;
