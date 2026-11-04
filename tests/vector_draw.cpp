@@ -255,6 +255,43 @@ void packets(VulkanRenderer& gpu,VulkanRenderer& cpu) {
         require(generated.pixels()==packets.pixels(),"GPU-assembled indexed-texture pixels differ for primitive "+std::to_string(primitive));
         ++batches;
     }
+    // REGLIST tags: 64-bit GS register values, two per quadword, RGBAQ with its own Q.
+    for (bool textured:{false,true}) for (unsigned primitive:{3U,4U,5U}) {
+        Fixture fixture;
+        NativeDrawing generated(true),packets(true);
+        require(generated.assemble_triangles_on_gpu(gpu),"GPU packet assembly unavailable");
+        for (auto [drawing,renderer]:{std::pair{&generated,&gpu},std::pair{&packets,&cpu}}) {
+            if (textured) upload(*drawing,*renderer);
+            setup(*drawing,*renderer,primitive);
+            const auto state=textured ? registers({{0,primitive|8U|16U|32U|64U},{0x3d,0x102030},
+                {6,0x1000ULL|(1ULL<<14)|(3ULL<<26)|(3ULL<<30)|(1ULL<<34)|(1ULL<<35)}}) : registers({{0,primitive|8U|64U}});
+            drawing->submit(*renderer,std::span(&state,1));
+        }
+        const auto source=fixture.packet();
+        std::vector<std::uint64_t> values;
+        for (unsigned i=0;i<Fixture::count;++i) {
+            const auto& color=source[1+i*2];
+            const auto& xyz=source[1+i*2+1];
+            const float q=1.0f+float(i%4)*0.25f;
+            if (textured) values.push_back(std::uint64_t(std::bit_cast<std::uint32_t>(float(xyz[0])/1024.0f*q))|
+                (std::uint64_t(std::bit_cast<std::uint32_t>(float(xyz[1])/1024.0f*q))<<32));
+            values.push_back((color[0]&255U)|((color[1]&255U)<<8)|((color[2]&255U)<<16)|(std::uint64_t(color[3]&255U)<<24)|
+                (std::uint64_t(std::bit_cast<std::uint32_t>(q))<<32));
+            values.push_back((xyz[0]&65535U)|((xyz[1]&65535U)<<16)|(std::uint64_t(textured ? (xyz[2]&0xffffffU)|((i*19U)<<24) : xyz[2])<<32));
+        }
+        const unsigned nreg=textured ? 3 : 2;
+        Packet packet{{0x8000U|Fixture::count,(nreg<<28)|0x04000000U,textured ? (2U|(1U<<4)|(4U<<8)) : (1U|(5U<<4)),0}};
+        for (std::size_t n=0;n<values.size();n+=2) {
+            const auto first=values[n],second=n+1<values.size() ? values[n+1] : 0;
+            packet.push_back({std::uint32_t(first),std::uint32_t(first>>32),std::uint32_t(second),std::uint32_t(second>>32)});
+        }
+        const auto before=generated.gpu_packet_batches();
+        generated.submit(gpu,std::span(&packet,1)); packets.submit(cpu,std::span(&packet,1));
+        require(generated.gpu_packet_batches()==before+1,"Eligible REGLIST packet was not assembled on the GPU");
+        require(generated.pixels()==packets.pixels(),std::string("GPU-assembled REGLIST pixels differ: ")+
+            (textured ? "textured" : "colored")+" primitive "+std::to_string(primitive));
+        ++batches;
+    }
     // A texture in the frame's pages keeps the CPU planner and still matches.
     Fixture fixture;
     NativeDrawing generated(true),packets(true);

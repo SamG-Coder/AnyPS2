@@ -15,7 +15,7 @@ layout(std430,set=0,binding=3) buffer Status { uint failures; } status;
 const uint plan_elements=0u, plan_element_words=1u, plan_record_first=2u, plan_primitive=3u;
 const uint plan_shaded=4u, plan_coverage=5u, plan_xyz_register=6u, plan_present=7u;
 const uint plan_offset=8u, plan_scissor=10u, plan_store=14u, plan_constant=34u, plan_state=54u;
-const uint plan_template=64u;
+const uint plan_reglist=60u, plan_template=64u;
 // DrawRecord words (native_raster.cpp, native.vert).
 const uint record_words=68u, record_left=0u, record_color=6u, record_vertices=32u, record_fog=65u;
 
@@ -25,7 +25,28 @@ uint register_word(uint element,uint kind,uint n) {
     return store==0xffffffffu ? P(plan_constant+kind*4u+n) : elements.words[element*P(plan_element_words)+1u+store];
 }
 struct Vertex { int x,y; uint color,u,v,s,t,q,z,fog; bool kick; };
+// REGLIST register values, as NativeDrawing::command applies them: RGBAQ is
+// color and Q, ST is S and T, UV is masked, FOG is the top byte, and the
+// position carries Z (24 bits with fog for XYZF) without an ADC bit.
+Vertex reglist_vertex(uint element) {
+    const uint present=P(plan_present);
+    Vertex r;
+    r.color=(present&1u)!=0u ? register_word(element,0u,0u) : P(plan_state);
+    r.q=(present&1u)!=0u ? register_word(element,0u,1u) : P(plan_state+1u);
+    r.s=(present&2u)!=0u ? register_word(element,1u,0u) : P(plan_state+2u);
+    r.t=(present&2u)!=0u ? register_word(element,1u,1u) : P(plan_state+3u);
+    const uint uv=(present&4u)!=0u ? (register_word(element,2u,0u)&0x3fff3fffu) : P(plan_state+4u);
+    r.u=uv&16383u; r.v=(uv>>16)&16383u;
+    r.fog=(present&8u)!=0u ? (register_word(element,3u,1u)>>24) : P(plan_state+5u);
+    const uint reg=P(plan_xyz_register);
+    const uint low=register_word(element,4u,0u),high=register_word(element,4u,1u);
+    r.x=int(low&65535u); r.y=int(low>>16);
+    if ((reg&1u)==0u) { r.z=high&0xffffffu; r.fog=high>>24; } else r.z=high;
+    r.kick=reg<12u;
+    return r;
+}
 Vertex vertex(uint element) {
+    if (P(plan_reglist)!=0u) return reglist_vertex(element);
     const uint present=P(plan_present);
     Vertex r;
     // RGBAQ takes Q from the preceding ST of the same record, otherwise from

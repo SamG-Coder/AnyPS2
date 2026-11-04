@@ -298,6 +298,7 @@ void NativeVectors::record(VkCommandBuffer command,unsigned slot,const VectorLau
         plan[14+kind*4+n]=assembly.store[kind][n]; plan[34+kind*4+n]=assembly.constant[kind][n];
     }
     std::copy(assembly.state.begin(),assembly.state.end(),plan.begin()+54);
+    plan[60]=assembly.reglist;
     std::copy(primitive.begin(),primitive.end(),plan.begin()+64);
     const auto plan_offset=host_allocate(std::as_bytes(std::span(plan)));
     const std::uint32_t zero=0;

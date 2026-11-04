@@ -634,6 +634,8 @@ int main(int argc,char** argv) {
                     <<" submissions="<<s.submissions-p.submissions<<" uploads="<<s.uploads-p.uploads
                     <<" triangles="<<s.triangles-p.triangles<<" barriers="<<s.feedback_barriers-p.feedback_barriers
                     <<" draw_calls="<<s.draw_calls-p.draw_calls<<" batched_primitives="<<s.batched_primitives-p.batched_primitives<<'\n'<<std::flush;
+                if (gpu.gpu_triangles) for (const auto& [reason,count]:gpu.drawing.gpu_packet_fallbacks())
+                    std::cout<<"gpu_triangle_fallback count="<<count<<" reason="<<reason<<'\n';
                 update_intervals.clear(); profile_updates=0; profile_started=now;
                 input_interval_gap_max_ms=0;
                 previous_drain_time=gpu.drain_time;

@@ -11,6 +11,8 @@
 #include <variant>
 #include <deque>
 #include <chrono>
+#include <map>
+#include <string>
 #include <cmath>
 
 namespace nt::graphics {
@@ -58,6 +60,8 @@ public:
         return true;
     }
     std::uint64_t gpu_packet_batches() const { return gpu_packet_batches_; }
+    // Why tags kept the CPU planner while GPU assembly was enabled, by reason.
+    const std::map<std::string,std::uint64_t>& gpu_packet_fallbacks() const { return gpu_packet_fallbacks_; }
     // The converter supplies a precompiled element kernel and a PACKED output
     // layout. This entry never reads vertex results back to the CPU.
     void submit_vectors(VulkanRenderer& renderer,const VectorLaunch& launch) {
@@ -88,6 +92,7 @@ public:
         struct ReleaseWorkspace { Workspace& workspace; ~ReleaseWorkspace() { workspace.clear(); } } release{workspace_};
         auto candidate=state_;
         candidate.gpu_packets=gpu_packets_ && resident_;
+        candidate.fallbacks=&gpu_packet_fallbacks_;
         auto& draws=workspace_.operations;
         std::size_t total=0;
         for (const auto& packet:packets) {
@@ -229,6 +234,7 @@ private:
         // primitives are drawn by a PacketVectors batch. Never set across tags.
         bool suppress_draws=false;
         bool gpu_packets=false;
+        std::map<std::string,std::uint64_t>* fallbacks=nullptr; // diagnostics only
         std::array<Context,2> contexts;
         unsigned primitive=0,attributes=0,color=0,x=0,y=0;
         unsigned scan_mask=0;
@@ -251,6 +257,7 @@ private:
     static constexpr unsigned unknown_vertices=1U<<5,unknown_packed_q=1U<<6;
     bool gpu_packets_=false;
     std::uint64_t gpu_packet_batches_=0;
+    std::map<std::string,std::uint64_t> gpu_packet_fallbacks_;
     struct VectorPlan { VectorAssembly assembly; Sprite target; unsigned written=0; TextureLevels levels{}; };
     // Conservative GS page extent of a surface: 32-bit page geometry (64x32
     // pixels per 2048-word page) covers at least the pages of every format.
@@ -265,7 +272,7 @@ private:
     // Data-independent part of GPU primitive assembly from the current GS state.
     // Throws std::invalid_argument for anything the GPU path does not reproduce.
     static VectorPlan plan_vectors(const State& state,std::span<const VectorRegister> vertex,unsigned elements,unsigned element_words,
-        bool textured) {
+        bool textured,bool reglist=false) {
         const auto primitive=state.primitive&7;
         const auto attributes=state.use_primitive ? state.primitive : state.attributes;
         if (primitive<3 || primitive>5 || (attributes&~0x3ffU))
@@ -279,13 +286,15 @@ private:
         auto& assembly=plan.assembly;
         for (auto& store:assembly.store) store.fill(vector_constant_word);
         assembly.primitive=primitive; assembly.shaded=bool(attributes&8); assembly.coverage=bool(attributes&128);
+        assembly.reglist=reglist ? 1U : 0U;
         for (unsigned i=0;i<vertex.size();++i) {
             const auto& reg=vertex[i];
             unsigned kind=0;
             switch (reg.reg) {
             case 1: kind=0; break;
             case 2:
-                if (assembly.present&1) throw std::invalid_argument("Vector ST must precede RGBAQ");
+                // PACKED RGBAQ takes Q from a preceding ST; a REGLIST RGBAQ carries Q.
+                if ((assembly.present&1) && !reglist) throw std::invalid_argument("Vector ST must precede RGBAQ");
                 kind=1; break;
             case 3: kind=2; break;
             case 10: kind=3; break;
@@ -343,7 +352,7 @@ private:
         };
         const auto stq=[&](unsigned vertex) {
             const auto s=(a.present&2) ? word(vertex,1,0) : state.s,t=(a.present&2) ? word(vertex,1,1) : state.t;
-            const auto q=(a.present&1) ? ((a.present&2) ? word(vertex,1,2) : 0x3f800000U) : state.q;
+            const auto q=!(a.present&1) ? state.q : a.reglist ? word(vertex,0,1) : (a.present&2) ? word(vertex,1,2) : 0x3f800000U;
             return std::array<float,3>{std::bit_cast<float>(s),std::bit_cast<float>(t),std::bit_cast<float>(q)};
         };
         const auto width=batch.target.texture_width,height=batch.target.texture_height;
@@ -366,32 +375,66 @@ private:
     // A PACKED tag of only vertex registers, with the position last, is drawn
     // by GPU assembly when its GS state qualifies. NOP slots carry no data.
     static bool vector_packet(const State& state,std::span<const Quadword> payload,unsigned nreg,
-        std::uint64_t registers,unsigned vertices,std::vector<Operation>& draws) {
+        std::uint64_t registers,unsigned vertices,bool reglist,std::vector<Operation>& draws) {
+        const auto fallback=[&](const std::string& reason) {
+            if (state.fallbacks) ++(*state.fallbacks)[reason];
+            return false;
+        };
         PacketVectors batch;
         std::array<unsigned,16> slots{};
         for (unsigned i=0;i<nreg;++i) {
             const auto reg=unsigned((registers>>(i*4))&15);
             if (reg==15) continue;
-            if (reg!=1 && reg!=2 && reg!=3 && reg!=10 && reg!=4 && reg!=5 && reg!=12 && reg!=13) return false;
-            if (batch.registers==batch.layout.size()) return false;
+            if (reg!=1 && reg!=2 && reg!=3 && reg!=10 && reg!=4 && reg!=5 && reg!=12 && reg!=13)
+                return fallback("PACKED register "+std::to_string(reg)+" in the vertex record");
+            if (batch.registers==batch.layout.size()) return fallback("more than five vertex registers");
             auto& entry=batch.layout[batch.registers];
             entry.reg=reg;
-            for (unsigned word=0;word<4;++word) entry.store[word]=batch.registers*4+word;
+            const unsigned register_words=reglist ? 2U : 4U;
+            for (unsigned word=0;word<register_words;++word) entry.store[word]=batch.registers*register_words+word;
             slots[batch.registers++]=i;
         }
-        batch.elements=vertices; batch.words=1+batch.registers*4;
+        batch.elements=vertices; batch.words=1+batch.registers*(reglist ? 2U : 4U);
         const auto primitives=vector_primitives(state.primitive&7,vertices);
-        if (!batch.registers || !primitives || primitives>4096) return false;
+        if (!batch.registers || !primitives || primitives>4096) return fallback("primitive count outside 1-4096");
         try {
-            const auto plan=plan_vectors(state,std::span(batch.layout).first(batch.registers),vertices,batch.words,true);
+            const auto plan=plan_vectors(state,std::span(batch.layout).first(batch.registers),vertices,batch.words,true,reglist);
             batch.assembly=plan.assembly; batch.target=plan.target; batch.levels=plan.levels;
-        } catch (const std::invalid_argument&) { return false; }
+        } catch (const std::invalid_argument& error) { return fallback(error.what()); }
         batch.records.assign(std::size_t(vertices)*batch.words,0);
         for (unsigned vertex=0;vertex<vertices;++vertex) for (unsigned n=0;n<batch.registers;++n) {
-            const auto& q=payload[std::size_t(vertex)*nreg+slots[n]];
-            std::copy(q.begin(),q.end(),batch.records.begin()+std::ptrdiff_t(vertex)*batch.words+1+n*4);
+            const auto entry=std::size_t(vertex)*nreg+slots[n];
+            auto* record=batch.records.data()+std::size_t(vertex)*batch.words+1;
+            if (reglist) {
+                // REGLIST packs two 64-bit register values per quadword.
+                const auto& q=payload[entry/2];
+                record[n*2]=q[(entry&1)*2]; record[n*2+1]=q[(entry&1)*2+1];
+            } else std::copy(payload[entry].begin(),payload[entry].end(),record+n*4);
         }
-        if ((batch.target.flags&perspective_triangle_flag) && !perspective_valid(state,batch)) return false;
+        if ((batch.target.flags&perspective_triangle_flag) && !perspective_valid(state,batch))
+            return fallback("perspective ST/Q outside the validated range");
+        // Bound the batch by all of its vertices, as plan_sprite bounds a triangle:
+        // a superset of every primitive drawn, and the surface extent CPU draws use.
+        {
+            const auto& a=batch.assembly;
+            int low_x=65535,low_y=65535,high_x=0,high_y=0;
+            for (unsigned vertex=0;vertex<vertices;++vertex) {
+                const auto* record=batch.records.data()+std::size_t(vertex)*batch.words+1;
+                const auto first=record[a.store[4][0]];
+                const int x=int(first&65535U),y=int(a.reglist ? first>>16 : record[a.store[4][1]]&65535U);
+                low_x=std::min(low_x,x); high_x=std::max(high_x,x); low_y=std::min(low_y,y); high_y=std::max(high_y,y);
+            }
+            const auto ceil_pixel=[](int value) { return value>=0 ? (value+15)/16 : value/16; };
+            const int coverage=a.coverage ? 15 : 0;
+            const int left=std::max(ceil_pixel(std::max(0,low_x-coverage)-a.offset_x),int(a.scissor[0]));
+            const int right=std::min(ceil_pixel(high_x-a.offset_x),int(a.scissor[1])+1);
+            const int top=std::max(ceil_pixel(std::max(0,low_y-coverage)-a.offset_y),int(a.scissor[2]));
+            const int bottom=std::min(ceil_pixel(high_y-a.offset_y),int(a.scissor[3])+1);
+            // Every primitive is outside the scissor: nothing to draw on either path.
+            if (left>=right || top>=bottom) return true;
+            batch.target.left=unsigned(left); batch.target.right=unsigned(right);
+            batch.target.top=unsigned(top); batch.target.bottom=unsigned(bottom);
+        }
         if (batch.target.flags&1) {
             const auto& context=state.contexts[(state.use_primitive ? state.primitive : state.attributes)>>9&1];
             batch.bank=unsigned((context.texture>>56)&(palette_is16(context.texture) ? 31 : 15));
@@ -595,8 +638,13 @@ private:
             }
             // Only the triangle kicks of this tag are suppressed; register state
             // is still updated by the loop below.
-            state.suppress_draws=state.gpu_packets && !format && entries && (low&0x7fffU)>=3 &&
-                vector_packet(state,packet.subspan(cursor,count),unsigned(nreg),registers,unsigned(low&0x7fffU),draws);
+            // Only tags that write a position can draw; state-only tags are not fallbacks.
+            bool positions=false;
+            for (unsigned i=0;i<nreg;++i) { const auto reg=(registers>>(i*4))&15; positions|=reg==4 || reg==5 || reg==12 || reg==13; }
+            const bool candidate=state.gpu_packets && format<2 && entries && positions;
+            if (candidate && state.fallbacks && (low&0x7fffU)<3) ++(*state.fallbacks)["fewer than three vertices"];
+            state.suppress_draws=candidate && (low&0x7fffU)>=3 &&
+                vector_packet(state,packet.subspan(cursor,count),unsigned(nreg),registers,unsigned(low&0x7fffU),format==1,draws);
             unsigned register_index=0;
             for (std::uint64_t index=0;format<2 && index<entries;++index) {
                 const auto reg=unsigned((registers>>(register_index*4))&15);

@@ -56,6 +56,9 @@ struct VectorAssembly {
     std::array<std::array<std::uint32_t,4>,5> store{};     // per kind and word
     std::array<std::array<std::uint32_t,4>,5> constant{};
     std::array<std::uint32_t,6> state{};    // color, q, s, t, uv, fog when not in the record
+    // 1: records hold REGLIST register values (low and high 32-bit words), with
+    // GS register semantics: RGBAQ carries Q, no ADC bit. 0: PACKED quadwords.
+    std::uint32_t reglist=0;
 };
 // Register kinds of VectorAssembly::store/constant/present.
 enum class VectorRegisterKind : unsigned { color=0, texture=1, uv=2, fog=3, position=4 };

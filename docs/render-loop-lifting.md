@@ -266,7 +266,23 @@ perspective STQ, every primitive passes the per-draw validator's ST/Q range rule
 checked on the host from the packet records; the palette is snapshotted in
 submission order as for CPU draws. Fog uses the per-vertex values and fog color
 as CPU draws do. Other cases keep the CPU planner. Element-kernel batches remain untextured, because their ST/Q values exist
-only on the device. `ps2-native --gpu-triangles` enables it; it is off by default.
+only on the device. REGLIST tags are included: records hold the 64-bit register
+values and the assembler applies GS register semantics (RGBAQ carries Q, no ADC).
+A host-record batch is bounded by all of its vertices, as `plan_sprite` bounds a
+primitive, so it requests the same surface extent as CPU draws; test flags are
+normalized as for CPU draws. Assembly compute runs in a per-slot prologue command
+buffer submitted before the slot's draws, so batches are instanced draws inside
+the current render pass. `ps2-native --gpu-triangles` enables the path (off by
+default) and the graphics profile reports `gpu_triangle_batches` and fallback
+reasons.
+
+A private local capture of 9,143 GT4 graphics batches, replayed through the CPU
+planner and through this path, produced identical complete GS memory at 45
+checkpoints and at the end, with 9,306 GPU-assembled tags. Most remaining tags
+have fewer than three vertices (sprites and single-vertex tags). In headless GT4
+runs on one host the path rendered about 24,000 batches per second but still
+cost more render-thread CPU time than the CPU planner (about 0.96 s against
+0.74 s per 5 s window, mostly fence waits); no speedup is claimed.
 
 Frame slots own staging and status memory until their queue fence completes.
 `RenderStatistics` exposes vector launches, resident hits/uploads, staged bytes

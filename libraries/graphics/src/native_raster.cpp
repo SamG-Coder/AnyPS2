@@ -51,6 +51,16 @@ const std::uint32_t texture_decode_code[]=
 ;
 constexpr unsigned decode_sets_per_slot=64;
 #endif
+// An enabled NEVER alpha test always takes its failure action. FB_ONLY and
+// RGB_ONLY cannot write depth. With an ALWAYS depth comparison they do not read
+// it either: avoid creating dependencies on an unused image. Applies to CPU
+// draws and vector batches alike.
+void normalize_tests(Sprite& draw) {
+    const auto failure=(draw.test>>12)&3U;
+    if ((draw.test&15U)==1U && (failure==1 || failure==3)) draw.flags&=~depth_write_flag;
+    if ((draw.test&15U)==1U && failure==2) draw.mask=0xffffffffU;
+    if (((draw.test>>17)&3U)==1U && !(draw.flags&depth_write_flag)) draw.flags&=~depth_test_flag;
+}
 struct DrawRecord { Sprite draw; std::array<RasterVertex,3> vertices; unsigned width,height,fog_color,fog; std::uint32_t lod_control; float lod_q; };
 static_assert(sizeof(DrawRecord)==272);
 // Binding 0 holds level 0 followed by MIPTBP levels 1-6.
@@ -85,7 +95,9 @@ struct NativeRaster::Impl {
     VkPhysicalDevice physical; VkDevice device; VkQueue queue;
     bool ordered_fragments=false;
     VkQueryPool timestamps{}; double timestamp_period=0; unsigned timestamp_bits=0;
-    struct Submission { VkCommandBuffer command{}; VkFence fence{}; std::uint64_t serial=0; bool measured=false; };
+    // prologue holds vector batch compute work. It is submitted before command,
+    // so a slot's draws run in render passes uninterrupted by that work.
+    struct Submission { VkCommandBuffer command{},prologue{}; VkFence fence{}; std::uint64_t serial=0; bool measured=false; };
     std::array<Submission,frame_slots> slots{};
     unsigned slot=0; std::uint64_t submitted=0,completed=0;
     VkCommandPool pool{}; VkCommandBuffer command{};
@@ -169,6 +181,11 @@ struct NativeRaster::Impl {
     RasterHazards hazards;
     VkFramebuffer current_framebuffer{};
     unsigned current_width=0,current_height=0;
+    bool prologue_recording=false;
+    // Surfaces of the previous vector batch, reused while they stay current.
+    struct VectorTarget { Image* color=nullptr; Image* depth=nullptr; Sprite draw{}; };
+    VectorTarget vector_target;
+    VkCommandBuffer vector_commands();
     Impl(VkPhysicalDevice p,VkDevice d,VkQueue q,bool ordered):physical(p),device(d),queue(q),ordered_fragments(ordered) {}
     void initialize(unsigned family);
     ~Impl();
@@ -279,13 +296,33 @@ void NativeRaster::Impl::prepare_slot() {
     decodes_used=0;
 #endif
 }
+VkCommandBuffer NativeRaster::Impl::vector_commands() {
+    begin();
+    auto& entry=slots[slot];
+    if (!prologue_recording) {
+        checked(vkResetCommandBuffer(entry.prologue,0),"Reset native vector commands");
+        VkCommandBufferBeginInfo b{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO}; b.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        checked(vkBeginCommandBuffer(entry.prologue,&b),"Begin native vector commands"); prologue_recording=true;
+    }
+    return entry.prologue;
+}
 void NativeRaster::Impl::flush(VkSemaphore acquired,VkSemaphore rendered,bool wait) {
     end_pass();
     if (recording) {
         auto& entry=slots[slot];
         if (timestamps) vkCmdWriteTimestamp(command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timestamps,slot*2+1);
         checked(vkEndCommandBuffer(command),"End native commands"); checked(vkResetFences(device,1,&entry.fence),"Reset native fence");
+        const VkCommandBuffer buffers[]{entry.prologue,command};
         VkSubmitInfo s{VK_STRUCTURE_TYPE_SUBMIT_INFO}; s.commandBufferCount=1; s.pCommandBuffers=&command;
+        if (prologue_recording) {
+            // Vector compute results become visible to the slot's draws.
+            VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER}; b.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_TRANSFER_WRITE_BIT;
+            b.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(entry.prologue,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,1,&b,0,nullptr,0,nullptr);
+            checked(vkEndCommandBuffer(entry.prologue),"End native vector commands");
+            s.commandBufferCount=2; s.pCommandBuffers=buffers; prologue_recording=false;
+        }
         VkPipelineStageFlags stage=VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         if (acquired) { s.waitSemaphoreCount=1; s.pWaitSemaphores=&acquired; s.pWaitDstStageMask=&stage; s.signalSemaphoreCount=1; s.pSignalSemaphores=&rendered; }
         { Measure timing(stats.wait_ns,profiling); checked(vkQueueSubmit(queue,1,&s,entry.fence),"Submit native graphics"); }
@@ -339,6 +376,7 @@ void NativeRaster::Impl::initialize(unsigned family) {
     VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     for (auto& entry:slots) {
         checked(vkAllocateCommandBuffers(device,&ca,&entry.command),"Allocate native commands");
+        checked(vkAllocateCommandBuffers(device,&ca,&entry.prologue),"Allocate native vector commands");
         checked(vkCreateFence(device,&fi,nullptr,&entry.fence),"Create native fence");
     }
     VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO}; bi.size=staging_bytes*frame_slots; bi.usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -529,6 +567,7 @@ void NativeRaster::Impl::synchronize_source(Region requested) {
     for (auto* i:ordered) export_image(*i);
 }
 void NativeRaster::Impl::clear_views() {
+    vector_target={};
     flush(); for (auto [k,f]:framebuffers) vkDestroyFramebuffer(device,f,nullptr); framebuffers.clear(); sets.clear(); present_sets.clear();
     field_sets.clear();
     checked(vkResetDescriptorPool(device,descriptor_pool,0),"Reset native resource descriptors");
@@ -1020,7 +1059,9 @@ unsigned NativeRaster::load_vector_kernel(std::span<const std::uint32_t> spirv,u
 }
 void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly& assembly,const SpriteCommand& command) {
     auto& r=*impl_; Measure timing(r.stats.draw_ns,r.profiling);
-    const auto& target=command.draw;
+    auto normalized=command.draw;
+    normalize_tests(normalized);
+    const auto& target=normalized;
     // Textured batches need host-validated ST/Q values, so only host records may sample.
     const auto texture_flags=(launch.kernel==vector_host_records) ? 0U : (1U|perspective_triangle_flag);
     if (!r.initialized || !r.vectors) throw std::invalid_argument("Vector drawing requires initialized storage and enabled vector batches");
@@ -1030,7 +1071,8 @@ void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly&
         !(target.flags&triangle_flag) || (target.flags&(texture_flags|line_flag)) ||
         ((target.flags&perspective_triangle_flag) && !(target.flags&1)) ||
         target.right>target.pitch*64 || target.left>=target.right || target.top>=target.bottom ||
-        assembly.scissor!=std::array<std::uint32_t,4>{target.left,target.right-1,target.top,target.bottom-1} ||
+        target.left<assembly.scissor[0] || target.right>assembly.scissor[1]+1 ||
+        target.top<assembly.scissor[2] || target.bottom>assembly.scissor[3]+1 ||
         assembly.shaded!=unsigned(bool(target.flags&shaded_triangle_flag)) ||
         assembly.coverage!=unsigned(bool(target.flags&coverage_flag)) || assembly.offset_x<0 || assembly.offset_x>65535 ||
         assembly.offset_y<0 || assembly.offset_y>65535 || !(assembly.present&16) || (assembly.present&~31U) ||
@@ -1048,14 +1090,26 @@ void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly&
         triangle[1].x=16; triangle[2].y=16;
         VulkanRenderer::validate(shape,triangle,command.fog_color,command.fog,command.levels);
     }
-    if (r.sets.size()>=8192) r.clear_views();
+    if (r.sets.size()>=8192) { r.clear_views(); r.vector_target={}; }
     ++r.surface_scope;
     const unsigned format=(target.flags&color_16_flag) ? ((target.flags&color_16s_flag) ? 10 : 2) : 0;
-    auto& color=r.surface(target.base,target.pitch,target.bottom,false,false,false,&target,format);
-    auto& depth=r.surface((target.flags&depth_test_flag) ? target.depth_base : 0,target.pitch,target.bottom,
+    // As consecutive CPU draws do, reuse the previous batch's surfaces while
+    // they describe the same storage, are tall enough and remain current.
+    auto& cached=r.vector_target;
+    const auto& previous=cached.draw;
+    const bool reuse=cached.color && previous.base==target.base && previous.pitch==target.pitch &&
+        (previous.flags&(color_16_flag|color_16s_flag|depth_test_flag))==(target.flags&(color_16_flag|color_16s_flag|depth_test_flag)) &&
+        (!(target.flags&depth_test_flag) || previous.depth_base==target.depth_base) &&
+        cached.color->height>=target.bottom && cached.depth->height>=target.bottom &&
+        r.current(*cached.color,target) && r.current(*cached.depth,target);
+    auto& color=reuse ? *cached.color : r.surface(target.base,target.pitch,target.bottom,false,false,false,&target,format);
+    auto& depth=reuse ? *cached.depth : r.surface((target.flags&depth_test_flag) ? target.depth_base : 0,target.pitch,target.bottom,
         true,!(target.flags&depth_test_flag),false,&target);
+    color.scope=depth.scope=r.surface_scope;
+    color.last_use=++r.surface_use; depth.last_use=++r.surface_use;
     const auto textures=r.textures_for(command);
-    r.end_pass(); r.begin();
+    cached={&color,&depth,target};
+    r.begin();
     if (r.records_used+count>records_per_slot || r.vectors->space(r.slot,launch)==NativeVectors::Space::slot_full) {
         r.flush(VK_NULL_HANDLE,VK_NULL_HANDLE,false); r.begin();
     }
@@ -1066,10 +1120,12 @@ void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly&
     const DrawRecord record{target,{},color.width,std::min(color.height,depth.height),command.fog_color,0,
         command.levels.control,command.levels.q};
     const auto words=std::bit_cast<std::array<std::uint32_t,NativeVectors::record_words>>(record);
-    r.vectors->record(r.command,r.slot,launch,assembly,words,first,count);
+    r.vectors->record(r.vector_commands(),r.slot,launch,assembly,words,first,count);
     r.records_used+=count; r.collect_vectors();
-    // The GPU determines individual bounds. The host tracks their conservative
-    // scissor union for resource ownership and subsequent CPU-packet hazards.
+    // The GPU determines individual bounds. The host tracks a conservative union
+    // (all vertices, or the scissor) for resource ownership and later hazards.
+    // Earlier CPU draws may still be accumulating in an open batch: record them first.
+    r.flush_batch();
     const auto set=r.bind_target(color,depth,textures,target);
     const VkRect2D scissor{{static_cast<int>(target.left),static_cast<int>(target.top)},
         {target.right-target.left,target.bottom-target.top}};
@@ -1111,15 +1167,7 @@ void NativeRaster::draw(std::span<const SpriteCommand> commands) {
     };
     const auto emit=[&](SpriteCommand c,unsigned height) {
         ++r.surface_scope;
-        // An enabled NEVER alpha test always takes its failure action. FB_ONLY
-        // and RGB_ONLY cannot write depth. With an ALWAYS depth comparison they
-        // do not read it either: avoid creating dependencies on an unused image.
-        const auto failure=(c.draw.test>>12)&3U;
-        if ((c.draw.test&15U)==1U && (failure==1 || failure==3))
-            c.draw.flags&=~depth_write_flag;
-        if ((c.draw.test&15U)==1U && failure==2) c.draw.mask=0xffffffffU;
-        if (((c.draw.test>>17)&3U)==1U && !(c.draw.flags&depth_write_flag))
-            c.draw.flags&=~depth_test_flag;
+        normalize_tests(c.draw);
         const auto& d=c.draw;
         if (r.records_used==records_per_slot) r.flush(VK_NULL_HANDLE,VK_NULL_HANDLE,false);
         const auto& previous=cached_command.draw;
