@@ -170,6 +170,7 @@ void test_async_submission() {
     nt::ee::Memory memory; memory.data=ram.data(); memory.size=ram.size(); platform.attach(memory);
     nt::ee::NativeVuSubmissions routing; routing.add(owner);
     routing.connect(platform.packet_setup); owner.connect_data(memory);
+    platform.packet_setup.graphics=owner.graphics; // One renderer receives VU and GIF output.
     const auto start=[&] {
         const std::array<std::uint32_t,8> words{0x01000101,0x6c010000,11,22,33,44,0x94000000,0};
         std::memcpy(ram.data()+256,words.data(),sizeof(words));
@@ -202,9 +203,13 @@ void test_async_submission() {
         platform.packet_setup.write(0x10003870,0x87654321)!=nt::ee::Stop::budget ||
         platform.packet_setup.read(0x10003870).value!=0x87654321 ||
         platform.packet_setup.write(0x10003c70,0)!=nt::ee::Stop::native_wait ||
-        platform.packet_setup.consume(1,independent_bytes,false)!=nt::ee::Stop::native_wait ||
-        platform.packet_setup.consume(2,{},false)!=nt::ee::Stop::native_wait)
+        platform.packet_setup.consume(1,independent_bytes,false)!=nt::ee::Stop::native_wait)
         throw std::runtime_error("Independent VU0 work stalled behind VU1 or conflicting work escaped ownership");
+    // A GIF transfer queues behind the outstanding VU1 job instead of stalling
+    // the caller, and must reach the consumer after that job's graphics.
+    const std::array<std::uint32_t,8> gif{1|0x8000,0x10000000,0xe,0,0x5a5a,0,0x3f,0};
+    if (platform.packet_setup.consume(2,std::span(reinterpret_cast<const std::uint8_t*>(gif.data()),sizeof(gif)),false)!=nt::ee::Stop::budget)
+        throw std::runtime_error("GIF transfer did not queue behind outstanding VU1 work");
     if (!owner.pending() || !platform.packet_setup.working() || !platform.packet_setup.pending(1) ||
         owner.state!=before || sink.calls || platform.completions.status()&(1U<<1) ||
         !(platform.packet_submission.read(0x10009000).value&0x100) || platform.packet_setup.take_interrupts() ||
@@ -221,12 +226,27 @@ void test_async_submission() {
         }
         return nt::ee::Stop::budget;
     };
-    if (finish()!=nt::ee::Stop::budget || sink.calls!=1 || sink.packets.size()!=2 ||
-        sink.packets[0][1]!=std::array<std::uint32_t,4>{11,22,33,44} ||
-        sink.packets[1][1]!=std::array<std::uint32_t,4>{55,66,77,88} ||
+    std::vector<nt::graphics::Packet> vector_output;
+    sink.calls=0;
+    const auto drain=[&] {
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+        while (owner.pending() || platform.packet_setup.working()) {
+            const auto result=platform.poll_submissions();
+            if (result!=nt::ee::Stop::budget) return result;
+            if (sink.calls==1 && vector_output.empty()) vector_output=sink.packets;
+            if (std::chrono::steady_clock::now()>deadline) throw std::runtime_error("Async native job did not finish");
+            std::this_thread::yield();
+        }
+        if (sink.calls==1 && vector_output.empty()) vector_output=sink.packets;
+        return nt::ee::Stop::budget;
+    };
+    if (drain()!=nt::ee::Stop::budget || sink.calls!=2 || vector_output.size()!=2 ||
+        vector_output[0][1]!=std::array<std::uint32_t,4>{11,22,33,44} ||
+        vector_output[1][1]!=std::array<std::uint32_t,4>{55,66,77,88} ||
+        sink.packets.size()!=1 || sink.packets[0][1]!=std::array<std::uint32_t,4>{0x5a5a,0,0x3f,0} ||
         platform.packet_setup.take_interrupts()!=2 || !platform.packet_setup.pending(1) ||
         platform.completions.status()&(1U<<1))
-        throw std::runtime_error("Async publication lost snapshots or interrupt-stalled suffix");
+        throw std::runtime_error("Async publication lost snapshots, GIF order or interrupt-stalled suffix");
     if (memory.io.write32(memory.io.context,0x10003c10,8)!=nt::ee::Stop::budget ||
         platform.packet_setup.pending(1) || !(platform.completions.status()&(1U<<1)) ||
         platform.packet_submission.read(0x10009000).value&0x100)
@@ -234,9 +254,9 @@ void test_async_submission() {
     owner.state=before; sink.accept=false; platform.completions.acknowledge(2);
     start();
     if (finish()!=nt::ee::Stop::unsupported_vector || owner.state!=before ||
-        platform.completions.status()&2 || sink.calls!=2)
+        platform.completions.status()&2 || sink.calls!=3)
         throw std::runtime_error("Async renderer rejection committed private state");
-    if (platform.poll_submissions()!=nt::ee::Stop::unsupported_vector || owner.state!=before || sink.calls!=2)
+    if (platform.poll_submissions()!=nt::ee::Stop::unsupported_vector || owner.state!=before || sink.calls!=3)
         throw std::runtime_error("Failed asynchronous job later reported success");
 }
 nt::vu::Entry streamed_entry=nullptr;

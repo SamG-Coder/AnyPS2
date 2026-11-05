@@ -3,8 +3,12 @@
 #include <nt/vu_binding.hpp>
 #include <nt/vu_graphics.hpp>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <future>
 #include <mutex>
+#include <optional>
+#include <thread>
 
 namespace nt::ee {
 // Native launch owner. VU0 shares completed vector state with EE macro
@@ -12,6 +16,13 @@ namespace nt::ee {
 // publish owned graphics batches after each completed launch, allowing native
 // drawing to overlap subsequent compiled work. Shared vector state and DMA
 // completion remain private until the complete submission succeeds.
+//
+// Asynchronous jobs form an ordered queue of at most queue_limit submissions,
+// run by one worker thread: each starts from the binding and state its
+// predecessor produced, so the program can submit later vector work while
+// earlier work executes, as it would hand frames to a render thread. The owner
+// publishes results, graphics and completion strictly in submission order; a
+// failed job fails every job queued after it without running them.
 class NativeVuLaunch {
 public:
     explicit NativeVuLaunch(vu::Binding& binding,std::uint64_t block_budget=100000,VectorStorage* shared=nullptr,
@@ -38,41 +49,62 @@ public:
         if (unit()!=1 || shared_) throw std::invalid_argument("Asynchronous launches require private VU1 state");
         asynchronous_=true;
     }
+    static constexpr std::size_t queue_limit=16;
+    NativeVuLaunch(const NativeVuLaunch&)=delete;
+    NativeVuLaunch& operator=(const NativeVuLaunch&)=delete;
+    ~NativeVuLaunch() {
+        if (!worker_.joinable()) return;
+        { std::lock_guard lock(queue_mutex_); stopping_=true; }
+        queue_changed_.notify_all();
+        worker_.join();
+    }
     bool pending() const { return busy_; }
+    // Submission tickets: a submission is complete once completed_jobs()
+    // reaches the value submitted_jobs() had right after it was accepted.
+    std::uint64_t submitted_jobs() const { return submitted_jobs_; }
+    std::uint64_t completed_jobs() const { return completed_jobs_; }
     Stop poll() {
-        if (!busy_) return job_status_;
-        // Drain completed launches while later compiled launches are running.
-        // The owner alone calls the renderer; the producer only moves owned data.
-        const bool ready=job_.wait_for(std::chrono::seconds(0))==std::future_status::ready;
-        auto output=stream_->take();
-        const auto began=profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-        const auto accepted=accept_packets(output);
-        if (profile) {
-            const auto elapsed=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-began).count());
-            profile->submit_ns+=elapsed; profile->longest_submit_ns=std::max(profile->longest_submit_ns,elapsed);
+        // Drain completed launches in order while later compiled launches run.
+        // The owner alone calls the renderer; the worker only moves owned data.
+        while (!jobs_.empty()) {
+            auto& front=jobs_.front();
+            const bool ready=front.result.wait_for(std::chrono::seconds(0))==std::future_status::ready;
+            auto output=front.stream->take();
+            const auto began=profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+            const auto accepted=accept_packets(output);
+            if (profile) {
+                const auto elapsed=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-began).count());
+                profile->submit_ns+=elapsed; profile->longest_submit_ns=std::max(profile->longest_submit_ns,elapsed);
+            }
+            if (!accepted) { job_status_=Stop::unsupported_vector; front.result.wait(); }
+            if (!ready && accepted) return Stop::budget;
+            auto result=front.result.get();
+            jobs_.pop_front(); ++completed_jobs_;
+            busy_=!jobs_.empty();
+            last_result=result.last_result; last_entry=result.entry; last_next_pair=result.next;
+            last_sequence=result.sequence; failed_state=std::move(result.failed);
+            if (profile) {
+                profile->compiled_ns+=result.profile.compiled_ns; profile->blocks+=result.profile.blocks;
+                ++profile->jobs; profile->job_ns+=result.profile.job_ns;
+                profile->longest_job_ns=std::max(profile->longest_job_ns,result.profile.job_ns);
+                profile->execution.merge(result.profile.execution);
+            }
+            if (job_status_==Stop::budget) job_status_=result.status;
+            if (job_status_!=Stop::budget) {
+                // Later jobs were failed by the worker; retire them unpublished.
+                while (!jobs_.empty()) { jobs_.front().result.wait(); jobs_.pop_front(); }
+                busy_=false;
+                return job_status_;
+            }
+            binding_=std::move(result.binding); state=std::move(result.state); completed_=result.completed;
         }
-        if (!accepted) { job_status_=Stop::unsupported_vector; job_.wait(); }
-        if (!ready && accepted) return Stop::budget;
-        auto result=job_.get();
-        busy_=false;
-        last_result=result.last_result; last_entry=result.entry; last_next_pair=result.next;
-        last_sequence=result.sequence; failed_state=std::move(result.failed);
-        if (profile) {
-            profile->compiled_ns+=result.profile.compiled_ns; profile->blocks+=result.profile.blocks;
-            ++profile->jobs; profile->job_ns+=result.profile.job_ns;
-            profile->longest_job_ns=std::max(profile->longest_job_ns,result.profile.job_ns);
-            profile->execution.merge(result.profile.execution);
-        }
-        if (job_status_==Stop::budget) job_status_=result.status;
-        if (job_status_!=Stop::budget) return job_status_;
-        binding_=std::move(result.binding); state=std::move(result.state); completed_=result.completed;
-        return Stop::budget;
+        return job_status_;
     }
     Stop submit_sequence(unsigned unit,std::span<const NativeSubmissionStep> steps) {
         last_sequence={};
         if (unit!=binding_.unit() || steps.empty() || steps.size()>NativePacketBatch::maximum_descriptors) return Stop::unsupported_vector;
         if (shared_ && shared_->active) return Stop::vector_pending;
-        if (busy_) return Stop::vector_pending;
+        if (busy_ && !asynchronous_) return Stop::vector_pending;
         if (job_status_!=Stop::budget) return job_status_;
         if (asynchronous_) return begin_sequence(steps);
         // Reuse the ordinary compiled launch path against private candidate
@@ -141,7 +173,8 @@ public:
             if (!write_vector_data(std::span(next.data).first(unit ? 1024 : 256),upload)) return Stop::invalid_state;
         }
         std::vector<vu::GraphicsPacket> packets(prefix.begin(),prefix.end());
-        constexpr std::size_t maximum_quadwords=65536;
+        // Graphics share the batch bound of direct GIF submission (queued PATH3 included).
+        constexpr std::size_t maximum_quadwords=NativePacketBatch::maximum_bytes/16;
         std::size_t quadwords=0;
         for (const auto& packet:packets) {
             if (packet.size()>maximum_quadwords-quadwords) return Stop::unsupported_vector;
@@ -218,7 +251,10 @@ public:
     }
     void connect(NativePacketSetup& packets) {
         packets.launch_context=this;
-        packets.sequence_pending=[](void* raw,unsigned) { return static_cast<NativeVuLaunch*>(raw)->pending(); };
+        packets.sequence_tickets=[](void* raw,unsigned,bool completed) {
+            const auto& owner=*static_cast<NativeVuLaunch*>(raw);
+            return completed ? owner.completed_jobs() : owner.submitted_jobs();
+        };
         packets.poll_sequence=[](void* raw,unsigned) { return static_cast<NativeVuLaunch*>(raw)->poll(); };
         packets.submit_sequence=[](void* raw,unsigned unit,std::span<const NativeSubmissionStep> steps) {
             return static_cast<NativeVuLaunch*>(raw)->submit_sequence(unit,steps);
@@ -316,36 +352,86 @@ private:
         Stop status;
         std::unique_ptr<vu::State> failed;
     };
-    Stop begin_sequence(std::span<const NativeSubmissionStep> steps) {
+    struct Chain { vu::Binding binding; vu::State state; bool completed; };
+    struct QueuedJob {
         std::vector<OwnedStep> owned;
-        owned.reserve(steps.size());
-        try { for (const auto& step:steps) owned.emplace_back(step); }
+        std::shared_ptr<GraphicsStream> stream;
+        std::promise<JobResult> promise;
+        // Set when no earlier job is outstanding: the owner's state is current.
+        std::optional<Chain> seed;
+    };
+    Stop begin_sequence(std::span<const NativeSubmissionStep> steps) {
+        if (jobs_.size()>=queue_limit) return Stop::vector_pending;
+        QueuedJob job;
+        job.owned.reserve(steps.size());
+        try { for (const auto& step:steps) job.owned.emplace_back(step); }
         catch (const std::invalid_argument&) { return Stop::invalid_state; }
         // The worker sees only owned input, immutable compiled code and private
-        // candidate state. Completed packets cross an ordered, bounded queue.
-        stream_=std::make_shared<GraphicsStream>();
-        job_=std::async(std::launch::async,[owned=std::move(owned),binding=binding_,initial=state,stream=stream_,
-            completed=completed_,block_budget=block_budget_,sequence_budget=sequence_budget_,profiling=profile!=nullptr]() mutable {
-            const auto began=profiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-            NativeVuLaunch worker(binding,block_budget,nullptr,sequence_budget);
-            worker.state=std::move(initial); worker.completed_=completed;
-            SequenceOutput output; Profile profile;
-            worker.sequence_output_=&output; worker.stream_=std::move(stream); worker.profile=profiling ? &profile : nullptr;
-            std::vector<NativeSubmissionStep> views; views.reserve(owned.size());
-            for (const auto& step:owned) views.push_back(step.view);
-            const auto status=worker.submit_sequence(1,views);
-            if (profiling) profile.job_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-began).count();
-            return JobResult{std::move(binding),std::move(worker.state),profile,worker.last_sequence,
-                worker.last_result,worker.last_entry,worker.last_next_pair,worker.completed_,status,std::move(worker.failed_state)};
-        });
+        // candidate state. Completed packets cross an ordered, bounded stream.
+        job.stream=std::make_shared<GraphicsStream>();
+        if (jobs_.empty()) job.seed=Chain{binding_,state,completed_};
+        Pending pending{job.promise.get_future(),job.stream};
+        if (!worker_.joinable()) worker_=std::thread([this] { run_jobs(); });
+        {
+            std::lock_guard lock(queue_mutex_);
+            queued_.push_back(std::move(job));
+        }
+        queue_changed_.notify_one();
+        jobs_.push_back(std::move(pending));
+        ++submitted_jobs_;
         busy_=true;
         return Stop::budget;
+    }
+    void run_jobs() {
+        std::optional<Chain> chain;
+        bool chain_failed=false;
+        for (;;) {
+            QueuedJob job;
+            {
+                std::unique_lock lock(queue_mutex_);
+                queue_changed_.wait(lock,[&] { return stopping_ || !queued_.empty(); });
+                if (queued_.empty()) return;
+                job=std::move(queued_.front()); queued_.pop_front();
+            }
+            if (job.seed) { chain=std::move(job.seed); chain_failed=false; }
+            // The first job after an idle owner always carries a seed.
+            if (!chain) {
+                job.promise.set_exception(std::make_exception_ptr(std::logic_error("Unseeded native vector job")));
+                continue;
+            }
+            if (chain_failed) {
+                job.promise.set_value(JobResult{chain->binding,{},{},{},
+                    {vu::RunStatus::unsupported_context,0},0,0,false,Stop::unsupported_vector,nullptr});
+                continue;
+            }
+            const auto began=profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+            auto binding=chain->binding;
+            NativeVuLaunch worker(binding,block_budget_,nullptr,sequence_budget_);
+            worker.state=chain->state; worker.completed_=chain->completed;
+            SequenceOutput output; Profile job_profile;
+            worker.sequence_output_=&output; worker.stream_=job.stream; worker.profile=profile ? &job_profile : nullptr;
+            std::vector<NativeSubmissionStep> views; views.reserve(job.owned.size());
+            for (const auto& step:job.owned) views.push_back(step.view);
+            const auto status=worker.submit_sequence(1,views);
+            if (profile) job_profile.job_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-began).count();
+            if (status==Stop::budget) { chain->binding=binding; chain->state=worker.state; chain->completed=worker.completed_; }
+            else chain_failed=true;
+            job.promise.set_value(JobResult{std::move(binding),std::move(worker.state),job_profile,worker.last_sequence,
+                worker.last_result,worker.last_entry,worker.last_next_pair,worker.completed_,status,std::move(worker.failed_state)});
+        }
     }
     SequenceOutput* sequence_output_=nullptr;
     bool asynchronous_=false,busy_=false;
     Stop job_status_=Stop::budget;
     std::shared_ptr<GraphicsStream> stream_;
-    std::future<JobResult> job_;
+    struct Pending { std::future<JobResult> result; std::shared_ptr<GraphicsStream> stream; };
+    std::deque<Pending> jobs_;
+    std::uint64_t submitted_jobs_=0,completed_jobs_=0;
+    std::mutex queue_mutex_;
+    std::condition_variable queue_changed_;
+    std::deque<QueuedJob> queued_;
+    bool stopping_=false;
+    std::thread worker_;
     vu::Binding& binding_;
     std::uint64_t block_budget_;
     std::uint64_t sequence_budget_;
@@ -363,9 +449,10 @@ public:
     }
     void connect(NativePacketSetup& packets) {
         packets.launch_context=this;
-        packets.sequence_pending=[](void* raw,unsigned unit) {
+        packets.sequence_tickets=[](void* raw,unsigned unit,bool completed) -> std::uint64_t {
             auto& self=*static_cast<NativeVuSubmissions*>(raw);
-            return unit<self.owners_.size() && self.owners_[unit] && self.owners_[unit]->pending();
+            if (unit>=self.owners_.size() || !self.owners_[unit]) return 0;
+            return completed ? self.owners_[unit]->completed_jobs() : self.owners_[unit]->submitted_jobs();
         };
         packets.poll_sequence=[](void* raw,unsigned unit) {
             auto& self=*static_cast<NativeVuSubmissions*>(raw);

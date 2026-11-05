@@ -1,4 +1,5 @@
 #pragma once
+#include <deque>
 #include <nt/ee_native.hpp>
 #include <nt/ee_vector_data.hpp>
 #include <nt/ee_packet_batch.hpp>
@@ -34,7 +35,10 @@ public:
     Stop (*submit_combined)(void*,unsigned,std::span<const NativeUploadView>,
         std::span<const NativeVectorDataView>,const NativeLaunchView*,std::span<const graphics::Packet>)=nullptr;
     Stop (*submit_sequence)(void*,unsigned,std::span<const NativeSubmissionStep>)=nullptr;
-    bool (*sequence_pending)(void*,unsigned)=nullptr;
+    // Ordered vector submissions: the count accepted (completed=false) or
+    // finished (completed=true). A packet's VIF state and interrupt take effect
+    // when the submissions accepted up to and including it have finished.
+    std::uint64_t (*sequence_tickets)(void*,unsigned,bool completed)=nullptr;
     Stop (*poll_sequence)(void*,unsigned)=nullptr;
     // Optional conversion diagnostic, never an execution fallback. The payload
     // view is valid only during the callback, and the batch still fails.
@@ -61,7 +65,7 @@ public:
         if (!decode(address,channel,field)) return {Stop::unsupported_system};
         const auto& unit=units_[channel];
         switch (field) {
-        case 0: return {Stop::budget,(deferred_[channel] ? 4U : 0U)|(unit.stopped ? 0x100U : 0U)|(unit.broken ? 0x200U : 0U)|
+        case 0: return {Stop::budget,(!deferred_[channel].empty() ? 4U : 0U)|(unit.stopped ? 0x100U : 0U)|(unit.broken ? 0x200U : 0U)|
             (unit.interrupt_stall ? 0x400U : 0U)|(unit.interrupt ? 0x800U : 0U)|(unit.double_buffer ? 0x80U : 0U)|(channel && reverse_output_ ? 0x800000U : 0U)};
         case 2: return {Stop::budget,unit.error_mask};
         case 3: return {Stop::budget,unit.mark};
@@ -90,7 +94,7 @@ public:
         if (address==0x10003010) { gif_mode_=value&5; return Stop::budget; }
         unsigned channel,field;
         if (!decode(address,channel,field)) return Stop::unsupported_system;
-        if (deferred_[channel]) return Stop::native_wait;
+        if (!deferred_[channel].empty()) return Stop::native_wait;
         auto& unit=units_[channel];
         switch (field) {
         case 0:
@@ -116,18 +120,24 @@ public:
         }
     }
     unsigned rejected_command() const { return rejected_command_; }
-    bool pending(unsigned channel) const { return channel<2 && (deferred_[channel] || !pending_[channel].bytes.empty()); }
-    bool working() const { return bool(deferred_[0]) || bool(deferred_[1]); }
+    bool pending(unsigned channel) const { return channel<2 && (!deferred_[channel].empty() || !pending_[channel].bytes.empty()); }
+    bool working() const { return !deferred_[0].empty() || !deferred_[1].empty() || outstanding(0) || outstanding(1); }
     Stop poll(unsigned channel,bool vector_active) {
         if (channel>=2) return Stop::invalid_state;
-        if (deferred_[channel]) {
-            if (!poll_sequence || !sequence_pending) return Stop::invalid_state;
+        // Outstanding submissions without deferred packets (queued GIF drawing)
+        // still need polling to publish their graphics.
+        if (!deferred_[channel].empty() || outstanding(channel)) {
+            if (!poll_sequence || !sequence_tickets) return Stop::invalid_state;
             const auto result=poll_sequence(launch_context,channel);
             if (result!=Stop::budget) return result;
-            if (sequence_pending(launch_context,channel)) return Stop::budget;
-            units_[channel]=deferred_[channel]->next;
-            if (deferred_[channel]->notify) interrupt_events_|=1U<<channel;
-            deferred_[channel].reset();
+            const auto completed=sequence_tickets(launch_context,channel,true);
+            auto& deferred=deferred_[channel];
+            while (!deferred.empty() && deferred.front().ticket<=completed) {
+                units_[channel]=deferred.front().next;
+                if (deferred.front().notify) interrupt_events_|=1U<<channel;
+                deferred.pop_front();
+            }
+            if (!deferred.empty()) return Stop::budget;
         }
         return resume(channel,vector_active);
     }
@@ -135,10 +145,19 @@ public:
     Stop consume(unsigned channel,std::span<const std::uint8_t> bytes,bool vector_active,std::span<const NativePacketOrigin> origins={}) {
         std::size_t consumed=0;
         // VU0 and VU1 have independent native ownership. Only the shared GIF
-        // path waits for either outstanding submission.
-        if (channel<2 ? bool(deferred_[channel]) : working()) return Stop::native_wait;
-        if (channel>=2) return consume_segment(channel,bytes,vector_active,consumed);
-        if (pending(channel)) return Stop::unsupported_system;
+        // path waits for every outstanding submission. A vector channel queues
+        // a packet behind its outstanding submissions when the packet's VIF
+        // state can be projected and its effects are ordered vector work.
+        if (channel>=2) {
+            // GIF packets queue behind outstanding VU1 work, in order; VU0 is synchronous.
+            if (!deferred_[0].empty()) return Stop::native_wait;
+            return consume_segment(channel,bytes,vector_active,consumed);
+        }
+        if (!pending_[channel].bytes.empty()) return deferred_[channel].empty() ? Stop::unsupported_system : Stop::native_wait;
+        if (!deferred_[channel].empty()) {
+            const auto& projected=deferred_[channel].back().next;
+            if (projected.stopped || projected.broken || projected.interrupt_stall) return Stop::native_wait;
+        }
         if (bytes.size()>NativePacketBatch::maximum_bytes) return Stop::invalid_state;
         for (std::size_t i=0;i<origins.size();++i)
             if (origins[i].offset>=bytes.size() || origins[i].offset%4 || origins[i].quadword_offset>=16 || origins[i].quadword_offset%4 ||
@@ -155,7 +174,7 @@ public:
     }
     Stop resume(unsigned channel,bool vector_active) {
         if (!pending(channel)) return Stop::budget;
-        if (deferred_[channel]) return Stop::budget;
+        if (!deferred_[channel].empty()) return Stop::budget;
         if (units_[channel].stopped || units_[channel].broken || units_[channel].interrupt_stall)
             return Stop::budget;
         auto& packet=pending_[channel];
@@ -171,6 +190,8 @@ private:
     Stop consume_segment(unsigned channel,std::span<const std::uint8_t> bytes,bool vector_active,std::size_t& consumed,
                          std::span<const NativePacketOrigin> origins={},std::size_t source_offset=0) {
         if (channel==2) {
+            const bool behind_vectors=!deferred_[1].empty() || outstanding(1);
+            if (!deferred_[1].empty() && deferred_[1].back().next.path3_masked) return Stop::native_wait;
             if (gif_paused_ || units_[1].path3_masked || direct_stream_.pending() || !graphics.submit) return Stop::unsupported_system;
             // Descriptor-only submissions carry no GIF data. They complete
             // without inventing a packet or disturbing a partial stream.
@@ -179,15 +200,24 @@ private:
             auto next=gif_stream_;
             try { next.append(bytes,packets); }
             catch (const std::invalid_argument&) { return Stop::unsupported_system; }
-            if (!packets.empty() && !graphics.submit(graphics.context,packets)) return Stop::unsupported_system;
+            if (!packets.empty()) {
+                const auto result=behind_vectors ? submit_ordered_drawing(std::move(packets)) :
+                    graphics.submit(graphics.context,packets) ? Stop::budget : Stop::unsupported_system;
+                if (result!=Stop::budget) return result;
+            }
             gif_stream_=std::move(next);
             return Stop::budget;
         }
         if (channel==1 && gif_stream_.pending()) return Stop::unsupported_system;
         if (channel>=2 || bytes.size()%4) return Stop::unsupported_system;
-        if (units_[channel].stopped || units_[channel].broken || units_[channel].interrupt_stall || vector_active)
+        // Parsing continues from the state the last queued packet will leave.
+        // Effects queue whenever the unit has outstanding submissions, which
+        // can outlive its deferred packets (queued GIF drawing, for example).
+        const bool queued=!deferred_[channel].empty() || outstanding(channel);
+        const auto& base=deferred_[channel].empty() ? units_[channel] : deferred_[channel].back().next;
+        if (base.stopped || base.broken || base.interrupt_stall || vector_active)
             return Stop::unsupported_system;
-        auto next=units_[channel];
+        auto next=base;
         auto next_direct=direct_stream_;
         std::vector<NativeUploadView> uploads;
         std::vector<NativeVectorDataView> data;
@@ -361,13 +391,7 @@ private:
                     if (uncompiled_upload) uncompiled_upload(upload_context,channel,upload.destination,upload.bytes);
                 return result;
             }
-            if (sequence_pending && sequence_pending(launch_context,channel)) {
-                deferred_[channel]=Deferred{next,notify}; consumed=offset; rejected_command_=0;
-                return Stop::budget;
-            }
-            units_[channel]=next; consumed=offset; rejected_command_=0;
-            if (notify) interrupt_events_|=1U<<channel;
-            return Stop::budget;
+            return complete_packet(channel,next,notify,offset,consumed);
         }
         const bool combined=!uploads.empty() && (launch || !data.empty());
         const bool drawing_vectors=!drawing.empty() && (launch || !data.empty() || !uploads.empty());
@@ -384,7 +408,15 @@ private:
             }
         }
         if (!drawing_vectors && !uploads.empty() && !combined) {
-            const auto result=accept_uploads(compiled_context,channel,uploads);
+            // Behind queued work, program uploads take effect in queue order;
+            // binding them now would let earlier queued launches see them.
+            Stop result;
+            if (queued) {
+                if (!submit_sequence) return Stop::native_wait;
+                NativeSubmissionStep step{uploads,{},{},{}};
+                result=submit_sequence(launch_context,channel,std::span(&step,1));
+                if (result==Stop::vector_pending) return result;
+            } else result=accept_uploads(compiled_context,channel,uploads);
             if (result!=Stop::budget) {
                 rejected_command_=0x4a;
                 if (uncompiled_packet) uncompiled_packet(upload_context,channel,bytes);
@@ -405,15 +437,15 @@ private:
                 return result;
             }
         }
-        if (!drawing_vectors && !drawing.empty() && !graphics.submit(graphics.context,drawing)) return Stop::unsupported_system;
-        if (channel==1) direct_stream_=std::move(next_direct);
-        if (sequence_pending && sequence_pending(launch_context,channel)) {
-            deferred_[channel]=Deferred{next,notify}; consumed=offset; rejected_command_=0;
-            return Stop::budget;
+        // Direct drawing would overtake queued vector graphics; wait for them.
+        if (!drawing_vectors && !drawing.empty()) {
+            // Behind queued vector work, direct drawing joins the same ordered queue.
+            const auto result=queued ? submit_ordered_drawing(std::move(drawing)) :
+                graphics.submit(graphics.context,drawing) ? Stop::budget : Stop::unsupported_system;
+            if (result!=Stop::budget) return result;
         }
-        units_[channel]=next; consumed=offset; rejected_command_=0;
-        if (notify) interrupt_events_|=1U<<channel;
-        return Stop::budget;
+        if (channel==1) direct_stream_=std::move(next_direct);
+        return complete_packet(channel,next,notify,offset,consumed);
     }
 private:
     unsigned rejected_command_=0;
@@ -431,10 +463,34 @@ private:
         std::array<std::uint32_t,8> row_column{};
     };
     struct Pending { std::vector<std::uint8_t> bytes; std::size_t offset=0; std::vector<NativePacketOrigin> origins; };
-    struct Deferred { Unit next; bool notify; };
+    struct Deferred { Unit next; bool notify; std::uint64_t ticket; };
     std::array<Unit,2> units_{};
-    std::array<std::optional<Deferred>,2> deferred_{};
+    std::array<std::deque<Deferred>,2> deferred_{};
     std::array<Pending,2> pending_{};
+    bool outstanding(unsigned channel) const {
+        return sequence_tickets && sequence_tickets(launch_context,channel,false)>sequence_tickets(launch_context,channel,true);
+    }
+    // Graphics behind outstanding VU1 submissions travel as a drawing-only
+    // step of the same ordered queue, reaching the consumer after their output.
+    // A full queue returns vector_pending; nothing has been submitted then.
+    Stop submit_ordered_drawing(std::vector<graphics::Packet> packets) {
+        if (!submit_sequence) return Stop::native_wait;
+        NativeSubmissionStep step{{},{},std::move(packets),{}};
+        return submit_sequence(launch_context,1,std::span(&step,1));
+    }
+    // Applies a consumed packet's VIF state now, or after the submissions
+    // accepted so far finish, keeping packet order.
+    Stop complete_packet(unsigned channel,const Unit& next,bool notify,std::size_t offset,std::size_t& consumed) {
+        const auto ticket=sequence_tickets ? sequence_tickets(launch_context,channel,false) : 0;
+        consumed=offset; rejected_command_=0;
+        if (outstanding(channel) || !deferred_[channel].empty()) {
+            deferred_[channel].push_back(Deferred{next,notify,ticket});
+            return Stop::budget;
+        }
+        units_[channel]=next;
+        if (notify) interrupt_events_|=1U<<channel;
+        return Stop::budget;
+    }
     unsigned interrupt_events_=0;
     graphics::PacketStream gif_stream_,direct_stream_;
     bool gif_paused_=false;

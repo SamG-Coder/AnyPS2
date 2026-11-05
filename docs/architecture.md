@@ -116,9 +116,17 @@ in single-precision floating point from interpolated Q (or the sprite's Q), with
 16 fractional bits for level selection and an 8-bit blend between adjacent levels;
 it is not a bit-exact model of the GS LOD unit. Automatic base addresses (MTBA)
 stop with a diagnostic when levels are sampled.
-Asynchronous VU1 submissions publish ordered graphics from completed launches
-while later compiled launches continue. A later failure stops execution and does
-not report submission completion; already accepted graphics remain submitted.
+Asynchronous VU1 submissions form an ordered queue of up to 16 jobs run by one
+worker thread; each starts from the program binding and VU state its predecessor
+produced. The program can therefore submit later VIF1 packets, program uploads
+and GIF (PATH3) transfers while earlier vector work runs, as a game hands work to
+a render thread. VIF state, interrupts and graphics are published strictly in
+submission order: VIF parsing continues from the state the last queued packet
+leaves, and queued GIF or direct drawing reaches the renderer after the vector
+output submitted before it. A PATH3 mask, interrupt stall or full queue still
+waits. A failure stops execution, fails the jobs queued after it without running
+them, and does not report their completion; already accepted graphics remain
+submitted.
 A native drawing worker accepts one bounded, owned packet batch at a time.
 The execution owner rejoins it before reading graphics state. Window presentation
 is queued on the worker after the frame's drawing, as on a game's render thread,
