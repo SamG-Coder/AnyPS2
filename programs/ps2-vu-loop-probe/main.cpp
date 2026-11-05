@@ -4,6 +4,8 @@
 #include <nt/element_packet.hpp>
 #include <nt/element_range.hpp>
 #include <nt/vector_region_codegen.hpp>
+#include <nt/vu_arithmetic.hpp>
+#include <nt/vu_lower.hpp>
 #include <charconv>
 #include <filesystem>
 #include <iostream>
@@ -80,6 +82,29 @@ template<class T> T number(std::string_view text,int base=10) {
 unsigned decimal(std::string_view text) { return number<unsigned>(text); }
 }
 int main(int argc,char** argv) {
+    if (argc==7 && std::string_view(argv[1])=="--listing") {
+        // Decoded operations of a pair range (diagnostic; no instruction text is
+        // emitted into code): upper operation and destination, lower operation,
+        // its registers, address register/update, offset and branch target.
+        try {
+            const auto unit=decimal(argv[3]),destination=decimal(argv[4]),first=decimal(argv[5]),count=decimal(argv[6]);
+            const auto program=nt::vu::frame(nt::read_file(argv[2],unit ? 16384:4096),unit,destination);
+            for (const auto& pair:program) {
+                if (pair.address<first || pair.address>=first+count) continue;
+                const auto upper=nt::vu::decode_upper(pair.upper);
+                const auto lower=nt::vu::decode_lower(pair,unit);
+                std::cout<<pair.address<<"\t"<<nt::vu::name(upper.operation)<<" vf"<<upper.result<<" mask="<<upper.mask
+                         <<"\t"<<nt::vu::name(lower.operation)<<" r="<<lower.result.index<<" l="<<lower.left.index
+                         <<" a=vi"<<lower.address_register<<(lower.address_update==nt::vu::AddressUpdate::increment ? "++" :
+                            lower.address_update==nt::vu::AddressUpdate::decrement ? "--" : "")
+                         <<" off="<<lower.offset;
+                if (lower.operation==nt::vu::LowerOperation::branch && lower.transfer.target) std::cout<<" target="<<*lower.transfer.target;
+                if (pair.end) std::cout<<" E";
+                std::cout<<'\n';
+            }
+            return std::cout ? 0:1;
+        } catch (const std::exception& error) { std::cerr<<"Listing: "<<error.what()<<'\n'; return 1; }
+    }
     if (argc==6 && std::string_view(argv[1])=="--regions") {
         // Every loop of a whole-entry image: accepted regions as separate LLVM
         // modules (boundary, elements, binding), a head-to-binding table module,
@@ -176,6 +201,7 @@ int main(int argc,char** argv) {
                    "<manifest|cpu-llvm|spirv-llvm> --native-f32\n"
                    "       ps2-vu-loop-probe --region <image> <unit> <destination> <head> boundary|elements|binding <entries...>\n"
                    "       ps2-vu-loop-probe --regions <whole-entry-image> <unit> <destination> <new-output-directory>\n"
+                   "       ps2-vu-loop-probe --listing <image> <unit> <destination> <first-pair> <count>\n"
                    "       ps2-vu-loop-probe --structure <program-image.bin> <unit:0|1> <destination-index>\n"
                    "       ps2-vu-loop-probe --element <program-image.bin> <unit> <destination> <loop-head> cpu|vulkan|guard\n"
                    "       ps2-vu-loop-probe --element-binding <program-image.bin> <unit> <destination> <loop-head> "
