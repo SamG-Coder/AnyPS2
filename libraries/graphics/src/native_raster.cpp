@@ -1064,7 +1064,8 @@ bool NativeRaster::Impl::gpu_source(Region requested,bool* rendered) {
         if (backing_revisions[page]<latest) {
             Image* holder=nullptr;
             for (auto& [key,image]:surfaces)
-                if (image && image->dirty && image->valid && !image->scratch && !image->format && image->pages[page]==latest) {
+                if (image && image->dirty && image->valid && !image->scratch && (!image->format || image->format==2 || image->format==10) &&
+                    image->pages[page]==latest) {
                     holder=image.get(); break;
                 }
             if (!holder) return false;
@@ -1091,16 +1092,19 @@ bool NativeRaster::Impl::gpu_source(Region requested,bool* rendered) {
         parameters.mode=3; parameters.surface_base=holder->base; parameters.surface_pitch=holder->pitch;
         parameters.width=holder->width; parameters.height=holder->height;
         if (holder->base%32==0) {
-            // Pages are 64x32-pixel tiles of the image: cover only the owned ones.
+            // Pages are 64x32-pixel tiles of a 32-bit image (64x64 of a
+            // 16-bit one): cover only the owned ones.
+            const unsigned page_rows=holder->format ? 64 : 32;
             unsigned x0=holder->width,y0=holder->height,x1=0,y1=0;
             for (unsigned page=0;page<512;++page) if (owned[page/32]&(1U<<(page%32))) {
-                const unsigned relative=(page+512-holder->base/32)%512,x=(relative%holder->pitch)*64,y=(relative/holder->pitch)*32;
+                const unsigned relative=(page+512-holder->base/32)%512,x=(relative%holder->pitch)*64,y=(relative/holder->pitch)*page_rows;
                 if (x>=holder->width || y>=holder->height) continue;
-                x0=std::min(x0,x); y0=std::min(y0,y); x1=std::max(x1,x+64); y1=std::max(y1,std::min(y+32,holder->height));
+                x0=std::min(x0,x); y0=std::min(y0,y); x1=std::max(x1,x+64); y1=std::max(y1,std::min(y+page_rows,holder->height));
             }
             if (x1>x0 && y1>y0) { parameters.texture_base=x0; parameters.texture_pitch=y0; parameters.width=x1-x0; parameters.height=y1-y0; }
         }
-        parameters.owned=owned; parameters.layout=holder->depth ? 1U : 0U;
+        parameters.owned=owned;
+        parameters.layout=(holder->depth ? 1U : 0U)|(holder->format ? 4U : 0U)|(holder->format==10 ? 8U : 0U);
         palette_pass(*holder,nullptr,parameters);
         for (unsigned page=0;page<512;++page) if (owned[page/32]&(1U<<(page%32))) mirror_revisions[page]=source_revisions[page];
     }

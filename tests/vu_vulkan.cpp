@@ -331,6 +331,29 @@ void gpu_resident_memory(nt::graphics::VulkanRenderer& renderer) {
         const auto expected=uploaded ? half_value((y-7)*11+(x-5)) : half_at(64*32,x,y);
         if (half_at(32*32,x,y)!=expected) throw std::runtime_error("16-bit upload over a rendered target lost a pixel");
     }
+    // Memory a 16-bit target rendered, sampled as an 8-bit indexed texture,
+    // comes from the GPU memory copy without a readback.
+    d.submit(renderer,std::array{shaded16(32)});
+    Packet clut(1); ad(clut,0x50,(9000ULL<<32)|(1ULL<<48)); ad(clut,0x51,0); ad(clut,0x52,16|(16ULL<<32)); ad(clut,0x53,0); finish(clut);
+    const auto clut_value=[](unsigned i) { return 0x80000000U|(i*0x010307U); };
+    Packet sampled(1); ad(sampled,0x1a,1); ad(sampled,0,6|16|256); ad(sampled,0x4c,40|(1ULL<<16)); ad(sampled,0x40,(15ULL<<16)|(15ULL<<48));
+    ad(sampled,0x46,1); ad(sampled,0x47,0x30000); ad(sampled,0x4e,200|(1ULL<<32));
+    ad(sampled,6,1024ULL|(2ULL<<14)|(0x13ULL<<20)|(4ULL<<26)|(4ULL<<30)|(1ULL<<34)|(1ULL<<35)|(9000ULL<<37)|(1ULL<<61));
+    ad(sampled,1,0x80808080); ad(sampled,3,8|(8ULL<<16)); ad(sampled,5,0); ad(sampled,3,(16U*16+8)|((16ULL*16+8)<<16)); ad(sampled,5,(16U*16)|((16ULL*16)<<16));
+    finish(sampled);
+    const auto sampled_before=renderer.statistics();
+    d.submit(renderer,std::array{clut,payload(32,256,clut_value),sampled});
+    if (renderer.statistics().texture_readbacks!=sampled_before.texture_readbacks ||
+        renderer.statistics().readback_bytes!=sampled_before.readback_bytes)
+        throw std::runtime_error("Indexed texture over a rendered 16-bit target read memory back");
+    const auto& sampled_memory=d.pixels();
+    for (unsigned y=0;y<16;++y) for (unsigned x=0;x<16;++x) {
+        const auto byte=indexed_byte(1024,2,x,y);
+        const auto index=(sampled_memory[byte/4]>>((byte%4)*8))&255U;
+        const auto entry=(9000U*64+(index&1)+((index&6)<<1)+((index&8)>>2)+((index&16)<<2)+((index&96)>>1)+(index&128))&0xfffffU;
+        if (sampled_memory[rgba_word(40*32,1,x,y)]!=sampled_memory[entry])
+            throw std::runtime_error("Indexed texel over a rendered 16-bit target differs from the palette lookup");
+    }
 }
 void triangles(nt::graphics::VulkanRenderer& renderer) {
     using nt::graphics::Packet;

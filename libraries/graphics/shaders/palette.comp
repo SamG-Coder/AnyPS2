@@ -33,6 +33,15 @@ bool surface_pixel16(uint halfword,out ivec2 pixel) {
     pixel=ivec2(x,y);
     return x<p.surface_width && y<p.surface_height;
 }
+uint rgba_halfword(uint base,uint pitch,uint x,uint y,bool alternate) {
+    x&=2047u; y&=2047u;
+    const uint page=(y/64u)*pitch+x/64u;
+    const uint block=((y>>3)&1u)|(((x>>4)&1u)<<1)|
+        (alternate ? (((y>>5)&1u)<<2)|(((y>>4)&1u)<<3)|(((x>>5)&1u)<<4) :
+                     (((y>>4)&1u)<<2)|(((x>>5)&1u)<<3)|(((y>>5)&1u)<<4));
+    const uint h=((x>>3)&1u)|((x&1u)<<1)|((y&1u)<<2)|((x&6u)<<2)|((y&6u)<<4);
+    return (base*128u+page*4096u+block*128u+h)&0x1fffffu;
+}
 uint pack16(uint value) {
     return ((value>>3)&31u)|(((value>>11)&31u)<<5)|(((value>>19)&31u)<<10)|((value>>16)&0x8000u);
 }
@@ -121,6 +130,17 @@ void main() {
         // The dispatch covers the owned pages' rectangle at (texture_base,
         // texture_pitch); the surface pixel at a holds this word (export_image's mapping).
         const uvec2 a=g+uvec2(p.texture_base,p.texture_pitch);
+        if ((p.layouts&4u)!=0u) {
+            // 16-bit surface: each pixel is one halfword of memory. The two
+            // halves of a word come from different invocations, so each
+            // replaces only its own half atomically.
+            const uint halfword=rgba_halfword(p.surface_base,p.surface_pitch,a.x,a.y,(p.layouts&8u)!=0u);
+            const uint word=halfword/2u,page=(word/2048u)&511u,shift=(halfword%2u)*16u;
+            if ((p.owned[page/32u]&(1u<<(page%32u)))==0u) return;
+            atomicAnd(mirror.words[word],~(65535u<<shift));
+            atomicOr(mirror.words[word],pack16(texelFetch(surface,ivec2(a),0).r)<<shift);
+            return;
+        }
         const uint word=rgba_word(p.surface_base,p.surface_pitch,a.x,a.y)^((p.layouts&1u)!=0u ? 0x600u : 0u);
         const uint page=(word/2048u)&511u;
         if ((p.owned[page/32u]&(1u<<(page%32u)))!=0u) mirror.words[word]=texelFetch(surface,ivec2(a),0).r;
