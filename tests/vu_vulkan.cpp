@@ -29,18 +29,19 @@ void depth_and_coverage(nt::graphics::VulkanRenderer& renderer) {
     };
     const auto pixel=[](const NativeDrawing& d) { return d.pixels()[rgba_word(0,1,1,1)]; };
     const auto zpixel=[](const NativeDrawing& d) { return d.pixels()[rgba_word(32,1,1,1)^0x600]; };
-    // A zero-width frame with RGB masked and depth writes off leaves memory
-    // unchanged; with depth writes on it still stops with a diagnostic.
+    // An FBW=0 frame scissored to rows 0-31 addresses like an FBW=32 frame;
+    // a taller scissor would wrap rows and stops with a diagnostic.
     {
-        NativeDrawing d;
-        auto p=setup(6,1); ad(p,0x4c,0x00ffffffULL<<32); ad(p,0x4e,1|(1ULL<<32)); sprite(p,0x80402010,5); finish(p);
-        const auto before=d.pixels();
-        d.submit(renderer,std::array{p});
-        if (d.pixels()!=before) throw std::runtime_error("Zero-width masked pass changed memory");
-        auto q=setup(6,1); ad(q,0x4c,0x00ffffffULL<<32); sprite(q,0x80402010,5); finish(q);
+        NativeDrawing zero,wide;
+        auto p=setup(6,1); ad(p,0x4c,0); ad(p,0x40,(31ULL<<16)|(15ULL<<48)); sprite(p,0x80402010,5); finish(p);
+        auto q=setup(6,1); ad(q,0x4c,32ULL<<16); ad(q,0x40,(31ULL<<16)|(15ULL<<48)); sprite(q,0x80402010,5); finish(q);
+        zero.submit(renderer,std::array{p}); wide.submit(renderer,std::array{q});
+        if (zero.pixels()!=wide.pixels() || zero.pixels()[rgba_word(0,32,1,1)]!=0x80402010U)
+            throw std::runtime_error("Zero-width frame did not draw as a 2048-pixel strip");
+        auto tall=setup(6,1); ad(tall,0x4c,0); ad(tall,0x40,(31ULL<<16)|(40ULL<<48)); sprite(tall,0x80402010,5); finish(tall);
         bool stopped=false;
-        try { d.submit(renderer,std::array{q}); } catch (const std::invalid_argument&) { stopped=true; }
-        if (!stopped) throw std::runtime_error("Zero-width frame with depth writes did not stop");
+        try { zero.submit(renderer,std::array{tall}); } catch (const std::invalid_argument&) { stopped=true; }
+        if (!stopped) throw std::runtime_error("Zero-width frame taller than 32 rows did not stop");
     }
     // Color drawn through a Z24 frame format lands in the depth page layout
     // with the top byte preserved; a PSMZ24 texture reads it back from there.

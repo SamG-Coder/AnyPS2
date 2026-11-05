@@ -233,6 +233,12 @@ private:
     // still; a move of a pixel or more takes effect at once. This deliberately
     // differs from the GS by less than one pixel of placement.
     static void set_offset(Context& context,std::uint64_t value);
+    // FBW=0 places a frame's pages side by side along x: for rows 0-31 every
+    // address equals that of a 2048-pixel-wide (FBW=32) frame, so a frame
+    // scissored to those rows draws with that width exactly. A taller scissor
+    // would wrap rows every 32 lines on the GS; it keeps FBW=0, which stops
+    // with a diagnostic when drawn.
+    static void update_frame(Context& context);
 public:
     // Largest vertical XYOFFSET jitter held back since the last call, in 1/16
     // pixel. Call from the thread that submits drawing.
@@ -244,6 +250,8 @@ public:
 private:
     struct Context {
         std::uint64_t frame=0,offset=0,scissor=0,test=0,depth=0,texture=0,filter=0,clamp=0,alpha=0;
+        // FRAME as written; frame is the value used for drawing (see FBW=0).
+        std::uint64_t written_frame=0;
         // XYOFFSET as written; offset is the stabilized value used for drawing.
         std::uint64_t written_offset=0;
         bool offset_written=false;
@@ -546,7 +554,7 @@ private:
         case 0x1a: state.use_primitive=(value&1)!=0; return;
         case 0x1b: state.attributes=unsigned(value&2040); return;
         case 0x18: case 0x19: set_offset(state.contexts[reg-0x18],value); return;
-        case 0x40: case 0x41: state.contexts[reg-0x40].scissor=value; return;
+        case 0x40: case 0x41: state.contexts[reg-0x40].scissor=value; update_frame(state.contexts[reg-0x40]); return;
         case 0x42: case 0x43: state.contexts[reg-0x42].alpha=value; return;
         case 0x44: state.dither_matrix=value&0x7777777777777777ULL; return;
         case 0x45: state.dither_enabled=(value&1)!=0; return;
@@ -554,7 +562,7 @@ private:
         case 0x49: state.per_pixel_blend=(value&1)!=0; return;
         case 0x47: case 0x48: state.contexts[reg-0x47].test=value; return;
         case 0x4a: case 0x4b: state.contexts[reg-0x4a].force_alpha=(value&1)!=0; return;
-        case 0x4c: case 0x4d: state.contexts[reg-0x4c].frame=value; return;
+        case 0x4c: case 0x4d: state.contexts[reg-0x4c].written_frame=value; update_frame(state.contexts[reg-0x4c]); return;
         case 0x4e: case 0x4f: state.contexts[reg-0x4e].depth=value; return;
         case 0x50: state.transfer_buffer=value; return;
         case 0x51: state.transfer_position=value; return;
@@ -585,19 +593,6 @@ private:
         if (state.unknown&(15U|unknown_vertices))
             throw std::invalid_argument("CPU graphics packet consumes GPU-owned GS state; overwrite registers and restart PRIM");
         const auto primitive=state.primitive&7;
-        {
-            // A zero-width frame (FBW=0) with RGB masked and depth writes off
-            // (ZMSK) is a pass whose only memory effect on the GS would be
-            // alpha bytes wrapped into 32 aliased rows at FBP. Those writes are
-            // dropped (an approximation, counted in the fallback diagnostics);
-            // any other zero-width target still stops in sprite_target.
-            const auto& target=state.contexts[(attributes>>9)&1];
-            if (!((target.frame>>16)&63) && ((target.frame>>32)&0xffffffU)==0xffffffU && ((target.depth>>32)&1)) {
-                state.vertex_count=0;
-                if (state.fallbacks) ++(*state.fallbacks)["zero-width frame: wrapped alpha writes dropped"];
-                return;
-            }
-        }
         // Coverage antialiasing belongs to lines and triangles only. A caller
         // may retain AA1 while issuing point draws or rectangular clears.
         if (primitive==0 || primitive==6) attributes&=~128U;
@@ -776,6 +771,10 @@ private:
         throw std::invalid_argument("Missing native graphics end tag");
     }
 };
+inline void NativeDrawing::update_frame(Context& context) {
+    context.frame=context.written_frame;
+    if (!((context.frame>>16)&63) && ((context.scissor>>48)&2047)<32) context.frame|=32ULL<<16;
+}
 inline void NativeDrawing::set_offset(Context& context,std::uint64_t value) {
     // Components are 12.4 fixed point; 16 units are one pixel.
     const auto distance=[](std::uint64_t a,std::uint64_t b,unsigned shift) {

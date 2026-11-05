@@ -609,7 +609,7 @@ int main(int argc,char**) {
                 resident_gpu.statistics().readback_bytes!=before.readback_bytes)
                 throw std::runtime_error("Resident FINISH did not complete the GPU batch without readback");
             if (resident.pixels()!=reference.pixels()) throw std::runtime_error("Resident packet pixels differ");
-            auto invalid_draw=packet; invalid_draw[3][0]=0; // Invalid FRAME pitch.
+            auto invalid_draw=packet; invalid_draw[3][0]=0x3f010000; // Unsupported FRAME format.
             rejected=false;
             try { resident.submit(resident_gpu,std::array{packet,invalid_draw}); }
             catch (const std::exception&) { rejected=true; }
