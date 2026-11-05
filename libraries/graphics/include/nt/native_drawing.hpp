@@ -22,7 +22,11 @@ namespace nt::graphics {
 class NativeDrawing {
 public:
     using Packet=graphics::Packet;
-    enum class Completion { synchronous, deferred };
+    // FINISH completes after GPU execution (synchronous: waiting; deferred:
+    // polled), or once every earlier command is recorded in order (recorded).
+    // Recorded matches a GS that keeps pace: later readbacks and display
+    // flips still observe the ordered queue, and packet data is copied.
+    enum class Completion { synchronous, deferred, recorded };
     struct Profile { std::uint64_t parse_ns=0,validate_ns=0,submit_ns=0; };
     Profile* profile=nullptr;
     explicit NativeDrawing(bool resident=false,Completion completion=Completion::synchronous):resident_(resident),completion_(completion) {}
@@ -151,7 +155,9 @@ public:
                 } else if (std::holds_alternative<Finish>(operation)) {
                     // Native queue tokens preserve FINISH ordering without blocking
                     // command consumption on every texture switch.
-                    if (completion_==Completion::deferred) {
+                    if (completion_==Completion::recorded) {
+                        renderer.enqueue_finish(); ++completed_finishes_;
+                    } else if (completion_==Completion::deferred) {
                         pending_finishes_.push_back(renderer.enqueue_finish());
                         if (pending_finishes_.size()>=1024) renderer.synchronize();
                         poll_completions(renderer);

@@ -4,6 +4,7 @@
 #include <span>
 #include <optional>
 #include <algorithm>
+#include <cstring>
 #include <vector>
 
 namespace nt::ee {
@@ -62,11 +63,29 @@ inline std::optional<NativeVectorPlan> plan_vector_data(std::size_t storage_size
     NativeVectorPlan plan{{},upload.rows};
     if (upload.mask) std::copy_n(upload.mask->row_column.begin(),4,plan.rows.begin());
     plan.writes.reserve(outputs);
+    // Little-endian guest data on a little-endian host: a plain load.
     const auto read=[&](std::size_t offset,unsigned width) {
         std::uint32_t value=0;
-        for (unsigned byte=0;byte<width;++byte) value|=std::uint32_t(upload.bytes[offset+byte])<<(byte*8);
+        std::memcpy(&value,upload.bytes.data()+offset,width);
         return value;
     };
+    // Unmasked 32-bit four-component data copies whole vectors (with the
+    // row-register arithmetic of modes 1-3 applied per lane).
+    if (!upload.mask && !filling && upload.format==NativeVectorFormat::words && upload.components==4) {
+        plan.writes.resize(outputs);
+        for (unsigned index=0;index<outputs;++index) {
+            const auto within=index%upload.writes_per_cycle;
+            const auto displacement=(index/upload.writes_per_cycle)*upload.destination_cycle+within;
+            auto& write=plan.writes[index];
+            write.destination=unsigned((upload.destination+displacement)%storage_size); write.lanes=15;
+            std::memcpy(write.values.data(),upload.bytes.data()+std::size_t(index)*16,16);
+            if (upload.mode) for (unsigned lane=0;lane<4;++lane) {
+                if (upload.mode==1 || upload.mode==2) write.values[lane]+=plan.rows[lane];
+                if (upload.mode==2 || upload.mode==3) plan.rows[lane]=write.values[lane];
+            }
+        }
+        return plan;
+    }
     for (unsigned index=0;index<outputs;++index) {
         const auto within=index%upload.writes_per_cycle;
         const bool fill=filling && within>=upload.destination_cycle;

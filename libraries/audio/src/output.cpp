@@ -3,6 +3,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <chrono>
 #include <objbase.h>
 #include <xaudio2.h>
 #include "windows_reverb.hpp"
@@ -15,6 +16,8 @@
 namespace nt::audio {
 namespace {
 class WindowsOutput final : public Output,private IXAudio2EngineCallback {
+    struct CachedState { bool valid=false; std::chrono::steady_clock::time_point time{}; std::uint64_t played=0; bool queued=false; };
+    std::array<CachedState,48> sample_cache_{};
 public:
     ~WindowsOutput() override { close(); }
     bool open() override {
@@ -162,6 +165,7 @@ public:
         error_=static_cast<std::uint32_t>(result); return SUCCEEDED(result);
     }
     bool submit_sample(unsigned index,std::span<const std::int16_t> samples,std::uint32_t loop_begin,std::uint32_t loop_length) override {
+        if (index<48) sample_cache_[index].valid=false;
         if (index>=48 || !graph_.voices[index] || samples.empty() || samples.size()>4*1024*1024 ||
             std::uint64_t(loop_begin)+loop_length>samples.size() || (!loop_length && loop_begin)) return false;
         StreamState state;
@@ -216,6 +220,7 @@ public:
         error_=static_cast<std::uint32_t>(result); return SUCCEEDED(result);
     }
     bool append_voice(unsigned index,std::span<const std::int16_t> samples) override {
+        if (index<48) sample_cache_[index].valid=false;
         if (index>=48 || !graph_.voices[index] || samples.empty() || samples.size()>4096) return false;
         StreamState state;
         if (!sample_state(index,state)) return false;
@@ -329,11 +334,20 @@ public:
     }
     bool sample_state(unsigned index,StreamState& state) override {
         if (index>=48 || !graph_.voices[index]) return false;
-        XAUDIO2_VOICE_STATE current{}; graph_.voices[index]->GetState(&current);
-        state={current.SamplesPlayed,current.BuffersQueued!=0}; return true;
+        // GetState takes the engine lock; playback advances in engine
+        // quanta, so a state up to 1 ms old is reused until the voice's
+        // queue changes.
+        auto& cached=sample_cache_[index];
+        const auto now=std::chrono::steady_clock::now();
+        if (!cached.valid || now-cached.time>=std::chrono::milliseconds(1)) {
+            XAUDIO2_VOICE_STATE current{}; graph_.voices[index]->GetState(&current);
+            cached={true,now,current.SamplesPlayed,current.BuffersQueued!=0};
+        }
+        state={cached.played,cached.queued}; return true;
     }
     bool stop_voice(unsigned index) override {
         if (index>=48 || !graph_.voices[index]) return false;
+        sample_cache_[index].valid=false;
         // Wait for the engine before releasing/replacing its sample storage.
         graph_.voices[index]->DestroyVoice(); graph_.voices[index]=nullptr;
         const auto detached=graph_.envelope[index]->SetEffectChain(nullptr);

@@ -194,7 +194,7 @@ struct NativeGpu {
     nt::graphics::VulkanRenderer* renderer=nullptr;
     // GPU primitive assembly is the default where the renderer supports it.
     bool verify_textures=false,profile_commands=false,gpu_triangles=true,gpu_triangles_required=false,gpu_triangles_enabled=false;
-    nt::graphics::NativeDrawing drawing{true,nt::graphics::NativeDrawing::Completion::deferred};
+    nt::graphics::NativeDrawing drawing{true,nt::graphics::NativeDrawing::Completion::recorded};
     nt::graphics::NativeDrawing::Profile drawing_profile{};
     std::unique_ptr<nt::graphics::NativeDrawingWorker> worker;
     // Render thread only: the sub-pixel offset jitter a game keeps applying.
