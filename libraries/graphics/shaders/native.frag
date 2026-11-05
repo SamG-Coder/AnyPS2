@@ -18,12 +18,63 @@ struct DrawData {
     Vertex vertices[3];
     uint target_width,target_height,fog_color,fog;
     uint lod_control; float lod_q;
+    // Levels with bit set in indexed_levels are decoded by native.frag;
+    // level_buffers holds MIPTBP levels 1-6 as base | pitch << 16.
+    uint palette,palette_bank,indexed_format,indexed_levels;
+    uint level_buffers[6]; uint reserved0,reserved1;
 };
 layout(std430,set=0,binding=3) readonly buffer DrawRecords { DrawData items[]; } records;
 
 layout(location=0) flat in uint draw_index;
 #define draw records.items[draw_index]
 layout(set=0,binding=0) uniform usampler2D texture_levels[7];
+// Indexed level-0 textures are decoded here: index data comes from the GPU
+// copy of console memory and colors from a GPU palette slot (palette.comp's
+// layout), so no separate decode pass runs per draw.
+layout(std430,set=0,binding=4) readonly buffer Mirror { uint words[]; } mirror;
+layout(std430,set=0,binding=5) readonly buffer Palettes { uint words[]; } palettes;
+// Palettes known on the CPU, written by the host per draw (palette bit 31 set).
+layout(std430,set=0,binding=6) readonly buffer HostPalettes { uint words[]; } host_palettes;
+uint rgba_word(uint base,uint pitch,uint x,uint y) {
+    x&=2047u; y&=2047u;
+    const uint page=(y/32u)*pitch+x/64u;
+    const uint block=((x>>3)&1u)|(((y>>3)&1u)<<1)|(((x>>4)&1u)<<2)|(((y>>4)&1u)<<3)|(((x>>5)&1u)<<4);
+    const uint word=(x&1u)|((y&1u)<<1)|((x&6u)<<1)|((y&6u)<<3);
+    return (base*64u+page*2048u+block*64u+word)&0xfffffu;
+}
+uint indexed_byte(uint base,uint pitch,uint x,uint y) {
+    x&=2047u; y&=2047u;
+    const uint page=(y/64u)*(pitch/2u)+x/128u;
+    const uint block=((x>>4)&1u)|(((y>>4)&1u)<<1)|(((x>>5)&1u)<<2)|(((y>>5)&1u)<<3)|(((x>>6)&1u)<<4);
+    const uint column=((x&1u)<<2)|((x&2u)<<3)|((((x>>2)^(y>>1)^(y>>2))&1u)<<5)|
+        ((x&8u)>>2)|((y&1u)<<3)|((y&2u)>>1)|((y&4u)<<4)|((y&8u)<<4);
+    return (base*256u+page*8192u+block*256u+column)&0x3fffffu;
+}
+uint indexed_nibble(uint base,uint pitch,uint x,uint y) {
+    x&=2047u; y&=2047u;
+    const uint page=(y/128u)*(pitch/2u)+x/128u;
+    const uint block=((y>>4)&1u)|(((x>>5)&1u)<<1)|(((y>>5)&1u)<<2)|(((x>>6)&1u)<<3)|(((y>>6)&1u)<<4);
+    const uint column=((x&1u)<<3)|((x&2u)<<4)|((((x>>2)^(y>>1)^(y>>2))&1u)<<6)|
+        ((x&8u)>>2)|((x&16u)>>2)|((y&1u)<<4)|((y&2u)>>1)|((y&4u)<<5)|((y&8u)<<5);
+    return (base*512u+page*16384u+block*512u+column)&0x7fffffu;
+}
+// indexed_format: 1 PSMT8, 2 PSMT4, 3 PSMT8H, 4 PSMT4HL, 5 PSMT4HH; 6 PSMCT32
+// and 7 PSMCT32 in the depth page layout read memory without a palette.
+uint indexed_texel(uint level,ivec2 p) {
+    const uint format=draw.indexed_format-1u,x=uint(p.x),y=uint(p.y);
+    const uint base=level==0u ? draw.texture_base : draw.level_buffers[level-1u]&0xffffu;
+    const uint pitch=level==0u ? draw.texture_pitch : draw.level_buffers[level-1u]>>16;
+    uint word,shift,mask=255u;
+    if (format>=5u) return mirror.words[rgba_word(base,pitch,x,y)^(format==6u ? 0x600u : 0u)];
+    if (format==0u) { const uint b=indexed_byte(base,pitch,x,y); word=b/4u; shift=(b%4u)*8u; }
+    else if (format==1u) { const uint n=indexed_nibble(base,pitch,x,y); word=n/8u; shift=(n%8u)*4u; mask=15u; }
+    else { word=rgba_word(base,pitch,x,y); shift=format==4u ? 28u : 24u; mask=format==2u ? 255u : 15u; }
+    const uint index=(mirror.words[word&0xfffffu]>>shift)&mask;
+    // nt::graphics::snapshot_palette for 32-bit palettes: CSA selects the bank;
+    // eight-bit indices keep their low four bits within a clamped bank.
+    const uint entry=mask==255u ? min(draw.palette_bank+index/16u,15u)*16u+(index&15u) : draw.palette_bank*16u+index;
+    return draw.palette>=0x80000000u ? host_palettes.words[(draw.palette&0x7fffffffu)*256u+entry] : palettes.words[draw.palette*256u+entry];
+}
 #ifdef ANYPS2_ORDERED_FRAGMENTS
 layout(r32ui,set=0,binding=1) coherent uniform uimage2D color_image;
 layout(r32ui,set=0,binding=2) coherent uniform uimage2D depth_image;
@@ -47,6 +98,7 @@ uint wrap(int t,uint size,uint mode,uint low,uint high) {
 }
 // Constant indices keep level selection valid without descriptor indexing.
 uint level_texel(uint level,ivec2 p) {
+    if (((draw.indexed_levels>>level)&1u)!=0u) return indexed_texel(level,p);
     switch (level) {
     case 0: return texelFetch(texture_levels[0],p,0).r;
     case 1: return texelFetch(texture_levels[1],p,0).r;

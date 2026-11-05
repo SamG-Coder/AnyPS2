@@ -176,7 +176,8 @@ void gpu_palettes(nt::graphics::VulkanRenderer& renderer) {
     ad(p,1,0x80000000); ad(p,3,8|(8ULL<<16)); ad(p,5,0); ad(p,3,264|(264ULL<<16)); ad(p,5,256|(256ULL<<16));
     finish(p); d.submit(renderer,std::array{p});
     const auto& after=renderer.statistics();
-    if (after.gpu_palette_loads==before.gpu_palette_loads || after.gpu_indexed_decodes==before.gpu_indexed_decodes)
+    if (after.gpu_palette_loads==before.gpu_palette_loads ||
+        after.gpu_indexed_decodes+after.shader_indexed_draws==before.gpu_indexed_decodes+before.shader_indexed_draws)
         throw std::runtime_error("Rendered palette and indexed texture did not use the GPU path");
     const auto& memory=d.pixels();
     for (unsigned y=0;y<16;++y) for (unsigned x=0;x<16;++x) {
@@ -194,11 +195,11 @@ void gpu_palettes(nt::graphics::VulkanRenderer& renderer) {
     ad(q,6,(2ULL<<14)|(0x13ULL<<20)|(4ULL<<26)|(8ULL<<30)|(1ULL<<35)|(320ULL<<37)|(1ULL<<61)); // 16x256 PSMT8
     ad(q,1,0x80000000); ad(q,3,8|(8ULL<<16)); ad(q,5,0); ad(q,3,264|((256ULL*16+8)<<16)); ad(q,5,256|(256ULL<<16));
     finish(q);
-    const auto decodes=renderer.statistics().gpu_indexed_decodes;
     d.submit(renderer,std::array{q});
-    if (renderer.statistics().gpu_indexed_decodes==decodes ||
-        renderer.statistics().palette_readbacks+renderer.statistics().texture_readbacks!=readbacks)
-        throw std::runtime_error("PSMT8 view beyond the rendered surface did not decode on the GPU");
+    // The palette words are exact in CPU memory by now, so either decode path
+    // is valid; neither may read rendered memory back.
+    if (renderer.statistics().palette_readbacks+renderer.statistics().texture_readbacks!=readbacks)
+        throw std::runtime_error("PSMT8 view beyond the rendered surface read memory back");
     const auto& tall=d.pixels();
     for (unsigned y=0;y<16;++y) for (unsigned x=0;x<16;++x) {
         const auto byte=indexed_byte(0,2,x,y*16);

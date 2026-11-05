@@ -135,6 +135,9 @@ public:
                     renderer.draw_vectors(launch,batch->assembly,command);
                     dirty_=true;
                 } else if (const auto* load=std::get_if<PaletteLoad>(&operation)) {
+                    // A full 32-bit load replaces every entry, so it extends no GPU palette.
+                    const bool full=!load->narrow && !load->bank && load->addresses.size()==256;
+                    if (full) candidate.palette_slot=0;
                     // A 32-bit palette load from rendered memory stays on the GPU.
                     if (!load->narrow && load->bank*16+load->addresses.size()<=256)
                         if (const auto slot=renderer.load_palette(load->addresses,load->bank*16,candidate.palette_slot,candidate.palette)) {

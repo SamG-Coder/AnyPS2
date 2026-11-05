@@ -78,10 +78,12 @@ void main() {
     }
     if (g.x>=p.width || g.y>=p.height) return;
     if (p.mode==3u) {
-        // The surface pixel at g holds this word (export_image's mapping).
-        const uint word=rgba_word(p.surface_base,p.surface_pitch,g.x,g.y)^((p.layouts&1u)!=0u ? 0x600u : 0u);
+        // The dispatch covers the owned pages' rectangle at (texture_base,
+        // texture_pitch); the surface pixel at a holds this word (export_image's mapping).
+        const uvec2 a=g+uvec2(p.texture_base,p.texture_pitch);
+        const uint word=rgba_word(p.surface_base,p.surface_pitch,a.x,a.y)^((p.layouts&1u)!=0u ? 0x600u : 0u);
         const uint page=(word/2048u)&511u;
-        if ((p.owned[page/32u]&(1u<<(page%32u)))!=0u) mirror.words[word]=texelFetch(surface,ivec2(g),0).r;
+        if ((p.owned[page/32u]&(1u<<(page%32u)))!=0u) mirror.words[word]=texelFetch(surface,ivec2(a),0).r;
         return;
     }
     // format: 0 PSMT8, 1 PSMT4, 2 PSMT8H, 3 PSMT4HL, 4 PSMT4HH, 5 PSMCT32 (no palette).

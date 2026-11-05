@@ -82,7 +82,7 @@ struct RenderStatistics {
     std::uint64_t wait_ns=0,upload_ns=0,write_ns=0,draw_ns=0,texture_decode_ns=0;
     std::uint64_t surface_import_ns=0,surface_export_ns=0;
     std::uint64_t surface_conflicts=0,texture_readbacks=0,palette_readbacks=0;
-    std::uint64_t gpu_palette_loads=0,gpu_indexed_decodes=0;
+    std::uint64_t gpu_palette_loads=0,gpu_indexed_decodes=0,shader_indexed_draws=0;
     std::uint64_t surface_evictions=0;
     std::array<std::uint32_t,8> last_surface_conflict{}; // base, pitch, height, depth for each view.
     std::uint64_t uploads=0,feedback_barriers=0,gpu_ns=0;

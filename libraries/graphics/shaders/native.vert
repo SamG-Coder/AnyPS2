@@ -12,6 +12,10 @@ struct DrawData {
     Vertex vertices[3];
     uint target_width,target_height,fog_color,fog;
     uint lod_control; float lod_q;
+    // Levels with bit set in indexed_levels are decoded by native.frag;
+    // level_buffers holds MIPTBP levels 1-6 as base | pitch << 16.
+    uint palette,palette_bank,indexed_format,indexed_levels;
+    uint level_buffers[6]; uint reserved0,reserved1;
 };
 layout(std430,set=0,binding=3) readonly buffer DrawRecords { DrawData items[]; } records;
 

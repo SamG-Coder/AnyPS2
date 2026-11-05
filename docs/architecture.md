@@ -130,10 +130,17 @@ reproduce that in 32-row bands drawn top to bottom, and other primitives on a
 wrapping frame stop with a diagnostic.
 32-bit palette loads and indexed textures (PSMT8, PSMT4 and the high-bit
 variants) whose data was rendered are resolved on the GPU: palettes are gathered
-into numbered GPU palette slots and textures are decoded by a compute pass that
-inverts the 32-bit page layout. They read a GPU copy of console memory: a page
+into numbered GPU palette slots, and the draw's fragment shader decodes texels
+itself (every mip level) from the index data and the palette, so no decode pass
+or barrier runs per draw. A palette whose words the CPU holds exactly (written by
+the host and not drawn over since) is snapshotted on the CPU and published to the
+shader through host-visible memory with the draw record. Other 32-bit views of
+rendered memory are sampled by the shader in the same way. Vector-batch draws use
+the same path; draws that cannot (a source no plain 32-bit surface holds) decode
+into a native image by a compute pass that inverts the 32-bit page layout. They read a GPU copy of console memory: a page
 whose newest words are in backing memory is uploaded when stale, and a page that a
-plain 32-bit surface holds is published into the copy by a compute pass, so the
+plain 32-bit surface holds is published into the copy by a compute pass over
+only the changed pages, so the
 CPU never reads rendered memory back for them. Other 32-bit texture views of
 rendered memory (other widths or offsets, or spanning several surfaces) are
 gathered the same way. Host image transfers into a rendered 32-bit surface are

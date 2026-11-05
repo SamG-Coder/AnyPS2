@@ -21,7 +21,7 @@ const uint plan_shaded=4u, plan_coverage=5u, plan_xyz_register=6u, plan_present=
 const uint plan_offset=8u, plan_scissor=10u, plan_store=14u, plan_constant=34u, plan_state=54u;
 const uint plan_reglist=60u, plan_template=64u;
 // DrawRecord words (native_raster.cpp, native.vert).
-const uint record_words=68u, record_left=0u, record_color=6u, record_vertices=32u, record_fog=65u;
+const uint record_words=80u, record_left=0u, record_color=6u, record_vertices=32u, record_fog=65u;
 const uint record_x0=16u, record_depth=31u, record_lod_q=67u, record_flags=12u;
 
 uint plan_base=0u,record_base=0u;

@@ -14,7 +14,7 @@ namespace nt::graphics {
 // vertex, fragment and host reads.
 class NativeVectors {
 public:
-    static constexpr unsigned record_words=68;
+    static constexpr unsigned record_words=80;
     struct Statistics {
         std::uint64_t launches=0,resident_hits=0,resident_uploads=0;
         std::uint64_t resident_upload_bytes=0,staged_bytes=0,failures=0;
