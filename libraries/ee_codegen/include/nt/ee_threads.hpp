@@ -109,7 +109,8 @@ public:
             if (thread.status==2) thread.order=next_order_++;
             return {Stop::budget,id};
         }
-        if (call==0x2d) {
+        // ReleaseWaitThread and its interrupt-context form iReleaseWaitThread.
+        if (call==0x2d || call==0x2e) {
             if (id==current_ || !(thread.status&4)) return fail();
             thread.status=(thread.status&8) ? 8U : 2U;
             thread.semaphore=0; thread.context.set(2,~std::uint64_t(0));

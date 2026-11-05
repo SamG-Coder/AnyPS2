@@ -966,6 +966,8 @@ int main() {
             check(call(0x2d,1).value==1 && call(0x30,1).value==8);
             check(call(0x39,1).value==1 && call(0x30,1).value==2);
             check(call(0x2d,1).value==~std::uint64_t(0));
+            // iReleaseWaitThread shares the service and its failure result.
+            check(call(0x2e,1).status==nt::ee::Stop::budget && call(0x2e,1).value==~std::uint64_t(0));
             threads.schedule(state);
             check(state.gpr[2].lo==~std::uint64_t(0));
             check(call(0x32).value==1); threads.schedule(state);
