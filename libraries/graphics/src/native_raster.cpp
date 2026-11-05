@@ -872,14 +872,14 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
     unsigned width=(d.flags&1) ? texture_extent(d.texture_width,d.clamp_u,d.min_u,d.max_u) : 1;
     unsigned height=(d.flags&1) ? texture_extent(d.texture_height,d.clamp_v,d.min_v,d.max_v) : 1;
     if ((d.flags&1) && !(d.flags&64)) {
-        const auto found=surfaces.find({d.texture_base,d.texture_pitch,false});
+        const auto found=surfaces.find({d.texture_base,d.texture_pitch,(d.flags&texture_z_flag)!=0});
         if (found!=surfaces.end() && found->second && found->second->valid &&
             texture_fits_surface(d,found->second->width,found->second->height)) {
             width=std::min(width,found->second->width);
             height=std::min(height,found->second->height);
         }
     }
-    std::array<std::uint32_t,261> key{d.texture_base,d.texture_pitch,width,height,d.flags&(65|indexed8_flag)};
+    std::array<std::uint32_t,261> key{d.texture_base,d.texture_pitch,width,height,d.flags&(65|indexed8_flag|texture_z_flag)};
     if (d.flags&64) std::copy(command.palette.begin(),command.palette.end(),key.begin()+5);
     const auto r=(d.flags&1) ? region(d.texture_base,d.texture_pitch,width,height,(d.flags&indexed8_flag) ? 2U : (d.flags&64) ? 1U : 0U) : Region{};
     auto found_texture=textures.find(key);
@@ -908,12 +908,13 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
     // Identical surface views use an ordered native image copy for feedback.
     // No CPU conversion is involved in the common framebuffer texture path.
     if ((d.flags&1) && !(d.flags&64)) {
-        auto found=surfaces.find({d.texture_base,d.texture_pitch,false});
+        const bool depth_layout=(d.flags&texture_z_flag)!=0;
+        auto found=surfaces.find({d.texture_base,d.texture_pitch,depth_layout});
         if (found!=surfaces.end() && found->second && found->second->valid &&
             found->second->width>=width && found->second->height>=height) {
             // A draw may have resolved only its touched pages. Sampling the
             // image must first resolve all pages of the requested source view.
-            auto& from=surface(d.texture_base,d.texture_pitch,height,false);
+            auto& from=surface(d.texture_base,d.texture_pitch,height,depth_layout);
             if (!tex.valid || tex.image->revision!=from.revision) {
                 order(); VkImageCopy copy{}; copy.srcSubresource=copy.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; copy.extent={width,height,1};
                 vkCmdCopyImage(this->command,from.image,VK_IMAGE_LAYOUT_GENERAL,tex.image->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
@@ -925,7 +926,7 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
     for (auto& [k,i]:surfaces) if (i && i->dirty && i->region.overlaps(r)) { ++stats.texture_readbacks; synchronize_source(r); tex.valid=false; break; }
     if (!tex.valid) {
 #ifdef ANYPS2_LLVM_TEXTURES
-        if (d.flags&1) {
+        if ((d.flags&1) && !(d.flags&texture_z_flag)) {
             decode_texture(*tex.image,command,r); tex.valid=true;
             return *tex.image;
         }
@@ -936,7 +937,7 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
             std::uint32_t value;
             if (d.flags&indexed8_flag) { const auto byte=indexed_byte(d.texture_base,d.texture_pitch,x,y); value=command.palette[(source[byte/4]>>((byte%4)*8))&255]; }
             else if (d.flags&64) { const auto nibble=indexed_nibble(d.texture_base,d.texture_pitch,x,y); value=command.palette[(source[nibble/8]>>((nibble%8)*4))&15]; }
-            else value=source[rgba_word(d.texture_base,d.texture_pitch,x,y)];
+            else value=source[rgba_word(d.texture_base,d.texture_pitch,x,y)^((d.flags&texture_z_flag) ? 0x600U : 0U)];
             pixels[std::size_t(y)*width+x]=value;
         }
         }
@@ -1119,11 +1120,11 @@ void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly&
     auto& cached=r.vector_target;
     const auto& previous=cached.draw;
     const bool reuse=cached.color && previous.base==target.base && previous.pitch==target.pitch &&
-        (previous.flags&(color_16_flag|color_16s_flag|depth_test_flag))==(target.flags&(color_16_flag|color_16s_flag|depth_test_flag)) &&
+        (previous.flags&(color_16_flag|color_16s_flag|color_z_flag|depth_test_flag))==(target.flags&(color_16_flag|color_16s_flag|color_z_flag|depth_test_flag)) &&
         (!(target.flags&depth_test_flag) || previous.depth_base==target.depth_base) &&
         cached.color->height>=target.bottom && cached.depth->height>=target.bottom &&
         r.current(*cached.color,target) && r.current(*cached.depth,target);
-    auto& color=reuse ? *cached.color : r.surface(target.base,target.pitch,target.bottom,false,false,false,&target,format);
+    auto& color=reuse ? *cached.color : r.surface(target.base,target.pitch,target.bottom,(target.flags&color_z_flag)!=0,false,false,&target,format);
     auto& depth=reuse ? *cached.depth : r.surface((target.flags&depth_test_flag) ? target.depth_base : 0,target.pitch,target.bottom,
         true,!(target.flags&depth_test_flag),false,&target);
     color.scope=depth.scope=r.surface_scope;
@@ -1196,13 +1197,13 @@ void NativeRaster::draw(std::span<const SpriteCommand> commands) {
         if (r.records_used==records_per_slot) r.flush(VK_NULL_HANDLE,VK_NULL_HANDLE,false);
         const auto& previous=cached_command.draw;
         const bool reuse=cached_color && previous.base==d.base && previous.pitch==d.pitch &&
-            (previous.flags&(color_16_flag|color_16s_flag))==(d.flags&(color_16_flag|color_16s_flag)) &&
+            (previous.flags&(color_16_flag|color_16s_flag|color_z_flag))==(d.flags&(color_16_flag|color_16s_flag|color_z_flag)) &&
             (previous.flags&depth_test_flag)==(d.flags&depth_test_flag) &&
             (!(d.flags&depth_test_flag) || previous.depth_base==d.depth_base) &&
             cached_color->height>=height && cached_depth->height>=height && same_texture(c,cached_command) &&
             r.current(*cached_color,d) && r.current(*cached_depth,d);
         const unsigned format=(d.flags&color_16_flag) ? ((d.flags&color_16s_flag) ? 10 : 2) : 0;
-        auto& color=reuse ? *cached_color : r.surface(d.base,d.pitch,height,false,false,false,&d,format);
+        auto& color=reuse ? *cached_color : r.surface(d.base,d.pitch,height,(d.flags&color_z_flag)!=0,false,false,&d,format);
         color.scope=r.surface_scope; color.last_use=++r.surface_use;
         auto& depth=reuse ? *cached_depth : r.surface((d.flags&depth_test_flag) ? d.depth_base : 0,d.pitch,height,true,!(d.flags&depth_test_flag),false,&d);
         depth.scope=r.surface_scope; depth.last_use=++r.surface_use;

@@ -233,11 +233,21 @@ private:
     // still; a move of a pixel or more takes effect at once. This deliberately
     // differs from the GS by less than one pixel of placement.
     static void set_offset(Context& context,std::uint64_t value);
+public:
+    // Largest vertical XYOFFSET jitter held back since the last call, in 1/16
+    // pixel. Call from the thread that submits drawing.
+    unsigned take_offset_jitter() {
+        unsigned jitter=0;
+        for (auto& context:state_.contexts) { jitter=std::max(jitter,unsigned(context.jitter_y)); context.jitter_y=0; }
+        return jitter;
+    }
+private:
     struct Context {
         std::uint64_t frame=0,offset=0,scissor=0,test=0,depth=0,texture=0,filter=0,clamp=0,alpha=0;
         // XYOFFSET as written; offset is the stabilized value used for drawing.
         std::uint64_t written_offset=0;
         bool offset_written=false;
+        std::uint32_t jitter_y=0; // largest vertical change held back, in 1/16 pixel
         std::array<std::uint64_t,2> mipmap_bases{};
         bool force_alpha=false;
     };
@@ -760,7 +770,10 @@ inline void NativeDrawing::set_offset(Context& context,std::uint64_t value) {
         return x>y ? x-y : y-x;
     };
     context.written_offset=value;
-    if (context.offset_written && distance(value,context.offset,0)<16 && distance(value,context.offset,32)<16) return;
+    if (context.offset_written && distance(value,context.offset,0)<16 && distance(value,context.offset,32)<16) {
+        context.jitter_y=std::max(context.jitter_y,std::uint32_t(distance(value,context.offset,32)));
+        return;
+    }
     context.offset=value; context.offset_written=true;
 }
 }

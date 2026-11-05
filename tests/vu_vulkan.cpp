@@ -29,6 +29,23 @@ void depth_and_coverage(nt::graphics::VulkanRenderer& renderer) {
     };
     const auto pixel=[](const NativeDrawing& d) { return d.pixels()[rgba_word(0,1,1,1)]; };
     const auto zpixel=[](const NativeDrawing& d) { return d.pixels()[rgba_word(32,1,1,1)^0x600]; };
+    // Color drawn through a Z24 frame format lands in the depth page layout
+    // with the top byte preserved; a PSMZ24 texture reads it back from there.
+    {
+        NativeDrawing d;
+        auto p=setup(6,1); ad(p,0x4c,(1ULL<<16)|(0x31ULL<<24)); sprite(p,0x80402010,0); finish(p);
+        d.submit(renderer,std::array{p});
+        if (d.pixels()[rgba_word(0,1,1,1)^0x600]!=0x00402010U || d.pixels()[rgba_word(0,1,1,1)])
+            throw std::runtime_error("Z24 frame color was not written in the depth page layout");
+        auto t=setup(6,1); ad(t,0x4c,(1ULL<<16)|2ULL); // CT32 target at block 64
+        ad(t,6,(1ULL<<14)|(0x31ULL<<20)|(2ULL<<26)|(2ULL<<30)|(1ULL<<35)); // TEX0: base 0, PSMZ24, 4x4, DECAL
+        ad(t,0,6|(1U<<4)|(1U<<8)); // sprite, textured, UV coordinates
+        ad(t,1,0x80000000); ad(t,3,(8ULL<<4)|(8ULL<<20)); ad(t,5,0);
+        ad(t,3,(40ULL<<4)|(40ULL<<20)); ad(t,5,64ULL|(64ULL<<16));
+        finish(t); d.submit(renderer,std::array{t});
+        if ((d.pixels()[rgba_word(64,1,1,1)]&0xffffffU)!=0x402010U)
+            throw std::runtime_error("PSMZ24 texture did not sample the depth page layout");
+    }
     for (unsigned method=0;method<4;++method) {
         NativeDrawing d;
         auto p=setup(6,1); sprite(p,0x80402010,20); finish(p); d.submit(renderer,std::array{p});

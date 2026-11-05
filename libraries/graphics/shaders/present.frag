@@ -13,5 +13,13 @@ void main() {
     uint x=uint(gl_FragCoord.x),y=uint(gl_FragCoord.y);
     if (x>=display.width || y>=display.height) discard;
     uint color=compose_display(x,y);
-    output_color=vec4(color&255,(color>>8)&255,(color>>16)&255,255)/255.0;
+    vec3 rgb=vec3(color&255,(color>>8)&255,(color>>16)&255);
+    if (display.smoothing!=0) {
+        // Fixed vertical blend standing in for the temporal blend of a
+        // suppressed sub-pixel offset cycle (DisplayPlan::smoothing).
+        const uint above=compose_display(x,y>0 ? y-1 : 0),below=compose_display(x,min(y+1,display.height-1));
+        const float w=float(display.smoothing)/256.0;
+        rgb=rgb*(1.0-2.0*w)+(vec3(above&255,(above>>8)&255,(above>>16)&255)+vec3(below&255,(below>>8)&255,(below>>16)&255))*w;
+    }
+    output_color=vec4(rgb,255)/255.0;
 }

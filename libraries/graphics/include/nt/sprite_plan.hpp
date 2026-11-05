@@ -10,11 +10,14 @@ namespace nt::graphics {
 // batches use this directly; their bounds are planned per primitive on the GPU.
 inline Sprite sprite_target(std::uint64_t frame) {
     const unsigned format=(frame>>24)&63, pitch=(frame>>16)&63;
-    if ((format>1 && format!=2 && format!=10) || !pitch) throw std::invalid_argument("Unsupported drawing surface: format="+
+    // Z32 (0x30) and Z24 (0x31) frames receive color in the depth page layout.
+    const bool depth_layout=format==0x30 || format==0x31;
+    if ((format>1 && format!=2 && format!=10 && !depth_layout) || !pitch) throw std::invalid_argument("Unsupported drawing surface: format="+
         std::to_string(format)+" pitch="+std::to_string(pitch)+" frame="+std::to_string(frame));
-    const auto mask=std::uint32_t(frame>>32)|(format==1 ? 0xff000000U : 0U);
+    const auto mask=std::uint32_t(frame>>32)|(format==1 || format==0x31 ? 0xff000000U : 0U);
     Sprite result{0,0,0,0,unsigned(frame&511)*32,pitch,0,mask};
     if (format==2 || format==10) result.flags|=color_16_flag|(format==10 ? color_16s_flag : 0);
+    if (depth_layout) result.flags|=color_z_flag;
     return result;
 }
 // vector_assembly.comp repeats these bounds for GPU-produced triangles.

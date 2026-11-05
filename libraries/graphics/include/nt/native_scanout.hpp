@@ -14,7 +14,18 @@ struct DisplayPlan {
     std::uint32_t width=0,height=0,control=0,background=0,half_height=0,bgra=0;
     DisplayField field=DisplayField::progressive;
     std::uint32_t history_valid=0;
+    // Presentation only: weight in 1/256 of each vertically adjacent display
+    // row. It reproduces a CRT's averaging of sub-pixel drawing-offset jitter
+    // that rendering suppresses (see NativeDrawing::offset_jitter).
+    std::uint32_t smoothing=0;
 };
+// Neighbour weight for a jitter of +/- jitter_sixteenths of a pixel: the mean
+// of the image at -a, 0 and +a lines (linear between rows) gives each
+// neighbouring row a/3. Half-height output doubles every source line.
+inline std::uint32_t jitter_smoothing(unsigned jitter_sixteenths,bool half_height) {
+    const unsigned lines_256=jitter_sixteenths*16U*(half_height ? 2U : 1U);
+    return std::min(lines_256,256U)/3U;
+}
 inline std::optional<DisplayPlan> plan_display(std::uint64_t control,
     const std::array<std::uint64_t,2>& buffers,const std::array<std::uint64_t,2>& displays,
     bool half_height=false,std::uint32_t background=0,DisplayField field=DisplayField::progressive) {

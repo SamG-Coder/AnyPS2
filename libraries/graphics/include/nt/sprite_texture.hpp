@@ -39,7 +39,8 @@ inline TextureLevels plan_texture_levels(std::uint64_t filter,const std::array<s
 inline TextureLevels plan_texture(Sprite& draw,std::uint64_t texture,
     std::uint64_t filter,std::uint64_t clamp,std::uint32_t texa,const std::array<std::uint64_t,2>& mipmap_bases) {
     const unsigned format=(texture>>20)&63,function=(texture>>35)&3;
-    if (format>1 && format!=19 && format!=20)
+    const bool depth_layout=format==0x30 || format==0x31;
+    if (format>1 && format!=19 && format!=20 && !depth_layout)
         throw std::invalid_argument("Unsupported texture format PSM="+std::to_string(format)+" TFX="+std::to_string(function));
     bool linear=false;
     auto levels=plan_texture_levels(filter,mipmap_bases,linear);
@@ -48,7 +49,7 @@ inline TextureLevels plan_texture(Sprite& draw,std::uint64_t texture,
     if (tw>10 || th>10) throw std::invalid_argument("Unsupported texture extent");
     draw.texture_base=texture&16383; draw.texture_pitch=(texture>>14)&63;
     draw.texture_width=1U<<tw; draw.texture_height=1U<<th;
-    draw.flags|=1|(format==1 ? 2U : 0U)|(((texture>>34)&1) ? 4U : 0U)|(function<<3);
+    draw.flags|=1|(format==1 || format==0x31 ? 2U : 0U)|(((texture>>34)&1) ? 4U : 0U)|(function<<3)|(depth_layout ? texture_z_flag : 0U);
     if (format==19 || format==20) {
         const unsigned palette_format=(texture>>51)&15;
         if (palette_format>1 && palette_format!=2 && palette_format!=10)

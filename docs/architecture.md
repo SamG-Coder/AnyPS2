@@ -114,7 +114,15 @@ XYOFFSET changes smaller than one pixel on both axes keep the context's establis
 offset. Games cycle sub-pixel drawing offsets every frame so that an interlaced CRT
 blends them into anti-aliased edges; a progressive display shows the whole picture
 trembling instead. Placement therefore differs from the GS by less than one pixel;
-a change of a pixel or more applies immediately.
+a change of a pixel or more applies immediately. The presentation pass restores the
+intended smoothing as a fixed vertical blend matching the held-back jitter range
+(each neighbouring row weighted by a third of the jitter in display lines), so a
+cycling ±¼-pixel offset in field-rendered output becomes a 1/6, 2/3, 1/6 blend.
+It is applied while the game keeps jittering and dropped after about a second
+without jitter. It is presentation only; captures and readbacks are unfiltered.
+Z32 and Z24 frame and texture formats are drawn and sampled as CT32 and CT24 in
+the depth page block order (block number XOR 24), the layout depth buffers use.
+Z16 formats as colour targets or textures remain unsupported.
 TEX1 level-of-detail sampling binds MIPTBP levels 1-6 as separate native textures
 and selects the magnification or minification filter per pixel. LOD is computed
 in single-precision floating point from interpolated Q (or the sprite's Q), with

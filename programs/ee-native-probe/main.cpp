@@ -197,6 +197,17 @@ struct NativeGpu {
     nt::graphics::NativeDrawing drawing{true,nt::graphics::NativeDrawing::Completion::deferred};
     nt::graphics::NativeDrawing::Profile drawing_profile{};
     std::unique_ptr<nt::graphics::NativeDrawingWorker> worker;
+    // Render thread only: the sub-pixel offset jitter a game keeps applying.
+    // A frame that draws nothing (a repeated image) does not end it; a game
+    // that stops jittering loses the presentation filter after a second.
+    struct JitterHold {
+        unsigned jitter=0,quiet=0;
+        std::uint32_t smoothing(unsigned observed,bool half_height) {
+            if (observed) { jitter=observed; quiet=0; }
+            else if (jitter && ++quiet>=60) jitter=0;
+            return nt::graphics::jitter_smoothing(jitter,half_height);
+        }
+    } jitter_hold;
     std::uint64_t reported_finishes=0;
     void ensure_renderer() {
         if (!renderer) {
@@ -728,8 +739,9 @@ int main(int argc,char** argv) {
                     gpu.ensure_renderer();
                     if (window->needs_resize(*plan)) { gpu.join(); window->prepare(*plan); }
                     // Shown after this frame's queued drawing, on the render thread.
-                    gpu.worker->enqueue([display=window.get(),timing=presented,plan=*plan,profile=profile_graphics](nt::graphics::VulkanRenderer& renderer) {
+                    gpu.worker->enqueue([display=window.get(),timing=presented,plan=*plan,profile=profile_graphics,gpu=&gpu](nt::graphics::VulkanRenderer& renderer) mutable {
                         const auto present_started=std::chrono::steady_clock::now();
+                        plan.smoothing=gpu->jitter_hold.smoothing(gpu->drawing.take_offset_jitter(),plan.half_height!=0);
                         const bool updated=display->present_display(renderer,plan);
                         const auto completed=std::chrono::steady_clock::now();
                         if (profile && updated) {

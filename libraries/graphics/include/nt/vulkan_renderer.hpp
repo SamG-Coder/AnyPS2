@@ -30,6 +30,10 @@ inline constexpr std::uint32_t line_flag=1U<<24;
 inline constexpr std::uint32_t indexed8_flag=1U<<25;
 inline constexpr std::uint32_t fog_flag=1U<<26;
 inline constexpr std::uint32_t color_16_flag=1U<<27, color_16s_flag=1U<<28;
+// Color written through a Z32/Z24 frame format: depth page layout (block ^ 24).
+inline constexpr std::uint32_t color_z_flag=1U<<29;
+// A Z32/Z24 texture: sampled as CT32/CT24 in the depth page layout.
+inline constexpr std::uint32_t texture_z_flag=1U<<30;
 struct RasterVertex {
     std::int32_t x=0,y=0;
     std::uint32_t color=0;

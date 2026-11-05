@@ -66,7 +66,7 @@ uint texel_at(int u,int v) {
         uint tx=wrap(u,draw.texture_width,draw.clamp_u,draw.min_u,draw.max_u);
         uint ty=wrap(v,draw.texture_height,draw.clamp_v,draw.min_v,draw.max_v);
         uint texture_offset=(draw.flags&4194304)!=0 ? 0 : 1048576;
-        uint texel=memory.pixels[texture_offset+address(draw.texture_base,draw.texture_pitch,tx,ty)];
+        uint texel=memory.pixels[texture_offset+(address(draw.texture_base,draw.texture_pitch,tx,ty)^((draw.flags&1073741824u)!=0 ? 0x600u : 0u))]; // texture_z_flag
         if((draw.flags&64)!=0) {
             bool eight=(draw.flags&33554432)!=0;
             uint nibble=eight ? byte_address(draw.texture_base,draw.texture_pitch,tx,ty)*2 : nibble_address(draw.texture_base,draw.texture_pitch,tx,ty);
@@ -130,7 +130,8 @@ void main() {
     if (x>=draw.right || y>=draw.bottom) return;
     bool narrow=(draw.flags&134217728)!=0;
     uint half_index=narrow ? halfword_address(draw.base,draw.pitch,x,y) : 0;
-    uint output_address=narrow ? half_index/2 : address(draw.base,draw.pitch,x,y);
+    // color_z_flag (1<<29): a Z32/Z24 frame format uses the depth block order.
+    uint output_address=narrow ? half_index/2 : address(draw.base,draw.pitch,x,y)^((draw.flags&536870912u)!=0 ? 0x600u : 0u);
     uint color=draw.color;
     uint depth=draw.depth,coverage=16,line_alpha=128;
     bool triangle_interior=true;
