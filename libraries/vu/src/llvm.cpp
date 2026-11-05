@@ -2,6 +2,7 @@
 #include <nt/vu_arithmetic.hpp>
 #include <nt/vu_lower.hpp>
 #include <nt/vu_native.hpp>
+#include <nt/vu_gpu.hpp>
 #include <cstddef>
 #include <bit>
 #include <map>
@@ -25,15 +26,26 @@ bool upper_supported(Arithmetic operation) {
     default: return false;
     }
 }
+// Code target of a block. GPU blocks are Vulkan compute functions: registers
+// live in a private word array (%regs, vu_gpu.hpp layout) and data memory in a
+// storage buffer at %data_base. They write state directly, so a failing GPU
+// block leaves its job state unspecified; the kernel reports the failure.
+enum class Target { cpu, gpu };
+constexpr auto gpu_buffer_type="target(\"spirv.VulkanBuffer\", [0 x i32], 12, 1)";
+constexpr auto gpu_buffer_suffix="tspirv.VulkanBuffer_a0i32_12_1t";
 class Writer {
 public:
     std::ostringstream out;
     bool sparse_data=false;
+    bool gpu=false;
+    // Data addresses are generic host pointers or storage-buffer pointers.
+    const char* data_pointer() const { return gpu ? "ptr addrspace(11)" : "ptr"; }
     static constexpr auto data_begin=offsetof(State,data);
     static constexpr auto data_size=sizeof(State{}.data);
     static constexpr auto data_end=data_begin+data_size;
     static std::size_t alignment(std::size_t offset) { return std::gcd(std::size_t(alignof(State)),offset); }
     void copy_state(bool commit) {
+        if (gpu) return;
         const auto destination=commit ? "%output" : "%state",source=commit ? "%state" : "%output";
         out<<"  call void @llvm.memcpy.p0.p0.i64(ptr align "<<alignof(State)<<' '<<destination
            <<", ptr align "<<alignof(State)<<' '<<source<<", i64 "
@@ -48,7 +60,7 @@ public:
     // Compile-time SSA stores, published only after the whole block succeeds.
     std::vector<Store> data_stores;
     std::string load_data(const std::string& address) {
-        auto result=value("load i32, ptr "+address+", align 4");
+        auto result=value("load i32, "+std::string(data_pointer())+" "+address+", align 4");
         for (const auto& store:data_stores) {
             const auto aliases=value("icmp eq ptr "+address+", "+store.address);
             result=value("select i1 "+aliases+", i32 "+store.value+", i32 "+result);
@@ -57,14 +69,23 @@ public:
     }
     std::string value(const std::string& expression) {
         const auto id="%v"+std::to_string(next_++);
-        out<<"  "<<id<<" = "<<expression<<'\n'; return id;
+        // Shared numeric helpers are compiled by Clang for the SPIR-V target,
+        // which gives every C function the spir_func calling convention.
+        if (gpu && expression.starts_with("call ") && expression.find(" @nt_")!=std::string::npos)
+            out<<"  "<<id<<" = call spir_func "<<expression.substr(5)<<'\n';
+        else out<<"  "<<id<<" = "<<expression<<'\n';
+        return id;
     }
-    std::string pointer(std::size_t offset) {
+    std::string pointer(std::size_t offset,bool half=false) {
+        if (gpu) return value("getelementptr ["+std::to_string(gpu::register_words)+" x i32], ptr %regs, i32 0, i32 "+
+            std::to_string(half ? gpu::half_word(offset) : gpu::word(offset)));
         const bool original=sparse_data && offset>=data_begin && offset<data_end;
         if (sparse_data && offset>=data_end) offset-=data_size;
         return value(std::string("getelementptr i8, ptr ")+(original ? "%output" : "%state")+", i64 "+std::to_string(offset));
     }
     std::string load(const std::string& type,std::size_t offset) {
+        if (gpu && type=="i16") return value("trunc i32 "+value("load i32, ptr "+pointer(offset,true)+", align 4")+" to i16");
+        if (gpu) return value("load "+type+", ptr "+pointer(offset)+", align 4");
         return value("load "+type+", ptr "+pointer(offset)+", align "+std::to_string(alignment(offset)));
     }
     std::string integer(unsigned index) { return index ? load("i16",offsetof(State,integers)+(index-1)*2) : "0"; }
@@ -255,8 +276,15 @@ public:
                 data_stores.push_back(store);
                 continue;
             }
+            if (gpu && store.address.empty()) {
+                const bool half=store.type=="i16";
+                const auto stored=half ? value("zext i16 "+store.value+" to i32") : store.value;
+                const auto target=pointer(store.offset,half);
+                out<<"  store "<<(half ? "i32" : store.type)<<' '<<stored<<", ptr "<<target<<", align 4\n";
+                continue;
+            }
             const auto address=store.address.empty() ? pointer(store.offset) : store.address;
-            out<<"  store "<<store.type<<' '<<store.value<<", ptr "<<address<<", align "
+            out<<"  store "<<store.type<<' '<<store.value<<", "<<(store.address.empty() ? "ptr" : data_pointer())<<' '<<address<<", align "
                <<(store.address.empty() ? alignment(store.offset) : 4)<<'\n';
         }
         pending.clear();
@@ -270,7 +298,11 @@ private:
 // exact: integer lane arithmetic only; the cold fallback of a fast block.
 enum class NumericPath { automatic, fast, exact };
 static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigned unit,std::string_view symbol,bool declarations,bool fallthrough=false,
-                        NumericPath path=NumericPath::automatic) {
+                        NumericPath path=NumericPath::automatic,Target target=Target::cpu) {
+    const bool gpu=target==Target::gpu;
+    // GPU blocks use the exact integer helpers only; host-float speculation
+    // and its exact rerun are CPU code-size and latency optimizations.
+    if (gpu) { path=NumericPath::exact; declarations=false; }
     if (unit>1 || pairs.empty() || pairs.size()>2048) throw std::invalid_argument("Invalid VU native region");
     if (symbol.empty() || (symbol.front()>='0' && symbol.front()<='9') ||
         symbol.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")!=std::string_view::npos)
@@ -327,6 +359,7 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
     const bool exact_fallback=path==NumericPath::exact && symbol.ends_with("_exact");
     std::string exact_required="zeroinitializer";
     Writer writer;
+    writer.gpu=gpu;
     // A scalar publication can cross an observer-free native region as one
     // operation. Q's status bits are disjoint from MAC current/sticky bits;
     // without a status read, its publication commutes with vector arithmetic.
@@ -357,7 +390,7 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
             loaded_lanes+=lanes;
     }
     // Bound generated alias comparisons; larger transactions retain the snapshot.
-    writer.sparse_data=!nested_branch && stored_lanes<=32 && stored_lanes*loaded_lanes<=512;
+    writer.sparse_data=!gpu && !nested_branch && stored_lanes<=32 && stored_lanes*loaded_lanes<=512;
     // Numeric ABI helpers operate only on integer encodings and value arguments.
     // They cannot read guest state, host memory or the floating-point environment.
     if (declarations && observe_loads) writer.out<<"declare void @nt_vu_observe_load(i32)\n";
@@ -384,7 +417,10 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         <<"declare i32 @llvm.vector.reduce.or.v4i32(<4 x i32>)\n"
         // Exact-path reruns are rare: lay out fast blocks for the committed path.
         <<"!0 = !{!\"branch_weights\", i32 1, i32 4000}\n";
-    writer.out<<"define i32 @"<<symbol<<"(ptr align "<<alignof(State)<<" %output)"<<(exact_fallback ? " cold noinline optsize" : "")<<" {\nentry:\n"
+    if (gpu) writer.out<<"define internal i32 @"<<symbol<<"(ptr %regs, i32 %data_base) alwaysinline {\nentry:\n"
+        <<"  %memory = call "<<gpu_buffer_type<<" @llvm.spv.resource.handlefrombinding."<<gpu_buffer_suffix
+        <<"(i32 0, i32 1, i32 1, i32 0, ptr @nt_vu_memory_name)\n";
+    else writer.out<<"define i32 @"<<symbol<<"(ptr align "<<alignof(State)<<" %output)"<<(exact_fallback ? " cold noinline optsize" : "")<<" {\nentry:\n"
         <<"  %state = alloca ["<<sizeof(State)-(writer.sparse_data ? Writer::data_size : 0)<<" x i8], align "<<alignof(State)<<"\n";
     if (writer.sparse_data)
         writer.out<<"  %state_tail = getelementptr i8, ptr %state, i64 "<<Writer::data_begin<<"\n"
@@ -642,10 +678,17 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
                     const auto row=writer.value("zext i16 "+wrapped+" to i32");
                     writer.out<<"  call void @nt_vu_observe_load(i32 "<<row<<")\n";
                 }
-                const auto byte_offset=writer.value("shl i64 "+writer.value("zext i16 "+wrapped+" to i64")+", 4");
-                const auto start=writer.value("getelementptr i8, ptr "+writer.pointer(offsetof(State,data))+", i64 "+byte_offset);
+                std::string start;
+                if (gpu) start=writer.value("add i32 %data_base, "+writer.value("shl i32 "+writer.value("zext i16 "+wrapped+" to i32")+", 2"));
+                else {
+                    const auto byte_offset=writer.value("shl i64 "+writer.value("zext i16 "+wrapped+" to i64")+", 4");
+                    start=writer.value("getelementptr i8, ptr "+writer.pointer(offsetof(State,data))+", i64 "+byte_offset);
+                }
                 for (unsigned lane=0;lane<4;++lane) if (lower.mask&(8U>>lane)) {
-                    const auto pointer=writer.value("getelementptr i8, ptr "+start+", i64 "+std::to_string(lane*4));
+                    const auto pointer=gpu ?
+                        writer.value("call ptr addrspace(11) @llvm.spv.resource.getpointer.p11."+std::string(gpu_buffer_suffix)+"("+
+                            gpu_buffer_type+" %memory, i32 "+writer.value("add i32 "+start+", "+std::to_string(lane))+")") :
+                        writer.value("getelementptr i8, ptr "+start+", i64 "+std::to_string(lane*4));
                     if (load) {
                         const auto value=writer.load_data(pointer);
                         if (integer) writer.integer_result(lower.result.index,writer.value("trunc i32 "+value+" to i16"));
@@ -751,7 +794,7 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
     if (batch_clip) writer.advance_clip(static_cast<unsigned>(pairs.size()));
     if (nested_branch) {
         const auto call_delay=[&](unsigned address) {
-            return writer.value("call i32 @"+std::string(symbol)+"_delay_"+std::to_string(address)+"(ptr %state)");
+            return writer.value("call i32 @"+std::string(symbol)+"_delay_"+std::to_string(address)+(gpu ? "(ptr %regs, i32 %data_base)" : "(ptr %state)"));
         };
         std::string result;
         if (terminal.branch==Branch::jump) result=call_delay(*terminal.target);
@@ -803,8 +846,10 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
 void emit_llvm(std::ostream& output,std::span<const Pair> pairs,unsigned unit,std::string_view symbol) {
     emit_region(output,pairs,unit,symbol,true);
 }
+static void emit_gpu_kernel(std::ostream& module,const std::set<unsigned>& roots,unsigned unit,std::string_view symbol);
 static std::size_t emit_program_module(std::ostream& output,std::span<const Pair> pairs,unsigned unit,
-                       std::span<const unsigned> entries,std::string_view symbol,unsigned continuation_depth,bool all_entries,bool declarations) {
+                       std::span<const unsigned> entries,std::string_view symbol,unsigned continuation_depth,bool all_entries,bool declarations,
+                       Target target=Target::cpu) {
     if (pairs.empty()) throw std::invalid_argument("Empty VU program image");
     for (std::size_t i=1;i<pairs.size();++i)
         if (pairs[i].address!=pairs[i-1].address+1) throw std::invalid_argument("VU program image must be contiguous");
@@ -863,11 +908,12 @@ static std::size_t emit_program_module(std::ostream& output,std::span<const Pair
                         decode_lower(*slot,unit).operation==LowerOperation::graphics_kick)
                         throw std::invalid_argument("Unsupported chained VU delay continuation");
                     emit_region(module,std::span<const Pair>(&*slot,1),unit,
-                        std::string(symbol)+"_"+std::to_string(root)+"_delay_"+std::to_string(destination),declarations,true);
+                        std::string(symbol)+"_"+std::to_string(root)+"_delay_"+std::to_string(destination),declarations,true,NumericPath::automatic,target);
                     declarations=false;
                 }
             }
-            emit_region(module,std::span<const Pair>(found,fallthrough ? end : end+(graphics ? 1 : 2)),unit,std::string(symbol)+"_"+std::to_string(root),declarations,fallthrough);
+            emit_region(module,std::span<const Pair>(found,fallthrough ? end : end+(graphics ? 1 : 2)),unit,std::string(symbol)+"_"+std::to_string(root),declarations,fallthrough,
+                NumericPath::automatic,target);
         } catch (const std::invalid_argument& error) {
             throw std::invalid_argument("VU block at pair "+std::to_string(root)+": "+error.what());
         }
@@ -881,6 +927,11 @@ static std::size_t emit_program_module(std::ostream& output,std::span<const Pair
                 transfer.branch!=Branch::register_jump && transfer.branch!=Branch::register_call)
                 links[1]=(end->address+2)&(unit ? 2047U : 511U);
         }
+    }
+    if (target==Target::gpu) {
+        emit_gpu_kernel(module,roots,unit,symbol);
+        output<<module.str();
+        return roots.size();
     }
     constexpr auto block_type="{ i32, ptr, ptr, ptr }";
     const auto table_type="["+std::to_string(roots.size())+" x "+block_type+"]";
@@ -915,6 +966,174 @@ static std::size_t emit_program_module(std::ostream& output,std::span<const Pair
         <<"define i32 @"<<symbol<<"_unit() {\n  ret i32 "<<unit<<"\n}\n";
     output<<module.str();
     return roots.size();
+}
+// One invocation per job (vu_gpu.hpp). Blocks are inlined into a dispatch
+// loop over next_pair; XGKICK copies the complete GIF packet out of data
+// memory before the next block can change it, as the host does for CPU code.
+static void emit_gpu_kernel(std::ostream& module,const std::set<unsigned>& roots,unsigned unit,std::string_view symbol) {
+    const auto buffer=std::string(gpu_buffer_type);
+    const auto handle="@llvm.spv.resource.handlefrombinding."+std::string(gpu_buffer_suffix);
+    const auto element="@llvm.spv.resource.getpointer.p11."+std::string(gpu_buffer_suffix);
+    const auto registers="["+std::to_string(gpu::register_words)+" x i32]";
+    const auto ring=unit ? 1024U : 256U;
+    unsigned next=0;
+    std::ostringstream out;
+    const auto name=[&] { return "%k"+std::to_string(next++); };
+    const auto value=[&](const std::string& expression) { const auto id=name(); out<<"  "<<id<<" = "<<expression<<'\n'; return id; };
+    const auto word=[&](const char* binding,const std::string& index) {
+        return value("call ptr addrspace(11) "+element+"("+buffer+" "+binding+", i32 "+index+")");
+    };
+    const auto load=[&](const char* binding,const std::string& index) {
+        return value("load i32, ptr addrspace(11) "+word(binding,index)+", align 4");
+    };
+    const auto store=[&](const char* binding,const std::string& index,const std::string& stored) {
+        const auto target=word(binding,index);
+        out<<"  store i32 "<<stored<<", ptr addrspace(11) "<<target<<", align 4\n";
+    };
+    const auto reg=[&](std::size_t offset) {
+        return value("getelementptr "+registers+", ptr %regs, i32 0, i32 "+std::to_string(gpu::word(offset)));
+    };
+    out<<"define void @main() #0 {\nentry:\n"
+       <<"  %regs = alloca "<<registers<<", align 4\n"
+       <<"  %blocks_slot = alloca i32, align 4\n  %used_slot = alloca i32, align 4\n  %status_slot = alloca i32, align 4\n"
+       <<"  %jobs = call "<<buffer<<' '<<handle<<"(i32 0, i32 0, i32 1, i32 0, ptr @nt_vu_jobs_name)\n"
+       <<"  %memory = call "<<buffer<<' '<<handle<<"(i32 0, i32 1, i32 1, i32 0, ptr @nt_vu_memory_name)\n"
+       <<"  %output = call "<<buffer<<' '<<handle<<"(i32 0, i32 2, i32 1, i32 0, ptr @nt_vu_output_name)\n";
+    const auto count=load("%jobs","0");
+    out<<"  %item = call i32 @llvm.spv.thread.id.i32(i32 0)\n"
+       <<"  %active = icmp ult i32 %item, "<<count<<"\n  br i1 %active, label %start, label %done\nstart:\n";
+    const auto job=value("add i32 "+value("mul i32 %item, "+std::to_string(gpu::job_words))+", 1");
+    const auto field=[&](unsigned index) { return value("add i32 "+job+", "+std::to_string(index)); };
+    const auto state_base=load("%jobs",field(gpu::job_state));
+    const auto output_base=load("%jobs",field(gpu::job_output));
+    const auto capacity=load("%jobs",field(gpu::job_output_capacity));
+    const auto budget=load("%jobs",field(gpu::job_budget));
+    out<<"  %data_base = add i32 "<<state_base<<", "<<gpu::register_words<<'\n';
+    for (std::size_t w=0;w<gpu::register_words;++w) {
+        const auto loaded=load("%memory",value("add i32 "+state_base+", "+std::to_string(w)));
+        const auto target=value("getelementptr "+registers+", ptr %regs, i32 0, i32 "+std::to_string(w));
+        out<<"  store i32 "<<loaded<<", ptr "<<target<<", align 4\n";
+    }
+    out<<"  store i32 0, ptr %blocks_slot, align 4\n  store i32 0, ptr %used_slot, align 4\n  br label %dispatch\ndispatch:\n";
+    const auto blocks=value("load i32, ptr %blocks_slot, align 4");
+    out<<"  %exhausted = icmp uge i32 "<<blocks<<", "<<budget<<"\n  br i1 %exhausted, label %exit_budget, label %select\nselect:\n";
+    const auto pair=value("load i32, ptr "+reg(offsetof(State,next_pair))+", align 4");
+    out<<"  switch i32 "<<pair<<", label %exit_unmapped [\n";
+    for (const auto root:roots) out<<"    i32 "<<root<<", label %block_"<<root<<"\n";
+    out<<"  ]\n";
+    for (const auto root:roots)
+        out<<"block_"<<root<<":\n  %result_"<<root<<" = call i32 @"<<symbol<<"_"<<root<<"(ptr %regs, i32 %data_base)\n  br label %returned\n";
+    out<<"returned:\n  %result = phi i32 ";
+    bool first=true;
+    for (const auto root:roots) { out<<(first ? "" : ", ")<<"[ %result_"<<root<<", %block_"<<root<<" ]"; first=false; }
+    out<<'\n';
+    // Count executed blocks only, as Program::run does.
+    const auto counted=value("add i32 "+blocks+", 1");
+    out<<"  store i32 "<<counted<<", ptr %blocks_slot, align 4";
+    // Result codes: 0 complete, 2 transfer, 6 XGKICK; others are failures.
+    out<<"\n  switch i32 %result, label %exit_failure [\n    i32 2, label %dispatch\n    i32 6, label %kick\n    i32 0, label %exit_complete\n  ]\n"
+       <<"kick:\n";
+    const auto start_row=value("load i32, ptr "+reg(offsetof(State,graphics_address))+", align 4");
+    // Two single-exit loops: measure the whole packet, then copy it. The
+    // output is all-or-nothing per packet, as graphics::collect_packet is.
+    out<<"  br label %kick_scan\nkick_scan:\n  %consumed = phi i32 [ 0, %kick ], [ %scanned, %kick_scan ]\n";
+    const auto row_index=[&](const std::string& offset) {
+        const auto row=value("and i32 "+value("add i32 "+start_row+", "+offset)+", "+std::to_string(ring-1));
+        return value("add i32 %data_base, "+value("shl i32 "+row+", 2"));
+    };
+    const auto tag=row_index("%consumed");
+    const auto low=load("%memory",tag);
+    const auto high=load("%memory",value("add i32 "+tag+", 1"));
+    // graphics::payload_words: PACKED NLOOP*NREG, REGLIST half that rounded up,
+    // IMAGE and disabled formats NLOOP; NREG 0 means 16.
+    const auto loops=value("and i32 "+low+", 32767");
+    const auto format=value("and i32 "+value("lshr i32 "+high+", 26")+", 3");
+    const auto encoded=value("lshr i32 "+high+", 28");
+    const auto registers_count=value("select i1 "+value("icmp eq i32 "+encoded+", 0")+", i32 16, i32 "+encoded);
+    const auto entries=value("mul i32 "+loops+", "+registers_count);
+    const auto halves=value("lshr i32 "+value("add i32 "+entries+", 1")+", 1");
+    const auto payload=value("select i1 "+value("icmp eq i32 "+format+", 0")+", i32 "+entries+", i32 "+
+        value("select i1 "+value("icmp eq i32 "+format+", 1")+", i32 "+halves+", i32 "+loops));
+    const auto in_ring=value("icmp ule i32 "+payload+", "+value("sub i32 "+std::to_string(ring-1)+", %consumed"));
+    const auto quadwords=value("add i32 "+payload+", 1");
+    out<<"  %scanned = add i32 %consumed, "<<quadwords<<'\n';
+    const auto ended=value("icmp ne i32 "+value("and i32 "+low+", 32768")+", 0");
+    const auto more=value("and i1 "+value("and i1 "+in_ring+", "+value("xor i1 "+ended+", true"))+", "+
+        value("icmp ult i32 %scanned, "+std::to_string(ring)));
+    out<<"  br i1 "<<more<<", label %kick_scan, label %kick_measured\nkick_measured:\n";
+    const auto valid=value("and i1 "+in_ring+", "+ended);
+    out<<"  br i1 "<<valid<<", label %kick_room, label %exit_invalid\nkick_room:\n";
+    const auto used=value("load i32, ptr %used_slot, align 4");
+    const auto fits=value("icmp ule i32 %scanned, "+value("sub i32 "+capacity+", "+used));
+    out<<"  br i1 "<<fits<<", label %kick_copy, label %exit_full\n"
+       <<"kick_copy:\n  %copied = phi i32 [ 0, %kick_room ], [ %copied_next, %kick_copy ]\n";
+    const auto source=row_index("%copied");
+    const auto destination=value("add i32 "+output_base+", "+value("shl i32 "+value("add i32 "+used+", %copied")+", 2"));
+    for (unsigned lane=0;lane<4;++lane)
+        store("%output",value("add i32 "+destination+", "+std::to_string(lane)),load("%memory",value("add i32 "+source+", "+std::to_string(lane))));
+    out<<"  %copied_next = add i32 %copied, 1\n";
+    const auto copying=value("icmp ult i32 %copied_next, %scanned");
+    out<<"  br i1 "<<copying<<", label %kick_copy, label %kick_done\nkick_done:\n";
+    const auto total=value("add i32 "+used+", %scanned");
+    out<<"  store i32 "<<total<<", ptr %used_slot, align 4\n";
+    const auto pending=reg(offsetof(State,graphics_pending));
+    out<<"  store i32 0, ptr "<<pending<<", align 4\n";
+    const auto completes=value("load i32, ptr "+reg(offsetof(State,graphics_completes))+", align 4");
+    const auto finished=value("icmp ne i32 "+completes+", 0");
+    out<<"  br i1 "<<finished<<", label %exit_complete, label %dispatch\n";
+    const auto exit=[&](const char* label,gpu::JobStatus status) {
+        out<<label<<":\n  store i32 "<<static_cast<std::uint32_t>(status)<<", ptr %status_slot, align 4\n  br label %finish\n";
+    };
+    exit("exit_complete",gpu::JobStatus::complete);
+    exit("exit_budget",gpu::JobStatus::budget_exhausted);
+    exit("exit_unmapped",gpu::JobStatus::unmapped_block);
+    exit("exit_invalid",gpu::JobStatus::invalid_packet);
+    exit("exit_full",gpu::JobStatus::output_full);
+    // Block failure codes are Result values: 1 numeric, 3 schedule, 4 memory, 5 context.
+    out<<"exit_failure:\n";
+    const auto failure=value("select i1 "+value("icmp eq i32 %result, 1")+", i32 1, i32 "+value("add i32 %result, 1"));
+    out<<"  store i32 "<<failure<<", ptr %status_slot, align 4\n  br label %finish\nfinish:\n";
+    for (std::size_t w=0;w<gpu::register_words;++w)
+        store("%memory",value("add i32 "+state_base+", "+std::to_string(w)),
+            value("load i32, ptr "+value("getelementptr "+registers+", ptr %regs, i32 0, i32 "+std::to_string(w))+", align 4"));
+    store("%jobs",field(gpu::job_status),value("load i32, ptr %status_slot, align 4"));
+    store("%jobs",field(gpu::job_blocks),value("load i32, ptr %blocks_slot, align 4"));
+    store("%jobs",field(gpu::job_output_quadwords),value("load i32, ptr %used_slot, align 4"));
+    out<<"  br label %done\ndone:\n  ret void\n}\n"
+       <<"attributes #0 = { \"hlsl.numthreads\"=\""<<gpu::workgroup_size<<",1,1\" \"hlsl.shader\"=\"compute\" }\n";
+    module<<out.str();
+}
+void emit_gpu_program_llvm(std::ostream& output,std::span<const Pair> pairs,unsigned unit,
+                           std::span<const unsigned> entries,std::string_view symbol,bool all_entries) {
+    const auto buffer=std::string(gpu_buffer_type);
+    std::ostringstream module;
+    module<<"; AnyPS2 VU ahead-of-time Vulkan compute program\n"
+          <<"target triple = \"spirv-unknown-vulkan1.3\"\n"
+          <<"@nt_vu_jobs_name = private constant [5 x i8] c\"jobs\\00\"\n"
+          <<"@nt_vu_memory_name = private constant [7 x i8] c\"memory\\00\"\n"
+          <<"@nt_vu_output_name = private constant [7 x i8] c\"output\\00\"\n"
+          <<"declare i32 @llvm.spv.thread.id.i32(i32)\n"
+          <<"declare "<<buffer<<" @llvm.spv.resource.handlefrombinding."<<gpu_buffer_suffix<<"(i32, i32, i32, i32, ptr)\n"
+          <<"declare ptr addrspace(11) @llvm.spv.resource.getpointer.p11."<<gpu_buffer_suffix<<"("<<buffer<<", i32)\n"
+          // The exact helpers of the CPU blocks, linked from the same C++ source
+          // compiled for SPIR-V (no host-float or vector helpers).
+          <<"declare spir_func i32 @nt_ee_integer_to_scaled_scalar(i32, i32)\n"
+          <<"declare spir_func i32 @nt_ee_scaled_scalar_to_integer(i32, i32)\n"
+          <<"declare spir_func i32 @nt_ee_min_max_scalar(i32, i32, i32)\n"
+          <<"declare spir_func i64 @nt_ee_add_finite(i32, i32, i32)\n"
+          <<"declare spir_func i64 @nt_ee_multiply_finite(i32, i32)\n"
+          <<"declare spir_func i64 @nt_ee_multiply_accumulate_finite(i32, i32, i32, i32)\n"
+          <<"declare spir_func i32 @nt_ee_vector_lane_flags(i64, i32)\n"
+          <<"declare spir_func i32 @nt_ee_vector_status_flags(i32, i32)\n"
+          <<"declare spir_func i64 @nt_vu_divide_finite(i32, i32)\n"
+          <<"declare spir_func i64 @nt_vu_square_root_finite(i32)\n"
+          <<"declare spir_func i64 @nt_vu_reciprocal_square_root_finite(i32, i32)\n"
+          <<"declare spir_func i64 @nt_vu_reciprocal_length_finite(i32, i32, i32)\n"
+          <<"declare spir_func i64 @nt_vu_sine_finite(i32)\n"
+          <<"declare spir_func i64 @nt_vu_efu_square_root_finite(i32)\n"
+          <<"declare spir_func i32 @nt_vu_clip_flags(i32, i32, i32, i32)\n";
+    emit_program_module(module,pairs,unit,entries,symbol,0,all_entries,false,Target::gpu);
+    output<<module.str();
 }
 namespace {
 struct ArtifactDescription { std::string symbol; std::size_t count; unsigned destination; std::size_t bytes; };

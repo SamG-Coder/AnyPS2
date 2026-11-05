@@ -8,8 +8,11 @@
 int main(int argc,char** argv) {
     // Trailing diagnostic option: instrument VU data loads (nt_vu_observe_load).
     if (argc>5 && std::string_view(argv[argc-1])=="--observe-loads") { nt::vu::set_observe_loads(true); --argc; }
+    // Trailing target option: one Vulkan compute kernel instead of CPU blocks.
+    bool gpu=false;
+    if (argc>5 && std::string_view(argv[argc-1])=="--gpu") { gpu=true; --argc; }
     if (argc!=5 && argc!=6 && argc!=8) {
-        std::cerr<<"Usage: ps2-vu-recompile <input.bin> <output.ll> <unit:0|1> <destination-index> [--all-entries | entry,entry,... [--continuations depth]]\n"
+        std::cerr<<"Usage: ps2-vu-recompile <input.bin> <output.ll> <unit:0|1> <destination-index> [--all-entries | entry,entry,... [--continuations depth]] [--gpu]\n"
             <<"       ps2-vu-recompile --catalog <images.tsv> <output.ll> <unit:0|1>\n"; return 2;
     }
     try {
@@ -54,7 +57,8 @@ int main(int argc,char** argv) {
         }
         if (argc>=6 && std::string_view(argv[5])=="--all-entries") {
             if (argc!=6) throw std::invalid_argument("--all-entries does not accept continuation options");
-            nt::vu::emit_program_llvm(output,pairs,unit,{},unit ? "nt_vu_program1" : "nt_vu_program",0,true);
+            if (gpu) nt::vu::emit_gpu_program_llvm(output,pairs,unit,{},unit ? "nt_vu_program1" : "nt_vu_program",true);
+            else nt::vu::emit_program_llvm(output,pairs,unit,{},unit ? "nt_vu_program1" : "nt_vu_program",0,true);
             std::cout<<"LLVM entry coverage: "<<pairs.size()<<" of "<<pairs.size()<<" declared VU pairs. External targets remain explicit unmapped boundaries.\n";
         } else if (argc>=6) {
             std::vector<unsigned> entries;
@@ -65,8 +69,11 @@ int main(int argc,char** argv) {
                 if (comma==std::string_view::npos) break;
                 list.remove_prefix(comma+1);
             }
-            nt::vu::emit_program_llvm(output,pairs,unit,entries,unit ? "nt_vu_program1" : "nt_vu_program",continuation_depth);
-        } else nt::vu::emit_llvm(output,pairs,unit);
+            if (gpu && continuation_depth) throw std::invalid_argument("--gpu does not accept continuation options");
+            if (gpu) nt::vu::emit_gpu_program_llvm(output,pairs,unit,entries,unit ? "nt_vu_program1" : "nt_vu_program");
+            else nt::vu::emit_program_llvm(output,pairs,unit,entries,unit ? "nt_vu_program1" : "nt_vu_program",continuation_depth);
+        } else if (gpu) throw std::invalid_argument("--gpu requires program entries or --all-entries");
+        else nt::vu::emit_llvm(output,pairs,unit);
         const auto text=output.str();
         nt::write_text_file(argv[2], text);
         std::cout<<"Emitted VU LLVM region; compilation and runtime binding are separate stages.\n";

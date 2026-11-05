@@ -91,7 +91,9 @@ struct Device {
         const float priority=1;
         VkDeviceQueueCreateInfo qi{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
         qi.queueFamilyIndex=family; qi.queueCount=1; qi.pQueuePriorities=&priority;
-        VkPhysicalDeviceFeatures features{}; features.shaderInt64=VK_TRUE;
+        // Converted VU integer registers are 16-bit values in generated kernels.
+        VkPhysicalDeviceFeatures supported{}; vkGetPhysicalDeviceFeatures(physical,&supported);
+        VkPhysicalDeviceFeatures features{}; features.shaderInt64=VK_TRUE; features.shaderInt16=supported.shaderInt16;
         VkPhysicalDeviceShaderFloat16Int8Features integers{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES};
         VkPhysicalDeviceFeatures2 query{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
         query.pNext=&integers; vkGetPhysicalDeviceFeatures2(physical,&query);

@@ -2,7 +2,7 @@
 # compiler or changes the CPU conversion backend.
 include_guard(GLOBAL)
 function(anyps2_compile_llvm_shader result source)
-    cmake_parse_arguments(shader "STRUCTURIZE" "" "" ${ARGN})
+    cmake_parse_arguments(shader "STRUCTURIZE;VU_PROGRAM" "" "" ${ARGN})
     find_program(ANYPS2_GPU_CLANG NAMES clang REQUIRED)
     find_program(ANYPS2_SPIRV_LLC NAMES llc REQUIRED)
     find_program(ANYPS2_LLVM_LINK NAMES llvm-link REQUIRED)
@@ -33,6 +33,20 @@ function(anyps2_compile_llvm_shader result source)
                 "${root}/libraries/runtime/include/nt/compiler_attributes.hpp" VERBATIM)
         add_custom_target(anyps2-gpu-numeric DEPENDS "${numeric}")
     endif()
+    # Converted VU programs call the CPU blocks' exact helper ABI; the same
+    # source compiles for SPIR-V with its host-float paths excluded.
+    set(vu_numeric "${CMAKE_BINARY_DIR}/vu-numeric-spirv.ll")
+    if(NOT TARGET anyps2-vu-numeric-spirv)
+        file(GLOB numeric_headers CONFIGURE_DEPENDS "${root}/libraries/runtime/include/nt/*.hpp")
+        add_custom_command(OUTPUT "${vu_numeric}"
+            COMMAND "${ANYPS2_GPU_CLANG}" -cc1 -triple spirv-unknown-vulkan1.3
+                -x c++ -std=c++20 -ffreestanding -fconvergent-functions -DNDEBUG
+                -emit-llvm -O2 -I "${root}/libraries/runtime/include"
+                -internal-isystem "${resources}/include"
+                "${root}/libraries/ee_native/src/numeric.cpp" -o "${vu_numeric}"
+            DEPENDS "${root}/libraries/ee_native/src/numeric.cpp" ${numeric_headers} VERBATIM)
+        add_custom_target(anyps2-vu-numeric-spirv DEPENDS "${vu_numeric}")
+    endif()
     set(linked "${source}.linked.bc")
     set(optimized "${source}.optimized.bc")
     set(output "${source}.spv")
@@ -50,14 +64,24 @@ function(anyps2_compile_llvm_shader result source)
         string(APPEND passes ",lower-switch,structurizecfg")
         list(APPEND codegen_options -disable-machine-cse)
     endif()
+    # VU program kernels inline every block into one dispatch loop. InstCombine
+    # forms saturating and funnel-shift intrinsics from their flag and delay
+    # arithmetic that the SPIR-V backend cannot select, so these use a pipeline
+    # without it; the Vulkan driver optimizes the result again.
+    set(link_numeric "${numeric}")
+    if(shader_VU_PROGRAM)
+        set(passes "internalize,always-inline,cgscc(inline),function(sroa,early-cse<memssa>,simplifycfg,gvn,adce,simplifycfg),globaldce,lower-switch,structurizecfg")
+        set(codegen_options -disable-machine-cse)
+        set(link_numeric "${vu_numeric}")
+    endif()
     add_custom_command(OUTPUT "${output}"
-        COMMAND "${ANYPS2_LLVM_LINK}" "${source}" "${numeric}" ${shader_UNPARSED_ARGUMENTS} -o "${linked}"
+        COMMAND "${ANYPS2_LLVM_LINK}" "${source}" "${link_numeric}" ${shader_UNPARSED_ARGUMENTS} -o "${linked}"
         COMMAND "${ANYPS2_LLVM_OPT}" "-passes=${passes}" -internalize-public-api-list=main
             "${linked}" -o "${optimized}"
         COMMAND "${ANYPS2_SPIRV_LLC}" -mtriple=spirv-unknown-vulkan1.3 -O2 ${codegen_options} -filetype=obj
             "${optimized}" -o "${output}"
         COMMAND "${ANYPS2_SPIRV_VAL}" --target-env vulkan1.3 "${output}"
-        DEPENDS "${source}" "${numeric}" ${shader_UNPARSED_ARGUMENTS} anyps2-gpu-numeric
+        DEPENDS "${source}" "${link_numeric}" ${shader_UNPARSED_ARGUMENTS} anyps2-gpu-numeric anyps2-vu-numeric-spirv
         BYPRODUCTS "${linked}" "${optimized}" VERBATIM)
     set(${result} "${output}" PARENT_SCOPE)
 endfunction()

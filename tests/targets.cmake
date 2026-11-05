@@ -97,6 +97,28 @@ if(BUILD_TESTING)
         add_executable(vu-native-tests tests/vu_native.cpp libraries/ee_native/src/numeric.cpp ${vu_fixture_objects})
         target_include_directories(vu-native-tests PRIVATE libraries/vu/include libraries/runtime/include libraries/ee_codegen/include libraries/graphics/include)
         add_test(NAME vu-llvm-execution COMMAND vu-native-tests)
+        if(ANYPS2_TEST_LLVM_GPU)
+            # One generated VU1 program compiled for both targets; every job
+            # must match between the CPU blocks and the Vulkan kernel.
+            add_executable(emit-vu-gpu-fixture tests/emit_vu_gpu_fixture.cpp)
+            target_link_libraries(emit-vu-gpu-fixture PRIVATE nt_vu)
+            set(vu_gpu_fixture "${CMAKE_CURRENT_BINARY_DIR}/vu-gpu-fixture")
+            add_custom_command(OUTPUT "${vu_gpu_fixture}.cpu.ll" "${vu_gpu_fixture}.gpu.ll"
+                COMMAND emit-vu-gpu-fixture "${vu_gpu_fixture}"
+                DEPENDS emit-vu-gpu-fixture VERBATIM)
+            set(vu_gpu_object "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/vu-gpu-fixture.obj")
+            add_custom_command(OUTPUT "${vu_gpu_object}"
+                COMMAND "${ANYPS2_CLANG}" -x ir -target x86_64-pc-windows-msvc -Werror -Wno-override-module -c -O3
+                    -march=${ANYPS2_NATIVE_ISA} "${vu_gpu_fixture}.cpu.ll"
+                    -Xclang -mlink-builtin-bitcode -Xclang "${vu_numeric_bitcode}" -o "${vu_gpu_object}"
+                DEPENDS "${vu_gpu_fixture}.cpu.ll" "${vu_numeric_bitcode}" VERBATIM)
+            anyps2_compile_llvm_shader(vu_gpu_shader "${vu_gpu_fixture}.gpu.ll" VU_PROGRAM)
+            add_executable(vu-gpu-tests tests/vu_gpu.cpp libraries/ee_native/src/numeric.cpp "${vu_gpu_object}" "${vu_gpu_shader}")
+            target_include_directories(vu-gpu-tests PRIVATE libraries/vu/include libraries/runtime/include libraries/graphics/include)
+            target_link_libraries(vu-gpu-tests PRIVATE nt_vu Vulkan::Vulkan)
+            add_test(NAME vu-gpu-program COMMAND vu-gpu-tests "${vu_gpu_shader}")
+            set_tests_properties(vu-gpu-program PROPERTIES LABELS gpu TIMEOUT 120)
+        endif()
         add_executable(vu-vulkan-tests tests/vu_vulkan.cpp libraries/ee_native/src/numeric.cpp "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/vu-graphics_end.obj")
         target_include_directories(vu-vulkan-tests PRIVATE libraries/vu/include libraries/runtime/include libraries/ee_codegen/include)
         target_link_libraries(vu-vulkan-tests PRIVATE nt_vulkan)

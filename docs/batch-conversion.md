@@ -172,6 +172,9 @@ instructions or missing branch/E delay pairs reject conversion. A plain tail
 executes its compiled instructions and reports an unmapped boundary if it leaves
 the image; it does not become an invented successful return. Compile and link
 the emitted LLVM module through the existing VU binding configuration.
+A trailing `--gpu` emits the same blocks as one Vulkan compute kernel instead
+([whole-program VU kernels](render-modernization.md#whole-program-vu-kernels));
+continuation discovery is not available for that target.
 
 `ps2-vu-extract program.elf new-output-directory --elf` recovers every region
 declared by a DVP overlay table from its file-backed load address. It writes

@@ -39,7 +39,9 @@ requested presentation test. Opening an actual demo for the user is separate.
 
 `ANYPS2_TEST_AUDIO_DEVICE` and `ANYPS2_TEST_USB_DEVICES` opt into real host devices.
 `ANYPS2_TEST_LLVM_GPU` enables the experimental shader tests, which run AOT LLVM
-shaders on a Vulkan device (label `gpu`); it is OFF by default.
+shaders on a Vulkan device (label `gpu`); it is OFF by default. Among them,
+`vu-gpu-program` compiles one original VU1 program for both targets and requires
+every job's status, block count, final state and GIF packets to match.
 A synthetic device fixture does not establish physical controller or audio behavior.
 
 ## Original PS2 source programs
