@@ -205,6 +205,11 @@ VectorRegionPlan analyze_vector_region(std::span<const vu::Pair> program,unsigne
         if (body.size()<4) throw std::invalid_argument("Vector region flag replay needs at least four pairs per iteration");
         plan.flag_replay=2; plan.drain+=plan.flag_replay;
     }
+    for (const auto& pair:body) {
+        const auto operation=vu::decode_lower(pair,unit).operation;
+        if (operation==L::divide || operation==L::square_root || operation==L::reciprocal_square_root) plan.pipelines|=1U;
+        if (operation==L::reciprocal_length || operation==L::sine || operation==L::efu_square_root) plan.pipelines|=2U;
+    }
     plan.range=analyze_element_range(body,unit);
     const auto structure=analyze_loop_structure(body,unit);
     plan.loop=*recover_pipelined_loop(body,unit,structure).loop;
@@ -229,14 +234,14 @@ void emit_vector_region_llvm(std::ostream& boundary,std::ostream& elements,std::
     vu::emit_llvm(b,plan.body,plan.unit,prefix+"_iteration");
     emit_element_kernel_llvm(e,plan.loop,plan.unit,false,prefix+"_elements");
     emit_element_range_llvm(m,plan.range,prefix+"_guard");
-    static_assert(offsetof(VectorRegion,strides)==40 && offsetof(VectorRegion,output)==104);
-    static_assert(sizeof(RegionStore)==16 && offsetof(VectorRegion,iteration)==1128 && sizeof(VectorRegion)==1152);
+    static_assert(offsetof(VectorRegion,strides)==44 && offsetof(VectorRegion,output)==108);
+    static_assert(sizeof(RegionStore)==16 && offsetof(VectorRegion,iteration)==1136 && sizeof(VectorRegion)==1160);
     m<<"declare i32 @"<<prefix<<"_iteration(ptr)\n"<<"declare void @"<<prefix<<"_elements(ptr, ptr, ptr)\n";
-    const std::string type="{ [10 x i32], [16 x i32], [64 x { i32, i32, i32, i32 }], ptr, ptr, ptr }";
-    m<<"@"<<prefix<<" = constant "<<type<<" { [10 x i32] [";
+    const std::string type="{ [11 x i32], [16 x i32], [64 x { i32, i32, i32, i32 }], ptr, ptr, ptr }";
+    m<<"@"<<prefix<<" = constant "<<type<<" { [11 x i32] [";
     const unsigned fields[]{plan.unit,plan.head,plan.exit,plan.startup,plan.drain,plan.range.counter,plan.range.step,
-        unsigned(plan.loop.stores.size()),plan.flag_replay,plan.range.trip_offset};
-    for (unsigned i=0;i<10;++i) m<<(i ? ", ":"")<<"i32 "<<fields[i];
+        unsigned(plan.loop.stores.size()),plan.flag_replay,plan.range.trip_offset,plan.pipelines};
+    for (unsigned i=0;i<11;++i) m<<(i ? ", ":"")<<"i32 "<<fields[i];
     m<<"], [16 x i32] [";
     for (unsigned i=0;i<16;++i) m<<(i ? ", ":"")<<"i32 "<<plan.range.steps[i];
     m<<"], [64 x { i32, i32, i32, i32 }] [";

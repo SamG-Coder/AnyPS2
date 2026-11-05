@@ -101,7 +101,8 @@ int main(int argc,char** argv) {
             for (unsigned fault=0;fault<6;++fault) {
                 auto state=initial(region,20,7);
                 if (fault==0) state.next_pair++;
-                if (fault==1) state.quotient_pending=1;
+                // A pending Q is absorbed only by loops that issue Q themselves.
+                if (fault==1) { if (region.pipelines&1U) state.graphics_pending=1; else state.quotient_pending=1; }
                 if (fault==2) state.integers[2]=state.integers[3];
                 // Zero is a valid one-iteration count when the backed-up counter is compared.
                 if (fault==3) state.integers[8]=region.trip_offset ? 1000 : 0;

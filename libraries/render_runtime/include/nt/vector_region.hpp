@@ -18,6 +18,10 @@ struct VectorRegion {
     // The other replayed iterations only reconstruct registers.
     std::uint32_t flags=0;
     std::uint32_t trip_offset=0;  // iterations are counter/step plus this (integer branch backup)
+    // Bit 0: every iteration issues a Q result; bit 1: a P result. A result of
+    // such a unit in flight at entry is replaced in the first iteration, which
+    // runs as original code; steady elements are proved entry-independent.
+    std::uint32_t pipelines=0;
     std::array<std::int32_t,16> strides{};
     std::array<RegionStore,64> output{};
     RegionIteration iteration=nullptr;

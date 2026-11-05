@@ -392,9 +392,12 @@ No speed claim is made.
 Entries need not be quiescent. Heads reached during execution carry the loop's
 own in-flight FMAC/clip results and the integer branch backup; the service runs
 enough original iterations (FMAC/clip results publish within four pairs) before
-the first element, and the first pair at a head replaces the backup. Pending or
-delayed Q/P results and a pending kick are still rejected, because element
-kernels read Q and P from the entry state.
+the first element, and the first pair at a head replaces the backup. A pending or
+delayed Q or P result is absorbed the same way when the loop issues that unit
+itself (the region's `pipelines` bits): its first issue publishes the earlier
+result inside the original first iteration, and steady elements are proved
+entry-independent. A loop that only reads Q or P, and a pending kick, still
+reject such entries.
 
 ## Converted programs
 

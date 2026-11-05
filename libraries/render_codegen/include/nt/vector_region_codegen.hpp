@@ -5,6 +5,7 @@ namespace nt::render {
 struct VectorRegionPlan {
     unsigned unit=0,head=0,exit=0,startup=0,drain=0;
     unsigned flag_replay=0;  // final replayed iterations that run on exact values, with flag arithmetic
+    unsigned pipelines=0;    // bit 0: the body issues Q results; bit 1: P results
     std::vector<vu::Pair> body;
     PipelinedLoop loop;
     ElementRangeGuard range;

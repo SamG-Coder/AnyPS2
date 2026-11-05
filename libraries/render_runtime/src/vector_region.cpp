@@ -18,8 +18,13 @@ bool quiescent(const vu::State& s) {
 // compiled code: results publish within four pairs, and the first pair at a
 // head (never a branch) replaces the backup. Q/P results feed element kernels
 // from the entry state and a pending kick consumes output, so they must be idle.
-bool absorbable(const vu::State& s) {
-    return !s.quotient_pending && !s.p_pending && !s.quotient_read_delay && !s.p_read_delay && !s.graphics_pending;
+// A Q/P result in flight is absorbed only for a unit the loop issues itself:
+// its first issue publishes the earlier result inside the original first
+// iteration. A loop that only reads Q or P would see it land mid-loop.
+bool absorbable(const VectorRegion& region,const vu::State& s) {
+    const bool quotient=(region.pipelines&1U) || (!s.quotient_pending && !s.quotient_read_delay);
+    const bool p=(region.pipelines&2U) || (!s.p_pending && !s.p_read_delay);
+    return quotient && p && !s.graphics_pending;
 }
 unsigned absorbing_iterations(const VectorRegion& region,const vu::State& s) {
     if (quiescent(s)) return 0;
@@ -43,10 +48,10 @@ void iteration(const VectorRegion& region,vu::State& s,bool last) {
 std::vector<std::uint32_t> validate_vector_region(const VectorRegion& region,const vu::State& state) {
     if (region.unit>1 || !region.iteration || !region.guard || !region.kernel || !region.counter || region.counter>=16 ||
         !region.step || !region.stores || region.stores>64 || !region.drain || region.drain>8 || region.startup>8 ||
-        region.flags>=region.drain+(region.flags ? 0U : 1U) || region.trip_offset>1)
+        region.flags>=region.drain+(region.flags ? 0U : 1U) || region.trip_offset>1 || region.pipelines>3)
         throw std::invalid_argument("Invalid compiled vector region descriptor");
     if (state.next_pair!=region.head) throw std::invalid_argument("Vector region requires its declared entry");
-    if (!absorbable(state)) {
+    if (!absorbable(region,state)) {
         std::string busy;
         const auto note=[&](bool active,const char* name) { if (active) busy+=busy.empty() ? name : std::string(",")+name; };
         note(state.delayed_integer,"delayed integer"); note(state.quotient_pending,"Q pending");
@@ -54,7 +59,7 @@ std::vector<std::uint32_t> validate_vector_region(const VectorRegion& region,con
         note(state.clip_read_delay,"clip read delay"); note(state.quotient_read_delay,"Q read delay");
         note(state.p_read_delay,"P read delay"); note(state.pending_mac_mask,"MAC queue");
         note(state.pending_clip_mask,"clip queue"); note(state.graphics_pending,"graphics kick");
-        throw std::invalid_argument("Vector region requires idle Q/P pipelines and no pending kick: "+busy);
+        throw std::invalid_argument("Vector region requires idle Q/P pipelines it does not issue and no pending kick: "+busy);
     }
     const auto entry=entry_of(state);
     const unsigned count=entry.integers[region.counter]/region.step+region.trip_offset;
