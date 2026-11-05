@@ -45,6 +45,11 @@ public:
     void* upload_context=nullptr;
     void (*uncompiled_upload)(void*,unsigned,unsigned,std::span<const std::uint8_t>)=nullptr;
     void (*uncompiled_packet)(void*,unsigned,std::span<const std::uint8_t>)=nullptr;
+    // Optional diagnostic observer of accepted vector submissions, called after
+    // the owner accepted them. Views are valid only during the callback; it is
+    // never an execution path and cannot alter the submission.
+    void* observe_context=nullptr;
+    void (*observe_submission)(void*,unsigned,std::span<const NativeSubmissionStep>)=nullptr;
     bool reverse_output() const { return reverse_output_; }
     static bool maps(std::uint32_t address) { return address>=0x10003000 && address<0x10007000; }
     IoRead read(std::uint32_t address) const {
@@ -391,6 +396,7 @@ private:
                     if (uncompiled_upload) uncompiled_upload(upload_context,channel,upload.destination,upload.bytes);
                 return result;
             }
+            if (observe_submission) observe_submission(observe_context,channel,sequence);
             return complete_packet(channel,next,notify,offset,consumed);
         }
         const bool combined=!uploads.empty() && (launch || !data.empty());
@@ -436,6 +442,12 @@ private:
                 }
                 return result;
             }
+        }
+        // Observed before direct drawing moves into the ordered queue.
+        if (observe_submission && (launch || !data.empty() || !uploads.empty() || !drawing.empty())) {
+            NativeSubmissionStep step{uploads,data,drawing,{}};
+            if (launch) step.launch=NativeLaunchView{entry,next.top,next.itop,continuation};
+            observe_submission(observe_context,channel,std::span(&step,1));
         }
         // Direct drawing would overtake queued vector graphics; wait for them.
         if (!drawing_vectors && !drawing.empty()) {

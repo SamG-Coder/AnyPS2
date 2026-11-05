@@ -80,6 +80,13 @@ highlights below the change threshold time out after 2 s. `--profile-graphics` a
 waits for native vector jobs (`job_wait_profile`), and which enabled INTC lines
 and DMAC channels end idle spans while every thread waits (`idle_wake_profile`).
 
+`ps2-native --capture-vectors <new-private-directory>` records accepted vector
+submissions for the most recent 16 displayed frames into `submissions.tsv`:
+microcode uploads, data unpacks (destination, format, count, size, content
+fingerprint), direct graphics packets and program launches. It observes after
+acceptance and does not alter execution. Use it to measure render structure, such
+as which streams are unchanged between frames; keep captures under ignored `work/`.
+
 ## Before committing
 
 Run the repository-content guard before staging and again after staging:
