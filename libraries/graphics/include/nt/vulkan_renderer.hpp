@@ -130,6 +130,8 @@ public:
     void write(std::span<const PixelWrite> writes);
     void write(const ImageRect& rect);
     void read(std::span<std::uint32_t> memory);
+    // As read(), current at least for the words [start, start+length).
+    void read(std::span<std::uint32_t> memory,unsigned start,unsigned length);
     void read_words(std::span<const unsigned> addresses,std::span<std::uint32_t> values);
     // Native renderer: copies a 256-word palette on the GPU when its words lie
     // in rendered memory and returns its slot; 0 means read the words instead.

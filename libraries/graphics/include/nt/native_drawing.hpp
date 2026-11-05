@@ -158,7 +158,10 @@ public:
                     } else renderer.synchronize();
                 } else if (const auto* download=std::get_if<ImageDownload>(&operation)) {
                     std::vector<std::uint32_t> storage(1024*1024);
-                    renderer.read(storage); download_=download->pack(storage); download_offset_=0;
+                    // Only the rectangle's words need to be current: rendered
+                    // surfaces publish just those pages.
+                    const auto [low,high]=download->word_range();
+                    renderer.read(storage,low,high-low+1); download_=download->pack(storage); download_offset_=0;
                 } else if (std::holds_alternative<CancelDownload>(operation)) {
                     download_.clear(); download_offset_=0;
                 } else if (const auto* rect=std::get_if<ImageRect>(&operation)) {

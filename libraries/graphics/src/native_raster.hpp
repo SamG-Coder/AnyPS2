@@ -18,7 +18,9 @@ public:
     bool enable_vectors();
     unsigned load_vector_kernel(std::span<const std::uint32_t> spirv,unsigned unit);
     void draw_vectors(const VectorLaunch&,const VectorAssembly&,const SpriteCommand&);
-    void read(std::span<std::uint32_t> words);
+    // `words` receives all of memory; only [start, start+length) is
+    // guaranteed current with rendered surfaces.
+    void read(std::span<std::uint32_t> words,unsigned start=0,unsigned length=1024*1024);
     void read_words(std::span<const unsigned> addresses,std::span<std::uint32_t> values);
     // Loads palette entries first.. on the GPU when all their words lie in one
     // rendered 32-bit surface: the new slot starts as `previous` (a slot) or,

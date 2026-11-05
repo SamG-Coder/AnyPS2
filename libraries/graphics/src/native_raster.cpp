@@ -282,7 +282,8 @@ struct NativeRaster::Impl {
     void copy_surface_pages(Image& destination,const Image& source,const std::bitset<512>& requested);
     void written(Image&,const Sprite&);
     bool current(const Image&,const Sprite&) const;
-    void export_image(Image&); void synchronize_source(Region); void clear_views();
+    // Publishes the surface's newer pages within `requested` to `source`.
+    void export_image(Image&,Region requested={0,store_words}); void synchronize_source(Region); void clear_views();
     void trim_surfaces();
     Image& surface(unsigned base,unsigned pitch,unsigned height,bool depth,bool scratch=false,bool display=false,const Sprite* draw=nullptr,unsigned format=0);
     Image& display_surface(unsigned base,unsigned pitch,unsigned height);
@@ -536,8 +537,8 @@ void NativeRaster::Impl::initialize(unsigned family) {
     checked(vkCreateDescriptorSetLayout(device,&dl,nullptr,&descriptors),"Create native descriptors");
     const VkDescriptorSetLayoutBinding pb{0,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,2,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr}; dl.bindingCount=1; dl.pBindings=&pb;
     checked(vkCreateDescriptorSetLayout(device,&dl,nullptr,&present_descriptors),"Create display descriptors");
-    std::array<VkDescriptorPoolSize,4> sizes{{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,32768*texture_level_slots},{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,32768},{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,32768},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,65536}}};
-    VkDescriptorPoolCreateInfo dp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO}; dp.maxSets=32768; dp.poolSizeCount=4; dp.pPoolSizes=sizes.data();
+    std::array<VkDescriptorPoolSize,4> sizes{{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,65536*texture_level_slots},{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,65536},{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,65536},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,196608}}};
+    VkDescriptorPoolCreateInfo dp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO}; dp.maxSets=65536; dp.poolSizeCount=4; dp.pPoolSizes=sizes.data();
     checked(vkCreateDescriptorPool(device,&dp,nullptr,&descriptor_pool),"Create native descriptor pool");
     VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO}; pl.setLayoutCount=1; pl.pSetLayouts=&descriptors;
     checked(vkCreatePipelineLayout(device,&pl,nullptr,&layout),"Create native layout");
@@ -695,26 +696,45 @@ void NativeRaster::Impl::upload_image(Image& image,std::span<const std::uint32_t
     VkBufferImageCopy copy{}; copy.bufferOffset=offset; copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; copy.imageExtent={image.width,image.height,1};
     vkCmdCopyBufferToImage(command,staging,image.image,VK_IMAGE_LAYOUT_GENERAL,1,&copy); stats.upload_bytes+=pixels.size_bytes(); image.valid=true;
 }
-void NativeRaster::Impl::export_image(Image& image) {
+void NativeRaster::Impl::export_image(Image& image,Region requested) {
     if (!image.dirty || image.scratch) return;
-    std::bitset<512> newer;
-    for (unsigned page=0;page<512;++page)
-        if (image.pages[page]>backing_revisions[page]) newer.set(page);
-    if (newer.none()) { image.dirty=false; return; }
+    std::bitset<512> newer,wanted;
+    for (unsigned word=requested.start,left=requested.length;left;) {
+        wanted.set((word/2048)%512);
+        const unsigned step=std::min(left,2048-word%2048); word=(word+step)%store_words; left-=step;
+    }
+    bool remaining=false;
+    for (unsigned page=0;page<512;++page) if (image.pages[page]>backing_revisions[page]) {
+        if (wanted[page]) newer.set(page); else remaining=true;
+    }
+    if (newer.none()) { if (!remaining) image.dirty=false; return; }
     Measure timing(stats.surface_export_ns,profiling);
+    // Only the rows holding the requested pages are read back (pages are
+    // 64x32-pixel tiles of a page-aligned 32-bit surface).
+    unsigned y0=0,y1=image.height;
+    if (image.base%32==0 && !image.format) {
+        y0=image.height; y1=0;
+        for (unsigned page=0;page<512;++page) if (newer[page]) {
+            const unsigned row=((page+512-image.base/32)%512)/image.pitch*32;
+            if (row>=image.height) continue;
+            y0=std::min(y0,row); y1=std::max(y1,std::min(row+32,image.height));
+        }
+        if (y1<=y0) { y0=0; y1=image.height; }
+    }
     order();
-    VkBufferImageCopy copy{}; copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; copy.imageExtent={image.width,image.height,1};
+    VkBufferImageCopy copy{}; copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
+    copy.imageOffset={0,int(y0),0}; copy.imageExtent={image.width,y1-y0,1};
     vkCmdCopyImageToBuffer(command,image.image,VK_IMAGE_LAYOUT_GENERAL,readback,1,&copy); flush();
     // Host-visible staging may be uncached/write-combined. Read it once with a
     // contiguous copy before CPU address conversion instead of scalar loads
     // directly from the mapped allocation for every pixel.
-    std::vector<std::uint32_t> pixels(std::size_t(image.width)*image.height);
+    std::vector<std::uint32_t> pixels(std::size_t(image.width)*(y1-y0));
     std::memcpy(pixels.data(),readback_mapping,pixels.size()*sizeof(pixels[0]));
-    for (unsigned y=0;y<image.height;++y) for (unsigned x=0;x<image.width;++x) {
+    for (unsigned y=y0;y<y1;++y) for (unsigned x=0;x<image.width;++x) {
         const auto half=image.format ? rgba_halfword(image.base,image.pitch,x,y,image.format==10) : 0;
         const auto address=image.format ? half/2 : rgba_word(image.base,image.pitch,x,y)^(image.depth ? 0x600 : 0);
         if (newer[address/2048]) {
-            const auto pixel=pixels[std::size_t(y)*image.width+x];
+            const auto pixel=pixels[std::size_t(y-y0)*image.width+x];
             if (image.format) {
                 const auto shift=(half%2)*16;
                 source[address]=(source[address]&~(65535U<<shift))|(pack_rgba16(pixel)<<shift);
@@ -725,18 +745,20 @@ void NativeRaster::Impl::export_image(Image& image) {
         backing_revisions[page]=image.pages[page];
         std::fill_n(exact_words.begin()+page*32,32,~0ULL);
     }
+    stats.readback_bytes+=pixels.size()*4;
+    if (remaining) return;
     // Once the writer becomes clean, surface() can no longer discover it via
     // dirty dependencies. Invalidate older aliases before retiring that link.
     for (auto& [key,other]:surfaces)
         if (other && other.get()!=&image && other->revision<image.revision && other->region.overlaps(image.region))
             other->valid=false;
-    stats.readback_bytes+=std::size_t(image.width)*image.height*4; image.dirty=false;
+    image.dirty=false;
 }
 void NativeRaster::Impl::synchronize_source(Region requested) {
     std::vector<Image*> ordered;
     for (auto& [key,i]:surfaces) if (i && i->dirty && i->region.overlaps(requested)) ordered.push_back(i.get());
     std::sort(ordered.begin(),ordered.end(),[](auto a,auto b){return a->revision<b->revision;});
-    for (auto* i:ordered) export_image(*i);
+    for (auto* i:ordered) export_image(*i,requested);
 }
 void NativeRaster::Impl::clear_views() {
     vector_target={};
@@ -1204,12 +1226,12 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
     auto found_texture=textures.find(key);
     if (found_texture==textures.end()) {
         auto allocated=image(width,height);
-        constexpr VkDeviceSize budget=128ULL*1024*1024;
-        if (texture_bytes+allocated->allocation_bytes>budget || textures.size()>=1024) {
+        constexpr VkDeviceSize budget=512ULL*1024*1024;
+        if (texture_bytes+allocated->allocation_bytes>budget || textures.size()>=4096) {
             // Retire GPU users and descriptors before releasing old images.
             // Keep recent textures instead of discarding the entire working set.
             clear_views();
-            while (!textures.empty() && (texture_bytes+allocated->allocation_bytes>budget*3/4 || textures.size()>=768)) {
+            while (!textures.empty() && (texture_bytes+allocated->allocation_bytes>budget*3/4 || textures.size()>=3072)) {
                 const auto oldest=std::min_element(textures.begin(),textures.end(),[](const auto& a,const auto& b) {
                     return a.second.last_use<b.second.last_use;
                 });
@@ -1315,7 +1337,8 @@ NativeRaster::Impl::TextureSet NativeRaster::Impl::textures_for(const SpriteComm
 }
 VkDescriptorSet NativeRaster::Impl::bind_target(Image& color,Image& depth,const TextureSet& textures,const Sprite& draw) {
     Measure timing(stats.target_bind_ns,profiling);
-    if (sets.size()>=8192) clear_views();
+    // Clearing views drains the GPU: keep enough descriptor sets for many frames.
+    if (sets.size()>=24576) clear_views();
     auto& fb=framebuffers[{&color,&depth}];
     const unsigned height=std::min(color.height,depth.height);
     if (!fb) {
@@ -1391,9 +1414,9 @@ void NativeRaster::upload(std::span<const std::uint32_t> words) {
     auto& r=*impl_; r.clear_views(); r.surfaces.clear(); r.textures.clear(); r.texture_bytes=0; r.source_revisions={}; r.backing_revisions={}; std::fill(r.exact_words.begin(),r.exact_words.end(),~0ULL); r.mirror_revisions.fill(~0ULL); std::copy(words.begin(),words.end(),r.source.begin()); r.initialized=true; ++r.revision;
     r.field_count=0; r.composed_count=0; r.previous_field=DisplayField::progressive; r.resolved_revision=0;
 }
-void NativeRaster::read(std::span<std::uint32_t> words) {
-    if (words.size()!=store_words) throw std::runtime_error("Invalid native resource export");
-    auto& r=*impl_; r.synchronize_source({0,store_words}); r.flush(); std::copy(r.source.begin(),r.source.end(),words.begin());
+void NativeRaster::read(std::span<std::uint32_t> words,unsigned start,unsigned length) {
+    if (words.size()!=store_words || start>=store_words || !length || length>store_words) throw std::runtime_error("Invalid native resource export");
+    auto& r=*impl_; r.synchronize_source({start,length}); r.flush(); std::copy(r.source.begin(),r.source.end(),words.begin());
 }
 std::uint32_t NativeRaster::load_palette(std::span<const unsigned> addresses,unsigned first,std::uint32_t previous,
     const std::array<std::uint32_t,256>& current) {
@@ -1511,8 +1534,10 @@ std::vector<NativeRaster::Impl::Image*> NativeRaster::Impl::write_targets(Region
     // their newer pages need no readback. Other rendered views publish first.
     std::vector<Image*> targets;
     for (auto& [k,s]:surfaces) if (s && s->dirty && s->region.overlaps(range)) {
-        if (s->valid && !s->scratch && !s->format) targets.push_back(s.get());
-        else synchronize_source(s->region);
+        if (s->valid && !s->scratch && (!s->format || s->format==2 || s->format==10)) targets.push_back(s.get());
+        else {
+            synchronize_source(s->region);
+        }
     }
     return targets;
 }
@@ -1573,7 +1598,8 @@ void NativeRaster::Impl::scatter_entries(std::span<const std::uint32_t> all,unsi
             parameters.mode=stride==2 ? 4 : 2; parameters.surface_base=target->base; parameters.surface_pitch=target->pitch;
             parameters.surface_width=target->width; parameters.surface_height=target->height;
             parameters.addresses=scatter_offset; parameters.count=unsigned(n);
-            parameters.owned.fill(~0U); parameters.layout=target->depth ? 1U : 0U;
+            parameters.owned.fill(~0U);
+            parameters.layout=(target->depth ? 1U : 0U)|(target->format ? 4U : 0U)|(target->format==10 ? 8U : 0U);
             palette_pass(*target,nullptr,parameters);
         }
     }
@@ -1658,7 +1684,7 @@ void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly&
         if (!sprites) { triangle[1].x=16; triangle[2].y=16; }
         VulkanRenderer::validate(shape,triangle,command.fog_color,command.fog,command.levels);
     }
-    if (r.sets.size()>=8192) { r.clear_views(); r.vector_target={}; }
+    if (r.sets.size()>=24576) { r.clear_views(); r.vector_target={}; }
     ++r.surface_scope;
     const unsigned format=(target.flags&color_16_flag) ? ((target.flags&color_16s_flag) ? 10 : 2) : 0;
     // As consecutive CPU draws do, reuse the previous batch's surfaces while

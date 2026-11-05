@@ -19,6 +19,36 @@ layout(push_constant) uniform Parameters {
 } p;
 // Inverse of rgba_word for the surface: the pixel holding a word address,
 // or false when the word lies outside the surface image.
+// Inverse of rgba_halfword for a 16-bit surface (layouts bit 2; bit 3 PSMCT16S):
+// the pixel holding `halfword`, or false outside the image.
+bool surface_pixel16(uint halfword,out ivec2 pixel) {
+    const uint relative=(halfword-p.surface_base*128u)&0x1fffffu;
+    const uint page=relative/4096u,block=(relative/128u)%32u,h=relative%128u;
+    const uint pitch=max(p.surface_pitch,1u);
+    const bool alternate=(p.layouts&8u)!=0u;
+    const uint x4=(block>>1)&1u,x5=alternate ? (block>>4)&1u : (block>>3)&1u;
+    const uint y3=block&1u,y4=alternate ? (block>>3)&1u : (block>>2)&1u,y5=alternate ? (block>>2)&1u : (block>>4)&1u;
+    const uint x=(page%pitch)*64u+(x5<<5)+(x4<<4)+((h&1u)<<3)+(((h>>3)&3u)<<1)+((h>>1)&1u);
+    const uint y=(page/pitch)*64u+(y5<<5)+(y4<<4)+(y3<<3)+(((h>>5)&3u)<<1)+((h>>2)&1u);
+    pixel=ivec2(x,y);
+    return x<p.surface_width && y<p.surface_height;
+}
+uint pack16(uint value) {
+    return ((value>>3)&31u)|(((value>>11)&31u)<<5)|(((value>>19)&31u)<<10)|((value>>16)&0x8000u);
+}
+uint expand16(uint value) {
+    return ((value&0x8000u)<<16)|((value&31u)<<3)|(((value>>5)&31u)<<11)|(((value>>10)&31u)<<19);
+}
+// Applies a masked word write to a 16-bit surface: each half it covers.
+void write16(uint word,uint value,uint mask) {
+    for (uint k=0u;k<2u;++k) {
+        const uint half_mask=(mask>>(16u*k))&65535u;
+        ivec2 pixel;
+        if (half_mask==0u || !surface_pixel16(word*2u+k,pixel)) continue;
+        const uint current=pack16(imageLoad(decoded,pixel).r);
+        imageStore(decoded,pixel,uvec4(expand16((current&~half_mask)|((value>>(16u*k))&half_mask))));
+    }
+}
 bool surface_pixel(uint word,out ivec2 pixel) {
     // Depth pages permute blocks (word address XOR 0x600) within the page.
     word^=(p.layouts&1u)!=0u ? 0x600u : 0u;
@@ -69,6 +99,7 @@ void main() {
         // Unique (address, value) pairs of whole words.
         if (g.y!=0u || g.x>=p.count) return;
         const uint at=p.addresses+g.x*2u;
+        if ((p.layouts&4u)!=0u) { write16(palettes.words[at],palettes.words[at+1u],0xffffffffu); return; }
         ivec2 pixel;
         if (surface_pixel(palettes.words[at],pixel)) imageStore(decoded,pixel,uvec4(palettes.words[at+1u]));
         return;
@@ -79,6 +110,7 @@ void main() {
         if (g.y!=0u || g.x>=p.count) return;
         const uint at=p.addresses+g.x*3u;
         const uint mask=palettes.words[at+2u];
+        if ((p.layouts&4u)!=0u) { write16(palettes.words[at],palettes.words[at+1u],mask); return; }
         ivec2 pixel;
         if (!surface_pixel(palettes.words[at],pixel)) return;
         imageStore(decoded,pixel,uvec4((imageLoad(decoded,pixel).r&~mask)|palettes.words[at+1u]));

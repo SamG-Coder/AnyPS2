@@ -305,6 +305,32 @@ void gpu_resident_memory(nt::graphics::VulkanRenderer& renderer) {
     }
     for (unsigned a=0;a<4096;++a) if (packed[a]!=expected[a])
         throw std::runtime_error("Packed upload over rendered pixels differs at word "+std::to_string(a));
+    // A 16-bit render target takes an overlapping 16-bit upload on the GPU.
+    const auto shaded16=[&](unsigned fbp) {
+        Packet p(1); ad(p,0x1a,1); ad(p,0,3|8); ad(p,0x4c,fbp|(1ULL<<16)|(2ULL<<24));
+        ad(p,0x40,(63ULL<<16)|(63ULL<<48)); ad(p,0x46,1); ad(p,0x47,0x30000); ad(p,0x4e,200|(1ULL<<32));
+        const std::array<std::pair<unsigned,unsigned>,6> corners{{{0,0},{64,0},{0,64},{64,0},{0,64},{64,64}}};
+        const std::array<unsigned,6> which{0,1,2,1,2,3};
+        for (unsigned i=0;i<6;++i) { ad(p,1,colors[which[i]]); ad(p,5,(corners[i].first*16)|(std::uint64_t(corners[i].second*16)<<16)); }
+        finish(p); return p;
+    };
+    d.submit(renderer,std::array{shaded16(32),shaded16(64)});
+    const auto half_before=renderer.statistics().readback_bytes;
+    // DBP is in 64-word blocks (FBP 32 is block 1024).
+    Packet t16(1); ad(t16,0x50,(1024ULL<<32)|(1ULL<<48)|(2ULL<<56)); ad(t16,0x51,(5ULL<<32)|(7ULL<<48)); ad(t16,0x52,11|(9ULL<<32)); ad(t16,0x53,0); finish(t16);
+    const auto half_value=[](unsigned i) { return (i*0x0123U+0x8421U)&0xffffU; };
+    d.submit(renderer,std::array{t16,payload(16,99,half_value)});
+    if (renderer.statistics().readback_bytes!=half_before)
+        throw std::runtime_error("16-bit upload over a rendered 16-bit target read memory back");
+    const auto& halves=d.pixels();
+    const auto half_at=[&](unsigned base,unsigned x,unsigned y) {
+        const auto h=rgba_halfword(base,1,x,y); return (halves[h/2]>>((h%2)*16))&0xffffU;
+    };
+    for (unsigned y=0;y<64;++y) for (unsigned x=0;x<64;++x) {
+        const bool uploaded=x>=5 && x<16 && y>=7 && y<16;
+        const auto expected=uploaded ? half_value((y-7)*11+(x-5)) : half_at(64*32,x,y);
+        if (half_at(32*32,x,y)!=expected) throw std::runtime_error("16-bit upload over a rendered target lost a pixel");
+    }
 }
 void triangles(nt::graphics::VulkanRenderer& renderer) {
     using nt::graphics::Packet;

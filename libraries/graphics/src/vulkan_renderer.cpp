@@ -679,6 +679,10 @@ void VulkanRenderer::draw(std::span<const SpriteCommand> commands) {
     throw std::runtime_error("Reference renderer operation is unavailable in native output");
 #endif
 }
+void VulkanRenderer::read(std::span<std::uint32_t> memory,unsigned start,unsigned length) {
+    if (impl_->native) { impl_->native->read(memory,start,length); return; }
+    read(memory);
+}
 void VulkanRenderer::read(std::span<std::uint32_t> memory) {
     if (impl_->native) { impl_->native->read(memory); return; }
 #if ANYPS2_REFERENCE_RENDERER

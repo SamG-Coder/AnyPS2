@@ -9,6 +9,19 @@ struct ImageDownload {
     static ImageDownload begin(std::uint64_t buffer,std::uint64_t position,std::uint64_t extent) {
         return {ImageUpload::begin(buffer<<32,position<<32,extent,0)};
     }
+    // The lowest and highest memory word the rectangle reads.
+    std::pair<unsigned,unsigned> word_range() const {
+        const auto& s=source; unsigned low=~0U,high=0;
+        for (unsigned y=0;y<s.height;++y) for (unsigned x=0;x<s.width;++x) {
+            unsigned word;
+            if (s.bits==16) word=rgba_halfword(s.base,s.pitch,s.x+x,s.y+y,s.alternate_16)/2;
+            else if (s.bits==8) word=indexed_byte(s.base,s.pitch,s.x+x,s.y+y)/4;
+            else if (s.bits==4) word=indexed_nibble(s.base,s.pitch,s.x+x,s.y+y)/8;
+            else word=rgba_word(s.base,s.pitch,s.x+x,s.y+y);
+            low=std::min(low,word); high=std::max(high,word);
+        }
+        return {low,high};
+    }
     std::vector<std::uint8_t> pack(std::span<const std::uint32_t> words) const {
         if (words.size()!=1024*1024) throw std::invalid_argument("Invalid native readback storage");
         const auto& s=source;
