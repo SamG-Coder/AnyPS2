@@ -14,7 +14,7 @@ nt::Bytes program(unsigned variant) {
     };
     const auto load=[](unsigned vf,unsigned vi){return 0x80000000U|(15U<<21)|(vf<<16)|(vi<<11)|(13U<<6)|0x3cU;};
     const auto store=[](unsigned vf){return 0x80000000U|(15U<<21)|(4U<<16)|(vf<<11)|(13U<<6)|0x3dU;};
-    const bool pipelined=variant==1 || variant==2,arithmetic=variant==4;
+    const bool pipelined=variant==1 || variant==2,arithmetic=variant==4,quotient=variant==5;
     if (pipelined) { pair(store(2)); pair(store(6)); }
     if (variant==2) pair(render_fixture::lower_nop,(15U<<21)|(7U<<16)|(6U<<11)|0x1fdU); // ABS VF7, VF6
     pair(load(1,3)); pair(load(2,5));
@@ -22,6 +22,12 @@ nt::Bytes program(unsigned variant) {
         // ACC = VF1*VF20; VF7 = ACC + VF2*VF21; position = FTOI4(VF7). Flags and ACC are live out.
         pair(render_fixture::lower_nop,(15U<<21)|(20U<<16)|(1U<<11)|0x2beU); // MULA
         pair(render_fixture::lower_nop,(15U<<21)|(21U<<16)|(2U<<11)|(7U<<6)|0x29U); // MADD
+        pair(render_fixture::lower_nop,(15U<<21)|(6U<<16)|(7U<<11)|0x17dU); // FTOI4
+    } else if (quotient) {
+        // Q = VF1.x/VF20.x; WAITQ publishes it before MULq reads it in the same
+        // pair; position = FTOI4(VF1*Q). Q and flags are live out.
+        pair(0x80000000U|(1U<<11)|(20U<<16)|(14U<<6)|60U); // DIV Q, VF1.x, VF20.x
+        pair(0x80000000U|(14U<<6)|63U,(15U<<21)|(1U<<11)|(7U<<6)|28U); // WAITQ; MULq VF7, VF1, Q
         pair(render_fixture::lower_nop,(15U<<21)|(6U<<16)|(7U<<11)|0x17dU); // FTOI4
     } else pair(render_fixture::lower_nop,(15U<<21)|(6U<<16)|(1U<<11)|0x17dU); // FTOI4
     if (!pipelined) { pair(store(2)); pair(store(6)); }
@@ -45,14 +51,15 @@ void reject(std::vector<nt::vu::Pair> pairs,unsigned unit,std::vector<unsigned> 
 int main(int argc,char** argv) {
     try {
         if (argc!=2) throw std::invalid_argument("Expected output prefix");
-        for (unsigned variant=0;variant<5;++variant) {
+        for (unsigned variant=0;variant<6;++variant) {
             const unsigned unit=variant==3 ? 0:1,head=variant==3 ? 32:0;
             auto pairs=nt::vu::frame(program(variant),unit,head);
             const std::array entries{head};
             const auto plan=nt::render::analyze_vector_region(pairs,unit,entries,head);
-            if (plan.startup!=unsigned(variant==1 || variant==2) || plan.drain!=(variant==2 ? 2U : variant==4 ? 3U : 1U))
+            // Flag variants add two exact replay iterations; the quotient settles in one.
+            if (plan.startup!=unsigned(variant==1 || variant==2) || plan.drain!=(variant==2 ? 2U : variant>=4 ? 3U : 1U))
                 throw std::runtime_error("Incorrect startup/drain proof");
-            if ((variant==4)!=(plan.range.trip_offset==1) || (variant==4)==plan.loop.flags.empty())
+            if ((variant==4)!=(plan.range.trip_offset==1) || (variant>=4)==plan.loop.flags.empty())
                 throw std::runtime_error("Incorrect flag or integer-backup proof");
             std::ostringstream boundary,elements,binding,gpu,packet;
             const auto symbol="region_"+std::to_string(variant);

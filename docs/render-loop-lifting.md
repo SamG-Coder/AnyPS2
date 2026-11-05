@@ -343,11 +343,14 @@ the complete architectural state there, and reproduces running the loop from the
 head to its exit. Execution entering elsewhere runs the original compiled blocks
 until it reaches the head. The current subset accepts
 loads/stores, vector moves/rotations, ABS, MIN/MAX, integer/float conversions,
-ADD/SUB/MUL/MADD/MSUB forms writing VF lanes or the accumulator, and self-updating
-integer counters. Outer products, clipping, scalar-unit (Q/P) effects, kicks and
-other unproved side effects are rejected. Lane dependency analysis must prove that
-a bounded number of final iterations reconstructs every changed VF and accumulator
-lane; at most eight iterations are replayed.
+ADD/SUB/MUL/MADD/MSUB forms writing VF lanes or the accumulator (including Q
+operands), self-updating integer counters, DIV/SQRT/RSQRT with WAITQ, and the EFU
+operations ERLENG/ESIN/ESQRT with WAITP and MFP. Outer products, clipping, kicks
+and other unproved side effects are rejected. Lane dependency analysis must prove
+that a bounded number of final iterations reconstructs every changed VF and
+accumulator lane and the Q and P pipelines; Q/P results become visible after their
+issue latency, and a producer or wait publishes the earlier result before its pair
+reads Q or P, as in the VU code generator. At most eight iterations are replayed.
 
 With flag arithmetic, flags computed by those reconstructing iterations come from
 registers that are not yet exact, so they are discarded: the replay then clears the
@@ -415,9 +418,9 @@ CPU state. Both CPU and Vulkan executors are exercised, including rejected
 entry/range conditions and transactional failure. The runtime executable links
 native services and generated objects without the analysis/decoder libraries.
 
-On a local commercial VU1 program, 9 of 21 hot loops are accepted as regions; a
-local validator matched 1,800 randomized region executions against the original
-compiled loops in complete VU state. A Release timing of those loops on one host
+On a local commercial VU1 program, 11 of 49 loops are accepted as regions (two of
+them use the Q/P pipelines); a local validator matched 2,200 randomized region
+executions against the original compiled loops in complete VU state. A Release timing of those loops on one host
 found the CPU region service 1.2-13 times slower than the original compiled blocks,
 which already use inlined four-lane helpers, while the element kernels call scalar
 exact helpers. Regions must therefore not be installed as a CPU replacement. The

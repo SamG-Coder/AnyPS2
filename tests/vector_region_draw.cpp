@@ -113,7 +113,8 @@ unsigned compare(const Binding& binding,unsigned kernel,VulkanRenderer& gpu,Vulk
 }
 int main(int argc,char** argv) {
     try {
-        require(argc==6,"Usage: render-region-draw-tests <region-0.spv> ... <region-4.spv>");
+        // Drawing covers variants 0-4; the quotient variant is exercised by render-region-tests.
+        require(argc==7,"Usage: render-region-draw-tests <region-0.spv> ... <region-5.spv>");
         const Binding bindings[]{{&region_0,region_0_packet,region_0_packet_count,region_0_packet_words},
             {&region_1,region_1_packet,region_1_packet_count,region_1_packet_words},
             {&region_2,region_2_packet,region_2_packet_count,region_2_packet_words},

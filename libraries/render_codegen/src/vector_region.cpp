@@ -12,9 +12,9 @@ namespace nt::render {
 namespace {
 using L=vu::LowerOperation;
 using A=vu::Arithmetic;
-// VF0-VF31, then the accumulator as register 32.
-constexpr unsigned accumulator_lanes=32;
-using Lanes=std::array<std::array<bool,4>,33>;
+// VF0-VF31, the accumulator as register 32, then Q and P (lane 0 only).
+constexpr unsigned accumulator_lanes=32,quotient_register=33,p_register=34;
+using Lanes=std::array<std::array<bool,4>,35>;
 bool flag_arithmetic(A operation) {
     return operation==A::add || operation==A::subtract || operation==A::multiply ||
         operation==A::multiply_add || operation==A::multiply_subtract;
@@ -61,6 +61,10 @@ unsigned overwrite_horizon(std::span<const vu::Pair> body,unsigned unit,bool& fl
         case L::integer_add: case L::integer_subtract: case L::integer_and: case L::integer_or:
             if (lower.result.index) throw std::invalid_argument("Vector region integer operation is not proved");
             break; // includes the architectural lower NOP
+        // Q and P results: the element graph evaluates them, and the live-out
+        // horizon below proves that the replay reconstructs both pipelines.
+        case L::divide: case L::square_root: case L::reciprocal_square_root: case L::wait_quotient:
+        case L::reciprocal_length: case L::sine: case L::efu_square_root: case L::wait_p: case L::move_p: break;
         default: throw std::invalid_argument("Vector region lower side effect is not proved");
         }
         for (unsigned lane=0;lane<4;++lane) {
@@ -74,29 +78,84 @@ unsigned overwrite_horizon(std::span<const vu::Pair> body,unsigned unit,bool& fl
     }
     // Only changed lanes start tainted. Preserved lanes remain valid loop inputs.
     auto tainted=written;
+    // Q and P results become visible after their issue latency, as in the
+    // pipeline recovery. Only a unit the body issues can be changed by skipped
+    // iterations; a result of it in flight at replay start is unknown and is
+    // published, tainted, no later than the next issue.
+    struct Pending { bool valid=false,taint=false; unsigned delay=0; };
+    bool issues_quotient=false,issues_p=false;
+    for (const auto& pair:body) {
+        const auto operation=vu::decode_lower(pair,unit).operation;
+        issues_quotient|=operation==L::divide || operation==L::square_root || operation==L::reciprocal_square_root;
+        issues_p|=operation==L::reciprocal_length || operation==L::sine || operation==L::efu_square_root;
+    }
+    Pending pending_quotient{issues_quotient,issues_quotient,13},pending_p{issues_p,issues_p,29};
+    tainted[quotient_register][0]=issues_quotient; tainted[p_register][0]=issues_p;
+    const auto advance=[&](Pending& pending,unsigned reg) {
+        if (!pending.valid) return;
+        if (pending.delay==1) { tainted[reg][0]=pending.taint; pending={}; return; }
+        if (pending.delay) --pending.delay;
+    };
+    const auto publish=[&](Pending& pending,unsigned reg) {
+        if (pending.valid) tainted[reg][0]=pending.taint;
+        pending={};
+    };
+    const auto component=[&](const vu::Register& operand) {
+        if (operand.component<4) return bool(tainted[operand.index][operand.component]);
+        const auto& lanes=tainted[operand.index];
+        return lanes[0] || lanes[1] || lanes[2] || lanes[3];
+    };
     for (unsigned iteration=1;iteration<=8;++iteration) {
         for (const auto& pair:body) {
+            advance(pending_quotient,quotient_register);
+            advance(pending_p,p_register);
             const auto upper=vu::decode_upper(pair.upper);
             const auto lower=vu::decode_lower(pair,unit);
+            // Producers and waits publish the earlier result before this pair reads.
+            if (lower.operation==L::divide || lower.operation==L::square_root || lower.operation==L::reciprocal_square_root ||
+                lower.operation==L::wait_quotient) publish(pending_quotient,quotient_register);
+            if (lower.operation==L::reciprocal_length || lower.operation==L::sine || lower.operation==L::efu_square_root ||
+                lower.operation==L::wait_p) publish(pending_p,p_register);
             auto next=tainted; // both units sample pre-pair values
             for (unsigned lane=0;lane<4;++lane) {
                 if (writes_upper(upper,lane)) {
                     bool value=tainted[upper.left][lane];
-                    if (upper.operation==A::minimum || upper.operation==A::maximum || flag_arithmetic(upper.operation))
+                    if (upper.operation==A::minimum || upper.operation==A::maximum || flag_arithmetic(upper.operation)) {
                         if (const auto right=right_lane(upper,lane)) value=value || tainted[right->first][right->second];
+                        if (upper.operand==vu::Operand::quotient) value=value || tainted[quotient_register][0];
+                    }
                     if (upper.operation==A::multiply_add || upper.operation==A::multiply_subtract)
                         value=value || tainted[accumulator_lanes][lane];
                     next[upper_destination(upper)][lane]=value;
                 }
                 if (lower.result.bank==vu::Bank::vector && lower.result.index && (lower.mask&(8U>>lane))) {
                     next[lower.result.index][lane]=lower.operation==L::load_quad ? false :
+                        lower.operation==L::move_p ? tainted[p_register][0] :
                         tainted[lower.left.index][lower.operation==L::rotate ? (lane+1)%4:lane];
                 }
             }
+            switch (lower.operation) {
+            case L::divide: case L::square_root: case L::reciprocal_square_root: {
+                const bool taint=component(lower.right) || (lower.operation!=L::square_root && component(lower.left));
+                publish(pending_quotient,quotient_register); next[quotient_register][0]=tainted[quotient_register][0];
+                pending_quotient={true,taint,lower.operation==L::reciprocal_square_root ? 13U : 7U};
+                break;
+            }
+            case L::wait_quotient: publish(pending_quotient,quotient_register); next[quotient_register][0]=tainted[quotient_register][0]; break;
+            case L::reciprocal_length: case L::sine: case L::efu_square_root: {
+                const bool taint=lower.operation==L::reciprocal_length ?
+                    tainted[lower.left.index][0] || tainted[lower.left.index][1] || tainted[lower.left.index][2] : component(lower.left);
+                publish(pending_p,p_register); next[p_register][0]=tainted[p_register][0];
+                pending_p={true,taint,lower.operation==L::reciprocal_length ? 24U : lower.operation==L::sine ? 29U : 12U};
+                break;
+            }
+            case L::wait_p: publish(pending_p,p_register); next[p_register][0]=tainted[p_register][0]; break;
+            default: break;
+            }
             tainted=next;
         }
-        bool any=false;
-        for (unsigned reg=1;reg<=accumulator_lanes;++reg) for (unsigned lane=0;lane<4;++lane) any|=tainted[reg][lane];
+        bool any=(pending_quotient.valid && pending_quotient.taint) || (pending_p.valid && pending_p.taint);
+        for (unsigned reg=1;reg<tainted.size();++reg) for (unsigned lane=0;lane<4;++lane) any|=tainted[reg][lane];
         if (!any) return iteration;
     }
     throw std::invalid_argument("Vector region live-out lanes depend on skipped iterations");

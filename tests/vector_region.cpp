@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-extern "C" const nt::render::VectorRegion region_0,region_1,region_2,region_3,region_4;
+extern "C" const nt::render::VectorRegion region_0,region_1,region_2,region_3,region_4,region_5;
 namespace {
 void require(bool ok,const char* message) { if (!ok) throw std::runtime_error(message); }
 nt::vu::State initial(const nt::render::VectorRegion& region,unsigned count,unsigned seed) {
@@ -83,10 +83,10 @@ void gpu_kernel(void* context,std::span<const std::uint32_t> data,std::span<cons
 }
 int main(int argc,char** argv) {
     try {
-        require(argc==1 || argc==6,"Expected zero or five AOT shader paths");
-        const nt::render::VectorRegion* regions[]{&region_0,&region_1,&region_2,&region_3,&region_4};
+        require(argc==1 || argc==7,"Expected zero or six AOT shader paths");
+        const nt::render::VectorRegion* regions[]{&region_0,&region_1,&region_2,&region_3,&region_4,&region_5};
         unsigned checks=0;
-        for (unsigned variant=0;variant<5;++variant) {
+        for (unsigned variant=0;variant<6;++variant) {
             const auto& region=*regions[variant];
             for (unsigned count:{1U,2U,3U,4U,7U,20U,60U}) for (unsigned seed=0;seed<8;++seed) {
                 auto state=initial(region,count,seed);
@@ -114,7 +114,7 @@ int main(int argc,char** argv) {
             auto broken=region; broken.iteration=failed_boundary;
             rejects_unchanged(state,[&]{nt::render::execute_vector_region(broken,state);});
 #if defined(ANYPS2_REGION_VULKAN)
-            if (argc==6) {
+            if (argc==7) {
                 auto shader=vulkan_compute::read_shader(argv[variant+1]);
                 for (unsigned count:{7U,20U,60U}) {
                     state=initial(region,count,variant+42);

@@ -123,6 +123,12 @@ private:
         advance(pending_p_,p_);
         const auto upper=vu::decode_upper(pair.upper);
         const auto lower=vu::decode_lower(pair,unit_);
+        // As in the VU code generator, a Q/P producer or wait synchronizes the
+        // earlier result before either unit of this pair reads Q or P.
+        if (lower.operation==O::divide || lower.operation==O::square_root || lower.operation==O::reciprocal_square_root ||
+            lower.operation==O::wait_quotient) publish(pending_quotient_,quotient_);
+        if (lower.operation==O::reciprocal_length || lower.operation==O::sine || lower.operation==O::efu_square_root ||
+            lower.operation==O::wait_p) publish(pending_p_,p_);
         // Both units read before either writes.
         std::vector<std::tuple<unsigned,unsigned,std::uint32_t>> vector_writes;
         std::vector<std::pair<unsigned,std::uint32_t>> accumulator_writes;
