@@ -98,6 +98,22 @@ public:
             records_.emplace(id,Record{0x10,words[1],words[2],size,words[4],words[5],words[5],words[7],words[8]});
             return {Stop::budget,id};
         }
+        if (call==0x2b) {
+            // The first thread of a priority moves behind its peers. The running
+            // thread is first at its own priority; the caller then reschedules.
+            const auto priority=arg(0);
+            if (priority>=128) return fail();
+            auto& current=records_.at(current_);
+            if (current.status==1 && current.priority==priority) {
+                current.status=2; current.order=next_order_++;
+            } else {
+                auto first=records_.end();
+                for (auto i=records_.begin();i!=records_.end();++i)
+                    if (i->second.status==2 && i->second.priority==priority && (first==records_.end() || i->second.order<first->second.order)) first=i;
+                if (first!=records_.end()) first->second.order=next_order_++;
+            }
+            return {Stop::budget,priority};
+        }
         auto id=arg(0);
         if (call==0x23 || call==0x24 || call==0x32 || (!id && (call==0x29 || call==0x30 || call==0x31))) id=current_;
         if (id==idle_id) return {Stop::unsupported_system}; // Native idle status/mutation is not exposed yet.

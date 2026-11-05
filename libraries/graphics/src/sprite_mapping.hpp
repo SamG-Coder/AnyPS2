@@ -35,11 +35,15 @@ inline bool texture_fits_surface(const Sprite& draw,unsigned width,unsigned heig
 }
 // PSMCT32 pages are 64x32. Advancing one framebuffer pitch in x
 // therefore advances one page row in y, without changing the intra-page
-// address. A rectangle no wider than the pitch has disjoint mapped pieces.
+// address. Depth-tested draws use the same pitch and accessed depth formats are
+// 32 or 24 bits, whose pages match, so depth wraps with color.
+// A rectangle wider than the pitch has overlapping pieces, whose shared pixels
+// the GS also draws twice. Untextured sprites give each hit one color and depth,
+// so the different order of the two hits does not change the result.
 inline bool can_map_wrapped_sprite(const Sprite& draw) {
     const auto width=draw.pitch*64;
     if (!width || draw.right<=width || draw.right<=draw.left || draw.bottom<=draw.top ||
-        draw.right-draw.left>width || (draw.flags&(1|triangle_flag|line_flag|depth_test_flag))) return false;
+        (draw.right-1)/width-draw.left/width>1 || (draw.flags&(1|triangle_flag|line_flag))) return false;
     const auto height=draw.bottom+(draw.right-1)/width*32;
     return height<=2048 && ((height+31)/32)*draw.pitch<=512;
 }

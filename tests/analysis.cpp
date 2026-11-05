@@ -889,6 +889,71 @@ int main() {
             check(nt::analysis::syscall_callbacks(image,fixture,program,0x74).empty(),"Dynamic callback guessed");
         }
         {
+            // Copy 0x20 bytes from file-backed data to unloaded kernel memory,
+            // then register the copy as a syscall handler.
+            nt::Bytes image(0x200,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,0x100,0x100,5,4},{0x100,0x2000,0x100,0x100,6,4}}};
+            put(image,0x00,0x3c048000); put(image,0x04,0x34843000); // a0 = destination
+            put(image,0x08,0x3c050000); put(image,0x0c,0x34a52000); // a1 = source
+            put(image,0x10,0x0c000410); put(image,0x14,0x24060020); // copy(a0,a1,0x20)
+            put(image,0x18,0x2404005b); put(image,0x1c,0x3c058000);
+            put(image,0x20,0x0c000418); put(image,0x24,0x34a53000); // SetSyscall(0x5b,destination)
+            put(image,0x28,0x1000ffff); put(image,0x2c,0);
+            put(image,0x40,0x03e00008); put(image,0x44,0);
+            put(image,0x60,0x24030074); put(image,0x64,0x0000000c); put(image,0x68,0x03e00008); put(image,0x6c,0);
+            // The copied service returns an internal routine through a table.
+            put(image,0x100,0x3c028000); put(image,0x104,0x03e00008); put(image,0x108,0x34423010);
+            put(image,0x10c,0x80003010); put(image,0x110,0x03e00008); put(image,0x114,0);
+            put(image,0x118,0x80003100); put(image,0x11c,0x80003016);
+            const auto copies=[&] {
+                return nt::analysis::copied_code(image,fixture,nt::analysis::discover(image,fixture,128,{},true));
+            };
+            auto found=copies();
+            check(found.size()==1 && found[0].source==0x2000 && found[0].destination==0x80003000 && found[0].size==0x20 &&
+                  found[0].entry_offsets==std::set<std::uint32_t>{0,0x10},"Copied syscall handler or internal entry lost");
+            // A helper installed by the same routine is code, though never registered.
+            put(image,0x28,0x3c048000); put(image,0x2c,0x34844000); put(image,0x30,0x3c050000);
+            put(image,0x34,0x34a52010); put(image,0x38,0x0c000410); put(image,0x3c,0x24060010);
+            const auto after_helper=0x120U; put(image,after_helper,0x4c000000); put(image,0x110,0); put(image,0x114,0);
+            found=copies();
+            put(image,0x110,0x03e00008); put(image,after_helper,0);
+            check(found.size()==2 && found[1].source==0x2010 && found[1].destination==0x80004000 && found[1].size==0x10 &&
+                  found[1].entry_offsets==std::set<std::uint32_t>{0},"Helper copied by the installer lost");
+            put(image,0x38,0x0c000418);
+            check(copies().size()==1,"Copy through an unrelated routine accepted");
+            put(image,0x28,0x1000ffff); for (const auto at:{0x2cU,0x30U,0x34U,0x38U,0x3cU}) put(image,at,0);
+            put(image,0x14,0x8c060000);
+            check(copies().empty(),"Dynamic copy size guessed");
+            put(image,0x14,0x24060020); put(image,0x0c,0x34a52400);
+            check(copies().empty(),"Copy from unbacked storage accepted");
+            put(image,0x0c,0x34a52000); put(image,0x24,0x34a53030);
+            check(copies().empty(),"Handler outside the copy accepted");
+            put(image,0x1c,0x3c050000); put(image,0x24,0x34a51040);
+            check(copies().empty(),"Loaded handler treated as copied code");
+        }
+        {
+            // walker(begin,end) calls each initializer in a headerless array.
+            nt::Bytes image(0x200,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,0x100,0x100,5,4},{0x100,0x2000,0x100,0x100,6,4}}};
+            put(image,0x00,0x3c040000); put(image,0x04,0x34842000); put(image,0x08,0x3c050000);
+            put(image,0x0c,0x0c000410); put(image,0x10,0x34a52008); // walker(0x2000,0x2008)
+            put(image,0x14,0x1000ffff); put(image,0x18,0);
+            put(image,0x40,0x8c990000); put(image,0x44,0x0320f809); put(image,0x48,0);
+            put(image,0x4c,0x03e00008); put(image,0x50,0);
+            put(image,0x60,0x03e00008); put(image,0x64,0); put(image,0x70,0x03e00008); put(image,0x74,0);
+            put(image,0x100,0x1060); put(image,0x104,0x80001070); put(image,0x108,0x2000);
+            const auto entries=[&] {
+                return nt::analysis::bounded_pointer_range_entries(image,fixture,nt::analysis::discover(image,fixture,128,{},true));
+            };
+            check(entries()==std::set<std::uint32_t>{0x1060,0x1070},"Initializer range entries lost");
+            put(image,0x44,0);
+            check(entries().empty(),"Range passed to a non-calling function accepted");
+            put(image,0x44,0x0320f809); put(image,0x104,0x2000);
+            check(entries().empty(),"Range containing data accepted");
+            put(image,0x104,0x1070); put(image,0x10,0x34a51ff8);
+            check(entries().empty(),"Inverted range accepted");
+        }
+        {
             nt::Bytes image(0x100,0);
             nt::elf::Executable fixture{0x1000,0,{{0,0x1000,0x80,0x80,5,4},{0x80,0x2000,0x80,0x80,6,4}}};
             put(image,0,0x24081060); // entry candidate in t0

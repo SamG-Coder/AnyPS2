@@ -58,6 +58,10 @@ public:
         return Stop::budget;
     }
     bool active() const { return depth_!=0; }
+    // A handler may leave by restoring its caller's registers itself. Interrupts
+    // are delivered only with no handler active, so when one returns, any frame
+    // still recorded was entered during it and can no longer return.
+    void abandon_after_interrupt() { depth_=0; }
     bool returning(const runtime::State& state) const { return state.pc==return_gate && depth_; }
     Stop finish(runtime::State& state,Memory& memory) {
         if (!returning(state)) return Stop::invalid_state;

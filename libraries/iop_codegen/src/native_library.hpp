@@ -5,6 +5,12 @@
 #include <stdexcept>
 
 namespace nt::iop_codegen::ir {
+inline bool native_library_module(const elf::IopModule& module) {
+    const auto exports=elf::iop_exports(module);
+    return std::any_of(exports.begin(),exports.end(),[](const auto& library) {
+        return library.name=="libsd" || library.name=="usbd" || library.name=="dev9";
+    });
+}
 // Replace a public library ABI, never an observed game instruction address.
 // Entries are still emitted as LLVM functions, which call native services.
 inline std::optional<Program> native_library(const elf::IopModule& module,std::span<const std::uint32_t> entries) {

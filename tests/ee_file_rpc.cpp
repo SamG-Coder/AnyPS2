@@ -41,6 +41,31 @@ void run_ee_file_rpc_tests() {
     nt::ee::NativeCdvdSearchRpc search(cdvd,0xa000,0xb000);
     nt::ee::NativeCdvdReadRpc sectors(cdvd,0xc000,0xd000);
     {
+        // Streams read directly from the ISO at their own position.
+        std::vector<std::uint8_t> stream_ram(0x8000,0xcc);
+        nt::ee::Memory stream_memory{stream_ram.data(),stream_ram.size()};
+        nt::ee::NativeCdvdInitRpc stream_cdvd(disc.path,0x8000,0x9000);
+        const std::array<std::uint8_t,4> init_args{};
+        require(stream_cdvd.call(stream_memory,nt_ee_generated_code_overlap,0,init_args,0x7000,16)==Stop::budget);
+        nt::ee::NativeCdvdReadRpc stream(stream_cdvd,0xc000,0xd000);
+        const auto command=[&](std::uint32_t first,std::uint32_t count,std::uint32_t target,std::uint32_t kind) {
+            const auto arguments=words({first,count,target,kind,0});
+            const auto result=stream.call(stream_memory,nt_ee_generated_code_overlap,9,arguments,0x7000,4);
+            return std::pair{result,nt::le32(stream_ram,0x7000)};
+        };
+        require(command(16,4,0x6000,5)==std::pair{Stop::budget,1U}); // Initialize a 16-sector buffer.
+        require(command(0,0,0,6)==std::pair{Stop::budget,16U});
+        require(command(16,0,0,1)==std::pair{Stop::budget,1U});      // Start at the volume descriptor.
+        require(command(0,1,0x6000,2)==std::pair{Stop::budget,1U});
+        require(stream_ram[0x6001]=='C' && stream_ram[0x6002]=='D' && stream_ram[0x6003]=='0');
+        require(command(0,0,0,3)==std::pair{Stop::budget,1U});
+        const auto past_end=command(0xfffff000U,0,0,4);
+        require(past_end==std::pair{Stop::budget,1U});
+        const auto failed=command(0,1,0x6000,2);
+        require(failed.first==Stop::budget && (failed.second&0xffffU)==0 && (failed.second>>16)==0x20);
+        require(command(0,0,0,99).first==Stop::unsupported_system);
+    }
+    {
         std::vector<std::uint8_t> reset_ram(0x10000);
         nt::ee::Memory reset_memory{reset_ram.data(),reset_ram.size()};
         nt::ee::NativePlatform reset_platform; reset_platform.attach(reset_memory);

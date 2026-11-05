@@ -1597,6 +1597,9 @@ int main() {
             check((io.read32(io.context,0x10001810).value&0x800)!=0);
             state={}; state.pc=0x360004; state.cop0_status=0x10401; state.gpr[29].lo=0x8000;
             check(nt::ee::run(nt_ee_generated_run,state,memory,32,services)==nt::ee::Stop::syscall && state.executed==3);
+            // A delivered cause is visible to one read, then is not reported again.
+            check(platform.interrupts.read(0x1000f000).value==(1U<<12));
+            check(platform.interrupts.read(0x1000f000).value==0);
             timer_now+=1000000000; io.poll(io.context);
             check(platform.interrupts.read(0x1000f000).value==0); // Latched flag suppresses another event.
             check(io.write32(io.context,0x10001810,0xa82)==nt::ee::Stop::budget);
@@ -1679,6 +1682,20 @@ int main() {
             std::uint32_t result=0; std::memcpy(&result,ram.data()+0x6000,4); check(result==0x12345678);
             check(call(0x21,2)==nt::ee::Stop::budget && state.gpr[2].lo==2);
             check(call(0x20,0x5000)==nt::ee::Stop::budget && state.gpr[2].lo==2);
+            // Rotation yields to a ready peer of one priority, and back again.
+            {
+                check(call(0x29,0,10)==nt::ee::Stop::budget);
+                const auto priority=state.gpr[2].lo;
+                const auto running=[&] { check(call(0x2f)==nt::ee::Stop::budget); return state.gpr[2].lo; };
+                check(call(0x22,2,0)==nt::ee::Stop::budget && running()==1);
+                check(call(0x2b,10)==nt::ee::Stop::budget && running()==2);
+                check(call(0x2b,10)==nt::ee::Stop::budget && running()==1);
+                check(call(0x2b,128)==nt::ee::Stop::budget && state.gpr[2].lo==~std::uint64_t(0) && running()==1);
+                check(call(0x2b,50)==nt::ee::Stop::budget && state.gpr[2].lo==50 && running()==1);
+                check(call(0x25,2)==nt::ee::Stop::budget && call(0x21,2)==nt::ee::Stop::budget);
+                check(call(0x20,0x5000)==nt::ee::Stop::budget && state.gpr[2].lo==2);
+                check(call(0x29,0,static_cast<std::uint32_t>(priority))==nt::ee::Stop::budget);
+            }
             // ExitDeleteThread must switch back before erasing its continuation.
             check(call(0x22,2,77)==nt::ee::Stop::budget && state.pc==0x390000);
             check(call(0x24)==nt::ee::Stop::budget && state.pc==0x11f0);
@@ -1713,6 +1730,7 @@ int main() {
             check(state.gpr[2].lo==41 && state.gpr[2].hi==42 && state.gpr[4].lo==23 &&
                   state.gpr[29].lo==0x8000 && state.gpr[31].lo==0x12345678 && state.fpr[2]==123 && state.hi==987 &&
                   state.cop0_status==before.cop0_status && state.cop0_epc==before.pc && memory.exception.cause==32);
+            (void)interrupts.read(0x1000f000); // The delivered cause stays visible to one read.
             check(interrupts.read(0x1000f000).value==0 && !(memory.pending_interrupts&0x400));
             interrupts.raise(12); interrupts.write(0x1000f010,1U<<12);
             check(nt::ee::run(nt_ee_generated_run,state,memory,4,services)==nt::ee::Stop::syscall && state.executed==3);
@@ -2025,16 +2043,17 @@ int main() {
             nt::ee::NativePlatform platform; nt::ee::Memory memory; platform.attach(memory);
             auto& owner=platform.vector_owner;
             check(memory.vectors==&owner.storage);
+            // Compiled microprograms cannot deliver debug or trap breaks, so
+            // enabling them stops rather than silently losing the request.
             nt::runtime::State state; state.pc=0x143c; state.gpr[8].lo=0x0c0c;
-            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall);
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::unsupported_vector && !state.executed);
             state={}; state.pc=0x1414;
-            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall && state.gpr[8].lo==0x0c0c);
+            check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall && state.gpr[8].lo==0);
             owner.storage.active=true;
             state={}; state.pc=0x143c; state.gpr[8].lo=0x202;
             check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::vector_pending && !state.executed);
             check(owner.read(29,false).value==1 && owner.read(29,true).status==nt::ee::VectorStatus::pending);
             owner.storage.active=false;
-            check(owner.read(28,false).value==0x0c0c);
             check(nt_ee_generated_run(&state,&memory,8)==nt::ee::Stop::syscall && owner.read(28,false).value==0);
             owner.storage.mac=0x1234; owner.storage.status=0x5678;
             check(owner.read(17,false).value==0x1234 && owner.read(16,false).value==0x5678);
@@ -3063,6 +3082,7 @@ int main() {
             std::uint32_t line; std::memcpy(&line,ram.data()+0x6000,4); check(line==2 && !memory.pending_interrupts);
             timer_now=edge(487); poll(); check((platform.graphics.read(0x12001000).value&0x2008)==0x2008 && !memory.pending_interrupts && presented==1);
             poll(); platform.graphics.read(0x12001000); check(presented==1);
+            (void)platform.interrupts.read(0x1000f000); // Causes delivered earlier stay visible to one read.
             platform.graphics.write(0x12001010,0x7700); poll(); check(platform.interrupts.read(0x1000f000).value==1);
             platform.interrupts.write(0x1000f000,1); poll(); check(!memory.pending_interrupts);
             platform.graphics.write(0x12001000,8); timer_now=edge(525); poll();
@@ -3194,7 +3214,11 @@ int main() {
             const auto rejected_calls=sink.calls;
             check(write(0x10008000,0x101)==nt::ee::Stop::unsupported_system && sink.calls==rejected_calls+1 && read(0x10008020)==1 && !platform.completions.status());
             sink.result=nt::ee::Stop::budget;
-            check(write(0x1000e000,3)==nt::ee::Stop::unsupported_system && read(0x1000e000)==1);
+            // Bus cycle stealing has no native effect; MFIFO and stall control do.
+            check(write(0x1000e000,0x703)==nt::ee::Stop::budget && read(0x1000e000)==0x703);
+            check(write(0x1000e000,1)==nt::ee::Stop::budget);
+            for (const auto unsupported:{5U,0x11U,0x41U})
+                check(write(0x1000e000,unsupported)==nt::ee::Stop::unsupported_system && read(0x1000e000)==1);
             check(write(0x1000e020,0x7fffffff)==nt::ee::Stop::budget && read(0x1000e020)==0x03ff03ff);
             check(write(0x1000e020,0x80000000)==nt::ee::Stop::unsupported_system && read(0x1000e020)==0x03ff03ff);
             check(write(0x1000f590,0x11201)==nt::ee::Stop::budget && read(0x1000f520)==0x11201);
@@ -3490,6 +3514,19 @@ int main() {
                 (platform.completions.status()&4));
             for (unsigned packet=0;packet<4;++packet)
                 check(sink.packets[packet].size()==payload_words+1 && sink.packets[packet].back()[3]==packet+1);
+            // GIF has one fixed direction, so DIR=0 still sends. An SPR source
+            // may keep the mapped scratchpad base; other upper bits are invalid.
+            std::vector<std::uint8_t> scratch(nt::ee::scratchpad_size);
+            const std::array<std::uint32_t,8> scratch_packet{0x8001,0x08000000,0,0,1,2,3,7};
+            std::memcpy(scratch.data(),scratch_packet.data(),sizeof(scratch_packet));
+            auto* previous_scratch=memory.scratchpad; const auto previous_scratch_bytes=memory.scratchpad_bytes;
+            memory.scratchpad=scratch.data(); memory.scratchpad_bytes=scratch.size();
+            sink.packets.clear();
+            check(write(0x1000a010,0xf0000000)==nt::ee::Stop::budget && write(0x1000a020,2)==nt::ee::Stop::budget);
+            check(write(0x1000a000,0x100)==nt::ee::Stop::budget && sink.packets.size()==1 && sink.packets[0].back()[3]==7);
+            check(write(0x1000a010,0xb0000000)==nt::ee::Stop::budget && write(0x1000a020,2)==nt::ee::Stop::budget);
+            check(write(0x1000a000,0x100)==nt::ee::Stop::memory_fault);
+            memory.scratchpad=previous_scratch; memory.scratchpad_bytes=previous_scratch_bytes;
         }
         run_ee_batch_tests();
         run_ee_file_rpc_tests();

@@ -2640,6 +2640,13 @@ int main() {
               ram[0xcb04]==0 && ram[0xcb05]==0x05 && ram[0xcb06]==0x03 && ram[0xcb07]==0x24 &&
               ram[0xcb08]==0xab,
               "sceCdReadClock did not write the JST BCD clock");
+        std::array<std::uint8_t,8> read_clock_bytes{};
+        std::copy_n(ram.begin()+0xcb00,8,read_clock_bytes.begin());
+        std::fill_n(ram.begin()+0xcb00,8,std::uint8_t{0});
+        const auto raw_clock=cdvd.invoke({51,{0xcb00},NativeServiceKind::cdvdman},ram);
+        check(raw_clock.status==NativeServiceStatus::returned && raw_clock.value==1 &&
+              std::equal(read_clock_bytes.begin(),read_clock_bytes.end(),ram.begin()+0xcb00),
+              "sceCdRC did not write the host clock");
         const auto stale_year=std::chrono::sys_days{std::chrono::year{1999}/std::chrono::January/1};
         NativeCdvdmanServices stale([stale_year] { return stale_year; });
         const auto rejected_clock=stale.invoke({24,{0xcb00},NativeServiceKind::cdvdman},ram);

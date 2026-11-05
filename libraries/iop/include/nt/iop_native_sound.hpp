@@ -45,7 +45,7 @@ public:
                 return NativeCallback{stream.refill.address,core,stream.refill.argument,stream.refill.gp,scratch_,scratch_+4};
             }
             if (stream.loop) {
-                stream.half^=1;
+                stream.half^=1; stream.start=0;
                 if (!submit_stream(core)) { failure_=NativeResult{NativeStop::service_request,stream.pc,0,18}; return {}; }
             } else stream.active=false;
             notify(core);
@@ -246,7 +246,7 @@ private:
         bool effect_enabled=false,irq_enabled=false,muted=false;
     };
     struct Handler { std::uint32_t address=0,argument=0,gp=0; };
-    struct Stream { bool active=false,loop=false; unsigned half=0; std::uint32_t address=0,size=0,pc=0; std::uint64_t origin=0; Handler refill; };
+    struct Stream { bool active=false,loop=false; unsigned half=0; std::uint32_t address=0,size=0,pc=0,start=0; std::uint64_t origin=0; Handler refill; };
     static NativeServiceReply returned(std::uint32_t value=0) { return {NativeServiceStatus::returned,value}; }
     static NativeServiceReply unavailable() { return {NativeServiceStatus::unavailable}; }
     static float fixed_gain(std::uint16_t value) {
@@ -473,12 +473,15 @@ private:
     }
     bool submit_stream(unsigned core) {
         auto& stream=streams_[core];
-        const auto address=stream.address+stream.half*stream.size;
-        if (address>arena_.size() || stream.size>arena_.size()-address || !stream.size || stream.size%1024) return false;
-        std::vector<std::int16_t> pcm(stream.size/2);
+        // A stream started part way through a buffer plays only its remainder once.
+        const auto skip=stream.start;
+        const auto address=stream.address+stream.half*stream.size+skip;
+        const auto bytes=stream.size-skip;
+        if (address>arena_.size() || bytes>arena_.size()-address || !bytes || stream.size%1024) return false;
+        std::vector<std::int16_t> pcm(bytes/2);
         // LIBSD input buffers store 256 left samples followed by 256 right
         // samples in each 1024-byte block. XAudio2 consumes interleaved stereo.
-        for (unsigned block=0;block<stream.size;block+=1024)
+        for (unsigned block=0;block<bytes;block+=1024)
             for (unsigned frame=0;frame<256;++frame)
                 for (unsigned channel=0;channel<2;++channel) {
                     const auto at=address+block+channel*512+frame*2;
@@ -496,7 +499,7 @@ private:
         audio::StreamState state;
         if (!output_.stream_state(core,state)) return unavailable();
         const auto consumed=state.frames>=stream.origin ? state.frames-stream.origin : 0;
-        const auto offset=std::min<std::uint64_t>(consumed*4,stream.size);
+        const auto offset=std::min<std::uint64_t>(consumed*4+stream.start,stream.size);
         return returned((stream.half<<24)|((stream.address+stream.half*stream.size+static_cast<unsigned>(offset))&0xffffff));
     }
     NativeServiceReply stop_stream(unsigned core) {
@@ -507,13 +510,27 @@ private:
     NativeServiceReply block_transfer(const NativeServiceRequest& request,std::span<std::uint8_t> ram) {
         const auto& a=request.arguments; const unsigned core=a[0]&1,mode=a[1]&0xffff;
         if (mode==2) return stop_stream(core);
-        if (mode!=0 && mode!=0x10 && mode!=0x80) return unavailable();
+        // Mode bit 0 and 1 together select starting at a fifth, stacked address.
+        const bool from_address=(mode&3)==3;
+        if (mode!=0 && mode!=0x10 && mode!=0x80 && mode!=3 && mode!=0x13) return unavailable();
         if (streams_[core].active) return returned(0xffffffff);
         const auto source=ram_offset(a[2],1,ram.size());
         if (!source || a[3]>ram.size()-*source) return {NativeServiceStatus::address_fault,0,a[2]};
         const bool loop=(mode&0x10)!=0;
         const auto size=loop ? a[3]/2 : a[3];
         if (!size || size%1024 || (loop && a[3]%2)) return returned(0xffffffff);
+        unsigned half=0;
+        std::uint32_t start=0;
+        if (from_address) {
+            if (request.stack_pointer>0xffffffebU) return {NativeServiceStatus::address_fault,0,request.stack_pointer};
+            const auto stack=ram_offset(request.stack_pointer+16,4,ram.size());
+            if (!stack) return {NativeServiceStatus::address_fault,0,request.stack_pointer};
+            const auto first=load_native_word(ram,*stack);
+            const auto position=first-a[2];
+            // Blocks hold separate channels, so only whole blocks can be skipped.
+            if (position>=a[3] || position%1024) return unavailable();
+            half=position/size; start=position%size;
+        }
         Handler refill;
         if (mode==0x80) {
             if (request.stack_pointer>0xffffffe7U) return {NativeServiceStatus::address_fault,0,request.stack_pointer};
@@ -531,7 +548,8 @@ private:
                     return {NativeServiceStatus::code_write,0,scratch_};
             }
         }
-        streams_[core]={true,loop,0,*source,size,request.call_site};
+        streams_[core]={true,loop,half,*source,size,request.call_site};
+        streams_[core].start=start;
         streams_[core].refill=refill;
         if (!submit_stream(core)) { streams_[core]={}; return unavailable(); }
         return returned();

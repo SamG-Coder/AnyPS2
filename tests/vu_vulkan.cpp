@@ -613,10 +613,9 @@ int main() {
         transport.clear(); payload();
         if (direct.consume(2,transport,false)!=nt::ee::Stop::budget || consumer.drawing.pixels()[0]!=0x80201008)
             throw std::runtime_error("GIF reset retained pending transport framing");
-        transport.clear(); quad(0x7fffULL|(1ULL<<60),14);
-        std::vector<std::uint8_t> oversized(65536*16);
-        if (direct.consume(2,transport,false)!=nt::ee::Stop::budget ||
-            direct.consume(2,oversized,false)!=nt::ee::Stop::unsupported_system)
+        // Unterminated lists are drawn in parts; one tag too large for any part is not.
+        transport.clear(); quad(0x7fffULL|(8ULL<<60),14);
+        if (direct.consume(2,transport,false)!=nt::ee::Stop::unsupported_system)
             throw std::runtime_error("Graphics stream bound was not enforced");
         direct.write(0x10003000,1);
         if (consumer.renderer.validation_errors()) throw std::runtime_error("Native transfers caused Vulkan validation errors");

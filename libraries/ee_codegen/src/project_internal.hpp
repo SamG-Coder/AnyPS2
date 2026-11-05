@@ -12,6 +12,8 @@ struct PreparedProject {
     elf::Executable executable;
     analysis::Program discovered;
     std::vector<CodeRange> ranges;
+    // Swept words that guard themselves instead of being write-protected.
+    std::vector<CodeRange> unverified_code;
     std::vector<CodeRange> selected_regions;
     std::vector<CodePayload> payloads;
     Bytes image;

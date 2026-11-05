@@ -98,6 +98,20 @@ write ranges. Completion is published after all copies commit. Interleave,
 scratchpad self-copy, VU-storage transfers and unsupported descriptor kinds stop
 explicitly. Native RAM destinations remain subject to compiled-code protection.
 
+## Mixed code and data sections
+
+An ELF whose only section is writable and executable cannot be classified word by
+word, and `--whole-code` refuses it. Conversion follows reachable flow, then also
+selects other lowerable words in runs that transfer control or reach proven code.
+Those swept words are not write-protected, because the program may use them as
+data. Each compares its own bytes before running and stops with `unpublished_code`
+if they changed, so changed bytes never run stale native code.
+
+A constant copy from file-backed storage to unloaded memory is treated as code when
+a constant `SetSyscall` handler lands inside it, or when the same routine installed
+such a copy. Its entries are those handlers and words inside it that address
+decodable code within it. `--payloads` remains available for explicit classification.
+
 ## Services and output evidence
 
 Native services provide supported thread, callback, synchronization, file, audio,

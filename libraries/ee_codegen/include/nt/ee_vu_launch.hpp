@@ -202,7 +202,7 @@ public:
             const auto run_compiled=[&](bool resume,std::uint64_t budget) {
                 const auto began=profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 const auto result=resume ? binding_.resume(next,budget,profile ? &profile->execution : nullptr) :
-                    binding_.launch(next,last_entry,budget,profile ? &profile->execution : nullptr);
+                    binding_.launch(next,last_entry,budget,profile ? &profile->execution : nullptr,request->continuation);
                 if (profile) {
                     profile->compiled_ns+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-began).count();
                     profile->blocks+=result.blocks;

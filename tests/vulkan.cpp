@@ -92,11 +92,23 @@ void bulk_transfers() {
     }
     result.clear(); append_packets(result,large_bytes);
     if (result!=std::vector<Packet>{full,full}) throw std::runtime_error("Complete batch framing changed payloads");
-    // Removing EOP must not permit the next tag to grow the existing packet.
+    // Without EOP the next tag starts another part, never growing past the bound.
     large[32768*16+1]&=0x7f;
+    result.clear();
+    {
+        PacketStream stream; stream.append(large_bytes,result);
+        auto unterminated=full; unterminated[32768][0]&=0x7fffU;
+        if (stream.pending() || result!=std::vector<Packet>{unterminated,full})
+            throw std::runtime_error("Long unterminated list was not split at a tag boundary");
+    }
+    // A single tag that cannot fit any part stays an explicit limit.
+    // Eight PACKED registers per loop make this one payload far too long.
+    const Quadword oversized_tag{0x7fff,0x80000000U,0,0};
+    std::array<std::uint8_t,16> oversized{};
+    std::memcpy(oversized.data(),oversized_tag.data(),16);
     rejected=false; result.clear();
-    try {PacketStream stream; stream.append(large_bytes,result);} catch(const std::invalid_argument&) {rejected=true;}
-    if (!rejected || !result.empty()) throw std::runtime_error("Oversized individual packet escaped its bound");
+    try {PacketStream stream; stream.append(oversized,result);} catch(const std::invalid_argument&) {rejected=true;}
+    if (!rejected || !result.empty()) throw std::runtime_error("Oversized single tag escaped its bound");
 }
 }
 
@@ -157,6 +169,36 @@ int main(int argc,char**) {
             if (native.pixels()[pixel]!=0x80604020) throw std::runtime_error("Draw after image upload lost ordering");
         {
             // The readback snapshots preceding GPU writes and preserves packed
+            // Local-to-local copies move stored bits through the submission path.
+            {
+                nt::graphics::Packet copy{{0x8004,0x10000000,14,0}};
+                const auto put=[&](unsigned reg,std::uint64_t value) {
+                    copy.push_back({std::uint32_t(value),std::uint32_t(value>>32),reg,0});
+                };
+                const std::uint64_t buffer=(1ULL<<16)|(8ULL<<32)|(1ULL<<48),extent=9|(3ULL<<32);
+                put(0x50,buffer); put(0x51,0); put(0x52,extent); put(0x53,2);
+                auto expected=native.pixels();
+                (void)nt::graphics::ImageCopy::begin(buffer,0,extent).apply(expected);
+                native.submit(gpu,std::array{copy});
+                if (native.pixels()!=expected) throw std::runtime_error("Local-to-local copy did not reach graphics memory");
+            }
+            // TRXPOS selects the pixel order: an overlapping copy smears forward
+            // and moves intact in reverse. Pixel sizes must match.
+            {
+                const std::uint64_t buffer=(1ULL<<16)|(1ULL<<48),extent=3|(1ULL<<32);
+                const auto copied=[&](std::uint64_t position) {
+                    std::vector<std::uint32_t> words(1024*1024);
+                    for (unsigned x=0;x<4;++x) words[nt::graphics::rgba_word(0,1,x,0)]=x+1;
+                    (void)nt::graphics::ImageCopy::begin(buffer,position,extent).apply(words);
+                    return std::array{words[nt::graphics::rgba_word(0,1,1,0)],words[nt::graphics::rgba_word(0,1,2,0)],words[nt::graphics::rgba_word(0,1,3,0)]};
+                };
+                if (copied(1ULL<<32)!=std::array{1U,1U,1U} || copied((1ULL<<32)|(2ULL<<59))!=std::array{1U,2U,3U})
+                    throw std::runtime_error("Overlapping copy ignored TRXPOS order");
+                bool rejected=false;
+                try { (void)nt::graphics::ImageCopy::begin(buffer|(2ULL<<56),0,extent); }
+                catch (const std::invalid_argument&) { rejected=true; }
+                if (!rejected) throw std::runtime_error("Copy between pixel sizes accepted");
+            }
             // storage bits across split host requests, without display conversion.
             for (unsigned format:{0U,1U,2U,10U,19U,20U}) {
                 nt::graphics::Packet download{{0x8004,0x10000000,14,0}};
@@ -377,12 +419,18 @@ int main(int argc,char**) {
         frame24[3][0]|=1U<<24;
         native.submit(gpu,std::array{background,frame24});
         if (native.pixels()[0]!=0x80808080) throw std::runtime_error("24-bit frame did not ignore DATE/use fixed destination alpha");
+        // A blend past the surface width wraps into the next page row. Two rows
+        // map exactly; a third cannot be mapped and leaves memory unchanged.
         auto alias_draw=pixel_draw(0x40808080,0x46,0,0x44);
         alias_draw[4][0]=127U<<16; alias_draw.back()[0]=2048U|(32U<<16);
-        const auto before_alias=native.pixels(); rejected=false;
+        auto before_alias=native.pixels();
+        native.submit(gpu,std::array{background,alias_draw});
+        if (native.pixels()==before_alias) throw std::runtime_error("Wrapped destination blend did not draw");
+        alias_draw[4][0]=191U<<16; alias_draw.back()[0]=3072U|(32U<<16);
+        before_alias=native.pixels(); rejected=false;
         try { native.submit(gpu,std::array{background,alias_draw}); }
         catch (const std::runtime_error&) { rejected=true; }
-        if (!rejected || native.pixels()!=before_alias) throw std::runtime_error("Aliased destination blend was not atomic/rejected");
+        if (!rejected || native.pixels()!=before_alias) throw std::runtime_error("Unmappable destination blend was not atomic/rejected");
         std::vector<std::uint32_t> memory(1024*1024,0x12345678), expected=memory;
         // Independent block/column lookup, including page crossing and VRAM wrap.
         constexpr unsigned blocks[4][8]={{0,1,4,5,16,17,20,21},{2,3,6,7,18,19,22,23},

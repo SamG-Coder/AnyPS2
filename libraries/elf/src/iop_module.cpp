@@ -99,6 +99,7 @@ IopModule load_iop_module(ByteView file, std::uint32_t base) {
                 const auto upper=le32(result.memory,*high);
                 const std::uint32_t low=(word&0x8000) ? (word|0xffff0000U) : (word&0xffffU);
                 const auto address=(upper<<16)+low+base;
+                if (result.info && address%4==0 && address-base<result.info->text_size) result.text_references.push_back(address);
                 put32(result.memory,*high,(upper&0xffff0000U)|(((address+0x8000U)>>16)&0xffffU));
                 put32(result.memory,target,(word&0xffff0000U)|(address&0xffffU));
                 high.reset();

@@ -69,7 +69,13 @@ bool supported(Op op) {
     }
 }
 
-void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> ranges,std::span<const CodePayload> payloads,const NativeLayout& layout,bool external=false) {
+bool contains_address(std::span<const CodeRange> ranges,std::uint32_t address) {
+    const auto after=std::upper_bound(ranges.begin(),ranges.end(),address,[](std::uint32_t value,const CodeRange& range) {
+        return value<range.address;
+    });
+    return after!=ranges.begin() && address-std::prev(after)->address<std::prev(after)->size;
+}
+void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> ranges,std::span<const CodePayload> payloads,const NativeLayout& layout,bool external=false,std::span<const CodeRange> unverified={}) {
     w.out<<"define "<<(external ? "" : "internal ")<<"i32 @nt_ee_part_"<<instructions.front().pc<<"(ptr %state, ptr %memory, i64 %budget) noinline {\nentry:\n"
          <<"  %remaining = alloca i64\n  store i64 %budget, ptr %remaining\n  br label %dispatch\ndispatch:\n";
     const auto pc=w.load("i32",offsetof(runtime::State,pc));
@@ -144,6 +150,26 @@ void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::s
                  <<"\npayload_stop"<<suffix<<":\n";
             w.store("i32",std::to_string(address),offsetof(ee::Memory,fault_address),"%memory");
             w.out<<"  ret i32 14\npayload_ready"<<suffix<<":\n";
+        }
+        if (contains_address(unverified,physical_address(i.pc))) {
+            // Swept words from a mixed code/data section are not write-protected:
+            // the program may legitimately use them as data. Each word proves
+            // itself before it runs, so changed bytes can never run stale code.
+            const auto address=physical_address(i.pc);
+            const auto data=w.load("ptr",offsetof(ee::Memory,data),"%memory");
+            const auto size=w.load("i64",offsetof(ee::Memory,size),"%memory");
+            const auto absent=w.value("icmp eq ptr "+data+", null");
+            const auto short_memory=w.value("icmp ult i64 "+size+", "+std::to_string(std::uint64_t(address)+4));
+            const auto unavailable=w.binary("or","i1",absent,short_memory);
+            w.out<<"  br i1 "<<unavailable<<", label %sweep_stop"<<suffix<<", label %sweep_compare"<<suffix
+                 <<"\nsweep_compare"<<suffix<<":\n";
+            const auto pointer=w.pointer(address,data);
+            const auto word=w.value("load i32, ptr "+pointer);
+            const auto matches=w.value("icmp eq i32 "+word+", "+std::to_string(i.word));
+            w.out<<"  br i1 "<<matches<<", label %sweep_ready"<<suffix<<", label %sweep_stop"<<suffix
+                 <<"\nsweep_stop"<<suffix<<":\n";
+            w.store("i32",std::to_string(address),offsetof(ee::Memory,fault_address),"%memory");
+            w.out<<"  ret i32 14\nsweep_ready"<<suffix<<":\n";
         }
         if (display_wait_pattern(instructions.subspan(n)) && !(n && instructions[n-1].branch())) {
             // All four instructions must have the same lifetime/publication
@@ -307,6 +333,21 @@ void add_constraint(EeRejection& rejection,std::string message) {
     if (rejection.constraints.size()<32) rejection.constraints.push_back(std::move(message));
     else ++rejection.omitted_constraints;
 }
+std::optional<std::string> instruction_constraint(const r5900::Instruction& i,const r5900::Instruction* next) {
+    std::ostringstream where;
+    where<<"0x"<<std::hex<<i.pc;
+    if ((i.op==r5900::Op::mfc0 || i.op==r5900::Op::mtc0) && i.rd!=0 && i.rd!=2 && i.rd!=3 && i.rd!=5 && i.rd!=10 && i.rd!=25 && i.rd!=12 && i.rd!=14 && i.rd!=30 && i.rd!=6 && !((i.rd==28 || i.rd==9 || i.rd==1 || i.rd==8 || i.rd==13 || i.rd==23) && i.op==r5900::Op::mfc0))
+        return "EE system transfer selector is not supported at "+where.str();
+    if (i.op==r5900::Op::cfc2 && i.rd==20)
+        return "EE vector random-register transfer is not implemented at "+where.str();
+    if ((i.op==r5900::Op::ctc1 || i.op==r5900::Op::cfc1) && i.rd!=31)
+        return "EE floating control transfer supports FCR31 only at "+where.str();
+    if (i.op==r5900::Op::sync && (i.rs || i.rt || i.rd || (i.sa!=0 && i.sa!=16)))
+        return "Unsupported EE SYNC encoding at "+where.str();
+    if (i.branch() && (!next || next->pc!=i.pc+4 || next->branch() || next->op==r5900::Op::syscall || next->op==r5900::Op::eret))
+        return "EE branch requires a supported scalar delay slot at "+where.str();
+    return {};
+}
 }
 std::string EeRejection::text() const {
     std::ostringstream diagnostic;
@@ -345,20 +386,13 @@ EeRejection reject_unsupported(std::span<const r5900::Instruction> instructions)
                 rejection.families.push_back({key,i.pc,1});
             } else ++rejection.families[found->second].count;
         }
-        std::ostringstream where;
-        where<<"0x"<<std::hex<<i.pc;
-        if ((i.op==r5900::Op::mfc0 || i.op==r5900::Op::mtc0) && i.rd!=0 && i.rd!=2 && i.rd!=3 && i.rd!=5 && i.rd!=10 && i.rd!=25 && i.rd!=12 && i.rd!=14 && i.rd!=30 && i.rd!=6 && !((i.rd==28 || i.rd==9 || i.rd==1 || i.rd==8 || i.rd==13 || i.rd==23) && i.op==r5900::Op::mfc0))
-            add_constraint(rejection,"EE system transfer selector is not supported at "+where.str());
-        if (i.op==r5900::Op::cfc2 && i.rd==20)
-            add_constraint(rejection,"EE vector random-register transfer is not implemented at "+where.str());
-        if ((i.op==r5900::Op::ctc1 || i.op==r5900::Op::cfc1) && i.rd!=31)
-            add_constraint(rejection,"EE floating control transfer supports FCR31 only at "+where.str());
-        if (i.op==r5900::Op::sync && (i.rs || i.rt || i.rd || (i.sa!=0 && i.sa!=16)))
-            add_constraint(rejection,"Unsupported EE SYNC encoding at "+where.str());
-        if (i.branch() && (n+1==instructions.size() || instructions[n+1].pc!=i.pc+4 || instructions[n+1].branch() || instructions[n+1].op==r5900::Op::syscall || instructions[n+1].op==r5900::Op::eret))
-            add_constraint(rejection,"EE branch requires a supported scalar delay slot at "+where.str());
+        if (auto constraint=instruction_constraint(i,n+1<instructions.size() ? &instructions[n+1] : nullptr))
+            add_constraint(rejection,std::move(*constraint));
     }
     return rejection;
+}
+bool lowerable(const r5900::Instruction& instruction,const r5900::Instruction* next) {
+    return supported(instruction.op) && !instruction_constraint(instruction,next);
 }
 void emit_declarations(Writer& w) {
     w.out<<"declare i64 @nt_ee_exception_read(ptr, i32)\n"
@@ -410,7 +444,7 @@ void emit_payloads(Writer& w,std::span<const CodePayload> payloads) {
     }
 }
 void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> protected_code,std::span<const CodePayload> payloads,std::span<const LayoutDeclaration> layouts,std::span<const ExecutableImage> images,
-               const std::function<std::ostream&(std::size_t)>& module_output,std::uint64_t input_identity) {
+               const std::function<std::ostream&(std::size_t)>& module_output,std::uint64_t input_identity,std::span<const CodeRange> unverified_code) {
     static_assert(std::is_standard_layout_v<runtime::State> && std::is_standard_layout_v<ee::Memory>);
     static_assert(sizeof(void*)==8 && std::endian::native==std::endian::little,
                   "EE LLVM currently requires a little-endian 64-bit host ABI");
@@ -458,6 +492,7 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
             if (word!=i.word) throw std::invalid_argument("Compiled payload instruction differs from expected bytes");
             continue;
         }
+        if (contains_address(unverified_code,address)) continue;
         if (std::any_of(ranges.begin(),ranges.end(),[&](const auto& r) {
             return address>=r.address && std::uint64_t(address)+4<=std::uint64_t(r.address)+r.size;
         })) continue;
@@ -512,7 +547,7 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
             unit.out<<"declare i1 @nt_ee_check_code_range(i64, i64, i32)\n";
             emit_payloads(unit,payloads);
             for (auto index=first;index<end;++index) {
-                emit_part(unit,parts[index],ranges,payloads,layout,true);
+                emit_part(unit,parts[index],ranges,payloads,layout,true,unverified_code);
                 w.out<<"declare i32 @nt_ee_part_"<<parts[index].front().pc<<"(ptr, ptr, i64)\n";
             }
             if (!stream) throw std::runtime_error("Cannot finish EE LLVM module");
@@ -520,7 +555,7 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
         }
     } else {
         emit_payloads(w,payloads);
-        for (const auto part:parts) emit_part(w,part,ranges,payloads,layout);
+        for (const auto part:parts) emit_part(w,part,ranges,payloads,layout,false,unverified_code);
     }
     emit_dispatcher(w,parts);
     emit_contains(w,instructions);

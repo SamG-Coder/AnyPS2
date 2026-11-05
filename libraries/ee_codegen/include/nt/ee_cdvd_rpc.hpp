@@ -141,6 +141,7 @@ public:
             std::memcpy(memory.data+runtime::default_ram_address(destination),&ready,4);
             return Stop::budget;
         }
+        if (method==9) return stream(memory,protection,args,destination,size);
         if (method!=1) return Stop::unsupported_system;
         if (args.size()!=24 || (size!=0 && size!=4)) return Stop::invalid_state;
         auto sector=le32(args,0);
@@ -182,7 +183,45 @@ public:
         return Stop::budget;
     }
 private:
+    // Stream reads complete directly from the ISO, so there is no drive ring
+    // buffer to fill: the stream position is the only state, and a status query
+    // reports the requested buffer as full.
+    Stop stream(Memory& memory,CodeOverlap protection,std::span<const std::uint8_t> args,std::uint32_t destination,std::uint32_t size) {
+        if (args.size()!=20 || size!=4) return Stop::invalid_state;
+        const auto checked=rpc_output(memory,protection,destination,size);
+        if (checked!=Stop::budget) return checked;
+        const auto first=le32(args,0),count=le32(args,4),target=le32(args,8),command=le32(args,12);
+        std::uint32_t result=1;
+        switch (command) {
+        case 1: case 4: case 9: stream_position_=first; break; // Start, seek and fast seek.
+        case 3: case 7: case 8: break;                         // Stop, pause and resume hold no reads.
+        case 5: stream_sectors_=first; break;                  // Initialize with the buffer size.
+        case 6: result=stream_sectors_; break;                 // Status.
+        case 2: {                                              // Read: sectors, with an error in the high half.
+            if (!count || count>0x2000000/2048) return Stop::invalid_state;
+            const auto output=rpc_output(memory,protection,target,count*2048);
+            if (output!=Stop::budget) return output;
+            std::uint32_t error=0,transferred=0;
+            auto* volume=session_.volume();
+            if (!volume) error=0x12;
+            else if (stream_position_>volume->sector_count() || count>volume->sector_count()-stream_position_) error=0x20;
+            else {
+                try {
+                    const auto data=volume->read_sectors(stream_position_,count);
+                    std::memcpy(memory.data+runtime::default_ram_address(target),data.data(),data.size());
+                    transferred=count; stream_position_+=count;
+                } catch (const std::runtime_error&) { error=0x30; }
+            }
+            result=transferred|(error<<16);
+            break;
+        }
+        default: return Stop::unsupported_system;
+        }
+        std::memcpy(memory.data+runtime::default_ram_address(destination),&result,4);
+        return Stop::budget;
+    }
     NativeCdvdInitRpc& session_;
+    std::uint32_t stream_position_=0,stream_sectors_=0;
 };
 
 // Native CD/DVD synchronous commands. ReadClock uses the host clock.

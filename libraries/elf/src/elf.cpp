@@ -64,6 +64,7 @@ void read_sections(ByteView bytes,Executable& executable) {
             });
             if (!mapped) throw std::runtime_error("ELF EE instruction section is not mapped executable file data");
             executable.code_sections.push_back({section_address,section_size});
+            if (flags&1) executable.writable_code=true;
         }
         if (section_size && (!(flags&4) || vector_code)) {
             const auto end=std::uint64_t(section_address)+section_size;

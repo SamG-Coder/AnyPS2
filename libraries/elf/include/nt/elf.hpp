@@ -19,6 +19,9 @@ struct Executable {
     // An AnyPS2 import note records that the source container had no section
     // permissions. Only discovered flow establishes code in such an image.
     bool inferred_permissions=false;
+    // An executable section that is also writable may interleave code and
+    // data, so only discovered instructions are established as code.
+    bool writable_code=false;
     // Allocated section metadata distinguishes non-EE contents inside a mixed LOAD.
     std::vector<AddressRange> non_executable_sections;
     // VU payload containers remain in the load image but are not EE functions.

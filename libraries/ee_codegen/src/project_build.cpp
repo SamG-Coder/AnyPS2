@@ -16,7 +16,7 @@ void emit_project(const std::filesystem::path& output,const PreparedProject& pre
         auto stream=std::make_unique<std::ofstream>(output/modules.back(),std::ios::binary);
         stream->exceptions(std::ios::badbit|std::ios::failbit);
         streams.push_back(std::move(stream)); return *streams.back();
-    },prepared.input_identity);
+    },prepared.input_identity,prepared.unverified_code);
     llvm.close();
     for (auto& stream:streams) stream->close();
     std::string module_manifest;

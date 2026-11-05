@@ -87,4 +87,36 @@ UploadSequence extract_uploads(ByteView packet,unsigned unit) {
     }
     return result;
 }
+std::vector<Upload> find_framed_uploads(ByteView bytes) {
+    std::vector<Upload> result;
+    const auto word=[&](std::size_t offset) {
+        std::uint32_t value=0;
+        for (unsigned byte=0;byte<4;++byte) value|=std::uint32_t(bytes[offset+byte])<<(byte*8);
+        return value;
+    };
+    for (std::size_t offset=0;offset+16<=bytes.size();offset+=16) {
+        const auto tag=word(offset),kind=(tag>>28)&7U,quadwords=tag&0xffffU;
+        // These tag kinds carry their payload directly after the tag.
+        if ((kind!=1 && kind!=2 && kind!=5 && kind!=6 && kind!=7) || !quadwords) continue;
+        // The transfer tag holds two VIF codes: padding, then the first upload.
+        if (word(offset+8) || ((word(offset+12)>>24)&127U)!=0x4a) continue;
+        const auto size=std::size_t(4)+std::size_t(quadwords)*16;
+        if (size>bytes.size()-(offset+12) || size>0x100000) continue;
+        UploadSequence sequence;
+        std::vector<Upload> images;
+        try {
+            sequence=extract_uploads(bytes.subspan(offset+12,size),1);
+            if (sequence.stopped_command || sequence.consumed!=size || sequence.uploads.empty()) continue;
+            images=assemble_uploads(sequence.uploads,1);
+        } catch (const std::invalid_argument&) { continue; }
+        for (auto& image:images) {
+            bool ends=false;
+            for (std::size_t pair=0;pair+8<=image.bytes.size() && !ends;pair+=8)
+                ends=(image.bytes[pair+7]&0x40)!=0;
+            if (ends) result.push_back(std::move(image));
+        }
+        offset+=size&~std::size_t(15);
+    }
+    return result;
+}
 }

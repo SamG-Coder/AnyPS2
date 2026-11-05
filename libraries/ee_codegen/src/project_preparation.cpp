@@ -10,7 +10,7 @@ namespace nt::ee_codegen::project_detail {
 namespace {
 std::vector<CodeRange> declared_code_ranges(const elf::Executable& executable) {
     std::vector<CodeRange> result;
-    if (executable.inferred_permissions) return result;
+    if (executable.inferred_permissions || executable.writable_code) return result;
     auto data=executable.non_executable_sections;
     std::sort(data.begin(),data.end(),[](const auto& a,const auto& b) { return a.address<b.address; });
     for (const auto& segment:executable.segments) {
@@ -31,12 +31,56 @@ std::vector<CodeRange> declared_code_ranges(const elf::Executable& executable) {
     }
     return result;
 }
+// A section that mixes code and data cannot be classified word by word, and flow
+// discovery cannot prove every callback. Select all other lowerable words as well.
+// A run is kept only if it transfers control or falls into proven code, which
+// drops zero fill and most data. Kept words stay unprotected and self-guarded.
+std::vector<CodeRange> sweep_mixed_code(ByteView bytes,const elf::Executable& executable,analysis::Program& program) {
+    std::vector<CodeRange> result;
+    for (const auto& section:executable.code_sections) {
+        const auto segment=std::find_if(executable.segments.begin(),executable.segments.end(),[&](const auto& s) {
+            return section.address>=s.address && std::uint64_t(section.address)+section.size<=std::uint64_t(s.address)+s.file_size;
+        });
+        if (segment==executable.segments.end()) continue;
+        std::map<std::uint32_t,r5900::Instruction> candidates;
+        for (auto remaining=section.size&~3U;remaining;remaining-=4) {
+            const auto pc=section.address+remaining-4;
+            if (program.instructions.contains(pc) || !elf::executable_address(executable,pc)) continue;
+            const auto offset=std::size_t(segment->offset)+pc-segment->address;
+            if (offset+4>bytes.size()) continue;
+            const auto word=std::uint32_t(bytes[offset])|(std::uint32_t(bytes[offset+1])<<8)|
+                (std::uint32_t(bytes[offset+2])<<16)|(std::uint32_t(bytes[offset+3])<<24);
+            const auto instruction=r5900::decode(pc,word);
+            const r5900::Instruction* next=nullptr;
+            if (const auto found=candidates.find(pc+4);found!=candidates.end()) next=&found->second;
+            else if (const auto proven=program.instructions.find(pc+4);proven!=program.instructions.end()) next=&proven->second;
+            if (lowerable(instruction,next)) candidates.emplace(pc,instruction);
+        }
+        for (auto first=candidates.begin();first!=candidates.end();) {
+            auto last=first;
+            bool useful=first->second.branch() || first->second.terminal();
+            for (auto next=std::next(first);next!=candidates.end() && next->first==last->first+4;++next) {
+                last=next;
+                useful|=next->second.branch() || next->second.terminal();
+            }
+            const auto end=last->first+4;
+            useful|=program.instructions.contains(end) && std::any_of(first,std::next(last),[](const auto& entry) { return entry.second.word!=0; });
+            if (useful) {
+                program.instructions.insert(first,std::next(last));
+                result.push_back({first->first,end-first->first});
+            }
+            first=std::next(last);
+        }
+    }
+    std::sort(result.begin(),result.end(),[](const auto& a,const auto& b) { return a.address<b.address; });
+    return result;
+}
 PreparedProject prepare(ByteView bytes,std::span<const PayloadMapping> mappings,bool diagnose_flow=false,
                  std::span<const observation::Edge> observations={},bool function_symbols=false,bool whole_code=false) {
     auto executable=elf::parse(bytes);
     auto ranges=declared_code_ranges(executable);
     if (whole_code) {
-        if (executable.inferred_permissions || executable.code_sections.empty())
+        if (executable.inferred_permissions || executable.writable_code || executable.code_sections.empty())
             throw std::runtime_error("Whole-code conversion requires declared EE instruction sections; classify code/data for this image first");
         ranges.clear();
         for (const auto& range:executable.code_sections) ranges.push_back({range.address,range.size});
@@ -57,7 +101,9 @@ PreparedProject prepare(ByteView bytes,std::span<const PayloadMapping> mappings,
     const auto initial_executable=executable;
     std::vector<CodePayload> payloads;
     std::vector<std::uint32_t> payload_entries;
-    for (const auto& mapping:mappings) {
+    // Declared mappings always enter at their first byte; discovered copies
+    // enter only at their evidenced offsets.
+    const auto add_payload=[&](const PayloadMapping& mapping,bool entry_at_start) {
         const auto destination=runtime::default_ram_address(mapping.destination);
         const auto finish=std::uint64_t(destination)+mapping.size;
         if (!mapping.size || mapping.source%4 || destination%4 || mapping.size%4 || finish>0x2000000U)
@@ -89,25 +135,18 @@ PreparedProject prepare(ByteView bytes,std::span<const PayloadMapping> mappings,
                 return offset>=region.offset && std::uint64_t(offset)+4<=std::uint64_t(region.offset)+region.size;
             });
         };
-        if (!code_entry(0)) throw std::runtime_error("Copied payload entry is outside declared code");
-        payload_entries.push_back(destination);
+        if (entry_at_start) {
+            if (!code_entry(0)) throw std::runtime_error("Copied payload entry is outside declared code");
+            payload_entries.push_back(destination);
+        }
         for (const auto entry_offset:mapping.entry_offsets) {
             if (entry_offset%4 || entry_offset>=mapping.size) throw std::runtime_error("Payload entry offset is outside its extent or unaligned");
             if (!code_entry(entry_offset)) throw std::runtime_error("Copied payload entry is outside declared code");
             payload_entries.push_back(destination+entry_offset);
         }
         extents.emplace_back(destination,static_cast<std::uint32_t>(finish));
-    }
-    // Original native service metadata. Reserve a gap outside every ELF extent,
-    // including BSS; never overwrite application data to expose registrations.
-    std::sort(extents.begin(),extents.end());
-    std::uint32_t syscall_table=0x10000;
-    for (const auto& [begin,finish]:extents) {
-        if (std::uint64_t(syscall_table)+1024<=begin) break;
-        if (syscall_table<finish) syscall_table=(finish+3U)&~3U;
-    }
-    if (std::uint64_t(syscall_table)+1024>0x2000000U)
-        throw std::runtime_error("No native syscall metadata extent available");
+    };
+    for (const auto& mapping:mappings) add_payload(mapping,true);
     std::vector<std::uint32_t> continuations=payload_entries;
     if (function_symbols) continuations.insert(continuations.end(),executable.function_entries.begin(),executable.function_entries.end());
     const auto wrappers=analysis::syscall_wrappers(bytes,executable);
@@ -174,6 +213,11 @@ PreparedProject prepare(ByteView bytes,std::span<const PayloadMapping> mappings,
                 std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;
             continuations.push_back(address); added=true;
         }
+        for (const auto address:analysis::bounded_pointer_range_entries(bytes,executable,discovered)) {
+            if (discovered.instructions.contains(address) ||
+                std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;
+            continuations.push_back(address); added=true;
+        }
         for (const auto address:analysis::referenced_lifecycle_entries(bytes,executable,discovered)) {
             if (discovered.instructions.contains(address) ||
                 std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;
@@ -188,6 +232,16 @@ PreparedProject prepare(ByteView bytes,std::span<const PayloadMapping> mappings,
             if (discovered.instructions.contains(address) ||
                 std::find(continuations.begin(),continuations.end(),address)!=continuations.end()) continue;
             continuations.push_back(address); added=true;
+        }
+        // The unpatched image keeps installed copies from hiding later evidence.
+        for (auto& copy:analysis::copied_code(bytes,initial_executable,discovered)) {
+            const auto destination=runtime::default_ram_address(copy.destination);
+            if (std::any_of(payloads.begin(),payloads.end(),[&](const auto& payload) { return payload.address==destination; }))
+                continue;
+            const auto first_entry=payload_entries.size();
+            add_payload({copy.source,copy.destination,copy.size,{copy.entry_offsets.begin(),copy.entry_offsets.end()},{}},false);
+            continuations.insert(continuations.end(),payload_entries.begin()+first_entry,payload_entries.end());
+            added=true;
         }
         if (!payloads.empty()) for (const auto address:analysis::materialized_code_pointers(bytes,executable,discovered)) {
             const auto payload=std::find_if(payloads.begin(),payloads.end(),[&](const auto& p) {
@@ -219,10 +273,23 @@ PreparedProject prepare(ByteView bytes,std::span<const PayloadMapping> mappings,
         if (!accepted[index]) throw std::runtime_error("Observed source is not reached compiled flow at "+hex32(observations[index].site));
         observation::validate_code(observations[index],discovered);
     }
-    if (executable.inferred_permissions) for (const auto& [pc,instruction]:discovered.instructions) {
+    if (executable.inferred_permissions || executable.writable_code) for (const auto& [pc,instruction]:discovered.instructions) {
+        // Copied payloads own their destination instructions; they are not ELF code.
+        if (std::any_of(payloads.begin(),payloads.end(),[&](const auto& payload) {
+                return pc-payload.address<payload.bytes.size(); })) continue;
         if (!ranges.empty() && std::uint64_t(ranges.back().address)+ranges.back().size==pc) ranges.back().size+=4;
         else ranges.push_back({pc,4});
     }
+    // Original native service metadata. Reserve a gap outside every ELF and
+    // copied-code extent, including BSS; never overwrite application data.
+    std::sort(extents.begin(),extents.end());
+    std::uint32_t syscall_table=0x10000;
+    for (const auto& [begin,finish]:extents) {
+        if (std::uint64_t(syscall_table)+1024<=begin) break;
+        if (syscall_table<finish) syscall_table=(finish+3U)&~3U;
+    }
+    if (std::uint64_t(syscall_table)+1024>0x2000000U)
+        throw std::runtime_error("No native syscall metadata extent available");
     PreparedProject result;
     result.whole_code=whole_code;
     if (whole_code) for (const auto& region:executable.code_sections)
@@ -286,6 +353,9 @@ PreparedProject prepare_project(const std::filesystem::path& input,std::span<con
         observed[edge.image-1].push_back(std::move(edge));
     }
     auto prepared=prepare(bytes,mappings,diagnose_flow,observed[0],function_symbols,whole_code);
+    // Additional images have native lifetimes that swept extents cannot overlap.
+    if (!whole_code && prepared.executable.writable_code && images.empty())
+        prepared.unverified_code=sweep_mixed_code(bytes,prepared.executable,prepared.discovered);
     prepared.input_identity=input_identity;
     if (!images.empty()) {
         const auto snapshot=[](ByteView source,const elf::Executable& executable,std::uint32_t id) {

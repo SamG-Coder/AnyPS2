@@ -48,6 +48,15 @@ std::set<std::uint32_t> syscall_callbacks(ByteView bytes,const elf::Executable& 
                                         std::set<std::uint32_t>* registered_calls=nullptr);
 std::set<std::uint32_t> materialized_code_pointers(ByteView bytes,const elf::Executable& executable,
                                                 const Program& program);
+struct CopiedCode { std::uint32_t source,destination,size; std::set<std::uint32_t> entry_offsets; };
+// Code a program copies out of its own file-backed image and registers as a
+// system-call handler. Evidence requires a constant SetSyscall handler outside
+// every loaded segment and a reached call whose constant (destination, source,
+// size) arguments, in that ABI order, cover it. Other copies through the same
+// routine are treated as code from their first word. Entries are handlers and
+// words inside the copy that address decodable code within it. They are
+// compilation roots only; the program still performs the copy at runtime.
+std::vector<CopiedCode> copied_code(ByteView bytes,const elf::Executable& executable,const Program& program);
 std::set<std::uint32_t> thread_entries(ByteView bytes,const elf::Executable& executable,const Program& program);
 struct PointerReference {
     std::uint32_t site,target;
@@ -84,5 +93,9 @@ std::set<std::uint32_t> initial_indirect_entries(ByteView bytes,const elf::Execu
 // Recover bounded legacy lifecycle lists whose headers are explicitly loaded
 // from initial file data. Candidates only; do not fold runtime callback reads.
 std::set<std::uint32_t> referenced_lifecycle_entries(ByteView bytes,const elf::Executable&,const Program&);
+// Initializer arrays passed as constant [begin, end) arguments to a function
+// that makes indirect calls. Every slot must address decodable code; otherwise
+// the range is data. Candidates are compilation roots, not runtime values.
+std::set<std::uint32_t> bounded_pointer_range_entries(ByteView bytes,const elf::Executable&,const Program&);
 void describe(std::ostream& out, const Program& program);
 }

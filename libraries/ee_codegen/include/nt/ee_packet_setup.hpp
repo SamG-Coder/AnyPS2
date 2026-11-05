@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 #include <deque>
 #include <nt/ee_native.hpp>
 #include <nt/ee_vector_data.hpp>
@@ -125,6 +126,7 @@ public:
         }
     }
     unsigned rejected_command() const { return rejected_command_; }
+    const std::string& rejected_packet() const { return rejected_packet_; }
     bool pending(unsigned channel) const { return channel<2 && (!deferred_[channel].empty() || !pending_[channel].bytes.empty()); }
     bool working() const { return !deferred_[0].empty() || !deferred_[1].empty() || outstanding(0) || outstanding(1); }
     Stop poll(unsigned channel,bool vector_active) {
@@ -204,7 +206,7 @@ private:
             std::vector<graphics::Packet> packets;
             auto next=gif_stream_;
             try { next.append(bytes,packets); }
-            catch (const std::invalid_argument&) { return Stop::unsupported_system; }
+            catch (const std::invalid_argument& error) { rejected_packet_=error.what(); return Stop::unsupported_system; }
             if (!packets.empty()) {
                 const auto result=behind_vectors ? submit_ordered_drawing(std::move(packets)) :
                     graphics.submit(graphics.context,packets) ? Stop::budget : Stop::unsupported_system;
@@ -460,6 +462,7 @@ private:
         return complete_packet(channel,next,notify,offset,consumed);
     }
 private:
+    std::string rejected_packet_;
     unsigned rejected_command_=0;
     static bool decode(std::uint32_t address,unsigned& channel,unsigned& field) {
         if (address<0x10003800 || address>=0x10004000 || address%16) return false;

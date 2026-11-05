@@ -7,11 +7,30 @@
 #include <bit>
 #include <map>
 #include <numeric>
+#include <optional>
 #include <algorithm>
 #include <sstream>
 #include <stdexcept>
 
 namespace nt::vu {
+namespace {
+// An operation that publishes P after a latency, computed from vector lanes.
+struct PResult { const char* helper; unsigned lanes,delay; };
+std::optional<PResult> p_result(LowerOperation operation) {
+    switch (operation) {
+    case LowerOperation::reciprocal_length: return PResult{"reciprocal_length_finite",3,24};
+    case LowerOperation::efu_sum_squares: return PResult{"efu_sum_squares_finite",3,11};
+    case LowerOperation::efu_reciprocal_sum_squares: return PResult{"efu_reciprocal_sum_squares_finite",3,18};
+    case LowerOperation::efu_length: return PResult{"efu_length_finite",3,18};
+    case LowerOperation::efu_sum: return PResult{"efu_sum_finite",4,12};
+    case LowerOperation::sine: return PResult{"sine_finite",1,29};
+    case LowerOperation::efu_square_root: return PResult{"efu_square_root_finite",1,12};
+    case LowerOperation::efu_reciprocal: return PResult{"efu_reciprocal_finite",1,12};
+    case LowerOperation::efu_reciprocal_square_root: return PResult{"efu_reciprocal_square_root_finite",1,18};
+    default: return {};
+    }
+}
+}
 namespace { bool observe_loads=false; }
 void set_observe_loads(bool enabled) { observe_loads=enabled; }
 namespace {
@@ -311,11 +330,16 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         decode_lower(pairs[pairs.size()-2],unit).operation==LowerOperation::graphics_kick;
     const bool graphics_block=graphics_end || decode_lower(pairs.back(),unit).operation==LowerOperation::graphics_kick;
     if (graphics_block && pairs.back().end) throw std::invalid_argument("Missing XGKICK E delay pair");
+    // A kick in a delay slot still ends the block at a submission boundary; the
+    // branch has already chosen where execution resumes after it is accepted.
+    const bool graphics_delay=!graphics_end && graphics_block && pairs.size()>=2 &&
+        control(pairs[pairs.size()-2],unit).branch!=Branch::none;
     if (!graphics_block && !fallthrough && pairs.size()<2) throw std::invalid_argument("Missing VU terminal delay pair");
     const auto terminal=graphics_block || fallthrough ? Control{} : control(pairs[pairs.size()-2],unit);
     const bool branch_block=terminal.branch!=Branch::none;
     const bool nested_branch=branch_block && direct_delayed_branch(pairs[pairs.size()-2],pairs.back(),unit);
-    std::string next_pair,delay_destination;
+    const bool exclusive_branch=nested_branch && exclusive_delayed_branch(pairs[pairs.size()-2],pairs.back(),unit);
+    std::string next_pair,delay_destination,first_taken,second_taken;
     std::set<std::string> missing;
     for (const auto& pair:pairs) {
         const auto upper=decode_upper(pair.upper);
@@ -372,8 +396,7 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
             lower!=LowerOperation::square_root && lower!=LowerOperation::reciprocal_square_root &&
             lower!=LowerOperation::wait_quotient && lower!=LowerOperation::status_and &&
             lower!=LowerOperation::status_or && lower!=LowerOperation::status_equal;
-        batch_p &= lower!=LowerOperation::reciprocal_length && lower!=LowerOperation::sine &&
-            lower!=LowerOperation::efu_square_root && lower!=LowerOperation::wait_p && lower!=LowerOperation::move_p;
+        batch_p &= !p_result(lower) && lower!=LowerOperation::wait_p && lower!=LowerOperation::move_p;
         batch_clip &= upper.operation!=Arithmetic::clip && lower!=LowerOperation::clip_set &&
             lower!=LowerOperation::clip_and && lower!=LowerOperation::clip_or &&
             lower!=LowerOperation::clip_equal && lower!=LowerOperation::clip_get;
@@ -410,6 +433,12 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         <<"declare i64 @nt_vu_square_root_finite(i32) nounwind willreturn memory(none)\n"
         <<"declare i64 @nt_vu_reciprocal_square_root_finite(i32, i32) nounwind willreturn memory(none)\n"
         <<"declare i64 @nt_vu_reciprocal_length_finite(i32, i32, i32) nounwind willreturn memory(none)\n"
+        <<"declare i64 @nt_vu_efu_sum_squares_finite(i32, i32, i32) nounwind willreturn memory(none)\n"
+        <<"declare i64 @nt_vu_efu_reciprocal_sum_squares_finite(i32, i32, i32) nounwind willreturn memory(none)\n"
+        <<"declare i64 @nt_vu_efu_length_finite(i32, i32, i32) nounwind willreturn memory(none)\n"
+        <<"declare i64 @nt_vu_efu_sum_finite(i32, i32, i32, i32) nounwind willreturn memory(none)\n"
+        <<"declare i64 @nt_vu_efu_reciprocal_finite(i32) nounwind willreturn memory(none)\n"
+        <<"declare i64 @nt_vu_efu_reciprocal_square_root_finite(i32) nounwind willreturn memory(none)\n"
         <<"declare i64 @nt_vu_sine_finite(i32) nounwind willreturn memory(none)\n"
         <<"declare i64 @nt_vu_efu_square_root_finite(i32) nounwind willreturn memory(none)\n"
         <<"declare i32 @nt_vu_clip_flags(i32, i32, i32, i32) nounwind willreturn memory(none)\n"
@@ -430,10 +459,12 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
     for (std::size_t index=0;index<pairs.size();++index) {
         const auto& pair=pairs[index];
         if (pair.address>=(unit ? 2048U : 512U) || (index && pair.address!=pairs[index-1].address+1) ||
-            pair.end!=((graphics_end || (!graphics_block && !branch_block && !fallthrough)) && index+2==pairs.size()) || pair.interlock || pair.debug || pair.trap ||
-            (control(pair,unit).branch!=Branch::none && (graphics_block || fallthrough ||
+            pair.end!=((graphics_end || (!graphics_block && !branch_block && !fallthrough)) && index+2==pairs.size()) || pair.interlock ||
+            (control(pair,unit).branch!=Branch::none && ((graphics_block && !(graphics_delay && index+2==pairs.size())) || fallthrough ||
                 (index+2!=pairs.size() && !(nested_branch && index+1==pairs.size())))))
             throw std::invalid_argument("VU native block requires one terminal branch or E flag and its delay pair");
+        // D and T act only when FBRST enables them, which the vector owner
+        // refuses, so here they are ordinary pairs.
         const auto upper=decode_upper(pair.upper);
         const auto lower=decode_lower(pair,unit);
         if (graphics_end && index+1==pairs.size() &&
@@ -450,8 +481,7 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         // These lower operations synchronize an earlier quotient before this
         // pair reads Q. Unscheduled visibility is deliberately not approximated.
         if (quotient_producer || lower.operation==LowerOperation::wait_quotient) writer.publish_quotient();
-        if (lower.operation==LowerOperation::reciprocal_length || lower.operation==LowerOperation::sine ||
-            lower.operation==LowerOperation::efu_square_root || lower.operation==LowerOperation::wait_p) writer.publish_p();
+        if (p_result(lower.operation) || lower.operation==LowerOperation::wait_p) writer.publish_p();
         if (upper.operation!=Arithmetic::nop && upper.destination==Destination::vector && upper.result && lower.result.bank==Bank::vector &&
             lower.result.index==upper.result)
             throw std::invalid_argument("VU simultaneous vector destinations require explicit priority lowering");
@@ -614,7 +644,7 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
             writer.pending.push_back({"i32",writer.value("zext i16 "+address+" to i32"),offsetof(State,graphics_address)});
             writer.pending.push_back({"i32","1",offsetof(State,graphics_pending)});
             writer.pending.push_back({"i32",graphics_end ? "1" : "0",offsetof(State,graphics_completes)});
-            next_pair=std::to_string((pair.address+(graphics_end ? 2 : 1))&2047U);
+            if (!graphics_delay) next_pair=std::to_string((pair.address+(graphics_end ? 2 : 1))&2047U);
             break;
         }
         case LowerOperation::mac_and: case LowerOperation::mac_or: case LowerOperation::mac_equal: {
@@ -634,18 +664,20 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
             for (unsigned lane=0;lane<4;++lane) if (lower.mask&(8U>>lane)) writer.vector_result(lower.result.index,lane,value);
             break;
         }
-        case LowerOperation::reciprocal_length: case LowerOperation::sine: case LowerOperation::efu_square_root: {
-            const auto packed=lower.operation!=LowerOperation::reciprocal_length ?
-                writer.value(std::string("call i64 @nt_vu_")+(lower.operation==LowerOperation::sine ? "sine_finite" : "efu_square_root_finite")+
-                    "(i32 "+writer.vector(lower.left.index,lower.left.component)+")") :
-                writer.value("call i64 @nt_vu_reciprocal_length_finite(i32 "+writer.vector(lower.left.index,0)+
-                    ", i32 "+writer.vector(lower.left.index,1)+", i32 "+writer.vector(lower.left.index,2)+")");
+        case LowerOperation::reciprocal_length: case LowerOperation::sine: case LowerOperation::efu_square_root:
+        case LowerOperation::efu_sum_squares: case LowerOperation::efu_reciprocal_sum_squares: case LowerOperation::efu_length:
+        case LowerOperation::efu_sum: case LowerOperation::efu_reciprocal: case LowerOperation::efu_reciprocal_square_root: {
+            const auto result=*p_result(lower.operation);
+            std::string arguments;
+            if (result.lanes==1) arguments="i32 "+writer.vector(lower.left.index,lower.left.component);
+            else for (unsigned lane=0;lane<result.lanes;++lane)
+                arguments+=std::string(lane ? ", " : "")+"i32 "+writer.vector(lower.left.index,lane);
+            const auto packed=writer.value(std::string("call i64 @nt_vu_")+result.helper+"("+arguments+")");
             const auto ready=writer.value("icmp eq i64 "+writer.value("and i64 "+packed+", 8589934592")+", 0");
             writer.out<<"  br i1 "<<ready<<", label %p_numeric"<<index<<", label %numeric_failure\np_numeric"<<index<<":\n";
             writer.pending.push_back({"i32",writer.value("trunc i64 "+packed+" to i32"),offsetof(State,pending_p)});
             writer.pending.push_back({"i32","1",offsetof(State,p_pending)});
-            writer.pending.push_back({"i32",lower.operation==LowerOperation::reciprocal_length ? "24" :
-                lower.operation==LowerOperation::sine ? "29" : "12",offsetof(State,p_read_delay)});
+            writer.pending.push_back({"i32",std::to_string(result.delay),offsetof(State,p_read_delay)});
             break;
         }
         case LowerOperation::input_top: case LowerOperation::input_itop: {
@@ -732,7 +764,7 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
                 return writer.value("select i1 "+matches+", i16 "+backup+", i16 "+current);
             };
             const auto address_mask=unit ? 2047U : 511U;
-            const auto continuation=delayed ?
+            const auto continuation=delayed && exclusive_branch ? delay_destination : delayed ?
                 writer.value("and i32 "+writer.value("add i32 "+delay_destination+", 1")+", "+std::to_string(address_mask)) :
                 std::to_string((pair.address+2)&address_mask);
             if (transfer.target) next_pair=std::to_string(*transfer.target);
@@ -754,6 +786,7 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
                 const auto right=transfer.branch==Branch::equal || transfer.branch==Branch::not_equal ? branch_register(transfer.target_register) : "0";
                 const auto taken=writer.value(std::string("icmp ")+predicate+" i16 "+left+", "+right);
                 next_pair=writer.value("select i1 "+taken+", i32 "+next_pair+", i32 "+continuation);
+                (delayed ? second_taken : first_taken)=taken;
             }
             if (transfer.branch==Branch::call || transfer.branch==Branch::register_call)
                 writer.integer_result(transfer.link_register,continuation);
@@ -797,7 +830,16 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
             return writer.value("call i32 @"+std::string(symbol)+"_delay_"+std::to_string(address)+(gpu ? "(ptr %regs, i32 %data_base)" : "(ptr %state)"));
         };
         std::string result;
-        if (terminal.branch==Branch::jump) result=call_delay(*terminal.target);
+        if (exclusive_branch) {
+            // A VI backup can give the first branch an older value than the
+            // second, so a pair of taken branches is possible but unsupported.
+            const auto both=writer.value("and i1 "+first_taken+", "+second_taken);
+            writer.out<<"  br i1 "<<both<<", label %schedule_failure, label %delay_select\ndelay_select:\n";
+            writer.out<<"  br i1 "<<second_taken<<", label %delay_taken, label %delay_skipped\ndelay_taken:\n";
+            const auto yes=call_delay((pairs[pairs.size()-2].address+2)&(unit ? 2047U : 511U));
+            writer.out<<"  br label %delay_done\ndelay_skipped:\n  br label %delay_done\ndelay_done:\n";
+            result=writer.value("phi i32 [ "+yes+", %delay_taken ], [ 2, %delay_skipped ]");
+        } else if (terminal.branch==Branch::jump) result=call_delay(*terminal.target);
         else {
             const auto taken=writer.value("icmp eq i32 "+delay_destination+", "+std::to_string(*terminal.target));
             writer.out<<"  br i1 "<<taken<<", label %delay_taken, label %delay_other\ndelay_taken:\n";
@@ -900,7 +942,8 @@ static std::size_t emit_program_module(std::ostream& output,std::span<const Pair
         try {
             if (!fallthrough && !graphics && direct_delayed_branch(*end,*(end+1),unit)) {
                 const auto transfer=control(*end,unit);
-                std::set<unsigned> destinations{*transfer.target};
+                std::set<unsigned> destinations;
+                if (!exclusive_delayed_branch(*end,*(end+1),unit)) destinations.insert(*transfer.target);
                 if (transfer.branch!=Branch::jump) destinations.insert((end->address+2)&(unit ? 2047U : 511U));
                 for (const auto destination:destinations) {
                     const auto slot=std::find_if(pairs.begin(),pairs.end(),[&](const Pair& pair) { return pair.address==destination; });
@@ -1129,6 +1172,12 @@ void emit_gpu_program_llvm(std::ostream& output,std::span<const Pair> pairs,unsi
           <<"declare spir_func i64 @nt_vu_square_root_finite(i32)\n"
           <<"declare spir_func i64 @nt_vu_reciprocal_square_root_finite(i32, i32)\n"
           <<"declare spir_func i64 @nt_vu_reciprocal_length_finite(i32, i32, i32)\n"
+          <<"declare spir_func i64 @nt_vu_efu_sum_squares_finite(i32, i32, i32)\n"
+          <<"declare spir_func i64 @nt_vu_efu_reciprocal_sum_squares_finite(i32, i32, i32)\n"
+          <<"declare spir_func i64 @nt_vu_efu_length_finite(i32, i32, i32)\n"
+          <<"declare spir_func i64 @nt_vu_efu_sum_finite(i32, i32, i32, i32)\n"
+          <<"declare spir_func i64 @nt_vu_efu_reciprocal_finite(i32)\n"
+          <<"declare spir_func i64 @nt_vu_efu_reciprocal_square_root_finite(i32)\n"
           <<"declare spir_func i64 @nt_vu_sine_finite(i32)\n"
           <<"declare spir_func i64 @nt_vu_efu_square_root_finite(i32)\n"
           <<"declare spir_func i32 @nt_vu_clip_flags(i32, i32, i32, i32)\n";

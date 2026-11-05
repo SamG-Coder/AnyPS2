@@ -66,14 +66,15 @@ public:
         while (offset<bytes.size()) {
             if (!remaining_) {
                 // Only tags need inspection; payload words are opaque data.
-                if (packet_.size()==limit)
-                    throw std::invalid_argument("Graphics stream packet exceeds bound");
-                detail::append_quadwords(packet_,bytes.subspan(offset,16)); offset+=16;
-                const auto& word=packet_.back();
-                remaining_=payload_words(word);
-                if (remaining_>limit-packet_.size())
-                    throw std::invalid_argument("Graphics stream packet exceeds bound");
-                end_=(word[0]&0x8000U)!=0;
+                Packet tag;
+                detail::append_quadwords(tag,bytes.subspan(offset,16)); offset+=16;
+                remaining_=payload_words(tag.front());
+                if (remaining_>=limit) throw std::invalid_argument("Graphics stream packet exceeds bound");
+                // EOP arbitrates between paths and does not change GS state, so a
+                // long list without it may be drawn in parts at a tag boundary.
+                if (remaining_>=limit-packet_.size()) { output.push_back(std::move(packet_)); packet_.clear(); }
+                packet_.push_back(tag.front());
+                end_=(tag.front()[0]&0x8000U)!=0;
             } else {
                 const auto count=std::min(remaining_,(bytes.size()-offset)/16);
                 detail::append_quadwords(packet_,bytes.subspan(offset,count*16));

@@ -177,6 +177,27 @@ int main() {
         require(context.initialize_commands().status==NativeServiceStatus::returned && control.sub_address()==0xce00);
         require(context.initialize_commands().status==NativeServiceStatus::returned && control.sub_flags()==0x10000);
         {
+            // A batch not addressed to the command buffer is plain DMA into IOP
+            // memory. It is atomic and never replaces compiled code.
+            std::vector<std::uint8_t> iop_memory(0x1000);
+            nt::ee::NativeIopCommands memory_commands(control,inbound,iop_memory,
+                [](std::uint32_t address) { return address==0x808; });
+            const auto accept=[](nt::ee::NativeIopCommands& target,const std::vector<nt::ee::NativeSifPacket>& batch) {
+                const auto sink=target.sink();
+                return sink.accept(sink.context,batch);
+            };
+            const std::vector<std::uint8_t> data(16,0x5a);
+            const std::vector<nt::ee::NativeSifPacket> plain{{0x100,0,data}};
+            require(memory_commands.plain_transfer(plain));
+            const auto written=accept(memory_commands,plain);
+            require(written.status==Stop::budget && written.value==1 && iop_memory[0x100]==0x5a && iop_memory[0x10f]==0x5a);
+            const std::vector<nt::ee::NativeSifPacket> partial{{0x200,0,data},{0x800,0,data}};
+            require(accept(memory_commands,partial).status==Stop::unsupported_system && !iop_memory[0x200] && !iop_memory[0x800]);
+            const std::vector<nt::ee::NativeSifPacket> beyond{{0xff8,0,data}};
+            require(accept(memory_commands,beyond).status==Stop::invalid_state && !iop_memory[0xff8]);
+            require(accept(incoming,plain).status==Stop::unsupported_system);
+        }
+        {
             nt::ee::NativeSifReceive receiver;
             nt::ee::NativeSifLink reset_link(receiver);
             reset_link.publish_peer(0x1000,0x70000);

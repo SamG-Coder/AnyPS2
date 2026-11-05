@@ -156,6 +156,23 @@ if(BUILD_TESTING)
             "-DUNSUPPORTED=${CMAKE_CURRENT_BINARY_DIR}/whole-code-fixture.ll.unsupported.elf"
             "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/whole-code-tests"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/whole_code_project.cmake")
+        add_executable(emit-swept-code-fixture tests/emit_swept_code_fixture.cpp)
+        target_link_libraries(emit-swept-code-fixture PRIVATE nt_ee_codegen nt_analysis)
+        add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/swept-code-fixture.obj"
+            COMMAND emit-swept-code-fixture "${CMAKE_CURRENT_BINARY_DIR}/swept-code-fixture.ll"
+            COMMAND "${ANYPS2_CLANG}" -target x86_64-pc-windows-msvc -Werror -Wno-override-module -O2 -c
+                "${CMAKE_CURRENT_BINARY_DIR}/swept-code-fixture.ll" -o "${CMAKE_CURRENT_BINARY_DIR}/swept-code-fixture.obj"
+            DEPENDS emit-swept-code-fixture VERBATIM)
+        add_executable(ee-swept-code-tests tests/swept_code_native.cpp
+            libraries/ee_native/src/io.cpp libraries/ee_native/src/numeric.cpp libraries/ee_native/src/vector.cpp
+            "${CMAKE_CURRENT_BINARY_DIR}/swept-code-fixture.obj")
+        target_link_libraries(ee-swept-code-tests PRIVATE nt_ee_native)
+        add_test(NAME ee-swept-code-execution COMMAND ee-swept-code-tests)
+        add_test(NAME ee-swept-code-project COMMAND "${CMAKE_COMMAND}"
+            "-DCONVERTER=$<TARGET_FILE:ps2-recompile>"
+            "-DINPUT=${CMAKE_CURRENT_BINARY_DIR}/swept-code-fixture.ll.elf"
+            "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/swept-code-tests"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/swept_code_project.cmake")
         add_test(NAME ee-llvm-project COMMAND "${CMAKE_COMMAND}"
             "-DFIXTURE=$<TARGET_FILE:emit-ee-fixture>" "-DCONVERTER=$<TARGET_FILE:ps2-recompile>"
             "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}" "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/ee-project-tests"
@@ -249,7 +266,7 @@ if(BUILD_TESTING)
         add_executable(sif-native-tests tests/sif_native.cpp tests/iop_reset.cpp
             libraries/ee_native/src/io.cpp libraries/ee_native/src/numeric.cpp libraries/ee_native/src/vector.cpp
             "${CMAKE_CURRENT_BINARY_DIR}/ee-llvm-fixture.obj" "${CMAKE_CURRENT_BINARY_DIR}/iop-llvm-fixture.obj")
-        target_link_libraries(sif-native-tests PRIVATE nt_ee_native nt_iop_native nt_fileio)
+        target_link_libraries(sif-native-tests PRIVATE nt_ee_native nt_iop_native nt_fileio nt_input)
         add_test(NAME native-sif-link COMMAND sif-native-tests)
         add_dependencies(ee-llvm-tests ee-fixture-object)
         add_dependencies(vu-native-tests ee-fixture-object)
@@ -313,6 +330,7 @@ if(BUILD_TESTING)
     target_link_libraries(kernel-tests PRIVATE nt_kernel)
     add_test(NAME bios-free-kernel COMMAND kernel-tests)
     add_executable(vu-program-tests tests/vu_program.cpp)
+    target_include_directories(vu-program-tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/libraries/runtime/include")
     target_link_libraries(vu-program-tests PRIVATE nt_vu)
     add_test(NAME vu-program-framing COMMAND vu-program-tests)
     add_executable(thread-tests tests/threads.cpp)

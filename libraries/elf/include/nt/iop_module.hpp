@@ -16,6 +16,9 @@ struct IopModule {
     std::optional<IopModuleInfo> info;
     // Relocated data words that explicitly take an address inside module text.
     std::vector<std::uint32_t> code_addresses;
+    // Addresses that module code materializes, by relocation, inside its own
+    // text: function pointers, or read-only data stored with the code.
+    std::vector<std::uint32_t> text_references;
 };
 // Prepare a relocatable IRX in private storage. The caller owns allocation,
 // import binding and execution; errors never partially modify guest RAM.

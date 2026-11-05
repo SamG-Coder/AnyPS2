@@ -1,3 +1,4 @@
+#include <memory>
 #include <nt/vu_native.hpp>
 #include <nt/vu_dispatch.hpp>
 #include <nt/vu_binding.hpp>
@@ -372,6 +373,35 @@ int run_core_tests() {
             }
         }
         {
+            {
+                // A program placed elsewhere in microcode memory runs at its
+                // compiled addresses. Its bytes, not its location, identify it.
+                const std::span<const std::uint8_t> image{nt_vu_continuation_image(),nt_vu_continuation_size()};
+                constexpr unsigned base=100;
+                auto state=std::make_unique<nt::vu::State>();
+                nt::vu::Binding fixed(nt::vu::Program(1,{nt_vu_continuation_blocks(),nt_vu_continuation_count()}),0,image);
+                if (!fixed.upload(1,std::array{nt::vu::UploadView{0,image}})) throw std::runtime_error("Fixed upload failed");
+                const auto fixed_status=fixed.launch(*state,0,1).status;
+                const auto fixed_next=state->next_pair;
+                *state={};
+                nt::vu::Binding moved(nt::vu::Program(1,{nt_vu_continuation_blocks(),nt_vu_continuation_count()}),0,image);
+                if (moved.launch(*state,base,1).status!=nt::vu::RunStatus::unbound_program)
+                    throw std::runtime_error("Program ran before its upload");
+                if (!moved.upload(1,std::array{nt::vu::UploadView{base,image}})) throw std::runtime_error("Relocated upload rejected");
+                const auto result=moved.launch(*state,base,1);
+                if (result.status!=fixed_status || state->next_pair!=fixed_next)
+                    throw std::runtime_error("Relocated program did not run at its compiled address");
+                const std::array<std::uint8_t,8> other{1,2,3,4,5,6,7,8};
+                if (moved.upload(1,std::array{nt::vu::UploadView{base,other}}))
+                    throw std::runtime_error("Unknown microcode was accepted");
+                // A shifted chunk of a known program replaces part of the placement.
+                if (!moved.upload(1,std::array{nt::vu::UploadView{base,image.subspan(8,8)}}))
+                    throw std::runtime_error("Known program chunk was rejected");
+                *state={};
+                if (!std::equal(image.begin(),image.begin()+8,image.begin()+8) &&
+                    moved.launch(*state,base,1).status!=nt::vu::RunStatus::unbound_program)
+                    throw std::runtime_error("Overwritten relocated program still ran");
+            }
             nt::vu::Binding binding(nt::vu::Program(1,{nt_vu_continuation_blocks(),nt_vu_continuation_count()}),0,
                 {nt_vu_continuation_image(),nt_vu_continuation_size()});
             if (!binding.upload(1,std::array{nt::vu::UploadView{0,{nt_vu_continuation_image(),nt_vu_continuation_size()}}}))

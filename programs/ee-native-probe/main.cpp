@@ -656,7 +656,15 @@ int main(int argc,char** argv) {
         });
         auto cdvd=std::make_unique<nt::ee::NativeCdvdInitRpc>(disc,0x4000,0x5000,disc_media);
         nt::ee::NativeCdvdScmdRpc scmd(*cdvd,0x6000,0x7000);
-        if (!command_peer.register_service(*cdvd) || !command_peer.register_service(scmd))
+        // A program may use the disc before rebooting the IOP, so the initial
+        // environment offers the same native disc services as a reset session.
+        nt::ee::NativeCdvdSearchRpc search(*cdvd,0x20000,0x21000);
+        nt::ee::NativeCdvdReadRpc read(*cdvd,0x22000,0x23000);
+        nt::ee::NativeCdvdReadyRpc ready(*cdvd,0x8000059AU,0x24000,0x25000);
+        nt::ee::NativeCdvdReadyRpc ready_alternate(*cdvd,0x8000059CU,0x26000,0x27000);
+        if (!command_peer.register_service(*cdvd) || !command_peer.register_service(scmd) ||
+            !command_peer.register_service(search) || !command_peer.register_service(read) ||
+            !command_peer.register_service(ready) || !command_peer.register_service(ready_alternate))
             throw std::runtime_error("Cannot register native CD/DVD and clock services");
         if (!command_peer.register_service(*files)) throw std::runtime_error("Cannot register native file service");
         if (!command_peer.connect(platform.sif_outbound)) throw std::runtime_error("Cannot connect native command peer");
@@ -1183,6 +1191,7 @@ int main(int argc,char** argv) {
         }
         if (cdvd && !cdvd->error().empty()) std::cerr<<"disc initialization: "<<cdvd->error()<<'\n';
         if (!gpu.error.empty()) std::cerr<<"graphics: "<<gpu.error<<'\n';
+        if (!platform.packet_setup.rejected_packet().empty()) std::cerr<<"graphics packet: "<<platform.packet_setup.rejected_packet()<<'\n';
         std::cout<<" video_decoded_blocks="<<platform.video.decoded_blocks()<<" video_converted_blocks="<<platform.video.converted_blocks();
         if ((platform.video.read(0x10002010).value&0x80000000U) ||
             (memory.fault_address>=0x10002000 && memory.fault_address<0x10002040) ||

@@ -30,7 +30,9 @@ public:
         const auto* data=scratch ? memory.scratchpad : memory.data;
         const auto available=scratch ? memory.scratchpad_bytes : memory.size;
         const auto limit=scratch ? scratchpad_size : 0x2000000U;
-        if (raw%16 || (scratch && (raw&0x7fffc000U)) || !data ||
+        // An SPR source may keep the scratchpad's mapped base beside the SPR bit.
+        const auto scratch_base=raw&0x7fffc000U;
+        if (raw%16 || (scratch && scratch_base && scratch_base!=scratchpad_begin) || !data ||
             std::uint64_t(offset)+size>available || std::uint64_t(offset)+size>limit)
             return Stop::memory_fault;
         result={data+offset,size}; return Stop::budget;

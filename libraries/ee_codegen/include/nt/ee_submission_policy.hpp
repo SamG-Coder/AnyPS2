@@ -26,7 +26,9 @@ public:
         if (unused_transfer_configuration(address) || inactive_channel(address))
             return value ? Stop::unsupported_system : Stop::budget;
         if (address==0x1000e000) {
-            if (value&~1U) return Stop::unsupported_system;
+            // Cycle stealing shares a console bus that native transfers do not use.
+            // MFIFO and stall control change transfers and need translations.
+            if (value&0xfcU) return Stop::unsupported_system;
             control_=value; return Stop::budget;
         }
         if (address==0x1000e020) {

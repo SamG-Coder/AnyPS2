@@ -28,6 +28,8 @@ struct Control {
 };
 Control control(const Pair& pair,unsigned unit);
 bool direct_delayed_branch(const Pair& first,const Pair& second,unsigned unit);
+// Delayed branches testing one value with conditions that cannot both hold.
+bool exclusive_delayed_branch(const Pair& first,const Pair& second,unsigned unit);
 struct Transfer {
     unsigned address,delay_slot;
     Control control;

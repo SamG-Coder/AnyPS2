@@ -18,6 +18,11 @@ UploadSequence extract_uploads(ByteView packet,unsigned unit);
 // Assemble the final image before the extraction boundary. Later uploads replace
 // earlier bytes; holes stay separate instead of being filled with invented code.
 std::vector<Upload> assemble_uploads(std::span<const Upload> uploads,unsigned unit);
+// Finds programs stored as ready-to-send uploads when a program declares none.
+// Evidence is structural: a qword-aligned DMA tag whose payload follows it and
+// whose size exactly frames VIF uploads, assembling into an image that contains
+// an end marker. Candidates are compilation inputs; uploads still validate at runtime.
+std::vector<Upload> find_framed_uploads(ByteView bytes);
 struct DeclaredUploadImage {
     Upload image;
     std::vector<std::uint32_t> sources;

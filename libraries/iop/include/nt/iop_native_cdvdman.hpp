@@ -41,7 +41,9 @@ public:
         // this known ABI lets unrelated compiled paths remain executable.
         if (request.selector==22) return {NativeServiceStatus::unavailable};
         if (request.selector==74 || request.selector==78) return power_call(request,ram);
-        if (request.selector!=24) return disc_call(request,ram);
+        // sceCdRC differs from sceCdReadClock only by keeping the month high
+        // bit, which this host clock never sets.
+        if (request.selector!=24 && request.selector!=51) return disc_call(request,ram);
         const auto pointer=request.arguments[0];
         const auto checked=output(ram,pointer,8);
         if (checked.status!=NativeServiceStatus::returned) return checked;

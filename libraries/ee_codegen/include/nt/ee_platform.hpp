@@ -97,6 +97,12 @@ private:
         while (events) {
             const auto line=static_cast<unsigned>(std::countr_zero(events));
             self.interrupts.raise(line); events&=events-1;
+            if (line==2 && self.memory_) if (const auto target=self.interrupts.take_display_flag()) {
+                const std::uint32_t flag=1;
+                const auto status=self.graphics.read(0x12001000);
+                std::memcpy(self.memory_->data+target->flag,&flag,sizeof(flag));
+                std::memcpy(self.memory_->data+target->status,&status.value,sizeof(status.value));
+            }
         }
     }
     static IoRead64 read64(void* context,std::uint32_t address) {

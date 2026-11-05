@@ -1,3 +1,4 @@
+#include <array>
 #include <nt/vu_lower.hpp>
 
 namespace nt::vu {
@@ -87,8 +88,18 @@ Lower decode_lower(const Pair& pair,unsigned unit) {
         result.operation=LowerOperation::graphics_kick; result.left=integer(fields.source); result.mask=0;
     } else if (fields.subfunction==25 && variant==0 && unit==1) {
         result.operation=LowerOperation::move_p; result.result=vector(fields.target);
-    } else if (fields.subfunction==28 && variant==3 && unit==1) {
-        result.operation=LowerOperation::reciprocal_length; result.left=vector(fields.source); result.mask=0;
+    } else if (fields.subfunction==28 && unit==1) {
+        constexpr std::array lengths{LowerOperation::efu_sum_squares,LowerOperation::efu_reciprocal_sum_squares,
+            LowerOperation::efu_length,LowerOperation::reciprocal_length};
+        result.operation=lengths[variant]; result.left=vector(fields.source); result.mask=0;
+    } else if (fields.subfunction==29 && variant==2 && unit==1) {
+        result.operation=LowerOperation::efu_sum; result.left=vector(fields.source); result.mask=0;
+    } else if (fields.subfunction==30 && variant==1 && unit==1) {
+        result.operation=LowerOperation::efu_reciprocal_square_root;
+        result.left={Bank::vector,fields.source,(fields.encoding>>21)&3U}; result.mask=0;
+    } else if (fields.subfunction==30 && variant==2 && unit==1) {
+        result.operation=LowerOperation::efu_reciprocal;
+        result.left={Bank::vector,fields.source,(fields.encoding>>21)&3U}; result.mask=0;
     } else if (fields.subfunction==31 && variant==0 && unit==1) {
         result.operation=LowerOperation::sine;
         result.left={Bank::vector,fields.source,(fields.encoding>>21)&3U}; result.mask=0;
@@ -165,6 +176,12 @@ std::string_view name(LowerOperation operation) {
     case LowerOperation::reciprocal_length: return "reciprocal_length";
     case LowerOperation::sine: return "sine";
     case LowerOperation::efu_square_root: return "efu_square_root";
+    case LowerOperation::efu_sum_squares: return "efu_sum_squares";
+    case LowerOperation::efu_reciprocal_sum_squares: return "efu_reciprocal_sum_squares";
+    case LowerOperation::efu_length: return "efu_length";
+    case LowerOperation::efu_sum: return "efu_sum";
+    case LowerOperation::efu_reciprocal: return "efu_reciprocal";
+    case LowerOperation::efu_reciprocal_square_root: return "efu_reciprocal_square_root";
     case LowerOperation::move_p: return "move_p";
     case LowerOperation::wait_p: return "wait_p";
     case LowerOperation::mac_and: return "mac_and";

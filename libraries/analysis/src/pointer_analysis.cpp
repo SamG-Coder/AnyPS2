@@ -329,8 +329,12 @@ std::optional<std::uint32_t> candidate(ByteView bytes,const elf::Executable& elf
                                      std::uint32_t conditional_store=0,bool follow_returns=false) {
     using r5900::Op;
     if (!reg) return 0;
-    while (before>=4 && fuel) {
-        --fuel; before-=4;
+    // Fuel bounds followed definitions. The scan stops at control transfers,
+    // so a separate distance limit bounds one straight-line block; unrelated
+    // instructions in a long initializer do not exhaust the slice.
+    constexpr unsigned maximum_distance=1024;
+    for (unsigned distance=0;before>=4 && fuel && distance<maximum_distance;++distance) {
+        before-=4;
         const auto found=program.instructions.find(before);
         if (found==program.instructions.end()) return {};
         const auto& i=found->second;
@@ -369,6 +373,7 @@ std::optional<std::uint32_t> candidate(ByteView bytes,const elf::Executable& elf
         if (!effect) return {};
         const auto destination=*effect;
         if (destination!=reg) continue;
+        --fuel;
         if (i.op==Op::ld || i.op==Op::lq || i.op==Op::mfc1 || i.op==Op::cfc1) return {};
         if (i.op==Op::slti || i.op==Op::sltiu || i.op==Op::slt || i.op==Op::sltu) return {};
         if (i.op==Op::lui) return static_cast<std::uint32_t>(i.immediate)<<16;
@@ -1738,19 +1743,115 @@ std::vector<LayoutCandidate> layout_candidates(ByteView bytes,const elf::Executa
     }
     return result;
 }
+// A code pointer recovered from a guessed table must start with decodable
+// instructions; in an image without separate data sections, table slots can
+// otherwise address strings or other data inside the executable segment.
+bool decodable_entry(ByteView bytes,const elf::Executable& elf,std::uint32_t entry,unsigned maximum=64) {
+    // Straight-line code from the entry decodes up to its first return.
+    for (unsigned index=0;index<maximum;++index) {
+        const auto pc=entry+4*index;
+        const auto word=initial_word(bytes,elf,pc);
+        if (!word) return false;
+        const auto instruction=r5900::decode(pc,*word);
+        if (instruction.op==r5900::Op::unsupported) return false;
+        if (instruction.op==r5900::Op::jr && instruction.rs==31) return true;
+    }
+    return true;
+}
+namespace {
+bool syscall_wrapper_call(ByteView bytes,const elf::Executable& elf,const Program& program,
+                          std::uint32_t pc,const r5900::Instruction& call,std::uint32_t syscall) {
+    using r5900::Op;
+    const auto callee=known_callee(bytes,elf,program,call);
+    if (!callee || pc>0xfffffff7U || *callee>0xfffffffBU) return false;
+    const auto setup=program.instructions.find(*callee);
+    const auto boundary=program.instructions.find(*callee+4);
+    if (setup==program.instructions.end() || boundary==program.instructions.end()) return false;
+    const auto& i=setup->second;
+    return !i.rs && i.rt==3 && (i.op==Op::addiu || i.op==Op::daddiu || i.op==Op::ori) &&
+        static_cast<std::uint32_t>(i.immediate)==syscall && boundary->second.op==Op::syscall;
+}
+std::uint32_t physical_address(std::uint32_t address) {
+    return address>=0x80000000U && address<0xc0000000U ? address&0x1fffffffU : address;
+}
+}
+std::vector<CopiedCode> copied_code(ByteView bytes,const elf::Executable& elf,const Program& program) {
+    const auto loaded=[&](std::uint32_t address) {
+        return std::any_of(elf.segments.begin(),elf.segments.end(),[&](const auto& segment) {
+            return address-segment.address<segment.memory_size; });
+    };
+    std::set<std::uint32_t> handlers;
+    for (const auto& [pc,call]:program.instructions) {
+        if (!syscall_wrapper_call(bytes,elf,program,pc,call,0x74)) continue;
+        unsigned fuel=128;
+        const auto target=candidate(bytes,elf,program,pc+8,5,fuel,pc);
+        if (target && *target && *target%4==0 && !loaded(physical_address(*target))) handlers.insert(physical_address(*target));
+    }
+    std::vector<CopiedCode> result;
+    if (handlers.empty()) return result;
+    constexpr std::uint32_t maximum_copy=0x100000;
+    struct Copy { std::uint32_t pc,callee,source,destination,size; };
+    std::vector<Copy> copies;
+    for (const auto& [pc,call]:program.instructions) {
+        if (!call_transfer(call) || !link_register(call) || pc>0xfffffff7U) continue;
+        const auto callee=known_callee(bytes,elf,program,call);
+        if (!callee) continue;
+        unsigned fuel=128;
+        const auto argument=candidate(bytes,elf,program,pc+8,4,fuel,pc);
+        if (!argument || *argument%4 || loaded(physical_address(*argument))) continue;
+        fuel=128;
+        const auto source=candidate(bytes,elf,program,pc+8,5,fuel,pc);
+        fuel=128;
+        const auto size=candidate(bytes,elf,program,pc+8,6,fuel,pc);
+        if (!source || !size || !*size || *size>maximum_copy || *size%4 || *source%4 ||
+            loaded(physical_address(*argument)+*size-1)) continue;
+        // The copied bytes must be file-backed program storage.
+        const auto origin=physical_address(*source);
+        if (std::none_of(elf.segments.begin(),elf.segments.end(),[&](const auto& segment) {
+                return origin>=segment.address && std::uint64_t(origin)+*size<=std::uint64_t(segment.address)+segment.file_size; }))
+            continue;
+        copies.push_back({pc,*callee,*source,*argument,*size});
+    }
+    // Bytes past the end of a copy are not installed with it.
+    const auto decodable_in=[&](const Copy& copy,std::uint32_t offset) {
+        return decodable_entry(bytes,elf,physical_address(copy.source)+offset,std::min(64U,(copy.size-offset)/4));
+    };
+    const auto add=[&](const Copy& copy,std::set<std::uint32_t> entries) {
+        const auto origin=physical_address(copy.source),destination=physical_address(copy.destination);
+        // Tables inside the copy may hand out further handlers, such as a
+        // service that returns one of its own routines for registration.
+        for (std::uint32_t offset=0;offset<copy.size;offset+=4) {
+            const auto word=initial_word(bytes,elf,origin+offset);
+            if (!word) continue;
+            const auto target=physical_address(*word)-destination;
+            if (target<copy.size && target%4==0 && decodable_in(copy,target)) entries.insert(target);
+        }
+        if (std::none_of(result.begin(),result.end(),[&](const auto& known) {
+                return known.source==copy.source && known.destination==copy.destination && known.size==copy.size; }))
+            result.push_back({copy.source,copy.destination,copy.size,std::move(entries)});
+    };
+    std::set<std::uint32_t> installers;
+    for (const auto& copy:copies) {
+        const auto destination=physical_address(copy.destination);
+        std::set<std::uint32_t> entries;
+        for (auto handler=handlers.lower_bound(destination);handler!=handlers.end() && *handler-destination<copy.size;++handler)
+            if (decodable_in(copy,*handler-destination)) entries.insert(*handler-destination);
+        if (entries.empty()) continue;
+        installers.insert(copy.callee);
+        add(copy,std::move(entries));
+    }
+    // The routine that installs registered handlers may also install helpers
+    // they call, which are never registered themselves.
+    for (const auto& copy:copies)
+        if (installers.contains(copy.callee) && decodable_in(copy,0))
+            add(copy,{0});
+    return result;
+}
 std::set<std::uint32_t> syscall_callbacks(ByteView bytes,const elf::Executable& elf,
                                         const Program& program,std::uint32_t syscall,std::set<std::uint32_t>* registered_calls) {
-    using r5900::Op;
     std::set<std::uint32_t> result;
     for (const auto& [pc,call]:program.instructions) {
-        const auto callee=known_callee(bytes,elf,program,call);
-        if (!callee || pc>0xfffffff7U || *callee>0xfffffffBU) continue;
-        const auto setup=program.instructions.find(*callee);
-        const auto boundary=program.instructions.find(*callee+4);
-        if (setup==program.instructions.end() || boundary==program.instructions.end()) continue;
-        const auto& i=setup->second;
-        if (i.rs || i.rt!=3 || (i.op!=Op::addiu && i.op!=Op::daddiu && i.op!=Op::ori) ||
-            static_cast<std::uint32_t>(i.immediate)!=syscall || boundary->second.op!=Op::syscall) continue;
+        if (!syscall_wrapper_call(bytes,elf,program,pc,call,syscall)) continue;
         // Include the call's delay slot when recovering argument a1.
         unsigned fuel=128;
         const auto target=candidate(bytes,elf,program,pc+8,5,fuel,pc);
@@ -2007,9 +2108,48 @@ std::set<std::uint32_t> referenced_lifecycle_entries(ByteView bytes,const elf::E
             if (index>maximum || (*header!=0xffffffffU && index>*header)) break;
             const auto entry=executable_pointer(elf,*word);
             if (!entry) break;
+            // Counted or terminated address lists are also ordinary data, such
+            // as string tables in images without separate data sections.
+            if (!decodable_entry(bytes,elf,*entry)) { terminated=false; break; }
             entries.insert(*entry);
         }
         if (terminated) result.insert(entries.begin(),entries.end());
+    }
+    return result;
+}
+std::set<std::uint32_t> bounded_pointer_range_entries(ByteView bytes,const elf::Executable& elf,const Program& program) {
+    constexpr unsigned maximum=4096,callee_scan=64;
+    std::set<std::uint32_t> result;
+    std::set<std::pair<std::uint32_t,std::uint32_t>> visited;
+    const auto indirect_caller=[&](std::uint32_t entry) {
+        for (unsigned index=0;index<callee_scan;++index) {
+            const auto found=program.instructions.find(entry+4*index);
+            if (found==program.instructions.end()) return false;
+            if (found->second.indirect() && link_register(found->second)) return true;
+        }
+        return false;
+    };
+    for (const auto& [pc,call]:program.instructions) {
+        if (!call_transfer(call) || call.indirect() || pc>0xfffffff7U) continue;
+        const auto callee=known_callee(bytes,elf,program,call);
+        if (!callee || !indirect_caller(*callee)) continue;
+        unsigned fuel=128;
+        const auto first=candidate(bytes,elf,program,pc+8,4,fuel,pc);
+        if (!first) continue;
+        fuel=128;
+        const auto last=candidate(bytes,elf,program,pc+8,5,fuel,pc);
+        if (!last) continue;
+        const auto begin=physical_address(*first),end=physical_address(*last);
+        if (begin>=end || begin%4 || (end-begin)%4 || (end-begin)/4>maximum || !visited.emplace(begin,end).second) continue;
+        std::set<std::uint32_t> entries;
+        bool complete=true;
+        for (auto address=begin;address<end && complete;address+=4) {
+            const auto word=initial_word(bytes,elf,address);
+            const auto entry=word ? executable_pointer(elf,*word) : std::nullopt;
+            if (!entry || !decodable_entry(bytes,elf,*entry)) complete=false;
+            else entries.insert(*entry);
+        }
+        if (complete) result.insert(entries.begin(),entries.end());
     }
     return result;
 }
@@ -2029,7 +2169,7 @@ std::set<std::uint32_t> object_table_entries(ByteView bytes,const elf::Executabl
             if (slot.field!=store.immediate) continue;
             const auto pointer=initial_word(bytes,elf,*table+slot.slot);
             if (!pointer) continue;
-            if (const auto entry=executable_pointer(elf,*pointer)) result.insert(*entry);
+            if (const auto entry=executable_pointer(elf,*pointer); entry && decodable_entry(bytes,elf,*entry)) result.insert(*entry);
         }
     }
     return result;

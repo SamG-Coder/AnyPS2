@@ -1,4 +1,5 @@
 #pragma once
+#include <map>
 #include <nt/vu_dispatch.hpp>
 #include <memory>
 #include <optional>
@@ -22,7 +23,8 @@ class Binding {
 public:
     Binding(Program program,unsigned destination,std::span<const std::uint8_t> image)
         : catalog_(std::make_shared<const Catalog>(Catalog{Image(std::move(program),destination,image)})),
-          present_{std::vector<bool>(image.size()/8,false)},ready_(1,false) {}
+          present_{std::vector<bool>(image.size()/8,false)},ready_(1,false),
+          memory_((catalog_->front().program.unit() ? 2048U : 512U)*8U),loaded_(memory_.size()/8,false) {}
     Binding(unsigned unit,std::span<const Artifact> artifacts) {
         if (artifacts.empty() || artifacts.size()>4096) throw std::invalid_argument("Invalid VU artifact catalog size");
         Catalog catalog;
@@ -35,6 +37,8 @@ public:
             ready_.push_back(false);
         }
         catalog_=std::make_shared<const Catalog>(std::move(catalog));
+        memory_.resize((unit ? 2048U : 512U)*8U);
+        loaded_.assign(memory_.size()/8,false);
     }
 
     // Validate every chunk before changing coverage. Rejecting an upload batch
@@ -50,7 +54,13 @@ public:
                 return offset<=image.bytes.size() && upload.bytes.size()<=image.bytes.size()-offset &&
                     std::equal(upload.bytes.begin(),upload.bytes.end(),image.bytes.begin()+offset);
             };
-            if (std::none_of(catalog_->begin(),catalog_->end(),matches)) return false;
+            if (std::none_of(catalog_->begin(),catalog_->end(),matches) &&
+                std::none_of(catalog_->begin(),catalog_->end(),[&](const Image& image) { return part_of(image,upload.bytes); }))
+                return false;
+        }
+        for (const auto& upload:uploads) {
+            std::copy(upload.bytes.begin(),upload.bytes.end(),memory_.begin()+upload.destination*8U);
+            std::fill_n(loaded_.begin()+upload.destination,upload.bytes.size()/8,true);
         }
         for (const auto& upload:uploads) for (std::size_t index=0;index<catalog_->size();++index) {
             const auto& image=(*catalog_)[index];
@@ -67,7 +77,8 @@ public:
         // not on every native graphics continuation of an unchanged module.
         for (std::size_t i=0;i<present_.size();++i)
             ready_[i]=std::all_of(present_[i].begin(),present_[i].end(),[](bool value) { return value; });
-        if (active_ && !ready(*active_)) active_.reset();
+        placements_.clear();
+        if (active_ && !(relocated_base_ ? placed(*active_,*relocated_base_) : ready(*active_))) { active_.reset(); relocated_base_.reset(); }
         return true;
     }
     bool ready() const {
@@ -78,17 +89,33 @@ public:
     void reset() {
         for (auto& coverage:present_) std::fill(coverage.begin(),coverage.end(),false);
         std::fill(ready_.begin(),ready_.end(),false);
-        active_.reset();
+        std::fill(loaded_.begin(),loaded_.end(),false);
+        placements_.clear();
+        active_.reset(); relocated_base_.reset();
     }
-    RunResult launch(State& state,unsigned entry,std::uint64_t budget,ExecutionProfile* profile=nullptr) {
-        const auto selected=select(entry);
+    // A continuation resumes from next_pair, which is already in the running
+    // program's compiled addresses when that program is relocated.
+    RunResult launch(State& state,unsigned entry,std::uint64_t budget,ExecutionProfile* profile=nullptr,bool continuation=false) {
+        if (continuation && active_ && relocated_base_ && (*catalog_)[*active_].program.contains(entry)) {
+            if (state.graphics_pending) return {RunStatus::graphics_pending,0};
+            if (!budget) return {RunStatus::budget_exhausted,0};
+            state.graphics_completes=0;
+            return (*catalog_)[*active_].program.run(state,budget,profile);
+        }
+        auto selected=select(entry);
+        std::optional<unsigned> base;
+        auto compiled_entry=entry;
+        if (!selected) if (const auto placement=find_placement(entry)) {
+            selected=placement->index; base=placement->base;
+            compiled_entry=(*catalog_)[placement->index].destination+entry-placement->base;
+        }
         if (!selected) return {ready() ? RunStatus::unmapped_block : RunStatus::unbound_program,0};
         if (state.graphics_pending) return {RunStatus::graphics_pending,0};
         // Zero budget must not alter even the caller's continuation.
         if (!budget) return {RunStatus::budget_exhausted,0};
-        active_=selected;
+        active_=selected; relocated_base_=base;
         state.graphics_completes=0;
-        state.next_pair=entry;
+        state.next_pair=compiled_entry;
         return (*catalog_)[*active_].program.run(state,budget,profile);
     }
     // Attaches loop substitutes to one catalog artifact. Call before copying the
@@ -101,7 +128,7 @@ public:
     }
     std::size_t artifacts() const { return catalog_->size(); }
     RunResult resume(State& state,std::uint64_t budget,ExecutionProfile* profile=nullptr) const {
-        return active_ && ready(*active_) ? (*catalog_)[*active_].program.run(state,budget,profile) : RunResult{RunStatus::unbound_program,0};
+        return active_ && (relocated_base_ || ready(*active_)) ? (*catalog_)[*active_].program.run(state,budget,profile) : RunResult{RunStatus::unbound_program,0};
     }
 private:
     struct Image {
@@ -118,6 +145,38 @@ private:
     using Catalog=std::vector<Image>;
     bool ready(std::size_t index) const {
         return ready_[index];
+    }
+    // Programs may be placed anywhere in microcode memory. Compiled branches are
+    // relative, so one runs unchanged at its compiled addresses; a BAL link and
+    // the JR using it agree. An absolute address the EE computes for its load
+    // location and passes through data is not translated, and such a jump would
+    // leave the program as an unmapped stop or reach the wrong compiled pair.
+    struct Placement { std::size_t index; unsigned base; };
+    bool part_of(const Image& image,std::span<const std::uint8_t> bytes) const {
+        for (std::size_t offset=0;offset+bytes.size()<=image.bytes.size();offset+=8)
+            if (std::equal(bytes.begin(),bytes.end(),image.bytes.begin()+offset)) return true;
+        return false;
+    }
+    bool placed(std::size_t index,unsigned base) const {
+        const auto& image=(*catalog_)[index];
+        const auto pairs=image.bytes.size()/8;
+        if (std::size_t(base)+pairs>loaded_.size() ||
+            !std::all_of(loaded_.begin()+base,loaded_.begin()+base+pairs,[](bool value) { return value; })) return false;
+        return std::equal(image.bytes.begin(),image.bytes.end(),memory_.begin()+base*8U);
+    }
+    std::optional<Placement> find_placement(unsigned entry) {
+        if (const auto known=placements_.find(entry);known!=placements_.end()) return known->second;
+        std::optional<Placement> result;
+        for (std::size_t i=0;i<catalog_->size() && !result;++i) {
+            const auto& image=(*catalog_)[i];
+            for (unsigned offset=0;offset<image.bytes.size()/8 && offset<=entry;++offset) {
+                if (!image.program.contains(image.destination+offset) || !placed(i,entry-offset)) continue;
+                result=Placement{i,entry-offset};
+                break;
+            }
+        }
+        if (result) placements_.emplace(entry,*result);
+        return result;
     }
     std::optional<std::size_t> select(unsigned entry) const {
         std::optional<std::size_t> selected;
@@ -140,5 +199,9 @@ private:
     std::vector<std::vector<bool>> present_;
     std::vector<bool> ready_;
     std::optional<std::size_t> active_;
+    std::optional<unsigned> relocated_base_;
+    std::vector<std::uint8_t> memory_;
+    std::vector<bool> loaded_;
+    std::map<unsigned,Placement> placements_;
 };
 }

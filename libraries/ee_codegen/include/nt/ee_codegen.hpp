@@ -42,7 +42,11 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
                std::span<const LayoutDeclaration> layouts = {},
                std::span<const ExecutableImage> images = {},
                const std::function<std::ostream&(std::size_t)>& module_output = {},
-               std::uint64_t input_identity=0);
+               std::uint64_t input_identity=0,
+               std::span<const CodeRange> unverified_code = {});
+// True when the generator can lower this word. next is the instruction compiled
+// at the following address, or null when that address has no compiled word.
+bool lowerable(const r5900::Instruction& instruction,const r5900::Instruction* next);
 // Select whole declared EE sections or entry-flow discovery, then emit a
 // project. Optional native-stop directories supply checked offline call edges;
 // they never become runtime inputs or establish complete indirect coverage.

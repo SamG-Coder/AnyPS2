@@ -66,10 +66,12 @@ public:
         // consumer, normal forward transfer and a complete bounded source.
         if (!(value&0x100)) { config[0]=value; armed_[channel]=false; return Stop::budget; }
         const auto mode=value&0xc;
-        if (direction_==Direction::selectable && !(value&1)) {
+        // Only the second channel transfers in both directions. The others have
+        // one fixed direction, and hardware ignores their DIR bit.
+        if (direction_==Direction::selectable && channel==1 && !(value&1)) {
             // TAG/ASP/TTE/TIE describe chain traversal; they are retained
             // metadata in normal mode and do not alter this byte transfer.
-            if (channel!=1 || (value&0x0000fe0fU) || !config[2] || !policy.enabled() ||
+            if ((value&0x0000fe0fU) || !config[2] || !policy.enabled() ||
                 !consumer.receive || !memory.completions) return Stop::unsupported_system;
             const auto size=config[2]*16U;
             std::span<const std::uint8_t> target;
@@ -92,7 +94,7 @@ public:
             memory.completions->complete(completion_base_+channel); memory.completions->publish(memory);
             return Stop::budget;
         }
-        if ((direction_==Direction::selectable && !(value&1)) || (mode!=0 && mode!=4) ||
+        if ((mode!=0 && mode!=4) ||
             (value&0x0000fe02U) || ((value>>4)&3)==3 || ((channel==2 || direction_==Direction::fixed_input) && (value&0x40)) || !consumer.consume || !memory.completions)
             return Stop::unsupported_system;
         if (!policy.enabled()) {

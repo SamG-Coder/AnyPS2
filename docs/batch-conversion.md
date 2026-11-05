@@ -184,6 +184,15 @@ addresses and sizes. Shadow-section contents are not used as instructions.
 matching upload command separate their payloads. The table does not identify
 the VU unit; unit selection still requires validation.
 
+`ps2-vu-extract program.elf new-output-directory --scan-elf` handles programs with
+no overlay table. It finds uploads stored ready to send: a qword-aligned DMA tag
+whose size exactly frames VIF uploads that assemble into an image with an end marker.
+Its `images.tsv` is a catalog. Validate the unit by converting each image for it.
+
+Uploads may target any free microcode address, because compiled branches are relative.
+A launch resolves to the catalog program occupying that address. An absolute address
+the EE computes from the load location and passes through data is not translated.
+
 For multiple images on one unit, pass `ps2-vu-recompile --catalog images.tsv
 output.ll 1`. This manifest has two tab-separated columns, `file` and
 `destination_pairs`; file paths are relative to the manifest. The generated

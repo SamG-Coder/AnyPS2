@@ -59,7 +59,11 @@ public:
     bool returning(const runtime::State& state) const { return handlers_.returning(state); }
     Stop finish(runtime::State& state,Memory& memory) { return handlers_.finish(state,memory); }
     Stop finish_interrupt(runtime::State& state,Memory& memory) {
-        if (handlers_.active() || !memory.interrupts) return Stop::invalid_state;
+        if (!memory.interrupts) return Stop::invalid_state;
+        if (handlers_.active()) {
+            if (!memory.interrupts->returning(state)) return Stop::invalid_state;
+            handlers_.abandon_after_interrupt();
+        }
         const auto result=memory.interrupts->finish(state);
         if (result==Stop::budget && !memory.interrupts->active()) threads_.schedule(state);
         return result;
@@ -77,7 +81,9 @@ public:
         const auto view=handlers_.validate_view(memory);
         if (view!=Stop::budget) return view;
         auto number=static_cast<std::uint32_t>(state.gpr[3].lo);
-        if (handlers_.registered(number)) return handlers_.enter(state,memory,number);
+        // A negative number is the interrupt-context form of the same table slot.
+        const auto slot=static_cast<std::int32_t>(number)<0 ? 0U-number : number;
+        if (handlers_.registered(slot)) return handlers_.enter(state,memory,slot);
         if (number==0x7f) {
             if (!memory.data || !memory.size || memory.size>0x2000000U) return Stop::invalid_state;
             return returned(state,memory.size);
@@ -100,6 +106,20 @@ public:
             const auto result=memory.graphics->configure(static_cast<std::uint32_t>(state.gpr[4].lo),
                 static_cast<std::uint32_t>(state.gpr[5].lo),static_cast<std::uint32_t>(state.gpr[6].lo));
             return result==Stop::budget ? returned(state,state.gpr[2].lo) : result;
+        }
+        if (number==0x73) {
+            if (!memory.interrupts) return Stop::unsupported_system;
+            const auto flag=static_cast<std::uint32_t>(state.gpr[4].lo),status=static_cast<std::uint32_t>(state.gpr[5].lo);
+            if (!flag && !status) { memory.interrupts->set_display_flag({}); return returned(state,state.gpr[2].lo); }
+            const auto physical_flag=runtime::default_ram_address(flag),physical_status=runtime::default_ram_address(status);
+            if (flag%4 || status%8) return Stop::invalid_state;
+            if (!memory.data || std::uint64_t(physical_flag)+4>memory.size) { memory.fault_address=flag; return Stop::memory_fault; }
+            if (std::uint64_t(physical_status)+8>memory.size) { memory.fault_address=status; return Stop::memory_fault; }
+            if (!protected_code_) return Stop::invalid_state;
+            if (protected_code_(physical_flag,4)) { memory.fault_address=flag; return Stop::code_write; }
+            if (protected_code_(physical_status,8)) { memory.fault_address=status; return Stop::code_write; }
+            memory.interrupts->set_display_flag(NativeInterrupts::DisplayFlag{physical_flag,physical_status});
+            return returned(state,state.gpr[2].lo);
         }
         if (number==0x70) {
             if (!memory.io.read64) return Stop::unsupported_system;

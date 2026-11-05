@@ -16,6 +16,11 @@ public:
     void* observation_context=nullptr;
     void (*observe_delivery)(void*,bool,unsigned,const runtime::State&)=nullptr;
     void raise(unsigned line) { if (line<16) pending_|=1U<<line; }
+    // SetVSyncFlag targets, written by the next vertical blank. A caller may
+    // register stack storage, so each registration is delivered once.
+    struct DisplayFlag { std::uint32_t flag,status; };
+    void set_display_flag(std::optional<DisplayFlag> target) { display_flag_=target; }
+    std::optional<DisplayFlag> take_display_flag() { const auto target=display_flag_; display_flag_.reset(); return target; }
     void raise_sbus(unsigned cause) {
         if (cause<16) { sbus_pending_|=1U<<cause; raise(1); }
     }
@@ -23,12 +28,20 @@ public:
         memory.pending_interrupts=(memory.pending_interrupts&~0x400U)|((pending_&enabled_) ? 0x400U : 0U);
     }
     IoRead read(std::uint32_t address) const {
-        if (address==0x1000f000) return {Stop::budget,pending_};
+        // A slow uncached read of the status register can observe a cause before
+        // the processor takes its interrupt, and programs poll while a handler
+        // is enabled. Native delivery is immediate, so a delivered cause stays
+        // visible to the next read instead of making such a poll unbounded.
+        if (address==0x1000f000) {
+            const auto status=pending_|delivered_;
+            delivered_=0;
+            return {Stop::budget,status};
+        }
         if (address==0x1000f010) return {Stop::budget,enabled_};
         return {Stop::memory_fault};
     }
     Stop write(std::uint32_t address,std::uint32_t value) {
-        if (address==0x1000f000) pending_&=~(value&65535);
+        if (address==0x1000f000) { pending_&=~(value&65535); delivered_&=~(value&65535); }
         else if (address==0x1000f010) enabled_^=value&65535;
         else return Stop::memory_fault;
         return Stop::budget;
@@ -129,7 +142,7 @@ public:
         callbacks_=std::move(callbacks); callback_=0;
         start(state);
         if (dma) { memory.completions->acknowledge(1U<<line); memory.completions->publish(memory); }
-        else { pending_&=~(1U<<line); if (line==1) sbus_pending_=0; publish(memory); }
+        else { pending_&=~(1U<<line); delivered_|=1U<<line; if (line==1) sbus_pending_=0; publish(memory); }
         return Stop::budget;
     }
     Stop finish(runtime::State& state) {
@@ -157,6 +170,8 @@ private:
     std::size_t callback_=0;
     std::array<std::uint32_t,16> handlers_{};
     std::uint32_t pending_=0,enabled_=0,stack_=0;
+    mutable std::uint32_t delivered_=0;
     std::optional<runtime::State> interrupted_;
+    std::optional<DisplayFlag> display_flag_;
 };
 }

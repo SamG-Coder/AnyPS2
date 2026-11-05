@@ -154,7 +154,8 @@ private:
         next->services->cdvdman.enable_application_exit();
         install_sealed(data,*next);
         next->startup=std::make_unique<nt::iop::NativeModuleStartup>(nt::iop::run_llvm,*next->services,next->ram,module_,nt_iop_generated_entries(),0x1ff000);
-        next->incoming=std::make_unique<nt::ee::NativeIopCommands>(next->services->sif_control,next->services->inbound);
+        next->incoming=std::make_unique<nt::ee::NativeIopCommands>(next->services->sif_control,next->services->inbound,next->ram,
+            [](std::uint32_t address) { return nt_iop_native_instruction(address)!=0; });
         if (!disc.empty()) {
             next->cdvd=std::make_unique<nt::ee::NativeCdvdInitRpc>(disc,0x1ee000,0x1ee010,disc_media_);
             auto* session=next->cdvd.get();
@@ -232,7 +233,7 @@ private:
         auto& self=*static_cast<IopReset*>(opaque);
         if (!self.accepted_ || !self.started_) return {nt::ee::Stop::unsupported_system};
         nt::ee::IoRead result;
-        if (self.state_->native_rpc && self.state_->native_rpc->owns_rpc(packets)) {
+        if (!self.state_->incoming->plain_transfer(packets) && self.state_->native_rpc && self.state_->native_rpc->owns_rpc(packets)) {
             if (self.state_->services->inbound.busy()) return {nt::ee::Stop::budget,0};
             result=self.state_->native_rpc->dispatch_rpc(packets,self.state_->services->endpoint()->command_buffer(),self.state_->services->command_session.rpc_ready());
         } else {

@@ -55,7 +55,7 @@ std::optional<Operation> native_import_operation(const elf::IopImport& import) {
         return Operation::native_import;
     if (import.library=="cdvdman" && (import.version>>8)==1 &&
         (import.ordinal==6 || import.ordinal==8 || (import.ordinal>=11 && import.ordinal<=15) ||
-         import.ordinal==22 || import.ordinal==24 || import.ordinal==28 || import.ordinal==37 || import.ordinal==39 ||
+         import.ordinal==22 || import.ordinal==24 || import.ordinal==28 || import.ordinal==37 || import.ordinal==39 || import.ordinal==51 ||
          import.ordinal==74 || import.ordinal==78 || import.ordinal==83))
         return Operation::native_import;
     if (import.library=="secrman" && (import.version>>8)==1 && import.ordinal>=4 && import.ordinal<=6)
@@ -228,6 +228,21 @@ SlotScan merge_foreign_slots(const std::vector<SlotScan>& scans,std::size_t skip
         }
     }
     return foreign;
+}
+// Code that takes an address inside its own text passes either a routine, such
+// as a thread entry the analysis cannot follow, or data. Straight-line words up
+// to the first return must decode for the address to be compiled as a routine.
+static bool referenced_routine(const elf::IopModule& module,std::uint32_t address) {
+    const auto extent=module.info ? module.info->text_size : module.initialized_size;
+    for (std::uint32_t offset=address-module.base,count=0;count<64;offset+=4,++count) {
+        if (offset>=extent || offset+4>module.memory.size()) return false;
+        std::uint32_t word=0;
+        for (unsigned byte=0;byte<4;++byte) word|=std::uint32_t(module.memory[offset+byte])<<(byte*8);
+        try {
+            if (decode(module.base+offset,word).flow==Flow::return_register) return true;
+        } catch (const std::runtime_error&) { return false; }
+    }
+    return true;
 }
 static bool module_owner(std::span<const elf::IopModule> modules,std::uint32_t address,std::size_t& owner) {
     for (std::size_t index=0;index<modules.size();++index) {
@@ -898,6 +913,8 @@ Program discover_bundle(std::span<const elf::IopModule> modules,std::span<const 
         replace_callback_roots(callback_roots,emitted,source,callbacks,modules,pending);
     };
     for (const auto entry : entries) add_entry(entry);
+    for (const auto& module:modules) if (!native_library_module(module))
+        for (const auto address:module.text_references) if (referenced_routine(module,address)) add_entry(address);
     // Callback roots follow the latest finished analysis. A retracted loaded
     // pointer drops the callee and revisits its former owner.
     std::vector<Program> programs(modules.size());

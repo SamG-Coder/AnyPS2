@@ -7,7 +7,8 @@
 int main(int argc,char** argv) {
     if (argc!=4) {
         std::cerr<<"Usage: ps2-vu-extract <packet.bin> <new-private-directory> <unit:0|1>\n"
-            <<"       ps2-vu-extract <program.elf> <new-private-directory> --elf\n";
+            <<"       ps2-vu-extract <program.elf> <new-private-directory> --elf\n"
+            <<"       ps2-vu-extract <program.elf> <new-private-directory> --scan-elf\n";
         return 2;
     }
     try {
@@ -42,6 +43,32 @@ int main(int argc,char** argv) {
             if (!images) throw std::runtime_error("Cannot write VU image manifest");
             std::cout<<"Recovered "<<index<<" declared VU regions from ELF metadata without execution. "
                 <<groups.size()<<" image groups retain proven contiguous upload framing. "
+                <<"Unit selection, LLVM compilation and linking remain separate stages.\n";
+            return 0;
+        }
+        if (unit_text=="--scan-elf") {
+            const auto bytes=nt::read_file(argv[1],256U*1024*1024);
+            const auto executable=nt::elf::parse(bytes);
+            const std::filesystem::path directory=argv[2];
+            if (!std::filesystem::create_directory(directory)) throw std::invalid_argument("Output directory already exists");
+            std::ofstream images(directory/"images.tsv");
+            // Directly usable as a ps2-vu-recompile catalog.
+            images<<"file\tdestination_pairs\n";
+            unsigned index=0;
+            for (const auto& segment:executable.segments) {
+                // Tags are aligned in guest memory, not necessarily in the file.
+                const auto skip=(16U-(segment.address&15U))&15U;
+                if (skip>=segment.file_size) continue;
+                const auto stored=nt::ByteView(bytes).subspan(segment.offset+skip,segment.file_size-skip);
+                for (const auto& image:nt::vu::find_framed_uploads(stored)) {
+                    const auto filename="image-"+std::to_string(index++)+".bin";
+                    nt::write_file(directory/filename,image.bytes);
+                    images<<filename<<'\t'<<image.destination<<'\n';
+                }
+            }
+            images.flush();
+            if (!images) throw std::runtime_error("Cannot write VU image manifest");
+            std::cout<<"Found "<<index<<" framed VU images in file-backed storage without execution. "
                 <<"Unit selection, LLVM compilation and linking remain separate stages.\n";
             return 0;
         }

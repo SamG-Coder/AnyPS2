@@ -1,3 +1,6 @@
+#include <nt/vu_extended.hpp>
+#include <nt/vu_lower.hpp>
+#include <bit>
 #include <nt/vu_program.hpp>
 #include <nt/vu_arithmetic.hpp>
 #include <nt/vu_lower.hpp>
@@ -69,6 +72,59 @@ int main() {
             instruction(0,32U<<25); instruction(1,32U<<25);
             pairs=nt::vu::frame(code,0,0); flow=nt::vu::discover(pairs,0,entries);
             check(flow.complex_delay==std::set<unsigned>{0});
+            // The EFU family decodes on VU1 and computes with separately rounded
+            // steps. Zero stays zero through the reciprocal forms.
+            {
+                using nt::vu::LowerOperation;
+                const auto decoded=[&](unsigned subfunction,unsigned variant,unsigned unit=1) {
+                    const std::uint32_t word=(0x40U<<25)|(3U<<11)|(subfunction<<6)|(60U+variant);
+                    nt::Bytes bytes(8);
+                    for (unsigned b=0;b<4;++b) bytes[b]=std::uint8_t(word>>(b*8));
+                    return nt::vu::decode_lower(nt::vu::frame(bytes,unit,0)[0],unit).operation;
+                };
+                check(decoded(28,0)==LowerOperation::efu_sum_squares && decoded(28,1)==LowerOperation::efu_reciprocal_sum_squares);
+                check(decoded(28,2)==LowerOperation::efu_length && decoded(28,3)==LowerOperation::reciprocal_length);
+                check(decoded(29,2)==LowerOperation::efu_sum && decoded(30,1)==LowerOperation::efu_reciprocal_square_root);
+                check(decoded(30,2)==LowerOperation::efu_reciprocal && decoded(28,0,0)!=LowerOperation::efu_sum_squares);
+                const auto bits=[](float value) { return std::bit_cast<std::uint32_t>(value); };
+                check(nt::numeric::efu_sum_squares_finite(bits(1),bits(2),bits(2)).bits==bits(9));
+                check(nt::numeric::efu_reciprocal_sum_squares_finite(bits(1),bits(1),0).bits==bits(0.5f));
+                check(nt::numeric::efu_length_finite(bits(1),bits(2),bits(2)).bits==bits(3));
+                check(nt::numeric::reciprocal_length_finite(bits(1),bits(2),bits(2)).bits==bits(1.0f/3.0f));
+                check(nt::numeric::efu_sum_finite(bits(1),bits(2),bits(3),bits(4)).bits==bits(10));
+                check(nt::numeric::efu_reciprocal_finite(bits(-2)).bits==bits(-0.5f));
+                check(nt::numeric::efu_reciprocal_square_root_finite(bits(-4)).bits==bits(0.5f));
+                check(nt::numeric::efu_reciprocal_finite(0x80000000U).bits==0x80000000U && nt::numeric::efu_reciprocal_finite(0).supported);
+                check(!nt::numeric::efu_sum_squares_finite(0x7f000000U,0,0).supported); // Overflow stays explicit.
+            }
+            // Conditions that cannot both hold make the first target ordinary
+            // code, so it may itself be a branch. Overlapping conditions may not.
+            {
+                auto exclusive=code;
+                const auto put=[&](unsigned pair,std::uint32_t word) {
+                    for (unsigned b=0;b<4;++b) exclusive[pair*8+b]=std::uint8_t(word>>(b*8));
+                };
+                const auto first_two=[&] {
+                    const auto framed=nt::vu::frame(exclusive,0,0);
+                    return nt::vu::exclusive_delayed_branch(framed[0],framed[1],0);
+                };
+                put(0,(0x2cU<<25)|(1U<<11)|3U); // IBLTZ vi1 to pair 4
+                put(1,(0x2dU<<25)|(1U<<11)|5U); // IBGTZ vi1 to pair 7
+                put(2,0x8000033c); put(4,32U<<25); put(5,0x8000033c);
+                check(first_two());
+                const auto dispatch=nt::vu::frame(exclusive,0,0);
+                flow=nt::vu::discover(dispatch,0,entries);
+                check(flow.complex_delay.empty() && flow.delayed_continuations.contains(4));
+                put(1,(0x2fU<<25)|(1U<<11)|5U); // IBGEZ also excludes IBLTZ.
+                check(first_two());
+                put(1,(0x2eU<<25)|(1U<<11)|5U); // IBLEZ overlaps IBLTZ at negative values.
+                check(!first_two());
+                const auto overlapping=nt::vu::frame(exclusive,0,0);
+                flow=nt::vu::discover(overlapping,0,entries);
+                check(flow.complex_delay==std::set<unsigned>{0});
+                put(1,(0x2dU<<25)|(2U<<11)|5U); // A different register proves nothing.
+                check(!first_two());
+            }
             // Signed displacements wrap in each unit's pair-address space.
             instruction(0,(32U<<25)|0x7fe); pairs=nt::vu::frame(code,0,0);
             check(nt::vu::control(pairs[0],0).target==511 && nt::vu::control(pairs[0],1).target==2047);
@@ -160,6 +216,22 @@ int main() {
             const auto boundary=packet.size();
             append(0x14000000); // Launch stops extraction before later data.
             append(0x4a010002); append(0); append(0);
+            {
+                // A stored upload needs a DMA tag framing it and a program end.
+                const auto framed=[](std::array<std::uint32_t,8> words) {
+                    nt::Bytes stored(words.size()*4);
+                    for (std::size_t i=0;i<words.size();++i) for (unsigned b=0;b<4;++b)
+                        stored[i*4+b]=std::uint8_t(words[i]>>(b*8));
+                    return nt::vu::find_framed_uploads(stored);
+                };
+                const auto found=framed({0x10000001,0,0,0x4a010000,0,0x40000000,0,0});
+                check(found.size()==1 && found[0].destination==0 && found[0].bytes.size()==8);
+                check(framed({0x10000001,0,0,0x4a010000,0,0,0,0}).empty());            // No end marker.
+                check(framed({0x30000001,0,0,0x4a010000,0,0x40000000,0,0}).empty());   // Payload is elsewhere.
+                check(framed({0x10000002,0,0,0x4a010000,0,0x40000000,0,0}).empty());   // Size exceeds storage.
+                check(framed({0x10000001,0,0,0x4a030000,0,0x40000000,0,0}).empty());   // Upload exceeds the frame.
+                check(framed({0x10000001,0,0,0x14000000,0,0x40000000,0,0}).empty());   // Not an upload.
+            }
             const auto sequence=nt::vu::extract_uploads(packet,0);
             check(sequence.uploads.size()==2 && sequence.uploads[0].destination==0 &&
                 sequence.uploads[1].destination==1 && sequence.uploads[0].bytes.size()==8 &&

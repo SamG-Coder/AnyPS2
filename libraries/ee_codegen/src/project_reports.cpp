@@ -8,6 +8,7 @@ void write_discovery_reports(const std::filesystem::path& output,const PreparedP
     std::ostringstream coverage;
     coverage<<"selection="<<(prepared.whole_code ? "whole-declared-EE-code" : "reachable-flow")<<"\n"
         <<"selected_instructions="<<prepared.discovered.instructions.size()<<"\n"
+        <<"unverified_ranges="<<prepared.unverified_code.size()<<"\n"
         <<"runtime_target_selection=dynamic\n";
     write_text_file(output/"code-coverage.txt",coverage.str());
     std::ostringstream regions;

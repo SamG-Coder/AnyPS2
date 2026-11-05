@@ -19,7 +19,7 @@ public:
         case 21: return {VectorStatus::ready,storage.immediate};
         case 22: return {VectorStatus::ready,storage.quotient};
         case 27: return {VectorStatus::ready,storage.launch_address};
-        case 28: return {VectorStatus::ready,break_control_};
+        case 28: return {VectorStatus::ready,0};
         case 29: return {VectorStatus::ready,storage.active ? 1U : 0U};
         default: return {VectorStatus::unsupported};
         }
@@ -43,10 +43,8 @@ public:
         if (selector==22) { storage.quotient=value; return VectorStatus::ready; }
         if (selector==27) { storage.launch_address=static_cast<std::uint16_t>(value); return VectorStatus::ready; }
         if (selector!=28) return VectorStatus::unsupported;
-        break_control_=value&0x0c0c;
-        if (value&2) break_control_&=~0xffU;
-        if (value&0x200) break_control_&=~0xff00U;
-        return VectorStatus::ready;
+        // Compiled microprograms have no debug or trap break to deliver.
+        return value&0x0c0c ? VectorStatus::unsupported : VectorStatus::ready;
     }
 private:
     static VectorReadResult read_control(void* context,unsigned selector,bool wait) {
@@ -55,6 +53,5 @@ private:
     static VectorStatus write_control(void* context,unsigned selector,bool wait,std::uint32_t value) {
         return static_cast<NativeVectorOwner*>(context)->write(selector,wait,value);
     }
-    std::uint32_t break_control_=0;
 };
 }

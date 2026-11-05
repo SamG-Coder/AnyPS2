@@ -32,7 +32,7 @@ NT_SHADER_INLINE FiniteFloatResult sine_finite(uint32_t x) {
 // Bounded finite EFU path, with explicit intermediate rounding. Reuse signed
 // zero underflow from the arithmetic helpers; EFU does not publish MAC flags.
 // Intermediate overflow remains an explicit unsupported boundary.
-NT_SHADER_INLINE FiniteFloatResult reciprocal_length_finite(uint32_t x,uint32_t y,uint32_t z) {
+NT_SHADER_INLINE FiniteFloatResult efu_sum_squares_finite(uint32_t x,uint32_t y,uint32_t z) {
     uint32_t sum=0;
     const uint32_t components[]{x,y,z};
 #if defined(__clang__)
@@ -45,10 +45,44 @@ NT_SHADER_INLINE FiniteFloatResult reciprocal_length_finite(uint32_t x,uint32_t 
         if (!added.supported || added.overflow) return {0,false,false};
         sum=added.bits;
     }
-    const auto root=square_root_finite(sum);
-    if (!root.supported) return {0,false,false};
-    if (!root.bits) return {0};
-    const auto reciprocal=divide_finite(0x3f800000,root.bits);
+    return {sum};
+}
+// The EFU reciprocal leaves a zero input unchanged rather than dividing by it.
+NT_SHADER_INLINE FiniteFloatResult efu_reciprocal_finite(uint32_t x) {
+    if (!(x&0x7f800000U)) return {x&0x80000000U};
+    const auto reciprocal=divide_finite(0x3f800000,x);
     return {reciprocal.bits,false,reciprocal.supported && reciprocal.flags==0};
+}
+NT_SHADER_INLINE FiniteFloatResult efu_length_finite(uint32_t x,uint32_t y,uint32_t z) {
+    const auto sum=efu_sum_squares_finite(x,y,z);
+    if (!sum.supported) return {0,false,false};
+    const auto root=square_root_finite(sum.bits);
+    return {root.bits,false,root.supported};
+}
+NT_SHADER_INLINE FiniteFloatResult efu_reciprocal_sum_squares_finite(uint32_t x,uint32_t y,uint32_t z) {
+    const auto sum=efu_sum_squares_finite(x,y,z);
+    return sum.supported ? efu_reciprocal_finite(sum.bits) : FiniteFloatResult{0,false,false};
+}
+NT_SHADER_INLINE FiniteFloatResult reciprocal_length_finite(uint32_t x,uint32_t y,uint32_t z) {
+    const auto length=efu_length_finite(x,y,z);
+    return length.supported ? efu_reciprocal_finite(length.bits) : FiniteFloatResult{0,false,false};
+}
+NT_SHADER_INLINE FiniteFloatResult efu_sum_finite(uint32_t x,uint32_t y,uint32_t z,uint32_t w) {
+    uint32_t sum=x;
+    const uint32_t components[]{y,z,w};
+#if defined(__clang__)
+#pragma clang loop unroll(full)
+#endif
+    for (const auto component:components) {
+        const auto added=add_subtract_finite(sum,component,false);
+        if (!added.supported || added.overflow) return {0,false,false};
+        sum=added.bits;
+    }
+    return {sum};
+}
+// Like the EFU square root, this uses the magnitude of its input.
+NT_SHADER_INLINE FiniteFloatResult efu_reciprocal_square_root_finite(uint32_t x) {
+    const auto root=square_root_finite(x&0x7fffffffU);
+    return root.supported && !root.flags ? efu_reciprocal_finite(root.bits) : FiniteFloatResult{0,false,false};
 }
 }

@@ -170,6 +170,11 @@ public:
                     renderer.read(storage,low,high-low+1); download_=download->pack(storage); download_offset_=0;
                 } else if (std::holds_alternative<CancelDownload>(operation)) {
                     download_.clear(); download_offset_=0;
+                } else if (const auto* copy=std::get_if<ImageCopy>(&operation)) {
+                    std::vector<std::uint32_t> storage(1024*1024);
+                    const auto [low,high]=copy->source.word_range();
+                    renderer.read(storage,low,high-low+1);
+                    renderer.write(copy->apply(storage)); dirty_=true;
                 } else if (const auto* rect=std::get_if<ImageRect>(&operation)) {
                     renderer.write(*rect); dirty_=true;
                 } else {
@@ -205,6 +210,8 @@ public:
                     download_=download->pack(pixels); download_offset_=0;
                 } else if (std::holds_alternative<CancelDownload>(operation)) {
                     download_.clear(); download_offset_=0;
+                } else if (const auto* copy=std::get_if<ImageCopy>(&operation)) {
+                    (void)copy->apply(pixels);
                 } else if (const auto* rect=std::get_if<ImageRect>(&operation)) {
                     for (const auto write:rect->writes()) pixels[write.address]=(pixels[write.address]&~write.mask)|write.value;
                 } else for (const auto& write:std::get<ImageWrites>(operation))
@@ -234,7 +241,7 @@ private:
         TextureLevels levels{};
         unsigned bank=0; bool palette16=false; std::uint64_t texa=0; std::uint32_t fog_color=0;
     };
-    using Operation=std::variant<Draw,ImageWrites,PaletteLoad,Finish,ImageDownload,CancelDownload,PacketVectors,ImageRect>;
+    using Operation=std::variant<Draw,ImageWrites,PaletteLoad,Finish,ImageDownload,ImageCopy,CancelDownload,PacketVectors,ImageRect>;
     struct Workspace {
         std::vector<Operation> operations;
         std::vector<SpriteCommand> commands;
@@ -548,6 +555,9 @@ private:
         const int bottom=std::min(ceil_pixel(high_y-a.offset_y),int(a.scissor[3])+1);
         // Nothing draws: no batch, and the CPU planner would not draw either.
         if (!primitives || left>=right || top>=bottom) { batch.elements=0; return true; }
+        // Pixels past the surface width wrap into later pages, as draws planned
+        // one primitive at a time map them; a vector batch has one flat target.
+        if (unsigned(right)>batch.target.pitch*64) return fallback("target wider than its surface");
         batch.target.left=unsigned(left); batch.target.right=unsigned(right);
         batch.target.top=unsigned(top); batch.target.bottom=unsigned(bottom);
         return true;
@@ -614,6 +624,10 @@ private:
                 state.upload={}; return;
             }
             draws.emplace_back(CancelDownload{});
+            if ((value&3)==2) {
+                draws.emplace_back(ImageCopy::begin(state.transfer_buffer,state.transfer_position,state.transfer_extent));
+                state.upload={}; return;
+            }
             state.upload=ImageUpload::begin(state.transfer_buffer,state.transfer_position,state.transfer_extent,unsigned(value&3)); return;
         case 0x61: draws.emplace_back(Finish{}); return;
         case 0xf: case 0x7f: return;
@@ -826,7 +840,7 @@ private:
                 return;
             }
         }
-        throw std::invalid_argument("Missing native graphics end tag");
+        // A long list without EOP arrives in parts that end at a tag boundary.
     }
 };
 inline void NativeDrawing::update_frame(Context& context) {

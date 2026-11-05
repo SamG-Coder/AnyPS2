@@ -110,6 +110,24 @@ extern "C" uint32_t nt_vu_clip_flags(uint32_t x,uint32_t y,uint32_t z,uint32_t w
 extern "C" uint64_t nt_vu_reciprocal_length_finite(uint32_t x,uint32_t y,uint32_t z) {
     return pack(nt::numeric::reciprocal_length_finite(x,y,z));
 }
+extern "C" uint64_t nt_vu_efu_sum_squares_finite(uint32_t x,uint32_t y,uint32_t z) {
+    return pack(nt::numeric::efu_sum_squares_finite(x,y,z));
+}
+extern "C" uint64_t nt_vu_efu_reciprocal_sum_squares_finite(uint32_t x,uint32_t y,uint32_t z) {
+    return pack(nt::numeric::efu_reciprocal_sum_squares_finite(x,y,z));
+}
+extern "C" uint64_t nt_vu_efu_length_finite(uint32_t x,uint32_t y,uint32_t z) {
+    return pack(nt::numeric::efu_length_finite(x,y,z));
+}
+extern "C" uint64_t nt_vu_efu_sum_finite(uint32_t x,uint32_t y,uint32_t z,uint32_t w) {
+    return pack(nt::numeric::efu_sum_finite(x,y,z,w));
+}
+extern "C" uint64_t nt_vu_efu_reciprocal_finite(uint32_t x) {
+    return pack(nt::numeric::efu_reciprocal_finite(x));
+}
+extern "C" uint64_t nt_vu_efu_reciprocal_square_root_finite(uint32_t x) {
+    return pack(nt::numeric::efu_reciprocal_square_root_finite(x));
+}
 extern "C" uint64_t nt_vu_sine_finite(uint32_t x) {
     return pack(nt::numeric::sine_finite(x));
 }
