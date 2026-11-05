@@ -117,8 +117,10 @@ struct NativeRaster::Impl {
     VkDescriptorSetLayout field_descriptors{};
     VkPipelineLayout field_layout{}; VkPipeline field_pipeline{};
     // GPU palette slots (palette_slot_count x 256 words) followed by one
-    // 256-word address list per slot for the gather pass.
+    // 256-word address list per slot for the gather pass, then a staging
+    // area of (address, value, mask) entries for GPU image writes.
     static constexpr unsigned palette_slot_count=4096;
+    static constexpr unsigned scatter_offset=palette_slot_count*2*256,scatter_capacity=262144;
     VkBuffer palettes{}; VkDeviceMemory palette_memory{};
     // Lazily updated GPU copy of `source`: a page is current when its
     // mirror revision equals its backing revision.
@@ -133,6 +135,7 @@ struct NativeRaster::Impl {
         std::uint32_t slot=0,addresses=0,count=0;
         std::uint32_t texture_base=0,texture_pitch=0,format=0,bank=0,width=0,height=0;
         std::array<std::uint32_t,16> owned{};
+        std::uint32_t layout=0; // bit 0: surface in depth layout; bit 1: texture in depth layout
     };
     static_assert(sizeof(PaletteParameters)<=128);
 #ifdef ANYPS2_LLVM_TEXTURES
@@ -247,7 +250,10 @@ struct NativeRaster::Impl {
     VkDescriptorSet allocate_set(VkDescriptorSetLayout);
     void read_palette_words(std::uint32_t slot,std::array<std::uint32_t,256>& words);
     void palette_pass(Image& source,Image* output,const PaletteParameters&);
-    bool gpu_source(Region requested,Image*& holder,std::array<std::uint32_t,16>& owned);
+    bool gpu_source(Region requested,bool* rendered=nullptr);
+    // Applies host image writes (already in `source`) to rendered surfaces.
+    void scatter(std::span<const PixelWrite> writes,std::span<Image* const> targets);
+    std::vector<std::uint32_t> scatter_stamps,scatter_entry; std::uint32_t scatter_stamp=0;
     VkDescriptorSet bind_target(Image&,Image&,const TextureSet&,const Sprite&);
 };
 VkDeviceMemory NativeRaster::Impl::allocate(VkMemoryRequirements requirements,VkMemoryPropertyFlags flags,VkMemoryPropertyFlags preferred) {
@@ -488,7 +494,7 @@ void NativeRaster::Impl::initialize(unsigned family) {
     checked(field_result,"Create field reconstruction pipeline");
     {
         VkBufferCreateInfo pb{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        pb.size=VkDeviceSize(palette_slot_count)*2*256*sizeof(std::uint32_t);
+        pb.size=(VkDeviceSize(scatter_offset)+VkDeviceSize(scatter_capacity)*3)*sizeof(std::uint32_t);
         pb.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         checked(vkCreateBuffer(device,&pb,nullptr,&palettes),"Create GPU palettes");
         VkMemoryRequirements requirements{}; vkGetBufferMemoryRequirements(device,palettes,&requirements);
@@ -939,40 +945,55 @@ void NativeRaster::Impl::decode_texture(Image& image,const SpriteCommand& draw,R
     }
 }
 #endif
-// The one rendered 32-bit color surface holding newer words in `requested`
-// (none when CPU memory is current there), with the pages it owns. Other
-// pages come from the mirror, refreshed here. Fails when another surface
-// also holds newer words in the request, or the holder is not a plain CT32 view.
-bool NativeRaster::Impl::gpu_source(Region requested,Image*& holder,std::array<std::uint32_t,16>& owned) {
-    holder=nullptr; owned={};
-    for (auto& [key,image]:surfaces) {
-        if (!image || !image->dirty || !image->region.overlaps(requested)) continue;
-        bool newer=false;
-        for (unsigned word=requested.start,left=requested.length;left && !newer;) {
-            const unsigned page=(word/2048)%512;
-            newer=image->pages[page]>backing_revisions[page];
-            const unsigned step=std::min(left,2048-word%2048); word=(word+step)%store_words; left-=step;
-        }
-        if (!newer) continue;
-        if (holder || !image->valid || image->scratch || image->depth || image->format) return false;
-        holder=image.get();
-    }
+// Makes the GPU memory mirror current for `requested`. Pages whose newest
+// words are in backing memory are uploaded; pages a rendered 32-bit surface
+// holds are published from it by a GPU pass, so no readback is needed.
+// `rendered` reports whether any page is newer than backing memory. Fails
+// when no plain 32-bit surface holds the newest words of a page.
+bool NativeRaster::Impl::gpu_source(Region requested,bool* rendered) {
+    std::bitset<512> pages;
     for (unsigned word=requested.start,left=requested.length;left;) {
-        const unsigned page=(word/2048)%512;
-        if (holder && holder->pages[page]>backing_revisions[page]) owned[page/32]|=1U<<(page%32);
-        else if (mirror_revisions[page]!=backing_revisions[page]) {
-            // Same staging rule as upload_image: transfers keep their bytes until the fence.
-            if (2048*4>staging_bytes-staging_used) flush();
-            prepare_slot();
-            const auto offset=slot*staging_bytes+staging_used;
-            std::memcpy(static_cast<std::byte*>(mapped)+offset,source.data()+std::size_t(page)*2048,2048*4);
-            staging_used+=2048*4; order();
-            const VkBufferCopy copy{offset,VkDeviceSize(page)*2048*4,2048*4};
-            vkCmdCopyBuffer(command,staging,mirror,1,&copy);
-            mirror_revisions[page]=backing_revisions[page]; stats.upload_bytes+=2048*4;
-        }
+        pages.set((word/2048)%512);
         const unsigned step=std::min(left,2048-word%2048); word=(word+step)%store_words; left-=step;
     }
+    std::vector<std::pair<Image*,std::array<std::uint32_t,16>>> publish;
+    bool newer=false;
+    for (unsigned page=0;page<512;++page) if (pages[page]) {
+        const auto latest=source_revisions[page];
+        if (backing_revisions[page]<latest) {
+            Image* holder=nullptr;
+            for (auto& [key,image]:surfaces)
+                if (image && image->dirty && image->valid && !image->scratch && !image->format && image->pages[page]==latest) {
+                    holder=image.get(); break;
+                }
+            if (!holder) return false;
+            newer=true;
+            if (mirror_revisions[page]==latest) continue;
+            auto found=std::find_if(publish.begin(),publish.end(),[&](const auto& entry){return entry.first==holder;});
+            if (found==publish.end()) found=publish.insert(publish.end(),{holder,{}});
+            found->second[page/32]|=1U<<(page%32);
+            continue;
+        }
+        if (mirror_revisions[page]==latest) continue;
+        // Same staging rule as upload_image: transfers keep their bytes until the fence.
+        if (2048*4>staging_bytes-staging_used) flush();
+        prepare_slot();
+        const auto offset=slot*staging_bytes+staging_used;
+        std::memcpy(static_cast<std::byte*>(mapped)+offset,source.data()+std::size_t(page)*2048,2048*4);
+        staging_used+=2048*4; order();
+        const VkBufferCopy copy{offset,VkDeviceSize(page)*2048*4,2048*4};
+        vkCmdCopyBuffer(command,staging,mirror,1,&copy);
+        mirror_revisions[page]=latest; stats.upload_bytes+=2048*4;
+    }
+    for (const auto& [holder,owned]:publish) {
+        PaletteParameters parameters{};
+        parameters.mode=3; parameters.surface_base=holder->base; parameters.surface_pitch=holder->pitch;
+        parameters.width=holder->width; parameters.height=holder->height;
+        parameters.owned=owned; parameters.layout=holder->depth ? 1U : 0U;
+        palette_pass(*holder,nullptr,parameters);
+        for (unsigned page=0;page<512;++page) if (owned[page/32]&(1U<<(page%32))) mirror_revisions[page]=source_revisions[page];
+    }
+    if (rendered) *rendered=newer;
     return true;
 }
 void NativeRaster::Impl::palette_pass(Image& source,Image* output,const PaletteParameters& parameters) {
@@ -1000,7 +1021,7 @@ void NativeRaster::Impl::palette_pass(Image& source,Image* output,const PaletteP
     vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_COMPUTE,palette_pipeline);
     vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_COMPUTE,palette_layout,0,1,&set,0,nullptr);
     vkCmdPushConstants(command,palette_layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(parameters),&parameters);
-    if (parameters.mode==0) vkCmdDispatch(command,(parameters.count+7)/8,1,1);
+    if (parameters.mode==0 || parameters.mode==2) vkCmdDispatch(command,(parameters.count+7)/8,1,1);
     else vkCmdDispatch(command,(parameters.width+7)/8,(parameters.height+7)/8,1);
     order();
 }
@@ -1013,14 +1034,13 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
         const bool high=(d.flags&texture_high_flag)!=0;
         const auto r=region(d.texture_base,d.texture_pitch,width,height,high ? 0U : (d.flags&indexed8_flag) ? 2U : 1U);
         // Indexed data decodes on the GPU when its palette is GPU-resident or
-        // its index data was rendered: words come from the owning surface or
-        // the memory mirror, so neither needs a readback. A CPU palette is
-        // uploaded into a slot, reused while its snapshot is unchanged.
-        Image* holder=nullptr; std::array<std::uint32_t,16> owned{};
+        // its index data was rendered: words come from the GPU memory mirror,
+        // so neither needs a readback. A CPU palette is uploaded into a slot,
+        // reused while its snapshot is unchanged.
         const bool rendered=std::any_of(surfaces.begin(),surfaces.end(),[&](const auto& entry) {
             return entry.second && entry.second->dirty && entry.second->region.overlaps(r);
         });
-        if ((command.palette_slot || rendered) && gpu_source(r,holder,owned)) {
+        if ((command.palette_slot || rendered) && gpu_source(r)) {
             std::uint32_t slot=command.palette_slot,bank=command.palette_bank;
             if (!slot) {
                 if (!uploaded_palette || uploaded_snapshot!=command.palette) {
@@ -1040,17 +1060,14 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
                 found=textures.emplace(key,Texture{std::move(allocated),r}).first; ++stats.texture_misses;
             }
             auto& tex=found->second; tex.last_use=++texture_use;
-            const auto generation=std::max(source_revision(r),holder ? holder->revision : 0);
+            const auto generation=source_revision(r);
             if (!tex.valid || tex.source_revision!=generation || tex.palette_slot!=slot || tex.palette_bank!=bank) {
-                auto& bound=holder ? *holder : *tex.image;
                 PaletteParameters parameters{};
-                parameters.mode=1; parameters.surface_base=bound.base; parameters.surface_pitch=bound.pitch;
-                parameters.surface_width=holder ? bound.width : 0; parameters.surface_height=holder ? bound.height : 0;
-                parameters.slot=slot%palette_slot_count;
+                parameters.mode=1; parameters.slot=slot%palette_slot_count;
                 parameters.texture_base=d.texture_base; parameters.texture_pitch=d.texture_pitch;
                 parameters.format=high ? ((d.flags&indexed8_flag) ? 2U : (d.flags&texture_high_nibble_flag) ? 4U : 3U) : (d.flags&indexed8_flag) ? 0U : 1U;
-                parameters.bank=bank; parameters.width=width; parameters.height=height; parameters.owned=owned;
-                palette_pass(bound,tex.image.get(),parameters);
+                parameters.bank=bank; parameters.width=width; parameters.height=height;
+                palette_pass(*tex.image,tex.image.get(),parameters);
                 tex.valid=true; tex.source_revision=generation; tex.image->revision=generation;
                 tex.palette_slot=slot; tex.palette_bank=bank;
                 ++stats.gpu_indexed_decodes;
@@ -1117,6 +1134,25 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
                 order(); VkImageCopy copy{}; copy.srcSubresource=copy.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; copy.extent={width,height,1};
                 vkCmdCopyImage(this->command,from.image,VK_IMAGE_LAYOUT_GENERAL,tex.image->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
                 tex.image->revision=from.revision; tex.valid=true; stats.texture_snapshot_bytes+=std::size_t(width)*height*4;
+            }
+            return *tex.image;
+        }
+    }
+    // Other 32-bit views of rendered memory (offset tiles, other widths) are
+    // gathered on the GPU from the memory mirror.
+    if ((d.flags&1) && !(d.flags&64)) {
+        const bool rendered=std::any_of(surfaces.begin(),surfaces.end(),[&](const auto& entry) {
+            return entry.second && entry.second->dirty && entry.second->region.overlaps(r);
+        });
+        if (rendered && gpu_source(r)) {
+            const auto fetched=source_revision(r);
+            if (!tex.valid || tex.image->revision!=fetched) {
+                PaletteParameters parameters{};
+                parameters.mode=1; parameters.texture_base=d.texture_base; parameters.texture_pitch=d.texture_pitch; parameters.format=5;
+                parameters.layout=(d.flags&texture_z_flag) ? 2U : 0U;
+                parameters.width=width; parameters.height=height;
+                palette_pass(*tex.image,tex.image.get(),parameters);
+                tex.valid=true; tex.image->revision=fetched; ++stats.gpu_indexed_decodes;
             }
             return *tex.image;
         }
@@ -1248,11 +1284,11 @@ std::uint32_t NativeRaster::load_palette(std::span<const unsigned> addresses,uns
     }
     // With CPU memory current for every word and no GPU palette to extend,
     // the caller reads the words without a stall. Otherwise the words come
-    // from the owning surface or the memory mirror.
-    Impl::Image* holder=nullptr; std::array<std::uint32_t,16> owned{};
-    if (!r.gpu_source({low,high-low+1},holder,owned) || (!holder && !previous)) return 0;
+    // from the GPU memory mirror.
+    bool rendered=false;
+    if (!r.gpu_source({low,high-low+1},&rendered) || (!rendered && !previous)) return 0;
     if (!r.placeholder) r.placeholder=r.image(1,1);
-    auto* source=holder ? holder : r.placeholder.get();
+    auto* source=r.placeholder.get();
     const auto id=r.next_palette++;
     const auto slot=id%Impl::palette_slot_count;
     std::array<std::uint32_t,256> list{};
@@ -1264,10 +1300,8 @@ std::uint32_t NativeRaster::load_palette(std::span<const unsigned> addresses,uns
     } else vkCmdUpdateBuffer(r.command,r.palettes,VkDeviceSize(slot)*256*4,sizeof(current),current.data());
     vkCmdUpdateBuffer(r.command,r.palettes,VkDeviceSize(Impl::palette_slot_count+slot)*256*4,sizeof(list),list.data());
     Impl::PaletteParameters parameters{};
-    parameters.mode=0; parameters.surface_base=source->base; parameters.surface_pitch=source->pitch;
-    parameters.surface_width=holder ? source->width : 0; parameters.surface_height=holder ? source->height : 0;
-    parameters.slot=slot; parameters.addresses=(Impl::palette_slot_count+slot)*256;
-    parameters.count=unsigned(addresses.size()); parameters.bank=first; parameters.owned=owned;
+    parameters.mode=0; parameters.slot=slot; parameters.addresses=(Impl::palette_slot_count+slot)*256;
+    parameters.count=unsigned(addresses.size()); parameters.bank=first;
     r.palette_pass(*source,nullptr,parameters);
     ++r.stats.gpu_palette_loads;
     return id;
@@ -1297,20 +1331,79 @@ void NativeRaster::read_words(std::span<const unsigned> addresses,std::span<std:
 void NativeRaster::write(std::span<const PixelWrite> writes) {
     for (auto w:writes) if (w.address>=store_words || (w.value&~w.mask)) throw std::runtime_error("Invalid native resource write");
     auto& r=*impl_; Measure timing(r.stats.write_ns,r.profiling);
-    for (auto& [k,s]:r.surfaces) if (s && s->dirty && std::any_of(writes.begin(),writes.end(),[&](auto w){return s->region.contains(w.address);})) r.synchronize_source(s->region);
+    if (writes.empty()) return;
+    unsigned low=store_words,high=0;
+    for (auto w:writes) { low=std::min(low,w.address); high=std::max(high,w.address); }
+    const Region range{low,high-low+1};
+    // Rendered 32-bit views take host writes on the GPU and stay valid, so
+    // their newer pages need no readback. Other rendered views publish first.
+    std::vector<Impl::Image*> targets;
+    for (auto& [k,s]:r.surfaces) if (s && s->dirty && s->region.overlaps(range)) {
+        if (s->valid && !s->scratch && !s->format) targets.push_back(s.get());
+        else r.synchronize_source(s->region);
+    }
     unsigned first=store_words,last=0;
     for (auto w:writes) {
         auto& value=r.source[w.address]; const auto next=(value&~w.mask)|w.value; if (value==next) continue;
         value=next; first=std::min(first,w.address); last=std::max(last,w.address);
     }
+    if (!targets.empty()) r.scatter(writes,targets);
     if (first!=store_words) {
         // Conservative changed range; invalidate each view once per upload,
         // not once per pixel. Sparse/overlapping/masked writes stay ordered.
         const Region changed{first,last-first+1};
-        for (auto& [k,s]:r.surfaces) if (s && s->region.overlaps(changed)) s->valid=false;
-        ++r.revision; r.touch(changed);
-        for (unsigned page=first/2048;page<=last/2048;++page) r.backing_revisions[page]=r.revision;
+        const auto previous=r.source_revisions;
+        ++r.revision;
+        for (auto& [k,s]:r.surfaces) if (s && s->region.overlaps(changed)) {
+            if (std::find(targets.begin(),targets.end(),s.get())==targets.end()) { s->valid=false; continue; }
+            // A target current for a page received the writes, so it stays current.
+            for (unsigned page=first/2048;page<=last/2048;++page)
+                if (s->pages[page]==previous[page]) s->pages[page]=r.revision;
+        }
+        r.touch(changed);
+        // Pages a rendered view still holds newer words for stay owned by it;
+        // backing memory has only the written words there.
+        for (unsigned page=first/2048;page<=last/2048;++page)
+            if (previous[page]<=r.backing_revisions[page]) r.backing_revisions[page]=r.revision;
     }
+}
+void NativeRaster::Impl::scatter(std::span<const PixelWrite> writes,std::span<Image* const> targets) {
+    // Merge repeated addresses: the final masked bits equal memory's. A
+    // per-word stamp finds repeats in linear time.
+    if (scatter_stamps.empty()) { scatter_stamps.assign(store_words,0); scatter_entry.assign(store_words,0); }
+    if (++scatter_stamp==0) { std::fill(scatter_stamps.begin(),scatter_stamps.end(),0U); scatter_stamp=1; }
+    std::vector<PixelWrite> merged; merged.reserve(writes.size());
+    for (const auto w:writes) {
+        if (scatter_stamps[w.address]==scatter_stamp) { merged[scatter_entry[w.address]].mask|=w.mask; continue; }
+        scatter_stamps[w.address]=scatter_stamp; scatter_entry[w.address]=unsigned(merged.size()); merged.push_back(w);
+    }
+    const auto count=merged.size();
+    std::vector<std::uint32_t> entries; entries.reserve(std::min<std::size_t>(count,scatter_capacity)*3);
+    for (std::size_t start=0;start<count;start+=scatter_capacity) {
+        const auto n=std::min<std::size_t>(scatter_capacity,count-start);
+        entries.clear();
+        for (std::size_t i=start;i<start+n;++i) {
+            const auto w=merged[i];
+            entries.insert(entries.end(),{w.address,source[w.address]&w.mask,w.mask});
+        }
+        const auto bytes=entries.size()*sizeof(std::uint32_t);
+        if (bytes>staging_bytes-staging_used) flush();
+        prepare_slot();
+        const auto offset=slot*staging_bytes+staging_used;
+        std::memcpy(static_cast<std::byte*>(mapped)+offset,entries.data(),bytes);
+        staging_used+=bytes; order();
+        const VkBufferCopy copy{offset,VkDeviceSize(scatter_offset)*4,bytes};
+        vkCmdCopyBuffer(command,staging,palettes,1,&copy); stats.upload_bytes+=bytes;
+        for (auto* target:targets) {
+            PaletteParameters parameters{};
+            parameters.mode=2; parameters.surface_base=target->base; parameters.surface_pitch=target->pitch;
+            parameters.surface_width=target->width; parameters.surface_height=target->height;
+            parameters.addresses=scatter_offset; parameters.count=unsigned(n);
+            parameters.owned.fill(~0U); parameters.layout=target->depth ? 1U : 0U;
+            palette_pass(*target,nullptr,parameters);
+        }
+    }
+    for (auto* target:targets) target->revision=++revision;
 }
 bool NativeRaster::enable_vectors() {
     auto& r=*impl_;

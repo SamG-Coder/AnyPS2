@@ -130,10 +130,15 @@ wrapping frame stop with a diagnostic.
 32-bit palette loads and indexed textures (PSMT8, PSMT4 and the high-bit
 variants) whose data was rendered are resolved on the GPU: palettes are gathered
 into numbered GPU palette slots and textures are decoded by a compute pass that
-inverts the 32-bit page layout. Words come from the surface holding their newest
-data or from a lazily refreshed GPU copy of console memory, so the CPU never reads
-rendered memory back for them. Draws carry the palette slot instead of palette
-words; other uses read a slot back once.
+inverts the 32-bit page layout. They read a GPU copy of console memory: a page
+whose newest words are in backing memory is uploaded when stale, and a page that a
+plain 32-bit surface holds is published into the copy by a compute pass, so the
+CPU never reads rendered memory back for them. Other 32-bit texture views of
+rendered memory (other widths or offsets, or spanning several surfaces) are
+gathered the same way. Host image transfers into a rendered 32-bit surface are
+applied to the surface by a compute pass as well; the written pages stay owned by
+the surface. Draws carry the palette slot instead of palette words; other uses
+read a slot back once.
 TEX1 level-of-detail sampling binds MIPTBP levels 1-6 as separate native textures
 and selects the magnification or minification filter per pixel. LOD is computed
 in single-precision floating point from interpolated Q (or the sprite's Q), with

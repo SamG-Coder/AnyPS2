@@ -257,20 +257,14 @@ struct NativeGpu {
         }
         catch (const std::exception& error) { self.error=error.what(); return false; }
     }
-    static bool submit_consumed(void* raw,std::span<const nt::graphics::Packet> packets) {
-        if (!submit(raw,packets)) return false;
+    // VIF FLUSH boundary: the render queue already orders later commands
+    // after earlier ones, and presentation, FINISH and readbacks submit the
+    // recorded Vulkan work, so a FLUSH needs neither a host wait nor its own
+    // GPU submission. Data the program reads back joins the queue explicitly.
+    static bool fence(void* raw) {
         auto& self=*static_cast<NativeGpu*>(raw);
-        try { self.join(); return true; }
+        try { self.ensure_renderer(); return true; }
         catch (const std::exception& error) { self.error=error.what(); return false; }
-    }
-    static bool drain(void* raw) {
-        auto& self=*static_cast<NativeGpu*>(raw);
-        try {
-            const auto started=self.profile_commands ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-            self.ensure_renderer(); self.worker->drain(); self.render_time=self.worker->elapsed();
-            if (self.profile_commands) self.drain_time+=std::chrono::steady_clock::now()-started;
-            return true;
-        } catch (const std::exception& error) { self.error=error.what(); return false; }
     }
     static nt::ee::Stop poll(void* context) {
         auto& self=*static_cast<NativeGpu*>(context);
@@ -540,7 +534,9 @@ int main(int argc,char** argv) {
             std::cerr.put(static_cast<char>(byte));
             return std::cerr ? nt::ee::Stop::budget : nt::ee::Stop::unsupported_system;
         };
-        platform.packet_setup.graphics={&gpu,NativeGpu::submit_consumed,NativeGpu::drain,true};
+        // Direct GS packets join the ordered render queue without waiting for it
+        // to be recorded; parse errors stop the program when the queue reports them.
+        platform.packet_setup.graphics={&gpu,NativeGpu::submit,NativeGpu::fence,true};
         VuCapture capture;
 #if defined(ANYPS2_NATIVE_VU) || defined(ANYPS2_NATIVE_VU1)
         nt::ee::NativeVuUploads compiled_uploads;

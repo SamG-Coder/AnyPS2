@@ -208,6 +208,49 @@ void gpu_palettes(nt::graphics::VulkanRenderer& renderer) {
             throw std::runtime_error("Mirror-sourced PSMT8 texel differs from the GS palette lookup");
     }
 }
+// Host image writes into rendered memory and textures spanning several
+// rendered surfaces stay on the GPU: memory matches without a readback.
+void gpu_resident_memory(nt::graphics::VulkanRenderer& renderer) {
+    using namespace nt::graphics;
+    const auto ad=[](Packet& p,unsigned reg,std::uint64_t value) {
+        p.push_back({std::uint32_t(value),std::uint32_t(value>>32),reg,0});
+    };
+    const auto finish=[](Packet& p) { p[0]={0x8000U|unsigned(p.size()-1),0x10000000,14,0}; };
+    const auto shaded=[&](unsigned fbp,std::array<std::uint32_t,4> colors) {
+        Packet p(1); ad(p,0x1a,1); ad(p,0,3|8); ad(p,0x4c,fbp|(2ULL<<16));
+        ad(p,0x40,(127ULL<<16)|(31ULL<<48)); ad(p,0x46,1); ad(p,0x47,0x30000); ad(p,0x4e,200|(1ULL<<32));
+        const std::array<std::pair<unsigned,unsigned>,6> corners{{{0,0},{128,0},{0,32},{128,0},{0,32},{128,32}}};
+        const std::array<unsigned,6> which{0,1,2,1,2,3};
+        for (unsigned i=0;i<6;++i) { ad(p,1,colors[which[i]]); ad(p,5,(corners[i].first*16)|(std::uint64_t(corners[i].second*16)<<16)); }
+        finish(p); return p;
+    };
+    const std::array<std::uint32_t,4> colors{0x80102030,0x40f0a050,0x20409070,0xc0e0d0f0};
+    NativeDrawing d{true};
+    // Two surfaces hold the two page rows of one 128x64 CT32 view at 0; a third copy is the reference.
+    d.submit(renderer,std::array{shaded(0,colors),shaded(2,{0x80ff0000,0x8000ff00,0x800000ff,0x80ffffff}),shaded(20,colors)});
+    const auto before=renderer.statistics();
+    Packet t(1); ad(t,0x50,(2ULL<<48)); ad(t,0x51,(4ULL<<32)|(4ULL<<48)); ad(t,0x52,8|(8ULL<<32)); ad(t,0x53,0); finish(t);
+    Packet image; image.push_back({0x8000U|16,0x08000000,0,0}); // IMAGE, 16 quadwords: 8x8 CT32
+    for (unsigned i=0;i<16;++i) image.push_back({0x12345600+i*4,0x12345601+i*4,0x12345602+i*4,0x12345603+i*4});
+    Packet s(1); ad(s,0x1a,1); ad(s,0,6|16|256); ad(s,0x4c,40|(2ULL<<16)); ad(s,0x40,(127ULL<<16)|(63ULL<<48));
+    ad(s,0x46,1); ad(s,0x47,0x30000); ad(s,0x4e,200|(1ULL<<32));
+    ad(s,6,(2ULL<<14)|(7ULL<<26)|(6ULL<<30)|(1ULL<<34)|(1ULL<<35)); // CT32 128x64, decal
+    ad(s,1,0x80808080); ad(s,3,8|(8ULL<<16)); ad(s,5,0); ad(s,3,(128U*16+8)|((64ULL*16+8)<<16)); ad(s,5,(128U*16)|((64ULL*16)<<16));
+    finish(s);
+    d.submit(renderer,std::array{t,image,s});
+    const auto& after=renderer.statistics();
+    if (after.readback_bytes!=before.readback_bytes || after.texture_readbacks!=before.texture_readbacks)
+        throw std::runtime_error("Rendered memory was read back for a host write or a multi-surface texture");
+    const auto& memory=d.pixels();
+    for (unsigned y=0;y<32;++y) for (unsigned x=0;x<128;++x) {
+        const bool written=x>=4 && x<12 && y>=4 && y<12;
+        const auto expected=written ? 0x12345600+(y-4)*8+(x-4) : memory[rgba_word(20*32,2,x,y)];
+        if (memory[rgba_word(0,2,x,y)]!=expected) throw std::runtime_error("Host image write into a rendered surface lost a pixel");
+    }
+    for (unsigned y=0;y<64;++y) for (unsigned x=0;x<128;++x)
+        if (memory[rgba_word(40*32,2,x,y)]!=memory[rgba_word(0,2,x,y)])
+            throw std::runtime_error("Texture spanning two rendered surfaces differs from memory");
+}
 void triangles(nt::graphics::VulkanRenderer& renderer) {
     using nt::graphics::Packet;
     using nt::graphics::RasterVertex;
@@ -648,6 +691,7 @@ int main() {
         triangles(consumer.renderer);
         depth_and_coverage(consumer.renderer);
         gpu_palettes(consumer.renderer);
+        gpu_resident_memory(consumer.renderer);
         std::cout<<"Compiled VU to Vulkan drawing integration passed\n";
         return 0;
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
