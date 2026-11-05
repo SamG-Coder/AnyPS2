@@ -47,7 +47,7 @@ StorageRange texture_storage(const Sprite& draw) {
     };
     const auto x=maximum(draw.texture_width,draw.clamp_u,draw.min_u,draw.max_u);
     const auto y=maximum(draw.texture_height,draw.clamp_v,draw.min_v,draw.max_v);
-    const auto page=(draw.flags&64) ? (y/((draw.flags&indexed8_flag) ? 64 : 128))*(draw.texture_pitch/2)+x/128
+    const auto page=(draw.flags&64) && !(draw.flags&texture_high_flag) ? (y/((draw.flags&indexed8_flag) ? 64 : 128))*(draw.texture_pitch/2)+x/128
                                     : (y/32)*draw.texture_pitch+x/64;
     return {VkDeviceSize(draw.texture_base)*256,std::min(memory_bytes,VkDeviceSize(page+1)*8192)};
 }
@@ -459,7 +459,7 @@ namespace {
 void validate_sprite(const Sprite& draw) {
     if ((draw.flags&indexed8_flag) && !(draw.flags&64)) throw std::runtime_error("Invalid indexed texture flags");
 
-    if (draw.flags&~(((1U<<22)-1)|line_flag|indexed8_flag|fog_flag|color_16_flag|color_16s_flag|color_z_flag|texture_z_flag)) throw std::runtime_error("Unknown Vulkan draw flags");
+    if (draw.flags&~(((1U<<22)-1)|line_flag|indexed8_flag|fog_flag|color_16_flag|color_16s_flag|color_z_flag|texture_z_flag|texture_high_flag)) throw std::runtime_error("Unknown Vulkan draw flags");
     if ((draw.flags&color_16s_flag) && !(draw.flags&color_16_flag)) throw std::runtime_error("Invalid 16-bit surface flags");
     if ((draw.flags&color_16_flag) && draw.right>draw.pitch*64) throw std::runtime_error("Wrapped 16-bit render target requires explicit mapping");
     if ((draw.flags&line_flag) && (draw.flags&(1|triangle_flag|perspective_triangle_flag)))

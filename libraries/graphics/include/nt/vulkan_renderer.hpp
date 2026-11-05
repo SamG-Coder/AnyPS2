@@ -34,6 +34,13 @@ inline constexpr std::uint32_t color_16_flag=1U<<27, color_16s_flag=1U<<28;
 inline constexpr std::uint32_t color_z_flag=1U<<29;
 // A Z32/Z24 texture: sampled as CT32/CT24 in the depth page layout.
 inline constexpr std::uint32_t texture_z_flag=1U<<30;
+// PSMT8H/PSMT4HL/PSMT4HH: the palette index is in the top bits of a CT32-layout
+// word (bits 24-31, 24-27 or 28-31). With texture_high_flag, bit 30 selects
+// bits 28-31 of a 4-bit index; texture_z_flag applies only to direct textures.
+inline constexpr std::uint32_t texture_high_flag=1U<<31, texture_high_nibble_flag=1U<<30;
+inline unsigned texture_high_index(std::uint32_t flags,std::uint32_t word) {
+    return (flags&indexed8_flag) ? word>>24 : (word>>((flags&texture_high_nibble_flag) ? 28 : 24))&15U;
+}
 struct RasterVertex {
     std::int32_t x=0,y=0;
     std::uint32_t color=0;

@@ -879,9 +879,10 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
             height=std::min(height,found->second->height);
         }
     }
-    std::array<std::uint32_t,261> key{d.texture_base,d.texture_pitch,width,height,d.flags&(65|indexed8_flag|texture_z_flag)};
+    std::array<std::uint32_t,261> key{d.texture_base,d.texture_pitch,width,height,d.flags&(65|indexed8_flag|texture_z_flag|texture_high_flag)};
     if (d.flags&64) std::copy(command.palette.begin(),command.palette.end(),key.begin()+5);
-    const auto r=(d.flags&1) ? region(d.texture_base,d.texture_pitch,width,height,(d.flags&indexed8_flag) ? 2U : (d.flags&64) ? 1U : 0U) : Region{};
+    const bool high=(d.flags&texture_high_flag)!=0;
+    const auto r=(d.flags&1) ? region(d.texture_base,d.texture_pitch,width,height,high ? 0U : (d.flags&indexed8_flag) ? 2U : (d.flags&64) ? 1U : 0U) : Region{};
     auto found_texture=textures.find(key);
     if (found_texture==textures.end()) {
         auto allocated=image(width,height);
@@ -926,7 +927,7 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
     for (auto& [k,i]:surfaces) if (i && i->dirty && i->region.overlaps(r)) { ++stats.texture_readbacks; synchronize_source(r); tex.valid=false; break; }
     if (!tex.valid) {
 #ifdef ANYPS2_LLVM_TEXTURES
-        if ((d.flags&1) && !(d.flags&texture_z_flag)) {
+        if ((d.flags&1) && !(d.flags&(texture_z_flag|texture_high_flag))) {
             decode_texture(*tex.image,command,r); tex.valid=true;
             return *tex.image;
         }
@@ -935,7 +936,8 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
         { Measure timing(stats.texture_decode_ns,profiling);
         if (d.flags&1) for (unsigned y=0;y<height;++y) for (unsigned x=0;x<width;++x) {
             std::uint32_t value;
-            if (d.flags&indexed8_flag) { const auto byte=indexed_byte(d.texture_base,d.texture_pitch,x,y); value=command.palette[(source[byte/4]>>((byte%4)*8))&255]; }
+            if (high) value=command.palette[texture_high_index(d.flags,source[rgba_word(d.texture_base,d.texture_pitch,x,y)])];
+            else if (d.flags&indexed8_flag) { const auto byte=indexed_byte(d.texture_base,d.texture_pitch,x,y); value=command.palette[(source[byte/4]>>((byte%4)*8))&255]; }
             else if (d.flags&64) { const auto nibble=indexed_nibble(d.texture_base,d.texture_pitch,x,y); value=command.palette[(source[nibble/8]>>((nibble%8)*4))&15]; }
             else value=source[rgba_word(d.texture_base,d.texture_pitch,x,y)^((d.flags&texture_z_flag) ? 0x600U : 0U)];
             pixels[std::size_t(y)*width+x]=value;
@@ -1181,7 +1183,7 @@ void NativeRaster::draw(std::span<const SpriteCommand> commands) {
     SpriteCommand cached_command{};
     const auto same_texture=[](const SpriteCommand& a,const SpriteCommand& b) {
         const auto& x=a.draw; const auto& y=b.draw;
-        constexpr unsigned formats=65|indexed8_flag;
+        constexpr unsigned formats=65|indexed8_flag|texture_z_flag|texture_high_flag;
         return (x.flags&formats)==(y.flags&formats) &&
             x.texture_base==y.texture_base && x.texture_pitch==y.texture_pitch &&
             x.texture_width==y.texture_width && x.texture_height==y.texture_height &&
@@ -1215,7 +1217,7 @@ void NativeRaster::draw(std::span<const SpriteCommand> commands) {
                 const auto planned=level ? texture_level_command(c,level).draw : d;
                 const auto& texture=*textures[level];
                 const auto source=(d.flags&1) ? region(planned.texture_base,planned.texture_pitch,texture.width,texture.height,
-                    (d.flags&indexed8_flag) ? 2U : (d.flags&64) ? 1U : 0U) : Region{};
+                    (d.flags&texture_high_flag) ? 0U : (d.flags&indexed8_flag) ? 2U : (d.flags&64) ? 1U : 0U) : Region{};
                 const bool full_texture=!(d.flags&1) ||
                     (texture.width==texture_extent(planned.texture_width,planned.clamp_u,planned.min_u,planned.max_u) &&
                      texture.height==texture_extent(planned.texture_height,planned.clamp_v,planned.min_v,planned.max_v));

@@ -40,7 +40,10 @@ inline TextureLevels plan_texture(Sprite& draw,std::uint64_t texture,
     std::uint64_t filter,std::uint64_t clamp,std::uint32_t texa,const std::array<std::uint64_t,2>& mipmap_bases) {
     const unsigned format=(texture>>20)&63,function=(texture>>35)&3;
     const bool depth_layout=format==0x30 || format==0x31;
-    if (format>1 && format!=19 && format!=20 && !depth_layout)
+    // PSMT8H (0x1b), PSMT4HL (0x24) and PSMT4HH (0x2c) index the palette from
+    // the top bits of 32-bit words.
+    const bool high_index=format==0x1b || format==0x24 || format==0x2c;
+    if (format>1 && format!=19 && format!=20 && !depth_layout && !high_index)
         throw std::invalid_argument("Unsupported texture format PSM="+std::to_string(format)+" TFX="+std::to_string(function));
     bool linear=false;
     auto levels=plan_texture_levels(filter,mipmap_bases,linear);
@@ -50,14 +53,15 @@ inline TextureLevels plan_texture(Sprite& draw,std::uint64_t texture,
     draw.texture_base=texture&16383; draw.texture_pitch=(texture>>14)&63;
     draw.texture_width=1U<<tw; draw.texture_height=1U<<th;
     draw.flags|=1|(format==1 || format==0x31 ? 2U : 0U)|(((texture>>34)&1) ? 4U : 0U)|(function<<3)|(depth_layout ? texture_z_flag : 0U);
-    if (format==19 || format==20) {
+    if (format==19 || format==20 || high_index) {
         const unsigned palette_format=(texture>>51)&15;
         if (palette_format>1 && palette_format!=2 && palette_format!=10)
             throw std::invalid_argument("Unsupported palette sampling format");
-        if ((palette_format==2 || palette_format==10) && format==19 && ((texture>>56)&31)>16)
+        if ((palette_format==2 || palette_format==10) && (format==19 || format==0x1b) && ((texture>>56)&31)>16)
             throw std::invalid_argument("16-bit palette sampling across palette capacity is unsupported");
         draw.flags|=64|(palette_format==1 ? 2U : 0U);
-        if (format==19) draw.flags|=indexed8_flag;
+        if (format==19 || format==0x1b) draw.flags|=indexed8_flag;
+        if (high_index) draw.flags|=texture_high_flag|(format==0x2c ? texture_high_nibble_flag : 0U);
     }
     draw.clamp_u=clamp&3; draw.clamp_v=(clamp>>2)&3;
     draw.min_u=(clamp>>4)&1023; draw.max_u=(clamp>>14)&1023;

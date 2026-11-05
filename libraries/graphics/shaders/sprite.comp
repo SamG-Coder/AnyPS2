@@ -66,8 +66,12 @@ uint texel_at(int u,int v) {
         uint tx=wrap(u,draw.texture_width,draw.clamp_u,draw.min_u,draw.max_u);
         uint ty=wrap(v,draw.texture_height,draw.clamp_v,draw.min_v,draw.max_v);
         uint texture_offset=(draw.flags&4194304)!=0 ? 0 : 1048576;
-        uint texel=memory.pixels[texture_offset+(address(draw.texture_base,draw.texture_pitch,tx,ty)^((draw.flags&1073741824u)!=0 ? 0x600u : 0u))]; // texture_z_flag
-        if((draw.flags&64)!=0) {
+        const bool high=(draw.flags&2147483648u)!=0; // texture_high_flag
+        uint texel=memory.pixels[texture_offset+(address(draw.texture_base,draw.texture_pitch,tx,ty)^((!high && (draw.flags&1073741824u)!=0) ? 0x600u : 0u))]; // texture_z_flag
+        if(high) {
+            uint index=(draw.flags&33554432)!=0 ? texel>>24 : (texel>>((draw.flags&1073741824u)!=0 ? 28 : 24))&15u;
+            texel=memory.pixels[2097152+index];
+        } else if((draw.flags&64)!=0) {
             bool eight=(draw.flags&33554432)!=0;
             uint nibble=eight ? byte_address(draw.texture_base,draw.texture_pitch,tx,ty)*2 : nibble_address(draw.texture_base,draw.texture_pitch,tx,ty);
             uint index=(memory.pixels[texture_offset+nibble/8]>>((nibble%8)*4))&(eight ? 255 : 15);

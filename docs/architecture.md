@@ -122,7 +122,7 @@ It is applied while the game keeps jittering and dropped after about a second
 without jitter. It is presentation only; captures and readbacks are unfiltered.
 Z32 and Z24 frame and texture formats are drawn and sampled as CT32 and CT24 in
 the depth page block order (block number XOR 24), the layout depth buffers use.
-Z16 formats as colour targets or textures remain unsupported. A draw to a
+Z16 formats as colour targets or textures remain unsupported. PSMT8H, PSMT4HL and PSMT4HH textures take their palette index from bits 24-31, 24-27 or 28-31 of the CT32-layout word at each texel. A draw to a
 zero-width frame (FBW=0) with RGB masked and depth writes off is dropped and
 counted as a fallback: on the GS its only effect would be alpha bytes wrapped into
 32 aliased rows at FBP, which is not modelled. Other zero-width targets stop.

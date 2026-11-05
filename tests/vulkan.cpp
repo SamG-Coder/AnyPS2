@@ -266,6 +266,17 @@ int main(int argc,char**) {
         set_palette(1);
         native.submit(gpu,std::array{indexed});
         if (native.pixels()[2048]!=0x80110004) throw std::runtime_error("Native palette reload missed updated image data");
+        // PSMT4HL/PSMT4HH index the same palette from bits 24-27 / 28-31 of the
+        // CT32 word at the texel (entry i holds 0x80110000+i here).
+        for (const auto [format,shift]:{std::pair<std::uint64_t,unsigned>{0x24,24},{0x2c,28}}) {
+            auto high=indexed;
+            const auto value=(indexed_description&~(63ULL<<20))|(format<<20)|(1ULL<<61);
+            high[6][0]=std::uint32_t(value); high[6][1]=std::uint32_t(value>>32);
+            native.submit(gpu,std::array{setup32,rgba,high});
+            if (native.pixels()[2048]!=0x80110000U+((rgba[1][0]>>shift)&15U))
+                throw std::runtime_error("High-bit 4-bit texture index sampled the wrong palette entry");
+        }
+        native.submit(gpu,std::array{indexed});
         const auto palette_snapshot=native.pixels();
         for (std::size_t i=1;i<palette_image.size();++i) for (auto& lane:palette_image[i]) lane+=0x10000;
         rejected=false;
