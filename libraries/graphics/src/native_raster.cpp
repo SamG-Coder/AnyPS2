@@ -297,7 +297,7 @@ void NativeRaster::Impl::append_draw(VkDescriptorSet set,const SpriteCommand& c)
 void NativeRaster::Impl::end_pass() { if (in_pass) { flush_batch(); vkCmdEndRenderPass(command); in_pass=false; current_framebuffer={}; hazards.clear(); bound_set={}; bound_pipeline={}; } }
 void NativeRaster::Impl::order() {
     end_pass(); begin(); VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER}; b.srcAccessMask=b.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
-    vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,1,&b,0,nullptr,0,nullptr);
+    vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,1,&b,0,nullptr,0,nullptr); ++stats.ordering_barriers;
 }
 void NativeRaster::Impl::collect(unsigned index,bool wait) {
     auto& entry=slots[index];
@@ -1206,7 +1206,7 @@ VkDescriptorSet NativeRaster::Impl::bind_target(Image& color,Image& depth,const 
     }
     if (!in_pass || current_framebuffer!=fb) {
         order(); VkRenderPassBeginInfo b{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO}; b.renderPass=render_pass; b.framebuffer=fb; b.renderArea.extent={color.width,height};
-        vkCmdBeginRenderPass(command,&b,VK_SUBPASS_CONTENTS_INLINE); in_pass=true; current_framebuffer=fb; current_width=color.width; current_height=height;
+        vkCmdBeginRenderPass(command,&b,VK_SUBPASS_CONTENTS_INLINE); in_pass=true; ++stats.render_passes; current_framebuffer=fb; current_width=color.width; current_height=height;
         const VkViewport viewport{0,0,float(current_width),float(current_height),0,1};
         const VkRect2D scissor{{0,0},{current_width,current_height}};
         vkCmdSetViewport(command,0,1,&viewport); vkCmdSetScissor(command,0,1,&scissor);
@@ -1347,7 +1347,12 @@ void NativeRaster::write(std::span<const PixelWrite> writes) {
         auto& value=r.source[w.address]; const auto next=(value&~w.mask)|w.value; if (value==next) continue;
         value=next; first=std::min(first,w.address); last=std::max(last,w.address);
     }
-    if (!targets.empty()) r.scatter(writes,targets);
+    if (!targets.empty()) {
+        r.scatter(writes,targets);
+        // A rendered surface can differ from memory even where a write leaves
+        // memory unchanged, so every written word counts as a change.
+        first=std::min(first,low); last=std::max(last,high);
+    }
     if (first!=store_words) {
         // Conservative changed range; invalidate each view once per upload,
         // not once per pixel. Sparse/overlapping/masked writes stay ordered.

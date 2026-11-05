@@ -232,10 +232,12 @@ private:
     // Games commonly jitter XYOFFSET by a fraction of a pixel every frame (for
     // example a three-step vertical cycle) so that an interlaced CRT blends the
     // images into anti-aliased edges. A progressive display shows that as the
-    // whole picture trembling. Changes smaller than one pixel on both axes keep
-    // drawing at the established offset, as a modern renderer keeps its camera
-    // still; a move of a pixel or more takes effect at once. This deliberately
-    // differs from the GS by less than one pixel of placement.
+    // whole picture trembling. An offset within one pixel on both axes of a
+    // recently established offset draws at that offset, as a modern renderer
+    // keeps its camera still; other offsets take effect at once and become
+    // established. Several are kept, so passes alternating between offsets (a
+    // 3D view and an overlay) each stay still. This deliberately differs from
+    // the GS by less than one pixel of placement.
     static void set_offset(Context& context,std::uint64_t value);
     // FBW=0 places a frame's pages side by side along x: for rows 0-31 every
     // address equals that of a 2048-pixel-wide (FBW=32) frame, and row y uses
@@ -260,6 +262,7 @@ private:
         // XYOFFSET as written; offset is the stabilized value used for drawing.
         std::uint64_t written_offset=0;
         bool offset_written=false;
+        std::array<std::uint64_t,8> established{}; unsigned established_count=0,established_next=0;
         std::uint32_t jitter_y=0; // largest vertical change held back, in 1/16 pixel
         std::array<std::uint64_t,2> mipmap_bases{};
         bool force_alpha=false;
@@ -818,10 +821,22 @@ inline void NativeDrawing::set_offset(Context& context,std::uint64_t value) {
         return x>y ? x-y : y-x;
     };
     context.written_offset=value;
-    if (context.offset_written && distance(value,context.offset,0)<16 && distance(value,context.offset,32)<16) {
-        context.jitter_y=std::max(context.jitter_y,std::uint32_t(distance(value,context.offset,32)));
+    // The nearest established offset within a pixel on both axes.
+    unsigned nearest=context.established_count; std::int32_t best=32;
+    for (unsigned i=0;i<context.established_count;++i) {
+        const auto anchor=context.established[i];
+        const auto x=distance(value,anchor,0),y=distance(value,anchor,32);
+        if (x<16 && y<16 && x+y<best) { best=x+y; nearest=i; }
+    }
+    if (nearest<context.established_count) {
+        const auto anchor=context.established[nearest];
+        context.jitter_y=std::max(context.jitter_y,std::uint32_t(distance(value,anchor,32)));
+        context.offset=anchor; context.offset_written=true;
         return;
     }
+    context.established[context.established_next]=value;
+    context.established_next=(context.established_next+1)%context.established.size();
+    context.established_count=std::min<unsigned>(context.established_count+1,context.established.size());
     context.offset=value; context.offset_written=true;
 }
 }

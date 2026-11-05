@@ -884,7 +884,7 @@ int main(int argc,char** argv) {
                     <<" validation_errors="<<gpu.renderer->validation_errors()
                     <<" submissions="<<s.submissions-p.submissions<<" uploads="<<s.uploads-p.uploads
                     <<" triangles="<<s.triangles-p.triangles<<" barriers="<<s.feedback_barriers-p.feedback_barriers
-                    <<" draw_calls="<<s.draw_calls-p.draw_calls<<" batched_primitives="<<s.batched_primitives-p.batched_primitives<<'\n'<<std::flush;
+                    <<" draw_calls="<<s.draw_calls-p.draw_calls<<" batched_primitives="<<s.batched_primitives-p.batched_primitives<<" render_passes="<<s.render_passes-p.render_passes<<" gpu_palette_loads="<<s.gpu_palette_loads-p.gpu_palette_loads<<" gpu_indexed_decodes="<<s.gpu_indexed_decodes-p.gpu_indexed_decodes<<" ordering_barriers="<<s.ordering_barriers-p.ordering_barriers<<'\n'<<std::flush;
                 if (gpu.gpu_triangles) for (const auto& [reason,count]:gpu.drawing.gpu_packet_fallbacks())
                     std::cout<<"gpu_triangle_fallback count="<<count<<" reason="<<reason<<'\n';
                 presented->intervals.clear(); presented->updates=0; profile_started=now;

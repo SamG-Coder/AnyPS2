@@ -250,6 +250,21 @@ void gpu_resident_memory(nt::graphics::VulkanRenderer& renderer) {
     for (unsigned y=0;y<64;++y) for (unsigned x=0;x<128;++x)
         if (memory[rgba_word(40*32,2,x,y)]!=memory[rgba_word(0,2,x,y)])
             throw std::runtime_error("Texture spanning two rendered surfaces differs from memory");
+    // Re-uploading bytes memory already holds over newer rendered pixels must
+    // restore them: the write differs from the surface, not from memory.
+    const std::vector<std::uint32_t> uploaded(memory.begin(),memory.end());
+    d.submit(renderer,std::array{shaded(0,{0xff000000,0xff000000,0xff000000,0xff000000}),s});
+    Packet same(1); same.push_back({0x8000U|16,0x08000000,0,0});
+    for (unsigned i=0;i<16;++i) {
+        std::array<std::uint32_t,4> words{};
+        for (unsigned j=0;j<4;++j) words[j]=uploaded[rgba_word(0,2,4+(i*4+j)%8,4+(i*4+j)/8)];
+        same.push_back({words[0],words[1],words[2],words[3]});
+    }
+    d.submit(renderer,std::array{t,same,s});
+    const auto& restored=d.pixels();
+    for (unsigned y=4;y<12;++y) for (unsigned x=4;x<12;++x)
+        if (restored[rgba_word(40*32,2,x,y)]!=uploaded[rgba_word(0,2,x,y)])
+            throw std::runtime_error("Unchanged-memory upload over rendered pixels was not sampled");
 }
 void triangles(nt::graphics::VulkanRenderer& renderer) {
     using nt::graphics::Packet;
@@ -338,6 +353,9 @@ void triangles(nt::graphics::VulkanRenderer& renderer) {
         throw std::runtime_error("Sub-pixel XYOFFSET jitter moved the drawing");
     if (offset_triangle({at(16,16),at(16,32)})!=offset_triangle({at(16,32)}) || offset_triangle({at(16,32)})==settled)
         throw std::runtime_error("A whole-pixel XYOFFSET change did not move the drawing");
+    // Passes alternating with another offset keep their own established offset.
+    if (offset_triangle({at(16,16),at(16,32),jitter})!=settled)
+        throw std::runtime_error("Sub-pixel jitter after an alternate offset moved the drawing");
     nt::graphics::NativeDrawing textured;
     Packet upload(1);
     ad(upload,0x50,(32ULL<<32)|(1ULL<<48)); ad(upload,0x51,0);

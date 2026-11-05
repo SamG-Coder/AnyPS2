@@ -87,7 +87,7 @@ struct RenderStatistics {
     std::array<std::uint32_t,8> last_surface_conflict{}; // base, pitch, height, depth for each view.
     std::uint64_t uploads=0,feedback_barriers=0,gpu_ns=0;
     std::uint64_t vector_gpu_ns=0; // vector batch compute, submitted before a slot's draws
-    std::uint64_t draw_calls=0,batched_primitives=0;
+    std::uint64_t draw_calls=0,batched_primitives=0,render_passes=0,ordering_barriers=0;
     bool gpu_timing_supported=false;
     bool ordered_fragment_access=false;
     bool llvm_texture_kernels=false;
