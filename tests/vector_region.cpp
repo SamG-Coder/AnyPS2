@@ -105,9 +105,18 @@ int main(int argc,char** argv) {
                 if (fault==2) state.integers[2]=state.integers[3];
                 // Zero is a valid one-iteration count when the backed-up counter is compared.
                 if (fault==3) state.integers[8]=region.trip_offset ? 1000 : 0;
-                if (fault==4) state.pending_mac_mask=1;
+                if (fault==4) state.p_pending=1; // Element kernels read P from the entry.
                 if (fault==5) state.integers[3]=std::uint16_t(region.unit ? 1020:250);
                 rejects_unchanged(state,[&]{nt::render::execute_vector_region(region,state);});
+            }
+            // Heads reached during execution carry the loop's own in-flight FMAC
+            // results and integer branch backup; regions absorb them exactly.
+            for (unsigned warm:{1U,2U}) for (unsigned count:{3U,7U,20U}) {
+                auto entered=initial(region,count+warm,warm+90);
+                for (unsigned i=0;i<warm;++i) require(region.iteration(&entered)==nt::vu::Result::transfer,"Warm-up iteration failed");
+                const auto expected=reference(region,entered,count);
+                nt::render::execute_vector_region(region,entered);
+                compare(entered,expected); ++checks;
             }
             auto state=initial(region,20,8);
             rejects_unchanged(state,[&]{nt::render::execute_vector_region(region,state,failed_kernel);});

@@ -5,6 +5,7 @@
 #include <nt/element_range.hpp>
 #include <nt/vector_region_codegen.hpp>
 #include <charconv>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -79,6 +80,48 @@ template<class T> T number(std::string_view text,int base=10) {
 unsigned decimal(std::string_view text) { return number<unsigned>(text); }
 }
 int main(int argc,char** argv) {
+    if (argc==6 && std::string_view(argv[1])=="--regions") {
+        // Every loop of a whole-entry image: accepted regions as separate LLVM
+        // modules (boundary, elements, binding), a head-to-binding table module,
+        // and a manifest recording each loop's acceptance or rejection reason.
+        try {
+            const auto unit=decimal(argv[3]),destination=decimal(argv[4]);
+            const std::filesystem::path directory=argv[5];
+            if (std::filesystem::exists(directory)) throw std::invalid_argument("Region output directory already exists");
+            const auto program=nt::vu::frame(nt::read_file(argv[2],unit ? 16384:4096),unit,destination);
+            std::vector<unsigned> entries;
+            for (const auto& pair:program) entries.push_back(pair.address);
+            std::filesystem::create_directory(directory);
+            std::ostringstream manifest,table;
+            manifest<<"head\tresult\treason\n";
+            std::vector<std::pair<unsigned,std::string>> accepted;
+            for (const auto& loop:nt::render::find_loop_regions(program,unit)) {
+                try {
+                    const auto region=nt::render::analyze_vector_region(program,unit,entries,loop.head);
+                    const auto symbol="nt_vu"+std::to_string(unit)+"_region_"+std::to_string(loop.head);
+                    std::ostringstream boundary,elements,binding;
+                    nt::render::emit_vector_region_llvm(boundary,elements,binding,region,symbol);
+                    for (const auto& [part,text]:{std::pair{"boundary",boundary.str()},{"elements",elements.str()},{"binding",binding.str()}})
+                        nt::write_text_file(directory/(symbol+"."+part+".ll"),text);
+                    accepted.push_back({loop.head,symbol});
+                    manifest<<loop.head<<"\taccepted\t\n";
+                } catch (const std::invalid_argument& error) {
+                    manifest<<loop.head<<"\trejected\t"<<error.what()<<"\n";
+                }
+            }
+            const auto prefix="nt_vu"+std::to_string(unit)+"_region";
+            for (const auto& [head,symbol]:accepted) table<<"@"<<symbol<<" = external constant i8\n";
+            table<<"@"<<prefix<<"_table = private constant ["<<accepted.size()<<" x { i32, ptr }] [";
+            for (std::size_t i=0;i<accepted.size();++i)
+                table<<(i ? ", " : "")<<"{ i32, ptr } { i32 "<<accepted[i].first<<", ptr @"<<accepted[i].second<<" }";
+            table<<"]\ndefine ptr @"<<prefix<<"s() {\n  ret ptr @"<<prefix<<"_table\n}\n"
+                 <<"define i32 @"<<prefix<<"_count() {\n  ret i32 "<<accepted.size()<<"\n}\n";
+            nt::write_text_file(directory/(prefix+"_table.ll"),table.str());
+            nt::write_text_file(directory/"regions.tsv",manifest.str());
+            std::cout<<"Emitted "<<accepted.size()<<" vector regions; LLVM compilation and linking remain separate stages.\n";
+            return 0;
+        } catch (const std::exception& error) { std::cerr<<"Vector regions: "<<error.what()<<'\n'; return 1; }
+    }
     if (argc>=8 && std::string_view(argv[1])=="--region") {
         try {
             const auto unit=decimal(argv[3]),destination=decimal(argv[4]),head=decimal(argv[5]);
@@ -132,6 +175,7 @@ int main(int argc,char** argv) {
         std::cerr<<"Usage: ps2-vu-loop-probe <isolated-loop.bin> <unit:0|1> <destination-index> "
                    "<manifest|cpu-llvm|spirv-llvm> --native-f32\n"
                    "       ps2-vu-loop-probe --region <image> <unit> <destination> <head> boundary|elements|binding <entries...>\n"
+                   "       ps2-vu-loop-probe --regions <whole-entry-image> <unit> <destination> <new-output-directory>\n"
                    "       ps2-vu-loop-probe --structure <program-image.bin> <unit:0|1> <destination-index>\n"
                    "       ps2-vu-loop-probe --element <program-image.bin> <unit> <destination> <loop-head> cpu|vulkan|guard\n"
                    "       ps2-vu-loop-probe --element-binding <program-image.bin> <unit> <destination> <loop-head> "

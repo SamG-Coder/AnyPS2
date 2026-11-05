@@ -386,8 +386,29 @@ other than the draw must first call `materialize_region_outputs`, which runs the
 same AOT kernel and yields exactly the `execute_vector_region` state. Batches of
 fewer than three vertices are rejected for drawing, because they would leave
 GPU-owned vertex-queue state; such regions are materialized and kicked normally.
-Deciding automatically that only a graphics kick consumes the rows, and installing
-the service in converted programs, remain open. No speed claim is made.
+Deciding automatically that only a graphics kick consumes the rows remains open.
+No speed claim is made.
+
+Entries need not be quiescent. Heads reached during execution carry the loop's
+own in-flight FMAC/clip results and the integer branch backup; the service runs
+enough original iterations (FMAC/clip results publish within four pairs) before
+the first element, and the first pair at a head replaces the backup. Pending or
+delayed Q/P results and a pending kick are still rejected, because element
+kernels read Q and P from the entry state.
+
+## Converted programs
+
+`ps2-vu-loop-probe --regions <whole-entry-image> <unit> <destination> <directory>`
+analyzes every loop of an image, writes each accepted region's boundary, element
+and binding modules, a head-to-binding table and `regions.tsv` with each loop's
+acceptance or rejection reason. A converted project links that directory with
+`ANYPS2_VU1_REGIONS`; the VU program then carries loop substitutes, a typed
+callback the dispatcher invokes when execution enters a listed head from another
+block. `ps2-native --vu-regions check` validates each such entry and reports the
+reasons regions decline it while running the original code; `--vu-regions cpu`
+executes accepted entries with the region service. The CPU service is slower than
+the original blocks and exists for in-program exactness checks; the GPU-owned
+launch path is not yet installed.
 
 ## Validation and limits
 
@@ -436,7 +457,7 @@ example 4.3 us against 27.2 us at 64 vertices for the slowest loop), and it also
 avoids per-primitive packet planning. An installation should select the GPU-owned
 path from the actual launch count, after measuring the complete frame.
 
-The renderer is exercised by this explicit interface, not installed automatically
+The GPU-owned draw path is exercised by this explicit interface, not installed
 into converted games. The region proofs apply only to the accepted subset above;
 other arithmetic, side effects and renderer ownership remain unsupported. There is
 no GT4 performance or gameplay claim from these synthetic comparisons. The

@@ -91,6 +91,15 @@ public:
         state.next_pair=entry;
         return (*catalog_)[*active_].program.run(state,budget,profile);
     }
+    // Attaches loop substitutes to one catalog artifact. Call before copying the
+    // binding to execution owners; existing copies keep their programs.
+    void substitute(std::size_t artifact,std::shared_ptr<const LoopSubstitutes> substitutes) {
+        if (artifact>=catalog_->size()) throw std::invalid_argument("Unknown VU artifact for loop substitutes");
+        auto catalog=*catalog_;
+        catalog[artifact].program.substitute(std::move(substitutes));
+        catalog_=std::make_shared<const Catalog>(std::move(catalog));
+    }
+    std::size_t artifacts() const { return catalog_->size(); }
     RunResult resume(State& state,std::uint64_t budget,ExecutionProfile* profile=nullptr) const {
         return active_ && ready(*active_) ? (*catalog_)[*active_].program.run(state,budget,profile) : RunResult{RunStatus::unbound_program,0};
     }

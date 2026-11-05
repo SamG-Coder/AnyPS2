@@ -36,6 +36,65 @@
 #endif
 #if defined(ANYPS2_NATIVE_VU) || defined(ANYPS2_NATIVE_VU1)
 #include <nt/vu_artifact.hpp>
+#ifdef ANYPS2_NATIVE_VU1_REGIONS
+#include <nt/vector_region.hpp>
+#include <atomic>
+#include <map>
+#include <mutex>
+extern "C" const void* nt_vu1_regions();
+extern "C" std::uint32_t nt_vu1_region_count();
+namespace {
+// Converter-emitted vector regions of the linked VU1 image, by loop head.
+// check: validate each entry with the region guard but run the original code.
+// cpu: execute accepted entries with the region service (exact, transactional).
+struct VuRegions {
+    struct Entry { std::uint32_t head; const nt::render::VectorRegion* region; };
+    std::array<const nt::render::VectorRegion*,2048> by_head{};
+    bool execute=false;
+    std::atomic<std::uint64_t> entries{0},accepted{0},rejected{0},executed{0},failed{0};
+    std::array<std::atomic<std::uint64_t>,5> settled{}; // accepted after 0..4 settling iterations
+    std::mutex reasons_mutex;
+    std::map<std::string,std::uint64_t> reasons; // Rejection reasons, at most 32 distinct.
+    void reject(const std::exception& error) {
+        std::lock_guard lock(reasons_mutex);
+        if (reasons.size()<32 || reasons.contains(error.what())) ++reasons[error.what()];
+    }
+    std::shared_ptr<nt::vu::LoopSubstitutes> substitutes(bool run_regions) {
+        execute=run_regions;
+        auto result=std::make_shared<nt::vu::LoopSubstitutes>();
+        result->context=this; result->heads.assign(2048,false);
+        const auto* table=static_cast<const Entry*>(nt_vu1_regions());
+        for (std::uint32_t i=0;i<nt_vu1_region_count();++i) {
+            if (table[i].head>=2048 || !table[i].region) throw std::runtime_error("Invalid linked VU1 region table");
+            by_head[table[i].head]=table[i].region; result->heads[table[i].head]=true;
+        }
+        result->run=[](void* raw,unsigned head,nt::vu::State& state) {
+            auto& self=*static_cast<VuRegions*>(raw);
+            ++self.entries;
+            const auto& region=*self.by_head[head];
+            if (!self.execute) {
+                // Diagnostic: settle on a copy with up to four original iterations
+                // while pipelines are busy at the head, then validate.
+                auto copy=state;
+                for (unsigned settle=0;;++settle) {
+                    try { (void)nt::render::validate_vector_region(region,copy); ++self.accepted; ++self.settled[std::min(settle,4U)]; break; }
+                    catch (const std::exception& error) {
+                        const bool busy=std::string_view(error.what()).find("quiescent")!=std::string_view::npos;
+                        if (!busy || settle==4 || region.iteration(&copy)!=nt::vu::Result::transfer || copy.next_pair!=region.head) {
+                            ++self.rejected; self.reject(error); break;
+                        }
+                    }
+                }
+                return false;
+            }
+            try { nt::render::execute_vector_region(region,state); ++self.executed; return true; }
+            catch (const std::exception& error) { ++self.failed; self.reject(error); return false; }
+        };
+        return result;
+    }
+};
+}
+#endif
 #include <nt/ee_vu_upload.hpp>
 #include <nt/ee_vu_launch.hpp>
 #endif
@@ -235,6 +294,7 @@ int main(int argc,char** argv) {
         bool iop_session=false,iop_default=false;
 #endif
         std::optional<nt::input::PadScript> pad_script;
+        std::string_view vu_region_mode;
         bool measure_input_latency=false;
         for (int index=2;index<argc;++index) {
             const std::string_view text=argv[index];
@@ -259,6 +319,15 @@ int main(int argc,char** argv) {
                 continue;
             }
             if (text=="--input-latency") { measure_input_latency=true; continue; }
+            if (text=="--vu-regions") {
+                if (!vu_region_mode.empty() || index+1==argc) throw std::runtime_error("Expected one VU region mode");
+                vu_region_mode=argv[++index];
+                if (vu_region_mode!="check" && vu_region_mode!="cpu") throw std::runtime_error("VU region mode must be check or cpu");
+#ifndef ANYPS2_NATIVE_VU1_REGIONS
+                throw std::runtime_error("--vu-regions requires a build linked with converted VU1 regions");
+#endif
+                continue;
+            }
             if (text=="--run-seconds") {
                 if (run_seconds || index+1==argc) throw std::runtime_error("Expected one diagnostic duration");
                 const std::string_view value=argv[++index];
@@ -403,6 +472,13 @@ int main(int argc,char** argv) {
 #endif
 #ifdef ANYPS2_NATIVE_VU1
         auto compiled_vu1=nt::vu::linked_binding1();
+#ifdef ANYPS2_NATIVE_VU1_REGIONS
+        VuRegions vu_regions;
+        if (!vu_region_mode.empty()) {
+            if (compiled_vu1.artifacts()!=1) throw std::runtime_error("Linked VU1 regions describe a single-image artifact");
+            compiled_vu1.substitute(0,vu_regions.substitutes(vu_region_mode=="cpu"));
+        }
+#endif
         compiled_uploads.add(compiled_vu1);
         nt::ee::NativeVuLaunch compiled_vu1_launch(compiled_vu1);
         compiled_vu1_launch.enable_async();
@@ -784,6 +860,14 @@ int main(int argc,char** argv) {
                  <<" error="<<sample_output->error()<<'\n';
         std::cout<<"native_controller_button_changes="<<input_button_changes<<'\n';
         if (latency) latency->report(std::cout);
+#ifdef ANYPS2_NATIVE_VU1_REGIONS
+        if (!vu_region_mode.empty())
+            std::cout<<"vu_regions mode="<<vu_region_mode<<" entries="<<vu_regions.entries<<" guard_accepted="<<vu_regions.accepted
+                     <<" guard_rejected="<<vu_regions.rejected<<" executed="<<vu_regions.executed<<" declined="<<vu_regions.failed
+                     <<" settled="<<vu_regions.settled[0]<<","<<vu_regions.settled[1]<<","<<vu_regions.settled[2]<<","<<vu_regions.settled[3]<<","<<vu_regions.settled[4]<<'\n';
+        if (!vu_region_mode.empty()) for (const auto& [reason,count]:vu_regions.reasons)
+            std::cout<<"vu_region_rejection count="<<count<<" reason="<<reason<<'\n';
+#endif
         const auto execution_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
         std::cout<<"execution_seconds="<<execution_seconds
                  <<" render_seconds="<<std::chrono::duration<double>(gpu.render_time).count();

@@ -37,6 +37,17 @@ struct ExecutionProfile {
     }
 };
 
+// Optional native replacements for whole loops, supplied by the converter's
+// loop analysis. When execution enters a listed head from another block, run
+// either executes the loop from that complete state to its exit (returning
+// true, next_pair at the exit) or declines and leaves the state unchanged, in
+// which case the original compiled blocks run. Typed callbacks only; no
+// instruction words or decoding.
+struct LoopSubstitutes {
+    void* context=nullptr;
+    bool (*run)(void*,unsigned head,State&)=nullptr;
+    std::vector<bool> heads;
+};
 // Owns an immutable address index of trusted, ahead-of-time compiled functions.
 // No instruction storage or decoding belongs in this execution interface.
 class Program {
@@ -65,6 +76,11 @@ public:
         }
     }
     unsigned unit() const { return unit_; }
+    void substitute(std::shared_ptr<const LoopSubstitutes> substitutes) {
+        if (substitutes && (!substitutes->run || substitutes->heads.size()>(unit_ ? 2048U : 512U)))
+            throw std::invalid_argument("Invalid VU loop substitutes");
+        substitutes_=std::move(substitutes);
+    }
     bool contains(unsigned address) const { return find(address)!=nullptr; }
     bool within(unsigned begin,std::uint64_t end) const {
         return !blocks_->empty() && blocks_->front().address>=begin && blocks_->back().address<end;
@@ -84,6 +100,12 @@ public:
                 return {RunStatus::unmapped_block, count};
             auto* site=profile ? &profile->sites[unit_*2048+found->address] : nullptr;
             if (site && found!=previous) ++site->entries;
+            if (substitutes_ && found!=previous && found->address<substitutes_->heads.size() &&
+                substitutes_->heads[found->address] && substitutes_->run(substitutes_->context,found->address,state)) {
+                ++count; previous=nullptr;
+                found=find(state.next_pair);
+                continue;
+            }
             previous=found;
             const bool sample=site && (++site->calls%1024)==0;
             const auto began=sample ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
@@ -113,6 +135,7 @@ public:
 private:
     unsigned unit_;
     std::shared_ptr<std::vector<Block>> blocks_;
+    std::shared_ptr<const LoopSubstitutes> substitutes_;
     const Block* find(unsigned address) const {
         const auto found=std::lower_bound(blocks_->begin(),blocks_->end(),address,
             [](const Block& block,unsigned value) { return block.address<value; });
