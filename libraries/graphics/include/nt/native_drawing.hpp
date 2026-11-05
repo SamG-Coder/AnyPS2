@@ -236,7 +236,7 @@ private:
     // FBW=0 places a frame's pages side by side along x: for rows 0-31 every
     // address equals that of a 2048-pixel-wide (FBW=32) frame, and row y uses
     // row y%32. Frames draw at FBW=32; a scissor below row 31 marks the context
-    // as wrapping, which untextured sprites reproduce in 32-row bands and any
+    // as wrapping, which sprites reproduce in 32-row bands and any
     // other primitive reports as unsupported.
     static void update_frame(Context& context);
 public:
@@ -667,13 +667,12 @@ private:
             }
             const Draw planned{*draw,unsigned((context.texture>>56)&(palette_is16(context.texture) ? 31 : 15)),{},state.fog_color,state.fog,palette_is16(context.texture),state.texa,levels};
             if (!context.wraps) { draws.push_back(planned); return; }
-            if (attributes&16) throw std::invalid_argument("Textured sprite on a wrapping zero-width frame is unsupported");
             // The GS fills a sprite top to bottom, so lower rows overwrite the
             // rows they wrap onto: emit 32-row bands in that order.
             for (unsigned band=draw->top/32;band*32<draw->bottom;++band) {
                 auto part=planned;
                 part.sprite.top=std::max(draw->top,band*32)-band*32;
-                part.sprite.bottom=std::min(draw->bottom,band*32+32)-band*32;
+                part.sprite.bottom=std::min(draw->bottom,band*32+32)-band*32; part.sprite.y0-=int(band*32*16); // texture origin moves with the rows
                 draws.push_back(part);
             }
         }

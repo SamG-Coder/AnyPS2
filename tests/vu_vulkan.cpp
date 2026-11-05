@@ -51,6 +51,20 @@ void depth_and_coverage(nt::graphics::VulkanRenderer& renderer) {
         bool stopped=false;
         try { wrapped.submit(renderer,std::array{triangle}); } catch (const std::invalid_argument&) { stopped=true; }
         if (!stopped) throw std::runtime_error("Triangle on a wrapping zero-width frame did not stop");
+        // A textured sprite keeps each row's texture coordinate when it wraps:
+        // rows 28-35 sample texture rows 0-7, and rows 32-35 land on rows 0-3.
+        NativeDrawing textured;
+        const auto row_color=[](unsigned i) { return 0x80000000U|(i*20U+10U); };
+        auto texture=setup(6,1); ad(texture,0x4c,(1ULL<<16)|2ULL); ad(texture,0x40,(63ULL<<16)|(63ULL<<48));
+        for (unsigned i=0;i<8;++i) { ad(texture,1,row_color(i)); ad(texture,5,(i*16ULL)<<16); ad(texture,5,256ULL|(((i+1)*16ULL)<<16)); }
+        finish(texture); textured.submit(renderer,std::array{texture});
+        auto band=setup(6|16|256,1); ad(band,0x4c,0); ad(band,0x40,(31ULL<<16)|(40ULL<<48));
+        ad(band,6,64ULL|(1ULL<<14)|(6ULL<<26)|(3ULL<<30)|(1ULL<<35)); ad(band,1,0x80000000);
+        ad(band,3,8ULL|(8ULL<<16)); ad(band,5,(28ULL*16)<<16);
+        ad(band,3,264ULL|(136ULL<<16)); ad(band,5,256ULL|((36ULL*16)<<16)); finish(band);
+        textured.submit(renderer,std::array{band});
+        if (textured.pixels()[rgba_word(0,32,1,29)]!=row_color(1) || textured.pixels()[rgba_word(0,32,1,1)]!=row_color(5))
+            throw std::runtime_error("Wrapped textured sprite rows sampled the wrong texture rows");
     }
     // Color drawn through a Z24 frame format lands in the depth page layout
     // with the top byte preserved; a PSMZ24 texture reads it back from there.
