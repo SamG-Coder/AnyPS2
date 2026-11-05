@@ -23,14 +23,16 @@ struct RunResult {
 // Optional conversion diagnostics. Entries group native block costs by unit
 // and original entry index, including different uploaded artifacts at that index.
 struct ExecutionProfile {
-    struct Site { std::uint64_t calls=0,samples=0,nanoseconds=0; };
+    // entries: calls not continuing from the same block (calls/entries is the
+    // mean trip count of a self-looping block).
+    struct Site { std::uint64_t calls=0,samples=0,nanoseconds=0,entries=0; };
     std::vector<Site> sites;
     void merge(const ExecutionProfile& other) {
         if (other.sites.empty()) return;
         if (sites.empty()) sites.resize(4096);
         for (std::size_t i=0;i<other.sites.size();++i) {
             sites[i].calls+=other.sites[i].calls; sites[i].samples+=other.sites[i].samples;
-            sites[i].nanoseconds+=other.sites[i].nanoseconds;
+            sites[i].nanoseconds+=other.sites[i].nanoseconds; sites[i].entries+=other.sites[i].entries;
         }
     }
 };
@@ -76,10 +78,13 @@ public:
         std::uint64_t count = 0;
         if (profile && profile->sites.empty()) profile->sites.resize(4096);
         auto found=find(state.next_pair);
+        const Block* previous=nullptr;
         while (count < budget) {
             if (!found)
                 return {RunStatus::unmapped_block, count};
             auto* site=profile ? &profile->sites[unit_*2048+found->address] : nullptr;
+            if (site && found!=previous) ++site->entries;
+            previous=found;
             const bool sample=site && (++site->calls%1024)==0;
             const auto began=sample ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             const auto result = found->entry(&state);

@@ -660,7 +660,7 @@ int main(int argc,char** argv) {
                 for (unsigned i=0;i<std::min<std::size_t>(8,vector_sites.size());++i) {
                     const auto& [index,site]=vector_sites[i];
                     std::cout<<"vector_block_profile unit="<<index/2048<<" entry="<<index%2048<<" calls="<<site.calls
-                        <<" samples="<<site.samples<<" sampled_ns_per_call="<<double(site.nanoseconds)/site.samples
+                        <<" entries="<<site.entries<<" samples="<<site.samples<<" sampled_ns_per_call="<<double(site.nanoseconds)/site.samples
                         <<" estimated_ms="<<estimated(site)/1e6<<'\n';
                 }
                 vector_profile.execution.sites.clear();
