@@ -137,11 +137,13 @@ public:
             // Interrupt-context forms: iGetThreadId, iWakeupThread, iCancelWakeupThread
             // and iReleaseWaitThread. They never reschedule from the handler.
             const bool interrupt_safe=number==0x2f || number==0x34 || number==0x36 || number==0x2e;
-            if (handlers_.active() || (interrupt && !interrupt_safe)) return Stop::unsupported_system;
+            // Handlers (interrupt or registered callbacks) may use only these forms.
+            const bool handler=interrupt || handlers_.active();
+            if (handler && !interrupt_safe) return Stop::unsupported_system;
             const auto result=threads_.invoke(number,state,memory,compiled_,protected_code_);
             if (result.status!=Stop::budget) return result.status;
             returned(state,result.value);
-            if (!interrupt && !interrupt_safe) threads_.schedule(state);
+            if (!handler && !interrupt_safe) threads_.schedule(state);
             return Stop::budget;
         }
         if (intc_syscall(number)) {
@@ -231,8 +233,13 @@ private:
             fields[3]=threads_.semaphore_waiters(id); fields[4]=record->attributes; fields[5]=record->option;
             std::memcpy(memory.data+address,fields.data(),24);
         } else if (number==0x41) {
-            if (threads_.semaphore_waiters(id)) return Stop::unsupported_system;
+            const bool released=threads_.release_semaphore_waiters(id)!=0;
             semaphores_.erase(id);
+            if (released) {
+                returned(state,id);
+                if (!handlers_.active() && !(memory.interrupts && memory.interrupts->active())) threads_.schedule(state);
+                return Stop::budget;
+            }
         } else if (number==0x42 || number==0x43) {
             if (threads_.signal_semaphore(id)) {
                 returned(state,id);

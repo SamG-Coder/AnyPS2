@@ -992,6 +992,11 @@ int main() {
             check(idle_call(0x32).status==nt::ee::Stop::budget && idle.waiting());
             check(idle_call(0x34,1).value==1); idle.schedule(state);
             check(!idle.waiting() && state.executed==retired && idle_call(0x30,1).value==1);
+            // DeleteSema releases every waiter; its WaitSema then fails with -1.
+            check(idle.wait_semaphore(11)==nt::ee::Stop::budget && idle.semaphore_waiters(11)==1 && idle.waiting());
+            check(idle.release_semaphore_waiters(11)==1 && idle.semaphore_waiters(11)==0);
+            idle.schedule(state);
+            check(!idle.waiting() && state.gpr[2].lo==~std::uint64_t(0));
             // Semaphore queues are FIFO even when the later waiter has a higher
             // scheduling priority. WakeupThread grants a sleep credit only.
             threads.allow_idle=true;
@@ -1089,7 +1094,6 @@ int main() {
             std::array<std::uint32_t,6> status{};
             std::memcpy(status.data(),ram.data()+0x2100,sizeof(status));
             check(status[0]==0 && status[3]==1 && status[4]==0x1234 && status[5]==0x5678);
-            check(native_call(0x41,id)==nt::ee::Stop::unsupported_system);
             check(native_call(0x43,id)==nt::ee::Stop::budget && !services.waiting(memory));
             check(native_call(0x45,id)==nt::ee::Stop::budget && signal.gpr[2].lo==~std::uint64_t(0));
             check(native_call(0x47,id,0x2100)==nt::ee::Stop::budget);

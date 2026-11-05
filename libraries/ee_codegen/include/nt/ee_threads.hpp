@@ -44,6 +44,18 @@ public:
             return (item.second.status&4) && item.second.semaphore==id;
         }));
     }
+    // DeleteSema: every waiter becomes ready and its WaitSema fails (-1), as
+    // ReleaseWaitThread does. Returns the number released.
+    unsigned release_semaphore_waiters(std::uint32_t id) {
+        unsigned released=0;
+        for (auto& [thread_id,thread]:records_) {
+            if (!(thread.status&4) || thread.semaphore!=id) continue;
+            thread.semaphore=0; thread.status=(thread.status&8) ? 8U : 2U;
+            thread.context.set(2,~std::uint64_t(0)); thread.order=next_order_++;
+            ++released;
+        }
+        return released;
+    }
     bool signal_semaphore(std::uint32_t id) {
         auto selected=records_.end();
         for (auto i=records_.begin();i!=records_.end();++i) {
