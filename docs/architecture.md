@@ -124,8 +124,9 @@ Z32 and Z24 frame and texture formats are drawn and sampled as CT32 and CT24 in
 the depth page block order (block number XOR 24), the layout depth buffers use.
 Z16 formats as colour targets or textures remain unsupported. PSMT8H, PSMT4HL and PSMT4HH textures take their palette index from bits 24-31, 24-27 or 28-31 of the CT32-layout word at each texel. A zero-width frame (FBW=0) places its pages side by side along x; for rows 0-31
 its addresses equal those of a 2048-pixel-wide (FBW=32) frame, so frames scissored
-to those rows draw with that width exactly. Taller zero-width frames wrap rows on
-the GS and stop with a diagnostic.
+to those rows draw with that width exactly. Below row 31 such a frame wraps row y onto row y%32; untextured sprites
+reproduce that in 32-row bands drawn top to bottom, and other primitives on a
+wrapping frame stop with a diagnostic.
 TEX1 level-of-detail sampling binds MIPTBP levels 1-6 as separate native textures
 and selects the magnification or minification filter per pixel. LOD is computed
 in single-precision floating point from interpolated Q (or the sprite's Q), with

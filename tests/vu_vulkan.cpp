@@ -38,10 +38,19 @@ void depth_and_coverage(nt::graphics::VulkanRenderer& renderer) {
         zero.submit(renderer,std::array{p}); wide.submit(renderer,std::array{q});
         if (zero.pixels()!=wide.pixels() || zero.pixels()[rgba_word(0,32,1,1)]!=0x80402010U)
             throw std::runtime_error("Zero-width frame did not draw as a 2048-pixel strip");
-        auto tall=setup(6,1); ad(tall,0x4c,0); ad(tall,0x40,(31ULL<<16)|(40ULL<<48)); sprite(tall,0x80402010,5); finish(tall);
+        // Rows 32-35 of an untextured sprite wrap onto rows 0-3, drawn after rows 28-31.
+        NativeDrawing wrapped;
+        auto tall=setup(6,1); ad(tall,0x4c,0); ad(tall,0x40,(31ULL<<16)|(40ULL<<48));
+        ad(tall,1,0x80402010); ad(tall,5,(28ULL*16)<<16); ad(tall,5,64ULL|((36ULL*16)<<16)); finish(tall);
+        wrapped.submit(renderer,std::array{tall});
+        if (wrapped.pixels()[rgba_word(0,32,1,1)]!=0x80402010U || wrapped.pixels()[rgba_word(0,32,1,29)]!=0x80402010U ||
+            wrapped.pixels()[rgba_word(0,32,1,5)])
+            throw std::runtime_error("Zero-width frame rows did not wrap onto the 32-row strip");
+        auto triangle=setup(3,1); ad(triangle,0x4c,0); ad(triangle,0x40,(31ULL<<16)|(40ULL<<48));
+        ad(triangle,5,0); ad(triangle,5,64); ad(triangle,5,(64ULL<<16)); finish(triangle);
         bool stopped=false;
-        try { zero.submit(renderer,std::array{tall}); } catch (const std::invalid_argument&) { stopped=true; }
-        if (!stopped) throw std::runtime_error("Zero-width frame taller than 32 rows did not stop");
+        try { wrapped.submit(renderer,std::array{triangle}); } catch (const std::invalid_argument&) { stopped=true; }
+        if (!stopped) throw std::runtime_error("Triangle on a wrapping zero-width frame did not stop");
     }
     // Color drawn through a Z24 frame format lands in the depth page layout
     // with the top byte preserved; a PSMZ24 texture reads it back from there.

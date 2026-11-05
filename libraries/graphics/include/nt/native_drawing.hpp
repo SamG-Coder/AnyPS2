@@ -234,10 +234,10 @@ private:
     // differs from the GS by less than one pixel of placement.
     static void set_offset(Context& context,std::uint64_t value);
     // FBW=0 places a frame's pages side by side along x: for rows 0-31 every
-    // address equals that of a 2048-pixel-wide (FBW=32) frame, so a frame
-    // scissored to those rows draws with that width exactly. A taller scissor
-    // would wrap rows every 32 lines on the GS; it keeps FBW=0, which stops
-    // with a diagnostic when drawn.
+    // address equals that of a 2048-pixel-wide (FBW=32) frame, and row y uses
+    // row y%32. Frames draw at FBW=32; a scissor below row 31 marks the context
+    // as wrapping, which untextured sprites reproduce in 32-row bands and any
+    // other primitive reports as unsupported.
     static void update_frame(Context& context);
 public:
     // Largest vertical XYOFFSET jitter held back since the last call, in 1/16
@@ -252,6 +252,7 @@ private:
         std::uint64_t frame=0,offset=0,scissor=0,test=0,depth=0,texture=0,filter=0,clamp=0,alpha=0;
         // FRAME as written; frame is the value used for drawing (see FBW=0).
         std::uint64_t written_frame=0;
+        bool wraps=false; // FBW=0 with a scissor below row 31
         // XYOFFSET as written; offset is the stabilized value used for drawing.
         std::uint64_t written_offset=0;
         bool offset_written=false;
@@ -350,6 +351,7 @@ private:
         if (state.unknown&15U&~plan.written)
             throw std::invalid_argument("Vector drawing requires GS registers whose values are still GPU-owned");
         const auto& context=state.contexts[(attributes>>9)&1];
+        if (context.wraps) throw std::invalid_argument("Vector drawing on a wrapping zero-width frame is unsupported");
         assembly.offset_x=int(context.offset&65535); assembly.offset_y=int((context.offset>>32)&65535);
         assembly.scissor={unsigned(context.scissor&2047),unsigned((context.scissor>>16)&2047),
             unsigned((context.scissor>>32)&2047),unsigned((context.scissor>>48)&2047)};
@@ -607,6 +609,7 @@ private:
             if (attributes&~0x3cfU)
                 throw std::invalid_argument("Unsupported native point/line attributes: "+std::to_string(attributes));
             const auto& context=state.contexts[(attributes>>9)&1];
+            if (context.wraps) throw std::invalid_argument("Line or point on a wrapping zero-width frame is unsupported");
             if (auto draw=plan_line_or_point(context.frame,context.offset,context.scissor,vertices,primitive==0,(attributes&8)!=0,(attributes&128)!=0)) {
                 configure_draw(state,context,attributes,draw->draw);
                 draws.push_back(Draw{draw->draw,0,draw->triangle});
@@ -624,6 +627,7 @@ private:
             if (reg==12 || reg==13 || state.suppress_draws) return;
             if (attributes&~0x3ffU) throw std::invalid_argument("Unsupported native triangle attributes: "+std::to_string(attributes));
             const auto& context=state.contexts[(attributes>>9)&1];
+            if (context.wraps) throw std::invalid_argument("Triangle on a wrapping zero-width frame is unsupported");
             if (auto draw=plan_triangle(context.frame,context.offset,context.scissor,vertices,(attributes&8)!=0,(attributes&128)!=0)) {
                 configure_draw(state,context,attributes,draw->draw);
                 TextureLevels levels{};
@@ -661,7 +665,17 @@ private:
                 levels=plan_sprite_texture(*draw,attributes,context.texture,context.filter,context.clamp,state.texa,
                     context.mipmap_bases,context.offset,state.x,state.y,x,y,state.first_uv,state.uv,std::bit_cast<float>(state.q));
             }
-            draws.push_back(Draw{*draw,unsigned((context.texture>>56)&(palette_is16(context.texture) ? 31 : 15)),{},state.fog_color,state.fog,palette_is16(context.texture),state.texa,levels});
+            const Draw planned{*draw,unsigned((context.texture>>56)&(palette_is16(context.texture) ? 31 : 15)),{},state.fog_color,state.fog,palette_is16(context.texture),state.texa,levels};
+            if (!context.wraps) { draws.push_back(planned); return; }
+            if (attributes&16) throw std::invalid_argument("Textured sprite on a wrapping zero-width frame is unsupported");
+            // The GS fills a sprite top to bottom, so lower rows overwrite the
+            // rows they wrap onto: emit 32-row bands in that order.
+            for (unsigned band=draw->top/32;band*32<draw->bottom;++band) {
+                auto part=planned;
+                part.sprite.top=std::max(draw->top,band*32)-band*32;
+                part.sprite.bottom=std::min(draw->bottom,band*32+32)-band*32;
+                draws.push_back(part);
+            }
         }
     }
     static void configure_draw(const State& state,const Context& context,unsigned attributes,Sprite& draw) {
@@ -773,7 +787,10 @@ private:
 };
 inline void NativeDrawing::update_frame(Context& context) {
     context.frame=context.written_frame;
-    if (!((context.frame>>16)&63) && ((context.scissor>>48)&2047)<32) context.frame|=32ULL<<16;
+    context.wraps=false;
+    if ((context.frame>>16)&63) return;
+    context.frame|=32ULL<<16;
+    context.wraps=((context.scissor>>48)&2047)>=32;
 }
 inline void NativeDrawing::set_offset(Context& context,std::uint64_t value) {
     // Components are 12.4 fixed point; 16 units are one pixel.
