@@ -585,6 +585,19 @@ private:
         if (state.unknown&(15U|unknown_vertices))
             throw std::invalid_argument("CPU graphics packet consumes GPU-owned GS state; overwrite registers and restart PRIM");
         const auto primitive=state.primitive&7;
+        {
+            // A zero-width frame (FBW=0) with RGB masked and depth writes off
+            // (ZMSK) is a pass whose only memory effect on the GS would be
+            // alpha bytes wrapped into 32 aliased rows at FBP. Those writes are
+            // dropped (an approximation, counted in the fallback diagnostics);
+            // any other zero-width target still stops in sprite_target.
+            const auto& target=state.contexts[(attributes>>9)&1];
+            if (!((target.frame>>16)&63) && ((target.frame>>32)&0xffffffU)==0xffffffU && ((target.depth>>32)&1)) {
+                state.vertex_count=0;
+                if (state.fallbacks) ++(*state.fallbacks)["zero-width frame: wrapped alpha writes dropped"];
+                return;
+            }
+        }
         // Coverage antialiasing belongs to lines and triangles only. A caller
         // may retain AA1 while issuing point draws or rectangular clears.
         if (primitive==0 || primitive==6) attributes&=~128U;

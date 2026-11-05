@@ -29,6 +29,19 @@ void depth_and_coverage(nt::graphics::VulkanRenderer& renderer) {
     };
     const auto pixel=[](const NativeDrawing& d) { return d.pixels()[rgba_word(0,1,1,1)]; };
     const auto zpixel=[](const NativeDrawing& d) { return d.pixels()[rgba_word(32,1,1,1)^0x600]; };
+    // A zero-width frame with RGB masked and depth writes off leaves memory
+    // unchanged; with depth writes on it still stops with a diagnostic.
+    {
+        NativeDrawing d;
+        auto p=setup(6,1); ad(p,0x4c,0x00ffffffULL<<32); ad(p,0x4e,1|(1ULL<<32)); sprite(p,0x80402010,5); finish(p);
+        const auto before=d.pixels();
+        d.submit(renderer,std::array{p});
+        if (d.pixels()!=before) throw std::runtime_error("Zero-width masked pass changed memory");
+        auto q=setup(6,1); ad(q,0x4c,0x00ffffffULL<<32); sprite(q,0x80402010,5); finish(q);
+        bool stopped=false;
+        try { d.submit(renderer,std::array{q}); } catch (const std::invalid_argument&) { stopped=true; }
+        if (!stopped) throw std::runtime_error("Zero-width frame with depth writes did not stop");
+    }
     // Color drawn through a Z24 frame format lands in the depth page layout
     // with the top byte preserved; a PSMZ24 texture reads it back from there.
     {

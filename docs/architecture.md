@@ -122,7 +122,10 @@ It is applied while the game keeps jittering and dropped after about a second
 without jitter. It is presentation only; captures and readbacks are unfiltered.
 Z32 and Z24 frame and texture formats are drawn and sampled as CT32 and CT24 in
 the depth page block order (block number XOR 24), the layout depth buffers use.
-Z16 formats as colour targets or textures remain unsupported.
+Z16 formats as colour targets or textures remain unsupported. A draw to a
+zero-width frame (FBW=0) with RGB masked and depth writes off is dropped and
+counted as a fallback: on the GS its only effect would be alpha bytes wrapped into
+32 aliased rows at FBP, which is not modelled. Other zero-width targets stop.
 TEX1 level-of-detail sampling binds MIPTBP levels 1-6 as separate native textures
 and selects the magnification or minification filter per pixel. LOD is computed
 in single-precision floating point from interpolated Q (or the sprite's Q), with
