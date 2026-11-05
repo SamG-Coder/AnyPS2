@@ -70,7 +70,12 @@ scripted pad is a standard controller whose rumble motors produce no output.
 `--capture-display <directory>` records scanout frames headlessly as well as with a
 window. Times follow host execution, so check captured frames to confirm that a
 script reached the intended screen before comparing runs. Keep scripts and
-captures for commercial games under ignored `work/`.
+captures for commercial games under ignored `work/`. With a pad script,
+`--input-latency` reports, for each press, the display updates and milliseconds
+until the shown image visibly changes; it reads frames back around presses, and
+is meaningful only on screens that are otherwise still (animation counts as a
+change). `--profile-graphics` also lists the program locations where execution
+waits for native vector jobs (`job_wait_profile`).
 
 ## Before committing
 

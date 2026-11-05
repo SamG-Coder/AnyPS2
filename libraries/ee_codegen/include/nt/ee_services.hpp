@@ -28,6 +28,9 @@ struct ExecutionProfile {
     std::uint64_t display_waits=0,job_waits=0,display_sleep_ns=0,job_sleep_ns=0;
     struct Site { std::uint64_t nanoseconds=0,operations=0,calls=0; };
     std::map<std::uint32_t,Site> sites;
+    // Native-job waits by program counter and stop reason (pc<<8|reason):
+    // calls counts waits and nanoseconds their host sleep.
+    std::map<std::uint64_t,Site> job_wait_sites;
 };
 class StartupServices {
 public:
@@ -336,6 +339,12 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
             if (services.profile) {
                 if (job_wait) ++services.profile->job_waits; else ++services.profile->display_waits;
             }
+            ExecutionProfile::Site* wait_site=nullptr;
+            if (services.profile && job_wait && (services.profile->job_wait_sites.size()<256 ||
+                    services.profile->job_wait_sites.contains((std::uint64_t(state.pc)<<8)|std::uint32_t(result)))) {
+                wait_site=&services.profile->job_wait_sites[(std::uint64_t(state.pc)<<8)|std::uint32_t(result)];
+                ++wait_site->calls;
+            }
             for (;;) {
                 if (services.stop_requested && services.stop_requested()) return Stop::host_stop;
                 if (services.poll_native_jobs) {
@@ -369,6 +378,7 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
                     const auto slept=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count();
                     services.profile->idle_ns+=slept;
                     if (job_wait) services.profile->job_sleep_ns+=slept; else services.profile->display_sleep_ns+=slept;
+                    if (wait_site) wait_site->nanoseconds+=slept;
                 }
             }
             continue;

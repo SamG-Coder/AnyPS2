@@ -22,6 +22,7 @@
 #include <memory>
 #include <optional>
 #include "display.hpp"
+#include "input_latency.hpp"
 #include <nt/vulkan_renderer.hpp>
 #include <nt/native_drawing_worker.hpp>
 #include <charconv>
@@ -223,6 +224,7 @@ int main(int argc,char** argv) {
         bool iop_session=false,iop_default=false;
 #endif
         std::optional<nt::input::PadScript> pad_script;
+        bool measure_input_latency=false;
         for (int index=2;index<argc;++index) {
             const std::string_view text=argv[index];
             if (text=="--native-thread-cycles") { native_cycles=true; continue; }
@@ -245,6 +247,7 @@ int main(int argc,char** argv) {
                 if (!error.empty()) throw std::runtime_error(error);
                 continue;
             }
+            if (text=="--input-latency") { measure_input_latency=true; continue; }
             if (text=="--run-seconds") {
                 if (run_seconds || index+1==argc) throw std::runtime_error("Expected one diagnostic duration");
                 const std::string_view value=argv[++index];
@@ -513,6 +516,9 @@ int main(int argc,char** argv) {
         }
         const auto started=std::chrono::steady_clock::now();
         script_epoch=started;
+        if (measure_input_latency && !pad_script) throw std::runtime_error("--input-latency requires --pad-script");
+        std::optional<probe::InputLatency> latency;
+        if (measure_input_latency) latency.emplace(*pad_script);
         if (pad_script) std::cout<<"pad_script presses="<<pad_script->presses().size()<<" end_ms="<<pad_script->end_ms()<<'\n';
         auto next_profile=started+std::chrono::seconds(5);
         nt::graphics::RenderStatistics previous_statistics{};
@@ -545,7 +551,10 @@ int main(int argc,char** argv) {
         auto present_output=[&] {
             // Headless runs still present to a display capture.
             const bool capturing=gpu.capture && gpu.capture->ready();
-            if ((!window && !capturing) || window_closed || display_failed) return;
+            const auto script_ms=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now()-script_epoch).count());
+            const bool timing_input=latency && latency->wants(script_ms);
+            if ((!window && !capturing && !timing_input) || window_closed || display_failed) return;
             try {
                 const auto& output=platform.graphics.output();
                 const auto plan=nt::graphics::plan_display(output.control,output.buffers,output.displays,
@@ -567,6 +576,10 @@ int main(int argc,char** argv) {
                         timing->seconds+=std::chrono::duration<double>(completed-present_started).count();
                     });
                     window->update_rate();
+                }
+                if (timing_input) {
+                    gpu.ensure_renderer(); gpu.join();
+                    latency->observe(script_ms,gpu.renderer->scanout_readback(*plan));
                 }
                 if (capturing) {
                     gpu.join();
@@ -599,6 +612,17 @@ int main(int argc,char** argv) {
                              <<" ms="<<site.nanoseconds/1e6<<" operations="<<site.operations<<" calls="<<site.calls<<'\n';
                 }
                 execution_profile.sites.clear();
+                std::vector<std::pair<std::uint64_t,nt::ee::ExecutionProfile::Site>> waits(
+                    execution_profile.job_wait_sites.begin(),execution_profile.job_wait_sites.end());
+                std::sort(waits.begin(),waits.end(),[](const auto& a,const auto& b) {
+                    return a.second.nanoseconds>b.second.nanoseconds;
+                });
+                for (std::size_t i=0;i<std::min<std::size_t>(6,waits.size());++i) {
+                    const auto& [key,site]=waits[i];
+                    std::cout<<"job_wait_profile pc=0x"<<std::hex<<(key>>8)<<std::dec<<" stop="<<(key&255)
+                             <<" waits="<<site.calls<<" sleep_ms="<<site.nanoseconds/1e6<<'\n';
+                }
+                execution_profile.job_wait_sites.clear();
 #if defined(ANYPS2_NATIVE_VU) || defined(ANYPS2_NATIVE_VU1)
                 std::cout<<"vector_profile compiled_ms="<<(vector_profile.compiled_ns-previous_vector_profile.compiled_ns)/1e6
                          <<" blocks="<<(vector_profile.blocks-previous_vector_profile.blocks)
@@ -742,6 +766,7 @@ int main(int argc,char** argv) {
                  <<" state_valid="<<sample_state_ok<<" last_method="<<sample_audio.last_method()
                  <<" error="<<sample_output->error()<<'\n';
         std::cout<<"native_controller_button_changes="<<input_button_changes<<'\n';
+        if (latency) latency->report(std::cout);
         const auto execution_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
         std::cout<<"execution_seconds="<<execution_seconds
                  <<" render_seconds="<<std::chrono::duration<double>(gpu.render_time).count();
