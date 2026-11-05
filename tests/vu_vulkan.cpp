@@ -266,6 +266,45 @@ void gpu_resident_memory(nt::graphics::VulkanRenderer& renderer) {
     for (unsigned y=4;y<12;++y) for (unsigned x=4;x<12;++x)
         if (restored[rgba_word(40*32,2,x,y)]!=uploaded[rgba_word(0,2,x,y)])
             throw std::runtime_error("Unchanged-memory upload over rendered pixels was not sampled");
+    // 8- and 4-bit uploads over rendered pixels change only their bytes and
+    // nibbles; neighbors in the same words keep the rendered values.
+    d.submit(renderer,std::array{shaded(0,colors),shaded(20,colors)});
+    const auto packed_before=renderer.statistics().readback_bytes;
+    const auto transfer=[&](unsigned format,unsigned x,unsigned y,unsigned width,unsigned height) {
+        Packet p(1); ad(p,0x50,(2ULL<<48)|(std::uint64_t(format)<<56)); ad(p,0x51,(std::uint64_t(x)<<32)|(std::uint64_t(y)<<48));
+        ad(p,0x52,width|(std::uint64_t(height)<<32)); ad(p,0x53,0); finish(p); return p;
+    };
+    const auto payload=[](unsigned bits,unsigned count,auto pixel) {
+        Packet p; const unsigned quadwords=(count*bits+127)/128;
+        p.push_back({0x8000U|quadwords,0x08000000,0,0});
+        for (unsigned q=0;q<quadwords;++q) {
+            std::array<std::uint32_t,4> words{};
+            for (unsigned i=0;i<128/bits;++i) {
+                const unsigned index=q*(128/bits)+i;
+                if (index<count) words[i*bits/32]|=pixel(index)<<((i*bits)%32);
+            }
+            p.push_back({words[0],words[1],words[2],words[3]});
+        }
+        return p;
+    };
+    const auto byte_value=[](unsigned i) { return (i*7U+1U)&255U; };
+    const auto nibble_value=[](unsigned i) { return (i*3U+5U)&15U; };
+    d.submit(renderer,std::array{transfer(0x13,3,2,13,5),payload(8,65,byte_value),transfer(0x14,9,11,7,3),payload(4,21,nibble_value)});
+    if (renderer.statistics().readback_bytes!=packed_before)
+        throw std::runtime_error("Packed uploads over rendered pixels read memory back");
+    const auto& packed=d.pixels();
+    std::vector<std::uint32_t> expected(4096);
+    for (unsigned a=0;a<4096;++a) expected[a]=packed[a+20*2048];
+    for (unsigned i=0;i<65;++i) {
+        const auto byte=indexed_byte(0,2,3+i%13,2+i/13);
+        expected[byte/4]=(expected[byte/4]&~(255U<<((byte%4)*8)))|(byte_value(i)<<((byte%4)*8));
+    }
+    for (unsigned i=0;i<21;++i) {
+        const auto nibble=indexed_nibble(0,2,9+i%7,11+i/7);
+        expected[nibble/8]=(expected[nibble/8]&~(15U<<((nibble%8)*4)))|(nibble_value(i)<<((nibble%8)*4));
+    }
+    for (unsigned a=0;a<4096;++a) if (packed[a]!=expected[a])
+        throw std::runtime_error("Packed upload over rendered pixels differs at word "+std::to_string(a));
 }
 void triangles(nt::graphics::VulkanRenderer& renderer) {
     using nt::graphics::Packet;

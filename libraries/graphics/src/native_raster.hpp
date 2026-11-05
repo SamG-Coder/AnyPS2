@@ -10,6 +10,9 @@ public:
     ~NativeRaster();
     void upload(std::span<const std::uint32_t> words);
     void write(std::span<const PixelWrite> writes);
+    // Whole 32-bit pixels of a transfer rectangle: one swizzle pass on the CPU
+    // and one GPU pass into rendered surfaces, without per-pixel records.
+    void write(const ImageRect& rect);
     void draw(std::span<const SpriteCommand> commands);
     // Vector batches need ordered fragment access; returns false without it.
     bool enable_vectors();

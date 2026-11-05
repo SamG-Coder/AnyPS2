@@ -15,7 +15,7 @@ void checked(VkResult r,const char* operation) {
     if (r!=VK_SUCCESS) throw std::runtime_error(std::string(operation)+": Vulkan result "+std::to_string(r));
 }
 constexpr VkDeviceSize alignment=256;
-constexpr VkDeviceSize host_slot_bytes=8*1024*1024,device_slot_bytes=4*1024*1024;
+constexpr VkDeviceSize host_slot_bytes=32*1024*1024,device_slot_bytes=16*1024*1024;
 constexpr VkDeviceSize launch_output_bytes=1024*1024,resident_bytes=64*1024*1024;
 constexpr VkDeviceSize parameter_bytes=156*4,plan_words=64+NativeVectors::record_words,plan_bytes=plan_words*4,status_bytes=4;
 // Device buffer: VU0 and VU1 data memory views, per-slot element outputs, then

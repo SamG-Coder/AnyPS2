@@ -65,6 +65,14 @@ void main() {
         palettes.words[p.slot*256u+p.bank+g.x]=surface_pixel(word,pixel) ? texelFetch(surface,pixel,0).r : mirror.words[word&0xfffffu];
         return;
     }
+    if (p.mode==4u) {
+        // Unique (address, value) pairs of whole words.
+        if (g.y!=0u || g.x>=p.count) return;
+        const uint at=p.addresses+g.x*2u;
+        ivec2 pixel;
+        if (surface_pixel(palettes.words[at],pixel)) imageStore(decoded,pixel,uvec4(palettes.words[at+1u]));
+        return;
+    }
     if (p.mode==2u) {
         // Entries are (address, value, mask) with unique addresses, so
         // invocations never touch the same pixel.

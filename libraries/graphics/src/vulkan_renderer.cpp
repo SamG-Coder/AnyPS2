@@ -729,6 +729,11 @@ void VulkanRenderer::read_words(std::span<const unsigned> addresses,std::span<st
     throw std::runtime_error("Reference renderer operation is unavailable in native output");
 #endif
 }
+void VulkanRenderer::write(const ImageRect& rect) {
+    if (impl_->native) { impl_->native->write(rect); return; }
+    const auto writes=rect.writes();
+    write(writes);
+}
 void VulkanRenderer::write(std::span<const PixelWrite> writes) {
     if (impl_->native) { impl_->native->write(writes); return; }
 #if ANYPS2_REFERENCE_RENDERER

@@ -128,6 +128,7 @@ public:
     // levels; its bounds are the conservative scissor rectangle.
     void draw_vectors(const VectorLaunch& launch,const VectorAssembly& assembly,const SpriteCommand& command);
     void write(std::span<const PixelWrite> writes);
+    void write(const ImageRect& rect);
     void read(std::span<std::uint32_t> memory);
     void read_words(std::span<const unsigned> addresses,std::span<std::uint32_t> values);
     // Native renderer: copies a 256-word palette on the GPU when its words lie

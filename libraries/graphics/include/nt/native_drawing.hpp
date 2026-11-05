@@ -161,6 +161,8 @@ public:
                     renderer.read(storage); download_=download->pack(storage); download_offset_=0;
                 } else if (std::holds_alternative<CancelDownload>(operation)) {
                     download_.clear(); download_offset_=0;
+                } else if (const auto* rect=std::get_if<ImageRect>(&operation)) {
+                    renderer.write(*rect); dirty_=true;
                 } else {
                     renderer.write(std::get<ImageWrites>(operation)); dirty_=true;
                 }
@@ -194,6 +196,8 @@ public:
                     download_=download->pack(pixels); download_offset_=0;
                 } else if (std::holds_alternative<CancelDownload>(operation)) {
                     download_.clear(); download_offset_=0;
+                } else if (const auto* rect=std::get_if<ImageRect>(&operation)) {
+                    for (const auto write:rect->writes()) pixels[write.address]=(pixels[write.address]&~write.mask)|write.value;
                 } else for (const auto& write:std::get<ImageWrites>(operation))
                     pixels[write.address]=(pixels[write.address]&~write.mask)|write.value;
             }
@@ -221,7 +225,7 @@ private:
         TextureLevels levels{};
         unsigned bank=0; bool palette16=false; std::uint64_t texa=0; std::uint32_t fog_color=0;
     };
-    using Operation=std::variant<Draw,ImageWrites,PaletteLoad,Finish,ImageDownload,CancelDownload,PacketVectors>;
+    using Operation=std::variant<Draw,ImageWrites,PaletteLoad,Finish,ImageDownload,CancelDownload,PacketVectors,ImageRect>;
     struct Workspace {
         std::vector<Operation> operations;
         std::vector<SpriteCommand> commands;
@@ -616,7 +620,9 @@ private:
                 throw std::invalid_argument("A vertex consumed GPU-owned GS state; write its registers and PRIM first");
             const std::uint32_t resolved[]{0,state.color,state.q,state.s,state.t,state.uv,state.fog,x|(y<<16),z,
                 (reg==4 || reg==5) ? 1U : 0U};
-            state.vertex_sink->insert(state.vertex_sink->end(),std::begin(resolved),std::end(resolved));
+            auto& sink=*state.vertex_sink; const auto size=sink.size();
+            sink.resize(size+std::size(resolved));
+            std::copy(std::begin(resolved),std::end(resolved),sink.begin()+std::ptrdiff_t(size));
         }
         if (state.unknown&(15U|unknown_vertices))
             throw std::invalid_argument("CPU graphics packet consumes GPU-owned GS state; overwrite registers and restart PRIM");
@@ -741,7 +747,11 @@ private:
             const auto count=format>=2 ? low&0x7fffU : format ? (entries+1)/2 : entries;
             if (count>packet.size()-cursor) throw std::invalid_argument("Truncated native graphics packet");
             if (!format && (low&(1ULL<<46))) command(state,0,(low>>47)&2047,draws);
-            if (format>=2) {
+            if (format>=2 && state.upload.whole_words()) {
+                ImageRect rect;
+                state.upload.append(packet.subspan(cursor,count),rect);
+                if (!rect.words.empty()) draws.emplace_back(std::move(rect));
+            } else if (format>=2) {
                 ImageWrites writes;
                 if (state.upload.bits) writes.reserve(std::min<std::size_t>(
                     state.upload.width*state.upload.height-state.upload.pixel,
