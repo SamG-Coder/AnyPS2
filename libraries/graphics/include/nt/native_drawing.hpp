@@ -224,8 +224,20 @@ private:
             if (operations.capacity()>4096) std::vector<Operation>().swap(operations);
         }
     } workspace_;
+    struct Context;
+    // Games commonly jitter XYOFFSET by a fraction of a pixel every frame (for
+    // example a three-step vertical cycle) so that an interlaced CRT blends the
+    // images into anti-aliased edges. A progressive display shows that as the
+    // whole picture trembling. Changes smaller than one pixel on both axes keep
+    // drawing at the established offset, as a modern renderer keeps its camera
+    // still; a move of a pixel or more takes effect at once. This deliberately
+    // differs from the GS by less than one pixel of placement.
+    static void set_offset(Context& context,std::uint64_t value);
     struct Context {
         std::uint64_t frame=0,offset=0,scissor=0,test=0,depth=0,texture=0,filter=0,clamp=0,alpha=0;
+        // XYOFFSET as written; offset is the stabilized value used for drawing.
+        std::uint64_t written_offset=0;
+        bool offset_written=false;
         std::array<std::uint64_t,2> mipmap_bases{};
         bool force_alpha=false;
     };
@@ -523,7 +535,7 @@ private:
         case 0x3f: return; // Coherent native texture storage has no deferred cache contents.
         case 0x1a: state.use_primitive=(value&1)!=0; return;
         case 0x1b: state.attributes=unsigned(value&2040); return;
-        case 0x18: case 0x19: state.contexts[reg-0x18].offset=value; return;
+        case 0x18: case 0x19: set_offset(state.contexts[reg-0x18],value); return;
         case 0x40: case 0x41: state.contexts[reg-0x40].scissor=value; return;
         case 0x42: case 0x43: state.contexts[reg-0x42].alpha=value; return;
         case 0x44: state.dither_matrix=value&0x7777777777777777ULL; return;
@@ -741,4 +753,14 @@ private:
         throw std::invalid_argument("Missing native graphics end tag");
     }
 };
+inline void NativeDrawing::set_offset(Context& context,std::uint64_t value) {
+    // Components are 12.4 fixed point; 16 units are one pixel.
+    const auto distance=[](std::uint64_t a,std::uint64_t b,unsigned shift) {
+        const auto x=std::int32_t((a>>shift)&65535U),y=std::int32_t((b>>shift)&65535U);
+        return x>y ? x-y : y-x;
+    };
+    context.written_offset=value;
+    if (context.offset_written && distance(value,context.offset,0)<16 && distance(value,context.offset,32)<16) return;
+    context.offset=value; context.offset_written=true;
+}
 }

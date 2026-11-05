@@ -110,6 +110,11 @@ PSMCT16/PSMCT16S targets use Vulkan rasterization with packed write-mask and col
 quantization semantics. Switching between 16- and 32-bit storage views currently
 requires ordered host format conversion; color dithering remains unsupported
 when it can affect written channels.
+XYOFFSET changes smaller than one pixel on both axes keep the context's established
+offset. Games cycle sub-pixel drawing offsets every frame so that an interlaced CRT
+blends them into anti-aliased edges; a progressive display shows the whole picture
+trembling instead. Placement therefore differs from the GS by less than one pixel;
+a change of a pixel or more applies immediately.
 TEX1 level-of-detail sampling binds MIPTBP levels 1-6 as separate native textures
 and selects the magnification or minification filter per pixel. LOD is computed
 in single-precision floating point from interpolated Q (or the sprite's Q), with

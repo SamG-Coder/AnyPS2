@@ -159,6 +159,29 @@ void triangles(nt::graphics::VulkanRenderer& renderer) {
     clipped.submit(renderer,std::array{p});
     if (pixel(clipped,0,0) || pixel(clipped,1,1)!=0x80443322 || pixel(clipped,3,1))
         throw std::runtime_error("Triangle scissor, offset or last-vertex flat color differs");
+    // Sub-pixel XYOFFSET jitter keeps the established offset; a whole-pixel
+    // change moves the drawing.
+    const auto offset_triangle=[&](std::initializer_list<std::uint64_t> offsets) {
+        auto drawing=std::make_unique<nt::graphics::NativeDrawing>();
+        auto q=setup(3);
+        for (const auto offset:offsets) ad(q,0x18,offset);
+        vertex(q,{0,0,1}); vertex(q,{112,0,2}); vertex(q,{0,112,0x80443322}); finish(q);
+        drawing->submit(renderer,std::array{q});
+        return drawing->pixels();
+    };
+    const auto at=[](std::uint64_t x,std::uint64_t y) { return x|(y<<32); };
+    const auto settled=offset_triangle({at(16,16)});
+    // Choose a sub-pixel offset that changes this triangle's coverage when it
+    // is the only offset written, so the jitter check below is meaningful.
+    std::uint64_t jitter=0;
+    for (std::uint64_t dy=1;dy<16 && !jitter;++dy)
+        for (std::uint64_t dx=0;dx<16 && !jitter;++dx)
+            if (offset_triangle({at(16-dx,16+dy)})!=settled) jitter=at(16-dx,16+dy);
+    if (!jitter) throw std::runtime_error("No sub-pixel offset changes the fixture's coverage");
+    if (offset_triangle({at(16,16),jitter})!=settled)
+        throw std::runtime_error("Sub-pixel XYOFFSET jitter moved the drawing");
+    if (offset_triangle({at(16,16),at(16,32)})!=offset_triangle({at(16,32)}) || offset_triangle({at(16,32)})==settled)
+        throw std::runtime_error("A whole-pixel XYOFFSET change did not move the drawing");
     nt::graphics::NativeDrawing textured;
     Packet upload(1);
     ad(upload,0x50,(32ULL<<32)|(1ULL<<48)); ad(upload,0x51,0);
