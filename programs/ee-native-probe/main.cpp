@@ -41,6 +41,7 @@
 #include <atomic>
 #include <map>
 #include <mutex>
+#include <tuple>
 extern "C" const void* nt_vu1_regions();
 extern "C" std::uint32_t nt_vu1_region_count();
 namespace {
@@ -53,6 +54,15 @@ struct VuRegions {
     bool execute=false;
     std::atomic<std::uint64_t> entries{0},accepted{0},rejected{0},executed{0},failed{0};
     std::array<std::atomic<std::uint64_t>,5> settled{}; // accepted after 0..4 settling iterations
+    // Pass chains (executed regions only; the VU1 worker is the only caller):
+    // consecutive region heads, and whether the later one writes the first
+    // output row the earlier one wrote (an in-place pass over its output).
+    unsigned last_head=0; std::int64_t last_row=-1;
+    std::map<std::tuple<unsigned,unsigned,bool>,std::uint64_t> transitions;
+    std::int64_t first_output_row(const nt::render::VectorRegion& region,const nt::vu::State& s) const {
+        const auto& store=region.output[0];
+        return std::int64_t(s.integers[store.base-1])+store.row;
+    }
     std::mutex reasons_mutex;
     std::map<std::string,std::uint64_t> reasons; // Rejection reasons, at most 32 distinct.
     void reject(const std::exception& error) {
@@ -87,7 +97,13 @@ struct VuRegions {
                 }
                 return false;
             }
-            try { nt::render::execute_vector_region(region,state); ++self.executed; return true; }
+            const auto row=self.first_output_row(region,state);
+            try {
+                nt::render::execute_vector_region(region,state); ++self.executed;
+                if (self.transitions.size()<256) ++self.transitions[{self.last_head,head,row==self.last_row}];
+                self.last_head=head; self.last_row=row;
+                return true;
+            }
             catch (const std::exception& error) { ++self.failed; self.reject(error); return false; }
         };
         return result;
@@ -867,6 +883,9 @@ int main(int argc,char** argv) {
                      <<" settled="<<vu_regions.settled[0]<<","<<vu_regions.settled[1]<<","<<vu_regions.settled[2]<<","<<vu_regions.settled[3]<<","<<vu_regions.settled[4]<<'\n';
         if (!vu_region_mode.empty()) for (const auto& [reason,count]:vu_regions.reasons)
             std::cout<<"vu_region_rejection count="<<count<<" reason="<<reason<<'\n';
+        if (!vu_region_mode.empty()) for (const auto& [key,count]:vu_regions.transitions)
+            if (count>=1000) std::cout<<"vu_region_chain from="<<std::get<0>(key)<<" to="<<std::get<1>(key)
+                                       <<" same_buffer="<<std::get<2>(key)<<" count="<<count<<'\n';
 #endif
         const auto execution_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
         std::cout<<"execution_seconds="<<execution_seconds
