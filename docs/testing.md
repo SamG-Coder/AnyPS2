@@ -75,7 +75,8 @@ captures for commercial games under ignored `work/`. With a pad script,
 until the shown image visibly changes; it reads frames back around presses, and
 is meaningful only on screens that are otherwise still (animation counts as a
 change). `--profile-graphics` also lists the program locations where execution
-waits for native vector jobs (`job_wait_profile`).
+waits for native vector jobs (`job_wait_profile`), and which enabled INTC lines
+and DMAC channels end idle spans while every thread waits (`idle_wake_profile`).
 
 ## Before committing
 

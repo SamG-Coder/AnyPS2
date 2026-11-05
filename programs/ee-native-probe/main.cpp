@@ -635,6 +635,11 @@ int main(int argc,char** argv) {
                              <<" waits="<<site.calls<<" sleep_ms="<<site.nanoseconds/1e6<<'\n';
                 }
                 execution_profile.job_wait_sites.clear();
+                for (const auto& [key,wake]:execution_profile.idle_wakes)
+                    if (wake.nanoseconds>=10000000)
+                        std::cout<<"idle_wake_profile intc=0x"<<std::hex<<(key&0xffff)<<" dmac=0x"<<(key>>16)<<std::dec
+                                 <<" wakes="<<wake.calls<<" idle_ms="<<wake.nanoseconds/1e6<<'\n';
+                execution_profile.idle_wakes.clear();
 #if defined(ANYPS2_NATIVE_VU) || defined(ANYPS2_NATIVE_VU1)
                 std::cout<<"vector_profile compiled_ms="<<(vector_profile.compiled_ns-previous_vector_profile.compiled_ns)/1e6
                          <<" blocks="<<(vector_profile.blocks-previous_vector_profile.blocks)

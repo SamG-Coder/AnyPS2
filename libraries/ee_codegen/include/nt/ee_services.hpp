@@ -31,6 +31,9 @@ struct ExecutionProfile {
     // Native-job waits by program counter and stop reason (pc<<8|reason):
     // calls counts waits and nanoseconds their host sleep.
     std::map<std::uint64_t,Site> job_wait_sites;
+    // Idle spans (every thread waiting) by the interrupts that ended them:
+    // enabled pending INTC lines, plus enabled pending DMAC channels << 16.
+    std::map<std::uint64_t,Site> idle_wakes;
 };
 class StartupServices {
 public:
@@ -265,7 +268,7 @@ private:
     std::optional<runtime::InitialHeap> heap_;
 };
 inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t budget,StartupServices& services) {
-    std::optional<std::chrono::steady_clock::time_point> idle_since;
+    std::optional<std::chrono::steady_clock::time_point> idle_since,idle_mark;
     while (budget) {
         if (services.stop_requested && services.stop_requested()) return Stop::host_stop;
         if (services.poll_native_jobs) {
@@ -291,6 +294,7 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
         }
         if (services.waiting(memory)) {
             if (!idle_since) idle_since=std::chrono::steady_clock::now();
+            if (!idle_mark) idle_mark=idle_since;
             if (services.idle_pump) {
                 const auto pumped=services.idle_pump();
                 if (pumped!=Stop::budget) return pumped;
@@ -299,6 +303,18 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
             if (memory.completions) memory.completions->publish(memory);
             if (memory.interrupts) memory.interrupts->publish(memory);
             if ((state.cop0_status&0x10007U)==0x10001U && (state.cop0_status&memory.pending_interrupts&0xff00U)) {
+                if (services.profile) {
+                    std::uint64_t key=0;
+                    if (memory.interrupts) key=memory.interrupts->read(0x1000f000).value&memory.interrupts->read(0x1000f010).value&0xffffU;
+                    if (memory.completions) {
+                        const auto dmac=memory.completions->status();
+                        key|=std::uint64_t(dmac&(dmac>>16)&0x3ffU)<<16;
+                    }
+                    const auto now=std::chrono::steady_clock::now();
+                    auto& wake=services.profile->idle_wakes[key];
+                    ++wake.calls; wake.nanoseconds+=std::chrono::duration_cast<std::chrono::nanoseconds>(now-*idle_mark).count();
+                    idle_mark=now;
+                }
                 const auto delivered=services.interrupt(state,memory);
                 if (delivered!=Stop::budget) return delivered;
                 continue;
@@ -313,6 +329,7 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
         // An interrupt that does not wake a native continuation is not
         // foreground progress and must not restart the bounded idle timeout.
         if (!services.foreground_waiting()) idle_since.reset();
+        idle_mark.reset();
         const auto before=state.executed;
         const auto entry_pc=state.pc;
         const auto slice=memory.io.poll && budget>4096 ? 4096 : budget;
