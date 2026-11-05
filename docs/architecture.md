@@ -127,7 +127,10 @@ output submitted before it. A PATH3 mask, interrupt stall or full queue still
 waits. A failure stops execution, fails the jobs queued after it without running
 them, and does not report their completion; already accepted graphics remain
 submitted.
-A native drawing worker accepts one bounded, owned packet batch at a time.
+A native drawing worker records owned packet batches in order; up to 64 batches
+and 64 MiB of packets may be queued, so bursts of small vector batches overlap
+recording instead of stalling execution. Producers that own a batch hand it over
+without a copy.
 The execution owner rejoins it before reading graphics state. Window presentation
 is queued on the worker after the frame's drawing, as on a game's render thread,
 so execution continues while the frame is recorded and shown; the window thread

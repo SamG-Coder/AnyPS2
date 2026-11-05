@@ -41,6 +41,10 @@ struct BatchConsumer {
     // True when submit consumes every command into that ordered queue before
     // returning. Allows a trailing command-drain within an atomic batch.
     bool synchronous=false;
+    // Optional ownership transfer with submit's contract, avoiding a copy when
+    // the producer already owns the batch. On success the packets may be moved
+    // from; on failure they are unchanged.
+    bool (*take)(void*,std::vector<Packet>&)=nullptr;
 };
 inline std::size_t payload_words(const Quadword& tag) {
     const auto low=std::uint64_t(tag[0])|(std::uint64_t(tag[1])<<32);

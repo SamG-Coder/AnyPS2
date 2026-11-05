@@ -311,7 +311,10 @@ private:
     };
     bool accept_packets(SequenceOutput& output) {
         if (output.packets.empty()) return true;
-        if (!sequence_output_) return graphics.submit && graphics.submit(graphics.context,output.packets);
+        if (!sequence_output_) {
+            if (graphics.take) return graphics.take(graphics.context,output.packets);
+            return graphics.submit && graphics.submit(graphics.context,output.packets);
+        }
         if (output.quadwords>NativePacketBatch::maximum_bytes/16-sequence_output_->quadwords) return false;
         sequence_output_->quadwords+=output.quadwords;
         for (auto& packet:output.packets) sequence_output_->packets.push_back(std::move(packet));

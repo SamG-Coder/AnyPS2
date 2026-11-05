@@ -118,6 +118,17 @@ struct NativeGpu {
         }
         catch (const std::exception& error) { self.error=error.what(); return false; }
     }
+    static bool take(void* raw,std::vector<nt::graphics::Packet>& packets) {
+        auto& self=*static_cast<NativeGpu*>(raw);
+        try {
+            self.ensure_renderer();
+            if (self.capture) self.capture->submit(packets);
+            self.worker->submit(std::move(packets));
+            self.render_time=self.worker->elapsed();
+            return true;
+        }
+        catch (const std::exception& error) { self.error=error.what(); return false; }
+    }
     static bool submit_consumed(void* raw,std::span<const nt::graphics::Packet> packets) {
         if (!submit(raw,packets)) return false;
         auto& self=*static_cast<NativeGpu*>(raw);
@@ -399,6 +410,7 @@ int main(int argc,char** argv) {
         compiled_submissions.add(compiled_vu1_launch);
         compiled_vu1_launch.connect_data(memory);
         compiled_vu1_launch.graphics={&gpu,NativeGpu::submit};
+        compiled_vu1_launch.graphics.take=NativeGpu::take;
 #endif
 #if defined(ANYPS2_NATIVE_VU) || defined(ANYPS2_NATIVE_VU1)
         compiled_uploads.connect(platform.packet_setup);
