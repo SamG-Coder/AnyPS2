@@ -440,10 +440,12 @@ entry/range conditions and transactional failure. The runtime executable links
 native services and generated objects without the analysis/decoder libraries.
 
 Element outputs may use up to eight forward streams, one per VI base; the launch
-guard keeps every stream in bounds and the streams disjoint. A read through the
-same base and stride at or after every row that stream writes reads each row no
-later than the iteration writing it, so in-place transforms use the entry memory
-the kernel receives; such reads are exempt from overlap with their own stream.
+guard keeps every stream in bounds and the streams disjoint. A read whose stride
+equals every store of a stream may overlap that stream when, at launch, each
+(load, store) pair either never touches a common row, writes it in a later
+iteration, or, in the same iteration, loads before storing: every row is then
+read before it is written, so in-place transforms (also through different VI
+registers) use the entry memory the kernel receives.
 On a local commercial VU1 program, 17 of 49 loops are accepted as regions,
 including its most expensive loop in a 3D menu; a local validator matched 3,400
 randomized region executions against the original compiled loops in complete VU

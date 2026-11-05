@@ -1,6 +1,7 @@
 #include <nt/element_range.hpp>
 #include <nt/vu_lower.hpp>
 #include <algorithm>
+#include <map>
 #include <set>
 #include <tuple>
 #include <stdexcept>
@@ -54,8 +55,16 @@ ElementRangeGuard analyze_element_range(std::span<const vu::Pair> pairs,unsigned
         if (access.kind==AccessKind::load_vector || access.kind==AccessKind::load_integer) {
             ElementRangeGuard::Range read{access.address.base,access.address.offset,access.stride,false};
             for (std::size_t i=0;i<guard.outputs.size();++i) {
-                const auto& output=guard.outputs[i];
-                if (read.base==int(output.base) && read.stride==output.stride && read.offset>=output.last) read.ahead_of=int(i);
+                std::vector<const MemoryAccess*> stores;
+                for (const auto& store:structure.accesses)
+                    if (store.kind==AccessKind::store_vector && store.address.known && store.address.base==int(guard.outputs[i].base))
+                        stores.push_back(&store);
+                if (stores.empty() || read.stride<=0 || std::any_of(stores.begin(),stores.end(),[&](const auto* store){return store->stride!=read.stride;}))
+                    continue;
+                read.ordered|=1U<<i;
+                for (const auto* store:stores)
+                    guard.orders.push_back({read.base,store->address.base,read.offset,store->address.offset,read.stride,
+                        access.pair<store->pair,static_cast<unsigned>(guard.reads.size()),static_cast<unsigned>(i)});
             }
             guard.reads.push_back(read);
         }
@@ -65,7 +74,12 @@ ElementRangeGuard analyze_element_range(std::span<const vu::Pair> pairs,unsigned
     for (const auto& node:loop.nodes) if (node.kind==ElementNodeKind::load) {
         if (node.a>18) throw std::invalid_argument("Invalid recovered load base");
         const int base=node.a==16 ? -1 : node.a>=17 ? int(node.a)-1 : int(node.a);
-        guard.reads.push_back({base,static_cast<std::int32_t>(node.b),node.a<16 ? loop.strides[node.a]:0,true});
+        ElementRangeGuard::Range read{base,static_cast<std::int32_t>(node.b),node.a<16 ? loop.strides[node.a]:0,true};
+        // A recovered prefetch re-expresses a physical load stream; it shares
+        // that stream's ordering exemptions.
+        for (const auto& physical:guard.reads)
+            if (!physical.selected && physical.base==read.base && physical.stride==read.stride) read.ordered|=physical.ordered;
+        guard.reads.push_back(read);
     }
     return guard;
 }
@@ -151,7 +165,10 @@ void emit_element_range_llvm(std::ostream& out,const ElementRangeGuard& guard,st
         }
         outputs.push_back({first_row,last_row});
     }
-    for (const auto& read:guard.reads) {
+    // Disjointness of each ordered read from each stream, combined with its order checks below.
+    std::map<std::pair<unsigned,unsigned>,std::string> disjoint;
+    for (std::size_t index=0;index<guard.reads.size();++index) {
+        const auto& read=guard.reads[index];
         const auto origin=e.add(e.base(read.base),std::to_string(read.offset));
         const auto begin=e.add(origin,e.multiply(read.selected ? first:"0",read.stride));
         const auto end=e.add(origin,e.multiply(read.selected ? selected_last:last,read.stride));
@@ -159,11 +176,24 @@ void emit_element_range_llvm(std::ostream& out,const ElementRangeGuard& guard,st
         const auto& low=read.stride<0 ? end:begin;
         const auto& high=read.stride<0 ? begin:end;
         for (std::size_t i=0;i<outputs.size();++i) {
-            if (read.ahead_of==int(i)) continue;
             const auto before=e.value("icmp ult i64 "+high+", "+outputs[i].first);
             const auto after=e.value("icmp ugt i64 "+low+", "+outputs[i].second);
-            e.require(e.value("or i1 "+before+", "+after),4);
+            const auto apart=e.value("or i1 "+before+", "+after);
+            if ((read.ordered>>i)&1U) disjoint[{unsigned(index),unsigned(i)}]=apart;
+            else e.require(apart,4);
         }
+    }
+    for (const auto& order:guard.orders) {
+        const auto distance=e.value("sub i64 "+e.add(e.base(order.load_base),std::to_string(order.load_offset))+", "+
+            e.add(e.base(order.store_base),std::to_string(order.store_offset)));
+        const auto stride=std::to_string(order.stride);
+        const auto apart=e.value("icmp ne i64 "+e.value("srem i64 "+distance+", "+stride)+", 0");
+        const auto later=e.value("icmp sge i64 "+distance+", "+stride);
+        const auto same=order.load_first ? e.value("icmp eq i64 "+distance+", 0") : std::string("false");
+        const auto ordered=e.value("or i1 "+e.value("or i1 "+apart+", "+later)+", "+same);
+        const auto found=disjoint.find({order.read,order.output});
+        if (found==disjoint.end()) throw std::logic_error("Element order lacks its read range");
+        e.require(e.value("or i1 "+found->second+", "+ordered),4);
     }
     out<<"  ret i32 0\n";
     for (unsigned code=1;code<=4;++code) out<<"fail"<<code<<":\n  ret i32 "<<code<<"\n";

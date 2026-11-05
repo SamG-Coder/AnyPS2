@@ -7,12 +7,18 @@ namespace nt::render {
 // Only the numerical range/independence gate. Region entry, live-out state and
 // startup/drain equivalence remain separate requirements for installation.
 struct ElementRangeGuard {
-    // ahead_of: index of the output stream this read precedes. It reads through
-    // the same base and stride at or after every row that stream writes, so each
-    // row is read no later than the iteration that writes it, and the kernel's
-    // entry-memory input equals what the original loop read. It is exempt from
-    // overlap with that stream only.
-    struct Range { int base=-1; std::int32_t offset=0,stride=0; bool selected=false; int ahead_of=-1; };
+    // ordered: bit i lets this read overlap output stream i, whose stores all
+    // share its stride, when the Order checks prove at launch that every row it
+    // reads is read before any iteration writes it; the kernel's entry-memory
+    // input then equals what the original loop read. Disjoint ranges also pass.
+    struct Range { int base=-1; std::int32_t offset=0,stride=0; bool selected=false; unsigned ordered=0; };
+    // One raw load and one raw store per iteration with equal positive stride.
+    // With d = load row - store row at entry, they touch a common row only if d
+    // is a multiple of the stride; the store is then d/stride iterations later.
+    // Safe: no common row, d >= stride, or d == 0 with the load first in the body.
+    struct Order { int load_base=-1,store_base=-1; std::int32_t load_offset=0,store_offset=0,stride=0; bool load_first=false;
+        unsigned read=0,output=0; };  // the read (guard.reads index) and output stream it relates
+    std::vector<Order> orders;
     // One forward output stream per VI base; rows first..last of each element.
     struct Output { unsigned base=0; std::int32_t first=0,last=0,stride=0; };
     unsigned rows=0,counter=0,step=0,minimum_element=0;

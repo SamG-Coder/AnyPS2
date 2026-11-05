@@ -124,7 +124,7 @@ int main(int argc,char** argv) {
             const std::array entries{0U};
             const auto plan=nt::render::analyze_vector_region(nt::vu::frame(streams(1),1,0),1,entries,0);
             if (plan.range.outputs.size()!=2 || std::none_of(plan.range.reads.begin(),plan.range.reads.end(),
-                    [](const auto& read){return read.ahead_of>=0;}))
+                    [](const auto& read){return read.ordered!=0;}))
                 throw std::runtime_error("Multiple output streams or the in-place read ahead were not proved");
             // Reading the row the previous iteration wrote carries a value through memory.
             reject(nt::vu::frame(streams(-1),1,0),1,{0},0,"Read behind an output stream accepted");
