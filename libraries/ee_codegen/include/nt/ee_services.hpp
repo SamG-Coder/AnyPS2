@@ -134,11 +134,14 @@ public:
         if (thread_syscall(number)) {
             threads_.allow_idle=static_cast<bool>(idle_pump);
             const bool interrupt=memory.interrupts && memory.interrupts->active();
-            if (handlers_.active() || (interrupt && number!=0x2f && number!=0x34 && number!=0x36)) return Stop::unsupported_system;
+            // Interrupt-context forms: iGetThreadId, iWakeupThread, iCancelWakeupThread
+            // and iReleaseWaitThread. They never reschedule from the handler.
+            const bool interrupt_safe=number==0x2f || number==0x34 || number==0x36 || number==0x2e;
+            if (handlers_.active() || (interrupt && !interrupt_safe)) return Stop::unsupported_system;
             const auto result=threads_.invoke(number,state,memory,compiled_,protected_code_);
             if (result.status!=Stop::budget) return result.status;
             returned(state,result.value);
-            if (!interrupt && number!=0x2f && number!=0x34 && number!=0x36) threads_.schedule(state);
+            if (!interrupt && !interrupt_safe) threads_.schedule(state);
             return Stop::budget;
         }
         if (intc_syscall(number)) {
