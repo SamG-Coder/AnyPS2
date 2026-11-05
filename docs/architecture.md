@@ -120,13 +120,22 @@ Asynchronous VU1 submissions publish ordered graphics from completed launches
 while later compiled launches continue. A later failure stops execution and does
 not report submission completion; already accepted graphics remain submitted.
 A native drawing worker accepts one bounded, owned packet batch at a time.
-The execution owner rejoins it before reading graphics state or presenting output.
+The execution owner rejoins it before reading graphics state. Window presentation
+is queued on the worker after the frame's drawing, as on a game's render thread,
+so execution continues while the frame is recorded and shown; the window thread
+keeps resizing and title updates, and rejoins the worker before a resize.
 Worker failures surface through the native service boundary; recording a batch
 does not itself signal FINISH, which still follows the actual GPU fences.
 FINISH and display operations track actual submitted work. Presentation resources
 can be rebuilt when the display dimensions change without discarding game surfaces.
 The window reports rendered display updates; presentation frequency alone is not
 simulation speed or proof that every displayed image contains new content.
+Half-height interlaced output is reconstructed progressively from the last three
+composed images. A texel unchanged across them is shown as composed, and one that
+repeats every third image, as sub-pixel drawing-offset jitter does on static
+content, is shown as the mean over that cycle, as an interlaced display would
+integrate it. Two-field alternation and motion use field reconstruction without
+temporal trails. GS memory is unchanged; only presentation differs.
 
 The experimental LLVM GPU texture path is disabled by default. The normal path
 retains CPU texture preparation and native Vulkan rendering. Performance claims

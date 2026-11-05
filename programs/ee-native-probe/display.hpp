@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <nt/native_scanout.hpp>
 #include <nt/vulkan_renderer.hpp>
 #include <memory>
@@ -47,23 +48,40 @@ public:
 #endif
     }
     nt::graphics::VulkanRenderer& renderer() { return *renderer_; }
-    bool present(const nt::graphics::DisplayPlan& plan) {
+    // Window state belongs to the thread that created the window; presentation
+    // itself runs on the render thread (present_display), so the caller never
+    // waits for a frame to be recorded or shown.
+    bool presentable() const {
 #ifdef _WIN32
-        if (!IsWindow(window_.handle) || IsIconic(window_.handle)) return false;
-        resize(plan.width,plan.height);
-        const bool changed=renderer_->present_display(plan);
-        if (renderer_->validation_errors()) throw std::runtime_error("Native GPU display validation failed");
-        if (changed) ++frames_;
-        const auto now=std::chrono::steady_clock::now();
-        const auto elapsed=std::chrono::duration<double>(now-rate_started_).count();
-        if (elapsed>=1.0) {
-            fps_=static_cast<unsigned>((frames_-rate_frames_)/elapsed+0.5);
-            rate_frames_=frames_; rate_started_=now;
-        }
-        update_title();
-        return changed;
+        return IsWindow(window_.handle) && !IsIconic(window_.handle);
 #else
         return false;
+#endif
+    }
+    // A size change recreates the swapchain: the caller must first join the
+    // render thread, which is the renderer's only other user.
+    bool needs_resize(const nt::graphics::DisplayPlan& plan) const { return width_!=plan.width || height_!=plan.height; }
+    void prepare(const nt::graphics::DisplayPlan& plan) {
+#ifdef _WIN32
+        resize(plan.width,plan.height);
+#endif
+    }
+    // Render thread: shows the plan if it changed the displayed image.
+    bool present_display(nt::graphics::VulkanRenderer& renderer,const nt::graphics::DisplayPlan& plan) {
+        const bool changed=renderer.present_display(plan);
+        if (renderer.validation_errors()) throw std::runtime_error("Native GPU display validation failed");
+        if (changed) presented_.fetch_add(1,std::memory_order_relaxed);
+        return changed;
+    }
+    void update_rate() {
+#ifdef _WIN32
+        const auto now=std::chrono::steady_clock::now();
+        const auto elapsed=std::chrono::duration<double>(now-rate_started_).count();
+        if (elapsed<1.0) return;
+        frames_=presented_.load(std::memory_order_relaxed);
+        fps_=static_cast<unsigned>((frames_-rate_frames_)/elapsed+0.5);
+        rate_frames_=frames_; rate_started_=now;
+        update_title();
 #endif
     }
     void present(const nt::graphics::Scanout& frame) {
@@ -123,6 +141,7 @@ private:
     }
     std::chrono::steady_clock::time_point rate_started_=std::chrono::steady_clock::now();
     std::uint64_t frames_=0,rate_frames_=0;
+    std::atomic<std::uint64_t> presented_{0};
     std::vector<std::uint32_t> last_pixels_;
     unsigned fps_=0;
     bool stopped_=false;

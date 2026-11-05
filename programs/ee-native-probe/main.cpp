@@ -519,11 +519,17 @@ int main(int argc,char** argv) {
         nt::graphics::NativeDrawing::Profile previous_drawing{};
         auto previous_render_time=gpu.render_time;
         auto previous_drain_time=gpu.drain_time;
-        double presentation_seconds=0,previous_presentation=0;
-        std::vector<double> update_intervals;
-        std::chrono::steady_clock::time_point last_update{};
+        // Written by presentation tasks on the render thread; read and reset by
+        // this thread only after joining it.
+        struct PresentTiming {
+            double seconds=0;
+            std::vector<double> intervals;
+            std::chrono::steady_clock::time_point last_update{};
+            unsigned updates=0;
+        };
+        const auto presented=std::make_shared<PresentTiming>();
+        double previous_presentation=0;
         auto profile_started=started;
-        unsigned profile_updates=0;
         auto next_window_poll=started;
         auto next_input=started;
         auto last_input=started;
@@ -541,23 +547,31 @@ int main(int argc,char** argv) {
             const bool capturing=gpu.capture && gpu.capture->ready();
             if ((!window && !capturing) || window_closed || display_failed) return;
             try {
-                gpu.join();
                 const auto& output=platform.graphics.output();
-                if (const auto plan=nt::graphics::plan_display(output.control,output.buffers,output.displays,
-                        platform.graphics.half_height_output(),std::uint32_t(output.background),display_field())) {
-                    const auto present_started=std::chrono::steady_clock::now();
-                    const auto updated=window && window->present(*plan);
-                    if (profile_graphics && updated) {
+                const auto plan=nt::graphics::plan_display(output.control,output.buffers,output.displays,
+                    platform.graphics.half_height_output(),std::uint32_t(output.background),display_field());
+                if (!plan) return;
+                if (window && window->presentable()) {
+                    gpu.ensure_renderer();
+                    if (window->needs_resize(*plan)) { gpu.join(); window->prepare(*plan); }
+                    // Shown after this frame's queued drawing, on the render thread.
+                    gpu.worker->enqueue([display=window.get(),timing=presented,plan=*plan,profile=profile_graphics](nt::graphics::VulkanRenderer& renderer) {
+                        const auto present_started=std::chrono::steady_clock::now();
+                        const bool updated=display->present_display(renderer,plan);
                         const auto completed=std::chrono::steady_clock::now();
-                        if (last_update!=std::chrono::steady_clock::time_point{})
-                            update_intervals.push_back(std::chrono::duration<double,std::milli>(completed-last_update).count());
-                        last_update=completed; ++profile_updates;
-                    }
-                    presentation_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-present_started).count();
-                    if (capturing) {
-                        const auto frame=gpu.renderer->scanout_readback(*plan);
-                        gpu.capture->present(frame,gpu.drawing.submitted_draws(),output.control,output.buffers,output.displays,platform.graphics.half_height_output(),platform.graphics.scanout_odd());
-                    }
+                        if (profile && updated) {
+                            if (timing->last_update!=std::chrono::steady_clock::time_point{})
+                                timing->intervals.push_back(std::chrono::duration<double,std::milli>(completed-timing->last_update).count());
+                            timing->last_update=completed; ++timing->updates;
+                        }
+                        timing->seconds+=std::chrono::duration<double>(completed-present_started).count();
+                    });
+                    window->update_rate();
+                }
+                if (capturing) {
+                    gpu.join();
+                    const auto frame=gpu.renderer->scanout_readback(*plan);
+                    gpu.capture->present(frame,gpu.drawing.submitted_draws(),output.control,output.buffers,output.displays,platform.graphics.half_height_output(),platform.graphics.scanout_odd());
                 }
             } catch (const std::exception& error) { display_failed=true; gpu.error=error.what(); }
         };
@@ -569,6 +583,7 @@ int main(int argc,char** argv) {
             if (profile_graphics && now>=next_profile && gpu.renderer) {
                 gpu.join();
                 const auto& s=gpu.renderer->statistics(); const auto& p=previous_statistics;
+                auto& update_intervals=presented->intervals;
                 std::sort(update_intervals.begin(),update_intervals.end());
                 const auto percentile=[&](double fraction) {
                     return update_intervals.empty() ? 0.0 : update_intervals[static_cast<std::size_t>((update_intervals.size()-1)*fraction)];
@@ -615,14 +630,14 @@ int main(int argc,char** argv) {
                 previous_iop_time=iop_time_ns;
 #endif
                 std::cout<<"graphics_profile seconds="<<std::chrono::duration<double>(now-started).count()
-                    <<" updates_per_second="<<profile_updates/std::chrono::duration<double>(now-profile_started).count()
+                    <<" updates_per_second="<<presented->updates/std::chrono::duration<double>(now-profile_started).count()
                     <<" update_p50_ms="<<percentile(0.50)<<" update_p95_ms="<<percentile(0.95)
                     <<" render_ms="<<std::chrono::duration<double,std::milli>(gpu.render_time-previous_render_time).count()
                     <<" command_parse_ms="<<(gpu.drawing_profile.parse_ns-previous_drawing.parse_ns)/1e6
                     <<" command_validate_ms="<<(gpu.drawing_profile.validate_ns-previous_drawing.validate_ns)/1e6
                     <<" command_submit_ms="<<(gpu.drawing_profile.submit_ns-previous_drawing.submit_ns)/1e6
                     <<" gpu_triangle_batches="<<gpu.drawing.gpu_packet_batches()
-                    <<" present_ms="<<(presentation_seconds-previous_presentation)*1000
+                    <<" present_ms="<<(presented->seconds-previous_presentation)*1000
                     <<" command_drain_ms="<<std::chrono::duration<double,std::milli>(gpu.drain_time-previous_drain_time).count()
                     <<" input_poll_gap_max_ms="<<input_interval_gap_max_ms
                     <<" compiled_entry_ms="<<(execution_profile.entry_ns-previous_execution.entry_ns)/1e6
@@ -671,10 +686,10 @@ int main(int argc,char** argv) {
                     <<" draw_calls="<<s.draw_calls-p.draw_calls<<" batched_primitives="<<s.batched_primitives-p.batched_primitives<<'\n'<<std::flush;
                 if (gpu.gpu_triangles) for (const auto& [reason,count]:gpu.drawing.gpu_packet_fallbacks())
                     std::cout<<"gpu_triangle_fallback count="<<count<<" reason="<<reason<<'\n';
-                update_intervals.clear(); profile_updates=0; profile_started=now;
+                presented->intervals.clear(); presented->updates=0; profile_started=now;
                 input_interval_gap_max_ms=0;
                 previous_drain_time=gpu.drain_time;
-                previous_statistics=s; previous_render_time=gpu.render_time; previous_presentation=presentation_seconds;
+                previous_statistics=s; previous_render_time=gpu.render_time; previous_presentation=presented->seconds;
                 previous_drawing=gpu.drawing_profile;
                 previous_execution=execution_profile;
                 previous_display=display_profile;

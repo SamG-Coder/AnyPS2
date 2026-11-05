@@ -3,7 +3,9 @@
 #include <condition_variable>
 #include <deque>
 #include <exception>
+#include <functional>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 
 namespace nt::graphics {
@@ -14,6 +16,10 @@ namespace nt::graphics {
 // referenced objects must outlive this worker. Destruction records accepted
 // jobs and joins without throwing; normal execution retrieves errors through
 // poll() or wait().
+//
+// enqueue() adds renderer work, such as presentation, ordered after every job
+// accepted before it. The caller keeps executing while the frame is recorded
+// and presented, as a game thread does with its render thread.
 class NativeDrawingWorker {
 public:
     using Duration=std::chrono::steady_clock::duration;
@@ -36,13 +42,13 @@ public:
                 throw std::invalid_argument("Native drawing job exceeds batch bound");
             words+=packet.size();
         }
-        std::vector<Packet> owned(packets.begin(),packets.end());
-        std::unique_lock lock(mutex_);
-        changed_.wait(lock,[&] { return error_ || jobs_.size()+active_<queue_limit; });
-        rethrow();
-        jobs_.push_back(std::move(owned));
-        lock.unlock();
-        changed_.notify_all();
+        push({std::vector<Packet>(packets.begin(),packets.end()),{}});
+    }
+    // The task runs on the worker thread, which alone uses the renderer until
+    // the caller joins. A throwing task fails the worker like a failed job.
+    void enqueue(std::function<void(VulkanRenderer&)> task) {
+        if (!task) throw std::invalid_argument("Native drawing task is empty");
+        push({{},std::move(task)});
     }
     bool poll() {
         std::lock_guard lock(mutex_);
@@ -59,6 +65,18 @@ public:
     void drain() { wait(); renderer_.enqueue_finish(); }
     Duration elapsed() const { std::lock_guard lock(mutex_); return elapsed_; }
 private:
+    struct Job {
+        std::vector<Packet> packets;
+        std::function<void(VulkanRenderer&)> task;
+    };
+    void push(Job job) {
+        std::unique_lock lock(mutex_);
+        changed_.wait(lock,[&] { return error_ || jobs_.size()+active_<queue_limit; });
+        rethrow();
+        jobs_.push_back(std::move(job));
+        lock.unlock();
+        changed_.notify_all();
+    }
     void rethrow() { if (error_) std::rethrow_exception(error_); }
     void run() {
         std::unique_lock lock(mutex_);
@@ -71,7 +89,10 @@ private:
             lock.unlock();
             const auto started=std::chrono::steady_clock::now();
             std::exception_ptr failure;
-            try { drawing_.submit(renderer_,job); }
+            try {
+                if (job.task) job.task(renderer_);
+                else drawing_.submit(renderer_,job.packets);
+            }
             catch (...) { failure=std::current_exception(); }
             const auto finished=std::chrono::steady_clock::now();
             lock.lock();
@@ -85,7 +106,7 @@ private:
     VulkanRenderer& renderer_;
     mutable std::mutex mutex_;
     std::condition_variable changed_;
-    std::deque<std::vector<Packet>> jobs_;
+    std::deque<Job> jobs_;
     std::size_t active_=0;
     bool stopping_=false;
     std::exception_ptr error_;

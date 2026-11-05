@@ -485,6 +485,33 @@ int main(int argc,char** argv) {
             }
             ++checks;
         }
+        // Sub-pixel jitter cycling over three images must present one stable
+        // image (the cycle mean) instead of edges hopping between rows.
+        {
+            native.upload(std::vector<std::uint32_t>(actual.size()));
+            const std::array<std::uint64_t,2> displays{(7ULL<<32)|(7ULL<<44),(7ULL<<32)|(7ULL<<44)};
+            const std::array<std::uint32_t,3> cycle{0x30,0x60,0x90};
+            std::vector<std::uint32_t> settled;
+            for (unsigned frame=0;frame<9;++frame) {
+                const unsigned base=(frame%3)*32;
+                std::array<SpriteCommand,4> rows{};
+                for (unsigned y=0;y<4;++y) rows[y].draw={0,y,8,y+1,base,1,0xff000000U|(y==1 ? cycle[frame%3] : 0U),0};
+                native.draw(rows);
+                const auto plan=*plan_display(2,{0,(1ULL<<9)|(base/32)},displays,true,0,
+                    frame&1 ? DisplayField::odd : DisplayField::even);
+                const auto output=native.scanout_readback(plan);
+                if (frame<3) continue;
+                if (output.pixels[2*8]!=0xff000060U || output.pixels[3*8]!=0xff000060U)
+                    throw std::runtime_error("Three-image sub-pixel jitter was not resolved to its mean");
+                if (frame==3) settled=output.pixels;
+                else if (output.pixels!=settled) {
+                    for (std::size_t i=0;i<settled.size();++i) if (settled[i]!=output.pixels[i])
+                        std::cerr<<"frame "<<frame<<" texel "<<i<<" "<<std::hex<<settled[i]<<" "<<output.pixels[i]<<std::dec<<'\n';
+                    throw std::runtime_error("Resolved jitter cycle still moves");
+                }
+            }
+            ++checks;
+        }
         {
             // Shared rows between the two fields must still converge to real
             // interlaced detail, not retain an early spatial interpolation.
@@ -871,11 +898,26 @@ int main(int argc,char** argv) {
                 worker.submit(std::span(&batch,1));
                 batch[5][0]=0x8000ffffU; // Reuse producer storage immediately.
             }
+            {
+                // Renderer tasks (presentation) run on the worker after every
+                // job accepted before them, while the caller keeps going.
+                std::vector<unsigned> order;
+                std::uint64_t draws_seen=0;
+                worker.enqueue([&](VulkanRenderer&) { order.push_back(1); draws_seen=asynchronous.submitted_draws(); });
+                batch[5][0]=0x80000020U; worker.submit(std::span(&batch,1));
+                worker.enqueue([&](VulkanRenderer&) { order.push_back(2); });
+                worker.wait();
+                if (order!=std::vector<unsigned>{1,2} || draws_seen+1!=asynchronous.submitted_draws())
+                    throw std::runtime_error("Queued renderer tasks lost submission order");
+                bool rejected_empty=false;
+                try { worker.enqueue({}); } catch (const std::invalid_argument&) { rejected_empty=true; }
+                if (!rejected_empty) throw std::runtime_error("Empty renderer task accepted");
+            }
             worker.drain();
             // Draining commands does not publish FINISH itself. Completion
             // still comes from retired Vulkan queue fences.
             native.synchronize(); asynchronous.poll_completions(native);
-            if (asynchronous.completed_finishes()!=32 || asynchronous.pixels()[0]!=0x8000001fU)
+            if (asynchronous.completed_finishes()!=33 || asynchronous.pixels()[0]!=0x80000020U)
                 throw std::runtime_error("Deferred FINISH lost completion or draw ordering");
             {
                 // A failing queued job surfaces at the join; later jobs are not recorded.

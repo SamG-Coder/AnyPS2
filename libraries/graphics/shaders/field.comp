@@ -16,7 +16,31 @@ uint sample_surface(uint index,uint x,uint y) {
 void main() {
     uvec2 p=gl_GlobalInvocationID.xy;
     if (p.x>=display.width || p.y>=display.height) return;
-    imageStore(current_field,ivec2(p),uvec4(compose_circuits(p.x,p.y)));
+    const uint raw=compose_circuits(p.x,p.y);
+    imageStore(current_field,ivec2(p),uvec4(raw));
+    // Sub-pixel drawing-offset jitter cycling over three images (a temporal
+    // anti-aliasing pattern meant to be integrated by an interlaced display)
+    // makes static edges hop between rows. Once three composed images exist, a
+    // texel equal in all of them is static and is shown as composed; one that
+    // differs from the last image but equals the image three back is such a
+    // cycle and is shown as its mean. Neither gets a field-line shift or
+    // interpolation from jittering neighbours. Two-field content alternates
+    // (period two) and genuine motion breaks both patterns; they are left to
+    // the reconstruction below.
+    if ((display.history_valid&4)!=0) {
+        const uint a=texelFetch(previous[0],ivec2(p),0).r,b=texelFetch(previous[1],ivec2(p),0).r;
+        const uint c=texelFetch(previous[2],ivec2(p),0).r;
+        if (raw==a && raw==b && raw==c) { imageStore(reconstructed,ivec2(p),uvec4(raw)); return; }
+        if (raw!=a && raw==c) {
+            uint mean=0xff000000u;
+            for (uint shift=0;shift<24;shift+=8) {
+                const uint sum=((raw>>shift)&255u)+((a>>shift)&255u)+((b>>shift)&255u);
+                mean|=((sum+1u)/3u)<<shift;
+            }
+            imageStore(reconstructed,ivec2(p),uvec4(mean));
+            return;
+        }
+    }
     // Repainting the same source field is not new motion. Resource revisions
     // can change for redraws or overlapping views outside the displayed area.
     // Retain the prior reconstruction only where all contributing source rows

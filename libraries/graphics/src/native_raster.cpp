@@ -173,7 +173,9 @@ struct NativeRaster::Impl {
     std::array<std::unique_ptr<Image>,4> fields;
     std::unique_ptr<Image> display_image;
     std::map<std::tuple<Image*,Image*,unsigned>,VkDescriptorSet> field_sets;
-    unsigned field_index=0,field_count=0;
+    // field_count: consecutive alternating-parity fields; composed_count:
+    // consecutive composed images in the ring, whatever their parity.
+    unsigned field_index=0,field_count=0,composed_count=0;
     DisplayField previous_field=DisplayField::progressive;
     DisplayPlan resolved_plan{};
     std::uint64_t resolved_revision=0;
@@ -1028,7 +1030,7 @@ std::uint64_t NativeRaster::completed_submission() {
 void NativeRaster::upload(std::span<const std::uint32_t> words) {
     if (words.size()!=store_words) throw std::runtime_error("Invalid native resource import");
     auto& r=*impl_; r.clear_views(); r.surfaces.clear(); r.textures.clear(); r.texture_bytes=0; r.source_revisions={}; r.backing_revisions={}; std::copy(words.begin(),words.end(),r.source.begin()); r.initialized=true; ++r.revision;
-    r.field_count=0; r.previous_field=DisplayField::progressive; r.resolved_revision=0;
+    r.field_count=0; r.composed_count=0; r.previous_field=DisplayField::progressive; r.resolved_revision=0;
 }
 void NativeRaster::read(std::span<std::uint32_t> words) {
     if (words.size()!=store_words) throw std::runtime_error("Invalid native resource export");
@@ -1248,7 +1250,7 @@ NativeRaster::Impl::Image& NativeRaster::Impl::reconstruct(const DisplayPlan& pl
         clear_views();
         display_image=image(plan.width,plan.height);
         for (auto& field:fields) field=image(plan.width,plan.height);
-        field_count=0; field_index=0; previous_field=DisplayField::progressive; resolved_revision=0;
+        field_count=0; field_index=0; composed_count=0; previous_field=DisplayField::progressive; resolved_revision=0;
     }
     Image* inputs[2]{};
     for (unsigned i=0;i<2;++i) if (plan.control&(1U<<i)) {
@@ -1287,14 +1289,16 @@ NativeRaster::Impl::Image& NativeRaster::Impl::reconstruct(const DisplayPlan& pl
         }
         vkUpdateDescriptorSets(device,writes.size(),writes.data(),0,nullptr);
     }
-    auto constants=plan; constants.history_valid=(field_count>=3 ? 1U : 0U)|(resolved_revision ? 2U : 0U);
+    auto constants=plan;
+    constants.history_valid=(field_count>=3 ? 1U : 0U)|(resolved_revision ? 2U : 0U)|(composed_count>=3 ? 4U : 0U);
     order();
     vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_COMPUTE,field_pipeline);
     vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_COMPUTE,field_layout,0,1,&set,0,nullptr);
     vkCmdPushConstants(command,field_layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(constants),&constants);
     vkCmdDispatch(command,(plan.width+7)/8,(plan.height+7)/8,1);
     order();
-    field_index=(field_index+1)%4; field_count=std::min(field_count+1,3U); previous_field=plan.field;
+    field_index=(field_index+1)%4; field_count=std::min(field_count+1,3U); composed_count=std::min(composed_count+1,3U);
+    previous_field=plan.field;
     resolved_plan=plan; resolved_revision=revision; resolved_sources=source_revisions;
     return *display_image;
 }
@@ -1309,7 +1313,7 @@ Scanout NativeRaster::capture(const DisplayPlan& plan) {
         r.stats.readback_bytes+=frame.pixels.size()*4;
         return frame;
     }
-    r.field_count=0; r.previous_field=DisplayField::progressive; r.resolved_revision=0;
+    r.field_count=0; r.composed_count=0; r.previous_field=DisplayField::progressive; r.resolved_revision=0;
     r.synchronize_source({0,store_words});
     return scanout(r.source,plan);
 }
@@ -1333,7 +1337,7 @@ void NativeRaster::release_presentation() {
     if (r.present_pipeline) vkDestroyPipeline(r.device,r.present_pipeline,nullptr);
     if (r.present_pass) vkDestroyRenderPass(r.device,r.present_pass,nullptr);
     r.present_pipeline={}; r.present_pass={}; r.last_present=0;
-    r.field_count=0; r.previous_field=DisplayField::progressive; r.resolved_revision=0;
+    r.field_count=0; r.composed_count=0; r.previous_field=DisplayField::progressive; r.resolved_revision=0;
 }
 
 void NativeRaster::wait_submission(std::uint64_t token) {
@@ -1356,7 +1360,7 @@ std::uint64_t NativeRaster::present(const DisplayPlan& source_plan,VkImage targe
         plan.control=2; plan.half_height=0; plan.field=DisplayField::progressive;
         plan.surfaces[1]={0,0,0,0,plan.width,plan.height,0,0};
     } else {
-        r.field_count=0; r.previous_field=DisplayField::progressive; r.resolved_revision=0;
+        r.field_count=0; r.composed_count=0; r.previous_field=DisplayField::progressive; r.resolved_revision=0;
         for (unsigned i=0;i<2;++i) if (plan.control&(1U<<i)) { const auto& s=plan.surfaces[i]; images[i]=&r.display_surface(s.base,s.pitch,s.y+(plan.half_height ? (s.height+1)/2 : s.height)); }
     }
     if (!images[0]) images[0]=images[1]; if (!images[1]) images[1]=images[0];
