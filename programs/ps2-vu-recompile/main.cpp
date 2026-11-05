@@ -6,6 +6,8 @@
 #include <stdexcept>
 
 int main(int argc,char** argv) {
+    // Trailing diagnostic option: instrument VU data loads (nt_vu_observe_load).
+    if (argc>5 && std::string_view(argv[argc-1])=="--observe-loads") { nt::vu::set_observe_loads(true); --argc; }
     if (argc!=5 && argc!=6 && argc!=8) {
         std::cerr<<"Usage: ps2-vu-recompile <input.bin> <output.ll> <unit:0|1> <destination-index> [--all-entries | entry,entry,... [--continuations depth]]\n"
             <<"       ps2-vu-recompile --catalog <images.tsv> <output.ll> <unit:0|1>\n"; return 2;

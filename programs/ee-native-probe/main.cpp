@@ -39,10 +39,27 @@
 #ifdef ANYPS2_NATIVE_VU1_REGIONS
 #include <nt/vector_region.hpp>
 #include <atomic>
+#include <bitset>
 #include <map>
 #include <mutex>
 #include <tuple>
 extern "C" const void* nt_vu1_regions();
+// Diagnostic: a VU module converted with --observe-loads reports each data load.
+// Rows written by the most recent executed region; later loads that hit them
+// are reads of region output by ordinary VU code (not the graphics kick).
+namespace {
+std::bitset<1024> region_rows;
+unsigned region_rows_head=0;
+std::map<unsigned,std::uint64_t> region_row_reads,region_row_executions;
+std::uint64_t observed_loads=0;
+}
+extern "C" void nt_vu_observe_load(std::uint32_t row) {
+    ++observed_loads;
+    if (row<1024 && region_rows[row]) {
+        ++region_row_reads[region_rows_head];
+        region_rows.reset(); // count each execution's outputs once
+    }
+}
 extern "C" std::uint32_t nt_vu1_region_count();
 namespace {
 // Converter-emitted vector regions of the linked VU1 image, by loop head.
@@ -98,8 +115,17 @@ struct VuRegions {
                 return false;
             }
             const auto row=self.first_output_row(region,state);
+            const auto entry=state;
             try {
                 nt::render::execute_vector_region(region,state); ++self.executed;
+                // Rows every element of every store wrote (the guard bounded them).
+                region_rows.reset(); region_rows_head=head; ++region_row_executions[head];
+                const unsigned count=entry.integers[region.counter-1]/region.step+region.trip_offset;
+                for (unsigned n=0;n<region.stores;++n) for (unsigned element=0;element<count;++element) {
+                    const auto& store=region.output[n];
+                    const auto value=std::int64_t(entry.integers[store.base-1])+store.row+std::int64_t(store.stride)*element;
+                    if (value>=0 && value<1024) region_rows.set(std::size_t(value));
+                }
                 if (self.transitions.size()<256) ++self.transitions[{self.last_head,head,row==self.last_row}];
                 self.last_head=head; self.last_row=row;
                 return true;
@@ -886,6 +912,12 @@ int main(int argc,char** argv) {
         if (!vu_region_mode.empty()) for (const auto& [key,count]:vu_regions.transitions)
             if (count>=1000) std::cout<<"vu_region_chain from="<<std::get<0>(key)<<" to="<<std::get<1>(key)
                                        <<" same_buffer="<<std::get<2>(key)<<" count="<<count<<'\n';
+        if (!vu_region_mode.empty()) {
+            std::cout<<"vu_observed_loads="<<observed_loads<<'\n';
+            for (const auto& [head,executions]:region_row_executions)
+                std::cout<<"vu_region_outputs head="<<head<<" executions="<<executions
+                         <<" read_by_vu_code="<<region_row_reads[head]<<'\n';
+        }
 #endif
         const auto execution_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
         std::cout<<"execution_seconds="<<execution_seconds

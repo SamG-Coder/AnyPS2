@@ -8,6 +8,10 @@ namespace nt::vu {
 // output. The generated function returns Result and atomically commits State only
 // on success; unsupported numeric inputs leave the input region state unchanged.
 void emit_llvm(std::ostream& output,std::span<const Pair> pairs,unsigned unit,std::string_view symbol="nt_vu_generated");
+// Diagnostic code generation: every VU data load also calls
+// nt_vu_observe_load(row), which the linking program must define. Off by
+// default; it changes no VU semantics and is never needed for execution.
+void set_observe_loads(bool enabled);
 // Compile reachable blocks from explicit entries into one module with native
 // block-table and count accessors. Indirect destinations require explicit entries.
 // A bounded number of subsequent E-stop continuations may be discovered offline.

@@ -11,6 +11,8 @@
 #include <stdexcept>
 
 namespace nt::vu {
+namespace { bool observe_loads=false; }
+void set_observe_loads(bool enabled) { observe_loads=enabled; }
 namespace {
 struct Store { std::string type,value; std::size_t offset; std::string address{}; };
 bool upper_supported(Arithmetic operation) {
@@ -358,6 +360,7 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
     writer.sparse_data=!nested_branch && stored_lanes<=32 && stored_lanes*loaded_lanes<=512;
     // Numeric ABI helpers operate only on integer encodings and value arguments.
     // They cannot read guest state, host memory or the floating-point environment.
+    if (declarations && observe_loads) writer.out<<"declare void @nt_vu_observe_load(i32)\n";
     if (declarations) writer.out<<"; AnyPS2 VU ahead-of-time native region\n"
         <<"declare i32 @nt_ee_integer_to_scaled_scalar(i32, i32) nounwind willreturn memory(none)\n"
         <<"declare i32 @nt_ee_scaled_scalar_to_integer(i32, i32) nounwind willreturn memory(none)\n"
@@ -634,6 +637,11 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
                     writer.out<<"  br i1 "<<ready<<", label %memory"<<index<<", label %memory_failure\nmemory"<<index<<":\n";
                 }
                 const auto wrapped=writer.value("and i16 "+address+", "+(unit ? "1023" : "255"));
+                if (load && observe_loads) {
+                    // value() emits its instruction immediately; name it first.
+                    const auto row=writer.value("zext i16 "+wrapped+" to i32");
+                    writer.out<<"  call void @nt_vu_observe_load(i32 "<<row<<")\n";
+                }
                 const auto byte_offset=writer.value("shl i64 "+writer.value("zext i16 "+wrapped+" to i64")+", 4");
                 const auto start=writer.value("getelementptr i8, ptr "+writer.pointer(offsetof(State,data))+", i64 "+byte_offset);
                 for (unsigned lane=0;lane<4;++lane) if (lower.mask&(8U>>lane)) {
