@@ -2,6 +2,7 @@
 #include <nt/vu_lower.hpp>
 #include <algorithm>
 #include <set>
+#include <tuple>
 #include <stdexcept>
 
 namespace nt::render {
@@ -30,27 +31,34 @@ ElementRangeGuard analyze_element_range(std::span<const vu::Pair> pairs,unsigned
     guard.rows=unit ? 1024:256; guard.counter=counter; guard.step=static_cast<unsigned>(-std::int64_t(step)); guard.minimum_element=loop.depth;
     guard.trip_offset=trip_offset;
     guard.steps=structure.steps; guard.integer_writes=structure.integer_writes;
-    const auto& first=loop.stores.front();
-    guard.output_base=first.base; guard.output_first=guard.output_last=first.row; guard.output_stride=first.stride;
-    if (first.base==0 || first.base>=16 || first.stride<=0)
-        throw std::invalid_argument("Element range requires a forward output stream");
-    std::set<std::pair<std::int32_t,unsigned>> written;
+    std::set<std::tuple<unsigned,std::int32_t,unsigned>> written;
     for (const auto& store:loop.stores) {
-        if (store.base!=first.base || store.stride!=first.stride || store.lane>=4 ||
-            !written.emplace(store.row,store.lane).second)
-            throw std::invalid_argument("Element outputs overlap or use different streams");
-        guard.output_first=std::min(guard.output_first,store.row); guard.output_last=std::max(guard.output_last,store.row);
+        if (store.base==0 || store.base>=16 || store.stride<=0 || store.lane>=4)
+            throw std::invalid_argument("Element range requires forward output streams");
+        auto stream=std::find_if(guard.outputs.begin(),guard.outputs.end(),[&](const auto& output){return output.base==store.base;});
+        if (stream==guard.outputs.end()) stream=guard.outputs.insert(guard.outputs.end(),{store.base,store.row,store.row,store.stride});
+        if (stream->stride!=store.stride || !written.emplace(store.base,store.row,store.lane).second)
+            throw std::invalid_argument("Element outputs overlap or use different strides on one stream");
+        stream->first=std::min(stream->first,store.row); stream->last=std::max(stream->last,store.row);
     }
-    if (std::int64_t(guard.output_last)-guard.output_first>=first.stride)
-        throw std::invalid_argument("Element output records overlap across iterations");
+    if (guard.outputs.empty() || guard.outputs.size()>8) throw std::invalid_argument("Element range requires one to eight output streams");
+    for (const auto& output:guard.outputs)
+        if (std::int64_t(output.last)-output.first>=output.stride)
+            throw std::invalid_argument("Element output records overlap across iterations");
     for (const auto& write:guard.integer_writes)
         if (!write.known || write.base < -1 || write.base>17)
             throw std::invalid_argument("Element integer range is not affine");
     for (const auto& access:structure.accesses) {
         if (access.kind==AccessKind::store_integer) throw std::invalid_argument("Element integer stores are not replaceable");
         if (!access.address.known) throw std::invalid_argument("Element memory range is not affine");
-        if (access.kind==AccessKind::load_vector || access.kind==AccessKind::load_integer)
-            guard.reads.push_back({access.address.base,access.address.offset,access.stride,false});
+        if (access.kind==AccessKind::load_vector || access.kind==AccessKind::load_integer) {
+            ElementRangeGuard::Range read{access.address.base,access.address.offset,access.stride,false};
+            for (std::size_t i=0;i<guard.outputs.size();++i) {
+                const auto& output=guard.outputs[i];
+                if (read.base==int(output.base) && read.stride==output.stride && read.offset>=output.last) read.ahead_of=int(i);
+            }
+            guard.reads.push_back(read);
+        }
     }
     // Recovered prefetches may address earlier iterations. Guard those too,
     // using only the requested steady-state subrange, not an invented prologue.
@@ -129,9 +137,20 @@ void emit_element_range_llvm(std::ostream& out,const ElementRangeGuard& guard,st
         e.bound(initial,65535);
         e.bound(e.add(initial,e.multiply(last,step)),65535);
     }
-    const auto output_first=e.add(e.base(int(guard.output_base)),std::to_string(guard.output_first));
-    const auto output_last=e.add(e.add(e.base(int(guard.output_base)),std::to_string(guard.output_last)),e.multiply(last,guard.output_stride));
-    e.bound(output_first,guard.rows-1); e.bound(output_last,guard.rows-1);
+    if (guard.outputs.empty()) throw std::invalid_argument("Element range guard has no output stream");
+    std::vector<std::pair<std::string,std::string>> outputs;
+    for (const auto& output:guard.outputs) {
+        const auto first_row=e.add(e.base(int(output.base)),std::to_string(output.first));
+        const auto last_row=e.add(e.add(e.base(int(output.base)),std::to_string(output.last)),e.multiply(last,output.stride));
+        e.bound(first_row,guard.rows-1); e.bound(last_row,guard.rows-1);
+        // Streams must not write each other's rows.
+        for (const auto& [other_first,other_last]:outputs) {
+            const auto before=e.value("icmp ult i64 "+last_row+", "+other_first);
+            const auto after=e.value("icmp ugt i64 "+first_row+", "+other_last);
+            e.require(e.value("or i1 "+before+", "+after),4);
+        }
+        outputs.push_back({first_row,last_row});
+    }
     for (const auto& read:guard.reads) {
         const auto origin=e.add(e.base(read.base),std::to_string(read.offset));
         const auto begin=e.add(origin,e.multiply(read.selected ? first:"0",read.stride));
@@ -139,9 +158,12 @@ void emit_element_range_llvm(std::ostream& out,const ElementRangeGuard& guard,st
         e.bound(begin,guard.rows-1); e.bound(end,guard.rows-1);
         const auto& low=read.stride<0 ? end:begin;
         const auto& high=read.stride<0 ? begin:end;
-        const auto before=e.value("icmp ult i64 "+high+", "+output_first);
-        const auto after=e.value("icmp ugt i64 "+low+", "+output_last);
-        e.require(e.value("or i1 "+before+", "+after),4);
+        for (std::size_t i=0;i<outputs.size();++i) {
+            if (read.ahead_of==int(i)) continue;
+            const auto before=e.value("icmp ult i64 "+high+", "+outputs[i].first);
+            const auto after=e.value("icmp ugt i64 "+low+", "+outputs[i].second);
+            e.require(e.value("or i1 "+before+", "+after),4);
+        }
     }
     out<<"  ret i32 0\n";
     for (unsigned code=1;code<=4;++code) out<<"fail"<<code<<":\n  ret i32 "<<code<<"\n";

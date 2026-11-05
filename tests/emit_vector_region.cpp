@@ -1,6 +1,7 @@
 #include "render_loop_fixture.hpp"
 #include <nt/vector_region_codegen.hpp>
 #include <nt/element_packet.hpp>
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -100,6 +101,33 @@ int main(int argc,char** argv) {
             invalid=program(variant);
             render_fixture::replace(invalid,0,true,(15U<<21)|(8U<<16)|(8U<<11)|0x1fdU);
             reject(nt::vu::frame(invalid,unit,head),unit,{head},head,"Unbounded live-out recurrence accepted");
+        }
+        {
+            // Two output streams (VI4, VI3) and an in-place read one row ahead
+            // of the VI4 stream: each row is read before the iteration writing it.
+            const auto streams=[](int ahead) {
+                nt::Bytes bytes;
+                const auto pair=[&](std::uint32_t low=render_fixture::lower_nop,std::uint32_t up=render_fixture::upper_nop) {
+                    render_fixture::word(bytes,low); render_fixture::word(bytes,up);
+                };
+                pair((15U<<21)|(1U<<16)|(4U<<11)|(unsigned(ahead)&0x7ffU)); // LQ VF1, ahead(VI4)
+                pair(0x80000000U|(15U<<21)|(2U<<16)|(5U<<11)|(13U<<6)|0x3cU); // LQI VF2, (VI5++)
+                pair(render_fixture::lower_nop,(15U<<21)|(6U<<16)|(1U<<11)|0x17dU); // FTOI4 VF6, VF1
+                pair(0x80000000U|(15U<<21)|(4U<<16)|(2U<<11)|(13U<<6)|0x3dU); // SQI VF2, (VI4++)
+                pair(0x80000000U|(15U<<21)|(3U<<16)|(6U<<11)|(13U<<6)|0x3dU); // SQI VF6, (VI3++)
+                pair((9U<<25)|(9U<<16)|(9U<<11)|1U); pair(); pair();
+                const int displacement=-int(bytes.size()/8)-1;
+                pair((41U<<25)|(9U<<11)|(unsigned(displacement)&0x7ffU)); pair();
+                pair(render_fixture::lower_nop,0x400002ffU); pair();
+                return bytes;
+            };
+            const std::array entries{0U};
+            const auto plan=nt::render::analyze_vector_region(nt::vu::frame(streams(1),1,0),1,entries,0);
+            if (plan.range.outputs.size()!=2 || std::none_of(plan.range.reads.begin(),plan.range.reads.end(),
+                    [](const auto& read){return read.ahead_of>=0;}))
+                throw std::runtime_error("Multiple output streams or the in-place read ahead were not proved");
+            // Reading the row the previous iteration wrote carries a value through memory.
+            reject(nt::vu::frame(streams(-1),1,0),1,{0},0,"Read behind an output stream accepted");
         }
     } catch (const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }
 }

@@ -418,9 +418,15 @@ CPU state. Both CPU and Vulkan executors are exercised, including rejected
 entry/range conditions and transactional failure. The runtime executable links
 native services and generated objects without the analysis/decoder libraries.
 
-On a local commercial VU1 program, 11 of 49 loops are accepted as regions (two of
-them use the Q/P pipelines); a local validator matched 2,200 randomized region
-executions against the original compiled loops in complete VU state. A Release timing of those loops on one host
+Element outputs may use up to eight forward streams, one per VI base; the launch
+guard keeps every stream in bounds and the streams disjoint. A read through the
+same base and stride at or after every row that stream writes reads each row no
+later than the iteration writing it, so in-place transforms use the entry memory
+the kernel receives; such reads are exempt from overlap with their own stream.
+On a local commercial VU1 program, 17 of 49 loops are accepted as regions,
+including its most expensive loop in a 3D menu; a local validator matched 3,400
+randomized region executions against the original compiled loops in complete VU
+state. A Release timing of those loops on one host
 found the CPU region service 1.2-13 times slower than the original compiled blocks,
 which already use inlined four-lane helpers, while the element kernels call scalar
 exact helpers. Regions must therefore not be installed as a CPU replacement. The

@@ -82,7 +82,7 @@ void run() {
     {
         const auto bytes=vertex_program();
         const auto guard=analyze_element_range(nt::vu::frame(bytes,1,0),1);
-        require(guard.counter==9 && guard.step==1 && guard.output_stride==2 && guard.minimum_element==0,
+        require(guard.counter==9 && guard.step==1 && guard.outputs.size()==1 && guard.outputs[0].stride==2 && guard.minimum_element==0,
             "Vertex range analysis lost the loop recurrence");
         require(guard.trip_offset==0,"Separated countdown was given an extra iteration");
         // A counter update in the pair before the branch is compared through the
