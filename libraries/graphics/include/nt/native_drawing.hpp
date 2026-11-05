@@ -120,7 +120,7 @@ public:
             for (const auto& operation:draws) {
                 if (const auto* draw=std::get_if<Draw>(&operation)) {
                     SpriteCommand command{draw->sprite,{},draw->triangle,draw->fog_color,draw->fog,draw->levels};
-                    snapshot_palette(std::span(command.palette).first((draw->sprite.flags&indexed8_flag) ? 256 : 16),candidate.palette,draw->bank,draw->palette16,draw->texa);
+                    attach_palette(renderer,candidate,command,draw->bank,draw->palette16,draw->texa);
                     pending.push_back(command);
                     if (pending.size()==256) flush();
                     continue;
@@ -131,12 +131,16 @@ public:
                     const VectorLaunch launch{vector_host_records,{},{},batch->elements,batch->words,
                         std::span(batch->layout).first(batch->registers),nullptr,batch->records};
                     SpriteCommand command{batch->target,{},{},batch->fog_color,0,batch->levels};
-                    if (batch->target.flags&64)
-                        snapshot_palette(std::span(command.palette).first((batch->target.flags&indexed8_flag) ? 256 : 16),
-                            candidate.palette,batch->bank,batch->palette16,batch->texa);
+                    if (batch->target.flags&64) attach_palette(renderer,candidate,command,batch->bank,batch->palette16,batch->texa);
                     renderer.draw_vectors(launch,batch->assembly,command);
                     dirty_=true;
                 } else if (const auto* load=std::get_if<PaletteLoad>(&operation)) {
+                    // A 32-bit palette load from rendered memory stays on the GPU.
+                    if (!load->narrow && load->bank*16+load->addresses.size()<=256)
+                        if (const auto slot=renderer.load_palette(load->addresses,load->bank*16,candidate.palette_slot,candidate.palette)) {
+                            candidate.palette_slot=slot; continue;
+                        }
+                    materialize_palette(renderer,candidate);
                     std::array<std::uint32_t,256> words{};
                     const auto selected=std::span(words).first(load->addresses.size());
                     renderer.read_words(load->addresses,selected);
@@ -285,9 +289,25 @@ private:
         std::uint64_t transfer_buffer=0,transfer_position=0,transfer_extent=0;
         ImageUpload upload;
         std::array<std::uint32_t,256> palette{};
+        std::uint32_t palette_slot=0; // nonzero: the palette is GPU-resident (VulkanRenderer::load_palette)
         std::array<unsigned,2> palette_bases{};
         std::uint64_t palette_config=0;
     } state_;
+    // While state.palette_slot is set, the current palette lives only on the
+    // GPU; 32-bit indexed draws reference it and other uses read it back once.
+    static void materialize_palette(VulkanRenderer& renderer,State& state) {
+        if (!state.palette_slot) return;
+        renderer.read_palette(state.palette_slot,std::span<std::uint32_t,256>(state.palette));
+        state.palette_slot=0;
+    }
+    static void attach_palette(VulkanRenderer& renderer,State& state,SpriteCommand& command,unsigned bank,bool narrow,std::uint64_t texa) {
+        if (state.palette_slot && !narrow && (command.draw.flags&64)) {
+            command.palette_slot=state.palette_slot; command.palette_bank=bank;
+            return;
+        }
+        if (command.draw.flags&64) materialize_palette(renderer,state);
+        snapshot_palette(std::span(command.palette).first((command.draw.flags&indexed8_flag) ? 256 : 16),state.palette,bank,narrow,texa);
+    }
     static constexpr unsigned unknown_vertices=1U<<5,unknown_packed_q=1U<<6;
     bool gpu_packets_=false;
     std::uint64_t gpu_packet_batches_=0;

@@ -149,6 +149,65 @@ void depth_and_coverage(nt::graphics::VulkanRenderer& renderer) {
 
 }
 
+// A palette loaded from rendered memory and a PSMT8 texture read from a
+// rendered 32-bit surface decode on the GPU (no readback) exactly as the GS
+// defines them: index bytes through the CSM1 palette layout.
+void gpu_palettes(nt::graphics::VulkanRenderer& renderer) {
+    using namespace nt::graphics;
+    const auto ad=[](Packet& p,unsigned reg,std::uint64_t value) {
+        p.push_back({std::uint32_t(value),std::uint32_t(value>>32),reg,0});
+    };
+    const auto finish=[](Packet& p) { p[0]={0x8000U|unsigned(p.size()-1),0x10000000,14,0}; };
+    const auto shaded=[&](unsigned fbp,unsigned fbw,unsigned width,unsigned height,std::array<std::uint32_t,4> colors) {
+        Packet p(1); ad(p,0x1a,1); ad(p,0,3|8); ad(p,0x4c,fbp|(std::uint64_t(fbw)<<16));
+        ad(p,0x40,std::uint64_t(width-1)<<16|(std::uint64_t(height-1)<<48)); ad(p,0x46,1); ad(p,0x47,0x30000); ad(p,0x4e,200|(1ULL<<32));
+        const std::array<std::pair<unsigned,unsigned>,6> corners{{{0,0},{width,0},{0,height},{width,0},{0,height},{width,height}}};
+        const std::array<unsigned,6> which{0,1,2,1,2,3};
+        for (unsigned i=0;i<6;++i) { ad(p,1,colors[which[i]]); ad(p,5,(corners[i].first*16)|(std::uint64_t(corners[i].second*16)<<16)); }
+        finish(p); return p;
+    };
+    NativeDrawing d{true};
+    const auto before=renderer.statistics();
+    d.submit(renderer,std::array{shaded(0,2,128,32,{0x80102030,0x40f0a050,0x20409070,0xc0e0d0f0}),
+        shaded(10,1,16,16,{0x80ff0000,0x8000ff00,0x800000ff,0x80ffffff})});
+    Packet p(1); ad(p,0x1a,1); ad(p,0,6|16|256); ad(p,0x4c,20|(1ULL<<16)); ad(p,0x40,(15ULL<<16)|(15ULL<<48));
+    ad(p,0x46,1); ad(p,0x47,0x30000); ad(p,0x4e,200|(1ULL<<32)); ad(p,0x42,0x44);
+    ad(p,6,(2ULL<<14)|(0x13ULL<<20)|(4ULL<<26)|(4ULL<<30)|(1ULL<<35)|(320ULL<<37)|(1ULL<<61)); // PSMT8, CBP 320, CLD 1
+    ad(p,1,0x80000000); ad(p,3,8|(8ULL<<16)); ad(p,5,0); ad(p,3,264|(264ULL<<16)); ad(p,5,256|(256ULL<<16));
+    finish(p); d.submit(renderer,std::array{p});
+    const auto& after=renderer.statistics();
+    if (after.gpu_palette_loads==before.gpu_palette_loads || after.gpu_indexed_decodes==before.gpu_indexed_decodes)
+        throw std::runtime_error("Rendered palette and indexed texture did not use the GPU path");
+    const auto& memory=d.pixels();
+    for (unsigned y=0;y<16;++y) for (unsigned x=0;x<16;++x) {
+        const auto byte=indexed_byte(0,2,x,y);
+        const auto index=(memory[byte/4]>>((byte%4)*8))&255U;
+        const auto entry=(320U*64+(index&1)+((index&6)<<1)+((index&8)>>2)+((index&16)<<2)+((index&96)>>1)+(index&128))&0xfffffU;
+        if (memory[rgba_word(640,1,x,y)]!=memory[entry])
+            throw std::runtime_error("GPU-decoded PSMT8 texel differs from the GS palette lookup");
+    }
+    // A taller PSMT8 view spans pages the surface does not hold: those texels
+    // come from the GPU copy of console memory, still without a readback.
+    const auto readbacks=renderer.statistics().palette_readbacks+renderer.statistics().texture_readbacks;
+    Packet q(1); ad(q,0x1a,1); ad(q,0,6|16|256); ad(q,0x4c,20|(1ULL<<16)); ad(q,0x40,(15ULL<<16)|(15ULL<<48));
+    ad(q,0x46,1); ad(q,0x47,0x30000); ad(q,0x4e,200|(1ULL<<32)); ad(q,0x42,0x44);
+    ad(q,6,(2ULL<<14)|(0x13ULL<<20)|(4ULL<<26)|(8ULL<<30)|(1ULL<<35)|(320ULL<<37)|(1ULL<<61)); // 16x256 PSMT8
+    ad(q,1,0x80000000); ad(q,3,8|(8ULL<<16)); ad(q,5,0); ad(q,3,264|((256ULL*16+8)<<16)); ad(q,5,256|(256ULL<<16));
+    finish(q);
+    const auto decodes=renderer.statistics().gpu_indexed_decodes;
+    d.submit(renderer,std::array{q});
+    if (renderer.statistics().gpu_indexed_decodes==decodes ||
+        renderer.statistics().palette_readbacks+renderer.statistics().texture_readbacks!=readbacks)
+        throw std::runtime_error("PSMT8 view beyond the rendered surface did not decode on the GPU");
+    const auto& tall=d.pixels();
+    for (unsigned y=0;y<16;++y) for (unsigned x=0;x<16;++x) {
+        const auto byte=indexed_byte(0,2,x,y*16);
+        const auto index=(tall[byte/4]>>((byte%4)*8))&255U;
+        const auto entry=(320U*64+(index&1)+((index&6)<<1)+((index&8)>>2)+((index&16)<<2)+((index&96)>>1)+(index&128))&0xfffffU;
+        if (tall[rgba_word(640,1,x,y)]!=tall[entry])
+            throw std::runtime_error("Mirror-sourced PSMT8 texel differs from the GS palette lookup");
+    }
+}
 void triangles(nt::graphics::VulkanRenderer& renderer) {
     using nt::graphics::Packet;
     using nt::graphics::RasterVertex;
@@ -588,6 +647,7 @@ int main() {
             throw std::runtime_error("Full-height scanout unexpectedly duplicated source rows");
         triangles(consumer.renderer);
         depth_and_coverage(consumer.renderer);
+        gpu_palettes(consumer.renderer);
         std::cout<<"Compiled VU to Vulkan drawing integration passed\n";
         return 0;
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }

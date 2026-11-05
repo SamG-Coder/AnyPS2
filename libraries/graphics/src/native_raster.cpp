@@ -1,4 +1,5 @@
 #include "native_raster.hpp"
+#include <nt/palette_plan.hpp>
 #include "native_vectors.hpp"
 #include "raster_hazards.hpp"
 #include "sprite_mapping.hpp"
@@ -44,6 +45,9 @@ const std::uint32_t present_fragment[]=
 ;
 const std::uint32_t field_code[]=
 #include "field.comp.inc"
+;
+const std::uint32_t palette_code[]=
+#include "palette.comp.inc"
 ;
 #ifdef ANYPS2_LLVM_TEXTURES
 const std::uint32_t texture_decode_code[]=
@@ -112,6 +116,25 @@ struct NativeRaster::Impl {
     VkPipelineLayout layout{},present_layout{}; VkPipeline pipeline{},coverage_pipeline{},present_pipeline{};
     VkDescriptorSetLayout field_descriptors{};
     VkPipelineLayout field_layout{}; VkPipeline field_pipeline{};
+    // GPU palette slots (palette_slot_count x 256 words) followed by one
+    // 256-word address list per slot for the gather pass.
+    static constexpr unsigned palette_slot_count=4096;
+    VkBuffer palettes{}; VkDeviceMemory palette_memory{};
+    // Lazily updated GPU copy of `source`: a page is current when its
+    // mirror revision equals its backing revision.
+    VkBuffer mirror{}; VkDeviceMemory mirror_memory{};
+    std::array<std::uint64_t,512> mirror_revisions{};
+    VkDescriptorSetLayout palette_descriptors{}; VkPipelineLayout palette_layout{}; VkPipeline palette_pipeline{};
+    std::uint32_t next_palette=1;
+    // Slot holding the last CPU palette snapshot uploaded for a GPU decode.
+    std::uint32_t uploaded_palette=0; std::array<std::uint32_t,256> uploaded_snapshot{};
+    struct PaletteParameters {
+        std::uint32_t mode=0,surface_base=0,surface_pitch=0,surface_width=0,surface_height=0;
+        std::uint32_t slot=0,addresses=0,count=0;
+        std::uint32_t texture_base=0,texture_pitch=0,format=0,bank=0,width=0,height=0;
+        std::array<std::uint32_t,16> owned{};
+    };
+    static_assert(sizeof(PaletteParameters)<=128);
 #ifdef ANYPS2_LLVM_TEXTURES
     VkDescriptorSetLayout decode_descriptors{}; VkDescriptorPool decode_pool{};
     VkPipelineLayout decode_layout{}; VkPipeline decode_pipeline{};
@@ -148,6 +171,7 @@ struct NativeRaster::Impl {
     struct Texture {
         std::unique_ptr<Image> image; Region region; bool valid=false;
         std::uint64_t last_use=0,source_revision=0;
+        std::uint32_t palette_slot=0,palette_bank=0; // GPU-decoded contents
     };
     VkDeviceSize texture_bytes=0;
     std::uint64_t texture_use=0;
@@ -173,6 +197,8 @@ struct NativeRaster::Impl {
     std::array<std::unique_ptr<Image>,4> fields;
     std::unique_ptr<Image> display_image;
     std::map<std::tuple<Image*,Image*,unsigned>,VkDescriptorSet> field_sets;
+    std::map<std::pair<Image*,Image*>,VkDescriptorSet> palette_sets;
+    std::unique_ptr<Image> placeholder; // bound as the surface when only the mirror is read
     // field_count: consecutive alternating-parity fields; composed_count:
     // consecutive composed images in the ring, whatever their parity.
     unsigned field_index=0,field_count=0,composed_count=0;
@@ -219,6 +245,9 @@ struct NativeRaster::Impl {
     void initialize_texture_decoder();
 #endif
     VkDescriptorSet allocate_set(VkDescriptorSetLayout);
+    void read_palette_words(std::uint32_t slot,std::array<std::uint32_t,256>& words);
+    void palette_pass(Image& source,Image* output,const PaletteParameters&);
+    bool gpu_source(Region requested,Image*& holder,std::array<std::uint32_t,16>& owned);
     VkDescriptorSet bind_target(Image&,Image&,const TextureSet&,const Sprite&);
 };
 VkDeviceMemory NativeRaster::Impl::allocate(VkMemoryRequirements requirements,VkMemoryPropertyFlags flags,VkMemoryPropertyFlags preferred) {
@@ -457,6 +486,43 @@ void NativeRaster::Impl::initialize(unsigned family) {
     const auto field_result=vkCreateComputePipelines(device,VK_NULL_HANDLE,1,&field_create,nullptr,&field_pipeline);
     vkDestroyShaderModule(device,field_module,nullptr);
     checked(field_result,"Create field reconstruction pipeline");
+    {
+        VkBufferCreateInfo pb{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        pb.size=VkDeviceSize(palette_slot_count)*2*256*sizeof(std::uint32_t);
+        pb.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        checked(vkCreateBuffer(device,&pb,nullptr,&palettes),"Create GPU palettes");
+        VkMemoryRequirements requirements{}; vkGetBufferMemoryRequirements(device,palettes,&requirements);
+        palette_memory=allocate(requirements,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        checked(vkBindBufferMemory(device,palettes,palette_memory,0),"Bind GPU palettes");
+        pb.size=VkDeviceSize(store_words)*sizeof(std::uint32_t);
+        pb.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        checked(vkCreateBuffer(device,&pb,nullptr,&mirror),"Create GPU memory mirror");
+        vkGetBufferMemoryRequirements(device,mirror,&requirements);
+        mirror_memory=allocate(requirements,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        checked(vkBindBufferMemory(device,mirror,mirror_memory,0),"Bind GPU memory mirror");
+        mirror_revisions.fill(~0ULL);
+        const std::array<VkDescriptorSetLayoutBinding,4> palette_bindings{{
+            {0,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,1,VK_SHADER_STAGE_COMPUTE_BIT,nullptr},
+            {1,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,VK_SHADER_STAGE_COMPUTE_BIT,nullptr},
+            {2,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,1,VK_SHADER_STAGE_COMPUTE_BIT,nullptr},
+            {3,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,VK_SHADER_STAGE_COMPUTE_BIT,nullptr}}};
+        dl.bindingCount=palette_bindings.size(); dl.pBindings=palette_bindings.data();
+        checked(vkCreateDescriptorSetLayout(device,&dl,nullptr,&palette_descriptors),"Create palette descriptors");
+        VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(PaletteParameters)};
+        VkPipelineLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        layout_info.setLayoutCount=1; layout_info.pSetLayouts=&palette_descriptors;
+        layout_info.pushConstantRangeCount=1; layout_info.pPushConstantRanges=&range;
+        checked(vkCreatePipelineLayout(device,&layout_info,nullptr,&palette_layout),"Create palette layout");
+        VkShaderModuleCreateInfo module_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        module_info.codeSize=sizeof(palette_code); module_info.pCode=palette_code;
+        VkShaderModule module{}; checked(vkCreateShaderModule(device,&module_info,nullptr,&module),"Create palette shader");
+        VkComputePipelineCreateInfo create{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        create.stage={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,nullptr,0,VK_SHADER_STAGE_COMPUTE_BIT,module,"main",nullptr};
+        create.layout=palette_layout;
+        const auto result=vkCreateComputePipelines(device,VK_NULL_HANDLE,1,&create,nullptr,&palette_pipeline);
+        vkDestroyShaderModule(device,module,nullptr);
+        checked(result,"Create palette pipeline");
+    }
     std::array<VkAttachmentDescription,2> attachments{};
     for (auto& a:attachments) { a.format=VK_FORMAT_R32_UINT; a.samples=VK_SAMPLE_COUNT_1_BIT; a.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD; a.storeOp=VK_ATTACHMENT_STORE_OP_STORE; a.initialLayout=a.finalLayout=VK_IMAGE_LAYOUT_GENERAL; }
     const std::array<VkAttachmentReference,2> refs{{{0,VK_IMAGE_LAYOUT_GENERAL},{1,VK_IMAGE_LAYOUT_GENERAL}}};
@@ -493,6 +559,13 @@ NativeRaster::Impl::~Impl() {
     if (pipeline) vkDestroyPipeline(device,pipeline,nullptr);
     if (coverage_pipeline) vkDestroyPipeline(device,coverage_pipeline,nullptr);
     if (present_pipeline) vkDestroyPipeline(device,present_pipeline,nullptr);
+    if (palette_pipeline) vkDestroyPipeline(device,palette_pipeline,nullptr);
+    if (palette_layout) vkDestroyPipelineLayout(device,palette_layout,nullptr);
+    if (palette_descriptors) vkDestroyDescriptorSetLayout(device,palette_descriptors,nullptr);
+    if (palettes) vkDestroyBuffer(device,palettes,nullptr);
+    if (mirror) vkDestroyBuffer(device,mirror,nullptr);
+    if (mirror_memory) vkFreeMemory(device,mirror_memory,nullptr);
+    if (palette_memory) vkFreeMemory(device,palette_memory,nullptr);
     if (field_pipeline) vkDestroyPipeline(device,field_pipeline,nullptr);
     if (field_layout) vkDestroyPipelineLayout(device,field_layout,nullptr);
     if (field_descriptors) vkDestroyDescriptorSetLayout(device,field_descriptors,nullptr);
@@ -586,7 +659,7 @@ void NativeRaster::Impl::synchronize_source(Region requested) {
 void NativeRaster::Impl::clear_views() {
     vector_target={};
     flush(); for (auto [k,f]:framebuffers) vkDestroyFramebuffer(device,f,nullptr); framebuffers.clear(); sets.clear(); present_sets.clear();
-    field_sets.clear();
+    field_sets.clear(); palette_sets.clear();
     checked(vkResetDescriptorPool(device,descriptor_pool,0),"Reset native resource descriptors");
 }
 void NativeRaster::Impl::trim_surfaces() {
@@ -866,9 +939,133 @@ void NativeRaster::Impl::decode_texture(Image& image,const SpriteCommand& draw,R
     }
 }
 #endif
+// The one rendered 32-bit color surface holding newer words in `requested`
+// (none when CPU memory is current there), with the pages it owns. Other
+// pages come from the mirror, refreshed here. Fails when another surface
+// also holds newer words in the request, or the holder is not a plain CT32 view.
+bool NativeRaster::Impl::gpu_source(Region requested,Image*& holder,std::array<std::uint32_t,16>& owned) {
+    holder=nullptr; owned={};
+    for (auto& [key,image]:surfaces) {
+        if (!image || !image->dirty || !image->region.overlaps(requested)) continue;
+        bool newer=false;
+        for (unsigned word=requested.start,left=requested.length;left && !newer;) {
+            const unsigned page=(word/2048)%512;
+            newer=image->pages[page]>backing_revisions[page];
+            const unsigned step=std::min(left,2048-word%2048); word=(word+step)%store_words; left-=step;
+        }
+        if (!newer) continue;
+        if (holder || !image->valid || image->scratch || image->depth || image->format) return false;
+        holder=image.get();
+    }
+    for (unsigned word=requested.start,left=requested.length;left;) {
+        const unsigned page=(word/2048)%512;
+        if (holder && holder->pages[page]>backing_revisions[page]) owned[page/32]|=1U<<(page%32);
+        else if (mirror_revisions[page]!=backing_revisions[page]) {
+            // Same staging rule as upload_image: transfers keep their bytes until the fence.
+            if (2048*4>staging_bytes-staging_used) flush();
+            prepare_slot();
+            const auto offset=slot*staging_bytes+staging_used;
+            std::memcpy(static_cast<std::byte*>(mapped)+offset,source.data()+std::size_t(page)*2048,2048*4);
+            staging_used+=2048*4; order();
+            const VkBufferCopy copy{offset,VkDeviceSize(page)*2048*4,2048*4};
+            vkCmdCopyBuffer(command,staging,mirror,1,&copy);
+            mirror_revisions[page]=backing_revisions[page]; stats.upload_bytes+=2048*4;
+        }
+        const unsigned step=std::min(left,2048-word%2048); word=(word+step)%store_words; left-=step;
+    }
+    return true;
+}
+void NativeRaster::Impl::palette_pass(Image& source,Image* output,const PaletteParameters& parameters) {
+    if (palette_sets.size()>=4096) clear_views();
+    auto& cached=palette_sets[{&source,output}];
+    if (!cached) {
+    cached=allocate_set(palette_descriptors);
+    const auto set=cached;
+    const VkDescriptorImageInfo surface_info{sampler,source.view,VK_IMAGE_LAYOUT_GENERAL};
+    const VkDescriptorBufferInfo buffer_info{palettes,0,VK_WHOLE_SIZE};
+    const VkDescriptorImageInfo output_info{VK_NULL_HANDLE,(output ? output : &source)->view,VK_IMAGE_LAYOUT_GENERAL};
+    const VkDescriptorBufferInfo mirror_info{mirror,0,VK_WHOLE_SIZE};
+    std::array<VkWriteDescriptorSet,4> writes{};
+    for (unsigned i=0;i<4;++i) {
+        auto& w=writes[i]; w.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w.dstSet=set; w.dstBinding=i; w.descriptorCount=1;
+    }
+    writes[0].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; writes[0].pImageInfo=&surface_info;
+    writes[1].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; writes[1].pBufferInfo=&buffer_info;
+    writes[2].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; writes[2].pImageInfo=&output_info;
+    writes[3].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; writes[3].pBufferInfo=&mirror_info;
+    vkUpdateDescriptorSets(device,writes.size(),writes.data(),0,nullptr);
+    }
+    const auto set=cached;
+    order();
+    vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_COMPUTE,palette_pipeline);
+    vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_COMPUTE,palette_layout,0,1,&set,0,nullptr);
+    vkCmdPushConstants(command,palette_layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(parameters),&parameters);
+    if (parameters.mode==0) vkCmdDispatch(command,(parameters.count+7)/8,1,1);
+    else vkCmdDispatch(command,(parameters.width+7)/8,(parameters.height+7)/8,1);
+    order();
+}
 NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& command) {
     Measure timing(stats.texture_lookup_ns,profiling);
     const auto& d=command.draw;
+    if (d.flags&64) {
+        unsigned width=texture_extent(d.texture_width,d.clamp_u,d.min_u,d.max_u);
+        unsigned height=texture_extent(d.texture_height,d.clamp_v,d.min_v,d.max_v);
+        const bool high=(d.flags&texture_high_flag)!=0;
+        const auto r=region(d.texture_base,d.texture_pitch,width,height,high ? 0U : (d.flags&indexed8_flag) ? 2U : 1U);
+        // Indexed data decodes on the GPU when its palette is GPU-resident or
+        // its index data was rendered: words come from the owning surface or
+        // the memory mirror, so neither needs a readback. A CPU palette is
+        // uploaded into a slot, reused while its snapshot is unchanged.
+        Image* holder=nullptr; std::array<std::uint32_t,16> owned{};
+        const bool rendered=std::any_of(surfaces.begin(),surfaces.end(),[&](const auto& entry) {
+            return entry.second && entry.second->dirty && entry.second->region.overlaps(r);
+        });
+        if ((command.palette_slot || rendered) && gpu_source(r,holder,owned)) {
+            std::uint32_t slot=command.palette_slot,bank=command.palette_bank;
+            if (!slot) {
+                if (!uploaded_palette || uploaded_snapshot!=command.palette) {
+                    uploaded_palette=next_palette++; uploaded_snapshot=command.palette;
+                    order();
+                    vkCmdUpdateBuffer(this->command,palettes,VkDeviceSize(uploaded_palette%palette_slot_count)*256*4,
+                        sizeof(uploaded_snapshot),uploaded_snapshot.data());
+                }
+                slot=uploaded_palette; bank=0; // the snapshot already applied CSA
+            }
+            // One image per source view; palette or source changes decode into it again.
+            std::array<std::uint32_t,261> key{d.texture_base,d.texture_pitch,width,height,
+                d.flags&(65|indexed8_flag|texture_high_flag|texture_high_nibble_flag),0xffffffffU};
+            auto found=textures.find(key);
+            if (found==textures.end()) {
+                auto allocated=image(width,height); texture_bytes+=allocated->allocation_bytes;
+                found=textures.emplace(key,Texture{std::move(allocated),r}).first; ++stats.texture_misses;
+            }
+            auto& tex=found->second; tex.last_use=++texture_use;
+            const auto generation=std::max(source_revision(r),holder ? holder->revision : 0);
+            if (!tex.valid || tex.source_revision!=generation || tex.palette_slot!=slot || tex.palette_bank!=bank) {
+                auto& bound=holder ? *holder : *tex.image;
+                PaletteParameters parameters{};
+                parameters.mode=1; parameters.surface_base=bound.base; parameters.surface_pitch=bound.pitch;
+                parameters.surface_width=holder ? bound.width : 0; parameters.surface_height=holder ? bound.height : 0;
+                parameters.slot=slot%palette_slot_count;
+                parameters.texture_base=d.texture_base; parameters.texture_pitch=d.texture_pitch;
+                parameters.format=high ? ((d.flags&indexed8_flag) ? 2U : (d.flags&texture_high_nibble_flag) ? 4U : 3U) : (d.flags&indexed8_flag) ? 0U : 1U;
+                parameters.bank=bank; parameters.width=width; parameters.height=height; parameters.owned=owned;
+                palette_pass(bound,tex.image.get(),parameters);
+                tex.valid=true; tex.source_revision=generation; tex.image->revision=generation;
+                tex.palette_slot=slot; tex.palette_bank=bank;
+                ++stats.gpu_indexed_decodes;
+            }
+            return *tex.image;
+        }
+        if (command.palette_slot) {
+            auto copy=command;
+            std::array<std::uint32_t,256> words{};
+            read_palette_words(command.palette_slot,words);
+            snapshot_palette(std::span(copy.palette).first((d.flags&indexed8_flag) ? 256 : 16),words,command.palette_bank);
+            copy.palette_slot=0;
+            return texture(copy);
+        }
+    }
     unsigned width=(d.flags&1) ? texture_extent(d.texture_width,d.clamp_u,d.min_u,d.max_u) : 1;
     unsigned height=(d.flags&1) ? texture_extent(d.texture_height,d.clamp_v,d.min_v,d.max_v) : 1;
     if ((d.flags&1) && !(d.flags&64)) {
@@ -924,7 +1121,8 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
             return *tex.image;
         }
     }
-    for (auto& [k,i]:surfaces) if (i && i->dirty && i->region.overlaps(r)) { ++stats.texture_readbacks; synchronize_source(r); tex.valid=false; break; }
+    for (auto& [k,i]:surfaces) if (i && i->dirty && i->region.overlaps(r)) {
+        ++stats.texture_readbacks; synchronize_source(r); tex.valid=false; break; }
     if (!tex.valid) {
 #ifdef ANYPS2_LLVM_TEXTURES
         if ((d.flags&1) && !(d.flags&(texture_z_flag|texture_high_flag))) {
@@ -1032,12 +1230,59 @@ std::uint64_t NativeRaster::completed_submission() {
 }
 void NativeRaster::upload(std::span<const std::uint32_t> words) {
     if (words.size()!=store_words) throw std::runtime_error("Invalid native resource import");
-    auto& r=*impl_; r.clear_views(); r.surfaces.clear(); r.textures.clear(); r.texture_bytes=0; r.source_revisions={}; r.backing_revisions={}; std::copy(words.begin(),words.end(),r.source.begin()); r.initialized=true; ++r.revision;
+    auto& r=*impl_; r.clear_views(); r.surfaces.clear(); r.textures.clear(); r.texture_bytes=0; r.source_revisions={}; r.backing_revisions={}; r.mirror_revisions.fill(~0ULL); std::copy(words.begin(),words.end(),r.source.begin()); r.initialized=true; ++r.revision;
     r.field_count=0; r.composed_count=0; r.previous_field=DisplayField::progressive; r.resolved_revision=0;
 }
 void NativeRaster::read(std::span<std::uint32_t> words) {
     if (words.size()!=store_words) throw std::runtime_error("Invalid native resource export");
     auto& r=*impl_; r.synchronize_source({0,store_words}); r.flush(); std::copy(r.source.begin(),r.source.end(),words.begin());
+}
+std::uint32_t NativeRaster::load_palette(std::span<const unsigned> addresses,unsigned first,std::uint32_t previous,
+    const std::array<std::uint32_t,256>& current) {
+    auto& r=*impl_;
+    if (addresses.empty() || first+addresses.size()>256) return 0;
+    unsigned low=store_words,high=0;
+    for (const auto address:addresses) {
+        if (address>=store_words) throw std::runtime_error("Invalid native palette address");
+        low=std::min(low,address); high=std::max(high,address);
+    }
+    // With CPU memory current for every word and no GPU palette to extend,
+    // the caller reads the words without a stall. Otherwise the words come
+    // from the owning surface or the memory mirror.
+    Impl::Image* holder=nullptr; std::array<std::uint32_t,16> owned{};
+    if (!r.gpu_source({low,high-low+1},holder,owned) || (!holder && !previous)) return 0;
+    if (!r.placeholder) r.placeholder=r.image(1,1);
+    auto* source=holder ? holder : r.placeholder.get();
+    const auto id=r.next_palette++;
+    const auto slot=id%Impl::palette_slot_count;
+    std::array<std::uint32_t,256> list{};
+    std::copy(addresses.begin(),addresses.end(),list.begin());
+    r.order();
+    if (previous) {
+        const VkBufferCopy copy{VkDeviceSize(previous%Impl::palette_slot_count)*256*4,VkDeviceSize(slot)*256*4,256*4};
+        vkCmdCopyBuffer(r.command,r.palettes,r.palettes,1,&copy);
+    } else vkCmdUpdateBuffer(r.command,r.palettes,VkDeviceSize(slot)*256*4,sizeof(current),current.data());
+    vkCmdUpdateBuffer(r.command,r.palettes,VkDeviceSize(Impl::palette_slot_count+slot)*256*4,sizeof(list),list.data());
+    Impl::PaletteParameters parameters{};
+    parameters.mode=0; parameters.surface_base=source->base; parameters.surface_pitch=source->pitch;
+    parameters.surface_width=holder ? source->width : 0; parameters.surface_height=holder ? source->height : 0;
+    parameters.slot=slot; parameters.addresses=(Impl::palette_slot_count+slot)*256;
+    parameters.count=unsigned(addresses.size()); parameters.bank=first; parameters.owned=owned;
+    r.palette_pass(*source,nullptr,parameters);
+    ++r.stats.gpu_palette_loads;
+    return id;
+}
+void NativeRaster::Impl::read_palette_words(std::uint32_t id,std::array<std::uint32_t,256>& words) {
+    order();
+    const VkBufferCopy copy{VkDeviceSize(id%palette_slot_count)*256*4,0,256*4};
+    vkCmdCopyBuffer(command,palettes,readback,1,&copy); flush();
+    std::memcpy(words.data(),readback_mapping,sizeof(words));
+    ++stats.palette_readbacks;
+}
+void NativeRaster::read_palette(std::uint32_t slot,std::span<std::uint32_t,256> words) {
+    std::array<std::uint32_t,256> values{};
+    impl_->read_palette_words(slot,values);
+    std::copy(values.begin(),values.end(),words.begin());
 }
 void NativeRaster::read_words(std::span<const unsigned> addresses,std::span<std::uint32_t> values) {
     if (addresses.size()!=values.size()) throw std::runtime_error("Invalid native palette read");
@@ -1189,7 +1434,7 @@ void NativeRaster::draw(std::span<const SpriteCommand> commands) {
             x.texture_width==y.texture_width && x.texture_height==y.texture_height &&
             x.clamp_u==y.clamp_u && x.clamp_v==y.clamp_v &&
             x.min_u==y.min_u && x.max_u==y.max_u && x.min_v==y.min_v && x.max_v==y.max_v &&
-            (!(x.flags&64) || a.palette==b.palette) &&
+            (!(x.flags&64) || (a.palette==b.palette && a.palette_slot==b.palette_slot && a.palette_bank==b.palette_bank)) &&
             a.levels.control==b.levels.control && a.levels.base==b.levels.base && a.levels.pitch==b.levels.pitch;
     };
     const auto emit=[&](SpriteCommand c,unsigned height) {

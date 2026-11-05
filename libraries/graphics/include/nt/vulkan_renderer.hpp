@@ -70,6 +70,9 @@ struct SpriteCommand {
     std::array<RasterVertex,3> triangle{};
     std::uint32_t fog_color=0,fog=0;
     TextureLevels levels{};
+    // Nonzero: a 32-bit palette held on the GPU (VulkanRenderer::load_palette)
+    // replaces `palette`; palette_bank is the CSA bank of that palette.
+    std::uint32_t palette_slot=0,palette_bank=0;
 };
 struct RenderStatistics {
     std::uint64_t submissions=0,sprites=0,upload_bytes=0,readback_bytes=0;
@@ -79,6 +82,7 @@ struct RenderStatistics {
     std::uint64_t wait_ns=0,upload_ns=0,write_ns=0,draw_ns=0,texture_decode_ns=0;
     std::uint64_t surface_import_ns=0,surface_export_ns=0;
     std::uint64_t surface_conflicts=0,texture_readbacks=0,palette_readbacks=0;
+    std::uint64_t gpu_palette_loads=0,gpu_indexed_decodes=0;
     std::uint64_t surface_evictions=0;
     std::array<std::uint32_t,8> last_surface_conflict{}; // base, pitch, height, depth for each view.
     std::uint64_t uploads=0,feedback_barriers=0,gpu_ns=0;
@@ -126,6 +130,11 @@ public:
     void write(std::span<const PixelWrite> writes);
     void read(std::span<std::uint32_t> memory);
     void read_words(std::span<const unsigned> addresses,std::span<std::uint32_t> values);
+    // Native renderer: copies a 256-word palette on the GPU when its words lie
+    // in rendered memory and returns its slot; 0 means read the words instead.
+    std::uint32_t load_palette(std::span<const unsigned> addresses,unsigned first,std::uint32_t previous,
+        const std::array<std::uint32_t,256>& current);
+    void read_palette(std::uint32_t slot,std::span<std::uint32_t,256> words);
     const RenderStatistics& statistics() const;
     // Diagnostic readback and exact comparison. Disabled during normal play.
     void verify_texture_kernels(bool enable);

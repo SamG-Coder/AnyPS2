@@ -698,6 +698,14 @@ void VulkanRenderer::read(std::span<std::uint32_t> memory) {
     throw std::runtime_error("Reference renderer operation is unavailable in native output");
 #endif
 }
+std::uint32_t VulkanRenderer::load_palette(std::span<const unsigned> addresses,unsigned first,std::uint32_t previous,
+    const std::array<std::uint32_t,256>& current) {
+    return impl_->native ? impl_->native->load_palette(addresses,first,previous,current) : 0;
+}
+void VulkanRenderer::read_palette(std::uint32_t slot,std::span<std::uint32_t,256> words) {
+    if (!impl_->native) throw std::logic_error("GPU palettes require the native renderer");
+    impl_->native->read_palette(slot,words);
+}
 void VulkanRenderer::read_words(std::span<const unsigned> addresses,std::span<std::uint32_t> values) {
     if (impl_->native) { impl_->native->read_words(addresses,values); return; }
 #if ANYPS2_REFERENCE_RENDERER
@@ -795,16 +803,24 @@ void VulkanRenderer::refresh_surface() {
 bool VulkanRenderer::present_display(DisplayPlan plan) {
     auto& v=*impl_;
     if (v.native) {
-        if (!v.swapchain || plan.width!=v.extent.width || plan.height!=v.extent.height)
-            throw std::runtime_error("Presentation size must match the fixed window");
+        if (!v.swapchain) throw std::runtime_error("Presentation requires a window");
+        // The surface may report another size while the window is being changed.
+        if (plan.width!=v.extent.width || plan.height!=v.extent.height) return false;
         if (!v.native->changed(plan)) return false;
         auto& frame=v.present_frames[v.present_frame];
         v.native->wait_submission(frame.submission);
-        unsigned index=0; check(vkAcquireNextImageKHR(v.device,v.swapchain,UINT64_MAX,frame.acquired,VK_NULL_HANDLE,&index),"Acquire native image");
+        // A window change (move between monitors, resize, display mode) makes
+        // the swapchain out of date; recreate it and show the next image.
+        unsigned index=0;
+        const auto acquired=vkAcquireNextImageKHR(v.device,v.swapchain,UINT64_MAX,frame.acquired,VK_NULL_HANDLE,&index);
+        if (acquired==VK_ERROR_OUT_OF_DATE_KHR) { refresh_surface(); return false; }
+        if (acquired!=VK_SUBOPTIMAL_KHR) check(acquired,"Acquire native image");
         frame.submission=v.native->present(plan,v.images[index],v.format,frame.acquired,v.present_ready[index]);
         VkPresentInfoKHR p{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR}; p.waitSemaphoreCount=1; p.pWaitSemaphores=&v.present_ready[index]; p.swapchainCount=1; p.pSwapchains=&v.swapchain; p.pImageIndices=&index;
-        check(vkQueuePresentKHR(v.queue,&p),"Present native image");
+        const auto presented=vkQueuePresentKHR(v.queue,&p);
         v.present_frame=(v.present_frame+1)%v.present_frames.size();
+        if (presented==VK_ERROR_OUT_OF_DATE_KHR || presented==VK_SUBOPTIMAL_KHR || acquired==VK_SUBOPTIMAL_KHR) refresh_surface();
+        else check(presented,"Present native image");
         return true;
     }
 #if ANYPS2_REFERENCE_RENDERER

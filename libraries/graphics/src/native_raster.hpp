@@ -17,6 +17,13 @@ public:
     void draw_vectors(const VectorLaunch&,const VectorAssembly&,const SpriteCommand&);
     void read(std::span<std::uint32_t> words);
     void read_words(std::span<const unsigned> addresses,std::span<std::uint32_t> values);
+    // Loads palette entries first.. on the GPU when all their words lie in one
+    // rendered 32-bit surface: the new slot starts as `previous` (a slot) or,
+    // when that is 0, as `current`. Returns the slot, or 0 when the caller
+    // must read the words instead. read_palette returns a slot's words.
+    std::uint32_t load_palette(std::span<const unsigned> addresses,unsigned first,std::uint32_t previous,
+        const std::array<std::uint32_t,256>& current);
+    void read_palette(std::uint32_t slot,std::span<std::uint32_t,256> words);
     void finish();
     // Completion tokens refer to actual queue fences, never assumed readiness.
     std::uint64_t enqueue_finish();

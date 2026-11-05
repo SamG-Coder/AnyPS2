@@ -1,0 +1,76 @@
+#version 450
+// GPU-resident palettes and indexed texture decoding for sources that a
+// native surface holds (rendered memory), so neither needs a CPU readback.
+// Mode 0 gathers palette words into a slot; mode 1 decodes an indexed texture
+// through a slot. Addresses follow nt/pixel_address.hpp exactly.
+layout(local_size_x=8,local_size_y=8) in;
+layout(set=0,binding=0) uniform usampler2D surface;          // CT32 surface image
+layout(std430,set=0,binding=1) buffer Palettes { uint words[]; } palettes;
+layout(set=0,binding=2,r32ui) writeonly uniform uimage2D decoded;
+// GPU copy of console memory, current for every page the surface does not own.
+layout(std430,set=0,binding=3) readonly buffer Mirror { uint words[]; } mirror;
+layout(push_constant) uniform Parameters {
+    uint mode,surface_base,surface_pitch,surface_width,surface_height;
+    uint slot,addresses,count;                    // mode 0: address list at word `addresses`
+    uint texture_base,texture_pitch,format,bank,width,height; // mode 1
+    uint owned[16];                               // pages whose newest words the surface holds
+} p;
+// Inverse of rgba_word for the surface: the pixel holding a word address,
+// or false when the word lies outside the surface image.
+bool surface_pixel(uint word,out ivec2 pixel) {
+    const uint owner=(word/2048u)&511u;
+    if ((p.owned[owner/32u]&(1u<<(owner%32u)))==0u) return false;
+    const uint relative=(word-p.surface_base*64u)&0xfffffu;
+    const uint page=relative/2048u,within=relative%2048u,block=within/64u,w=within%64u;
+    const uint pitch=max(p.surface_pitch,1u);
+    const uint x=(page%pitch)*64u+(((block>>4)&1u)<<5)+(((block>>2)&1u)<<4)+((block&1u)<<3)+(((w>>2)&3u)<<1)+(w&1u);
+    const uint y=(page/pitch)*32u+(((block>>3)&1u)<<4)+(((block>>1)&1u)<<3)+(((w>>4)&3u)<<1)+((w>>1)&1u);
+    pixel=ivec2(x,y);
+    return x<p.surface_width && y<p.surface_height;
+}
+uint rgba_word(uint base,uint pitch,uint x,uint y) {
+    x&=2047u; y&=2047u;
+    const uint page=(y/32u)*pitch+x/64u;
+    const uint block=((x>>3)&1u)|(((y>>3)&1u)<<1)|(((x>>4)&1u)<<2)|(((y>>4)&1u)<<3)|(((x>>5)&1u)<<4);
+    const uint word=(x&1u)|((y&1u)<<1)|((x&6u)<<1)|((y&6u)<<3);
+    return (base*64u+page*2048u+block*64u+word)&0xfffffu;
+}
+uint indexed_byte(uint base,uint pitch,uint x,uint y) {
+    x&=2047u; y&=2047u;
+    const uint page=(y/64u)*(pitch/2u)+x/128u;
+    const uint block=((x>>4)&1u)|(((y>>4)&1u)<<1)|(((x>>5)&1u)<<2)|(((y>>5)&1u)<<3)|(((x>>6)&1u)<<4);
+    const uint column=((x&1u)<<2)|((x&2u)<<3)|((((x>>2)^(y>>1)^(y>>2))&1u)<<5)|
+        ((x&8u)>>2)|((y&1u)<<3)|((y&2u)>>1)|((y&4u)<<4)|((y&8u)<<4);
+    return (base*256u+page*8192u+block*256u+column)&0x3fffffu;
+}
+uint indexed_nibble(uint base,uint pitch,uint x,uint y) {
+    x&=2047u; y&=2047u;
+    const uint page=(y/128u)*(pitch/2u)+x/128u;
+    const uint block=((y>>4)&1u)|(((x>>5)&1u)<<1)|(((y>>5)&1u)<<2)|(((x>>6)&1u)<<3)|(((y>>6)&1u)<<4);
+    const uint column=((x&1u)<<3)|((x&2u)<<4)|((((x>>2)^(y>>1)^(y>>2))&1u)<<6)|
+        ((x&8u)>>2)|((x&16u)>>2)|((y&1u)<<4)|((y&2u)>>1)|((y&4u)<<5)|((y&8u)<<5);
+    return (base*512u+page*16384u+block*512u+column)&0x7fffffu;
+}
+void main() {
+    const uvec2 g=gl_GlobalInvocationID.xy;
+    if (p.mode==0u) {
+        if (g.y!=0u || g.x>=p.count) return;
+        ivec2 pixel;
+        const uint word=palettes.words[p.addresses+g.x];
+        // Mode 0 writes entries bank.. bank+count-1 (bank is the first entry).
+        palettes.words[p.slot*256u+p.bank+g.x]=surface_pixel(word,pixel) ? texelFetch(surface,pixel,0).r : mirror.words[word&0xfffffu];
+        return;
+    }
+    if (g.x>=p.width || g.y>=p.height) return;
+    // format: 0 PSMT8, 1 PSMT4, 2 PSMT8H, 3 PSMT4HL, 4 PSMT4HH.
+    uint word,shift,mask=255u;
+    if (p.format==0u) { const uint b=indexed_byte(p.texture_base,p.texture_pitch,g.x,g.y); word=b/4u; shift=(b%4u)*8u; }
+    else if (p.format==1u) { const uint n=indexed_nibble(p.texture_base,p.texture_pitch,g.x,g.y); word=n/8u; shift=(n%8u)*4u; mask=15u; }
+    else { word=rgba_word(p.texture_base,p.texture_pitch,g.x,g.y); shift=p.format==4u ? 28u : 24u; mask=p.format==2u ? 255u : 15u; }
+    ivec2 pixel;
+    const uint index=((surface_pixel(word,pixel) ? texelFetch(surface,pixel,0).r : mirror.words[word&0xfffffu])>>shift)&mask;
+    // nt::graphics::snapshot_palette for 32-bit palettes: CSA selects the bank;
+    // eight-bit indices keep their low four bits within a clamped bank.
+    const uint entry=mask==255u ? min(p.bank+index/16u,15u)*16u+(index&15u) : p.bank*16u+index;
+    imageStore(decoded,ivec2(g),uvec4(palettes.words[p.slot*256u+entry]));
+}

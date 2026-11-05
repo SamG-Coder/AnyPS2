@@ -127,6 +127,13 @@ its addresses equal those of a 2048-pixel-wide (FBW=32) frame, so frames scissor
 to those rows draw with that width exactly. Below row 31 such a frame wraps row y onto row y%32; untextured sprites
 reproduce that in 32-row bands drawn top to bottom, and other primitives on a
 wrapping frame stop with a diagnostic.
+32-bit palette loads and indexed textures (PSMT8, PSMT4 and the high-bit
+variants) whose data was rendered are resolved on the GPU: palettes are gathered
+into numbered GPU palette slots and textures are decoded by a compute pass that
+inverts the 32-bit page layout. Words come from the surface holding their newest
+data or from a lazily refreshed GPU copy of console memory, so the CPU never reads
+rendered memory back for them. Draws carry the palette slot instead of palette
+words; other uses read a slot back once.
 TEX1 level-of-detail sampling binds MIPTBP levels 1-6 as separate native textures
 and selects the magnification or minification filter per pixel. LOD is computed
 in single-precision floating point from interpolated Q (or the sprite's Q), with
