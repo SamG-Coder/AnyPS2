@@ -140,6 +140,22 @@ struct VuRegions {
 #include <nt/ee_vu_upload.hpp>
 #include <nt/ee_vu_launch.hpp>
 #endif
+#ifdef ANYPS2_NATIVE_VU1
+// Diagnostic: raw entry states of VU1 launches after a start time, for local
+// replay of converted VU programs. Captures contain game data; keep them in
+// ignored local directories.
+struct VuJobCapture {
+    std::ofstream file;
+    std::uint64_t remaining=0;
+    std::chrono::steady_clock::time_point begin;
+    static void observe(void* context,unsigned unit,const nt::vu::State& state) {
+        auto& self=*static_cast<VuJobCapture*>(context);
+        if (unit!=1 || !self.remaining || std::chrono::steady_clock::now()<self.begin) return;
+        self.file.write(reinterpret_cast<const char*>(&state),sizeof(state));
+        if (!--self.remaining) self.file.flush();
+    }
+};
+#endif
 extern "C" nt::ee::Stop nt_ee_generated_run(nt::runtime::State*,nt::ee::Memory*,std::uint64_t);
 extern "C" bool nt_ee_generated_active_code_overlap(std::uint32_t,std::uint32_t,std::uint32_t);
 extern "C" nt::ee::Stop nt_ee_generated_publish_image(nt::ee::Memory*,std::uint32_t);
@@ -338,6 +354,9 @@ int main(int argc,char** argv) {
         std::optional<nt::input::PadScript> pad_script;
         std::string_view vu_region_mode;
         bool measure_input_latency=false;
+#ifdef ANYPS2_NATIVE_VU1
+        VuJobCapture vu_job_capture;
+#endif
         for (int index=2;index<argc;++index) {
             const std::string_view text=argv[index];
             if (text=="--native-thread-cycles") { native_cycles=true; continue; }
@@ -361,6 +380,20 @@ int main(int argc,char** argv) {
                 continue;
             }
             if (text=="--input-latency") { measure_input_latency=true; continue; }
+#ifdef ANYPS2_NATIVE_VU1
+            if (text=="--vu-capture") {
+                if (vu_job_capture.file.is_open() || index+3>=argc) throw std::runtime_error("Expected --vu-capture <new-file> <jobs> <start-ms>");
+                const std::filesystem::path path=argv[++index];
+                if (std::filesystem::exists(path)) throw std::runtime_error("VU capture output already exists");
+                vu_job_capture.remaining=std::stoull(argv[++index]);
+                vu_job_capture.begin=std::chrono::steady_clock::now()+std::chrono::milliseconds(std::stoull(argv[++index]));
+                vu_job_capture.file.open(path,std::ios::binary);
+                if (!vu_job_capture.file) throw std::runtime_error("Cannot create VU capture output");
+                const std::uint32_t header[2]{0x31554a56U,static_cast<std::uint32_t>(sizeof(nt::vu::State))}; // "VJU1", record size
+                vu_job_capture.file.write(reinterpret_cast<const char*>(header),sizeof(header));
+                continue;
+            }
+#endif
             if (text=="--vu-regions") {
                 if (!vu_region_mode.empty() || index+1==argc) throw std::runtime_error("Expected one VU region mode");
                 vu_region_mode=argv[++index];
@@ -529,6 +562,7 @@ int main(int argc,char** argv) {
         compiled_vu1_launch.connect_data(memory);
         compiled_vu1_launch.graphics={&gpu,NativeGpu::submit};
         compiled_vu1_launch.graphics.take=NativeGpu::take;
+        if (vu_job_capture.file.is_open()) compiled_vu1_launch.launch_observer={&vu_job_capture,VuJobCapture::observe};
 #endif
 #if defined(ANYPS2_NATIVE_VU) || defined(ANYPS2_NATIVE_VU1)
         compiled_uploads.connect(platform.packet_setup);

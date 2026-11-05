@@ -186,7 +186,7 @@ struct Device {
 // Reads a SPIR-V module produced by the build.
 inline std::vector<std::uint32_t> read_shader(const char* path) {
     std::ifstream file(path,std::ios::binary|std::ios::ate);
-    const auto bytes=file.tellg(); check(bytes>0 && bytes<4*1024*1024 && bytes%4==0,"Invalid compiled shader length");
+    const auto bytes=file.tellg(); check(bytes>0 && bytes<64*1024*1024 && bytes%4==0,"Invalid compiled shader length");
     std::vector<std::uint32_t> shader(static_cast<std::size_t>(bytes)/4);
     file.seekg(0); file.read(reinterpret_cast<char*>(shader.data()),bytes); check(bool(file),"Read shader");
     return shader;

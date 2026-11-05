@@ -37,6 +37,11 @@ public:
         vu::ExecutionProfile execution;
     };
     Profile* profile=nullptr;
+    // Diagnostic: receives the complete state of each compiled launch before
+    // it runs (next_pair is the entry). Called on the thread running the job;
+    // it cannot change execution.
+    struct LaunchObserver { void* context=nullptr; void (*observe)(void*,unsigned unit,const vu::State&)=nullptr; };
+    LaunchObserver launch_observer;
     unsigned unit() const { return binding_.unit(); }
     vu::State state;
     vu::RunResult last_result{vu::RunStatus::unbound_program,0};
@@ -116,6 +121,7 @@ public:
         if (shared_) candidate_shared=*shared_;
         NativeVuLaunch candidate(candidate_binding,block_budget_,shared_ ? &candidate_shared : nullptr);
         candidate.profile=profile;
+        candidate.launch_observer=launch_observer;
         candidate.state=state; candidate.completed_=completed_;
         SequenceOutput output;
         candidate.sequence_output_=&output;
@@ -203,6 +209,11 @@ public:
                 }
                 return result;
             };
+            if (launch_observer.observe) {
+                auto entry_state=std::make_unique<vu::State>(next);
+                entry_state->next_pair=last_entry; entry_state->graphics_completes=0;
+                launch_observer.observe(launch_observer.context,unit,*entry_state);
+            }
             last_result=run_compiled(false,block_budget_);
             last_next_pair=next.next_pair;
             std::uint64_t blocks=last_result.blocks;
@@ -413,6 +424,7 @@ private:
             worker.state=chain->state; worker.completed_=chain->completed;
             SequenceOutput output; Profile job_profile;
             worker.sequence_output_=&output; worker.stream_=job.stream; worker.profile=profile ? &job_profile : nullptr;
+            worker.launch_observer=launch_observer;
             std::vector<NativeSubmissionStep> views; views.reserve(job.owned.size());
             for (const auto& step:job.owned) views.push_back(step.view);
             const auto status=worker.submit_sequence(1,views);
