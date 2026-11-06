@@ -153,6 +153,19 @@ public:
         else queued.pop_back();
         error_=static_cast<std::uint32_t>(result); return SUCCEEDED(result);
     }
+    bool refresh_stream(unsigned core,std::span<const std::int16_t> samples) override {
+        if (core>=2 || !graph_.streams[core]) return false;
+        auto& queued=graph_.pcm[core];
+        if (queued.size()<2 || queued.back().pcm.size()!=samples.size()) return false;
+        StreamState state;
+        if (!stream_state(core,state)) return false;
+        // The engine consumes a source voice one 10 ms pass (480 frames) ahead of
+        // SamplesPlayed. Stay a further pass clear so that it never reads a partial write.
+        const auto begins=queued.back().end-samples.size()/2;
+        if (begins<state.frames+960) return false;
+        std::copy(samples.begin(),samples.end(),queued.back().pcm.begin());
+        return true;
+    }
     bool stream_state(unsigned core,StreamState& state) override {
         if (core>=2 || !graph_.streams[core]) return false;
         XAUDIO2_VOICE_STATE current{}; graph_.streams[core]->GetState(&current);

@@ -75,10 +75,21 @@ public:
                     if (!submit_stream(core,stream.half^1U,0)) { failure_=NativeResult{NativeStop::service_request,stream.pc,0,18}; return {}; }
                     stream.next_queued=true;
                 }
+                // The half was copied early so that a host stall cannot drain playback, but
+                // the program may legitimately write it until it starts. Copy it again as
+                // late as the output allows, or stale samples would repeat audibly.
+                if (stream.loop && !stream.refill.address && stream.next_queued && !stream.refreshed &&
+                    stream.boundary>state.frames && stream.boundary-state.frames<=stream_refresh_frames) {
+                    stream.refreshed=true;
+                    const auto pcm=stream_samples(stream,stream.half^1U,0);
+                    if (!pcm.empty()) {
+                        output_.refresh_stream(core,pcm);
+                    }
+                }
                 if (stream.loop && !stream.refill.address && state.queued && state.frames>=stream.boundary) {
                     // The audible position crossed into the queued half.
                     stream.half^=1; stream.start=0;
-                    stream.origin=stream.boundary; stream.boundary+=half_frames; stream.next_queued=false;
+                    stream.origin=stream.boundary; stream.boundary+=half_frames; stream.next_queued=false; stream.refreshed=false;
                     notify(core);
                     continue;
                 }
@@ -91,6 +102,7 @@ public:
                 }
                 if (stream.loop) {
                     // Drained before the host could queue ahead: restart from here.
+                    stream.refreshed=false;
                     if (stream.next_queued) { stream.half^=1; stream.next_queued=false; }
                     else {
                         stream.half^=1;
@@ -309,7 +321,9 @@ private:
         bool output_enabled=true;
     };
     struct Handler { std::uint32_t address=0,argument=0,gp=0; };
-    struct Stream { bool active=false,loop=false; unsigned half=0; std::uint32_t address=0,size=0,pc=0,start=0; std::uint64_t origin=0,boundary=0; bool next_queued=false; Handler refill; };
+    // Late enough to catch normal writes, and more than the output's safety margin.
+    static constexpr std::uint64_t stream_refresh_frames=1200;
+    struct Stream { bool active=false,loop=false; unsigned half=0; std::uint32_t address=0,size=0,pc=0,start=0; std::uint64_t origin=0,boundary=0; bool next_queued=false; Handler refill; bool refreshed=false; };
     static NativeServiceReply returned(std::uint32_t value=0) { return {NativeServiceStatus::returned,value}; }
     static NativeServiceReply unavailable() { return {NativeServiceStatus::unavailable}; }
     static float fixed_gain(std::uint16_t value) {
@@ -553,14 +567,10 @@ private:
             callbacks_.push_back({handlers_[2].address,1U<<core,handlers_[2].argument,handlers_[2].gp});
         return returned((mode&8) ? 0U : requested);
     }
-    bool submit_stream(unsigned core,unsigned half,std::uint32_t skip) {
-        ++stream_submissions_;
-        stream_bytes_=streams_[core].size;
-        auto& stream=streams_[core];
-        // A stream started part way through a buffer plays only its remainder once.
+    std::vector<std::int16_t> stream_samples(const Stream& stream,unsigned half,std::uint32_t skip) const {
         const auto address=stream.address+half*stream.size+skip;
         const auto bytes=stream.size-skip;
-        if (address>arena_.size() || bytes>arena_.size()-address || !bytes || stream.size%1024) return false;
+        if (address>arena_.size() || bytes>arena_.size()-address || !bytes || stream.size%1024) return {};
         std::vector<std::int16_t> pcm(bytes/2);
         // LIBSD input buffers store 256 left samples followed by 256 right
         // samples in each 1024-byte block. XAudio2 consumes interleaved stereo.
@@ -571,6 +581,16 @@ private:
                     const auto word=std::uint16_t(arena_[at]|(unsigned(arena_[at+1])<<8));
                     pcm[block/2+frame*2+channel]=std::bit_cast<std::int16_t>(word);
                 }
+        return pcm;
+    }
+    bool submit_stream(unsigned core,unsigned half,std::uint32_t skip) {
+        ++stream_submissions_;
+        stream_bytes_=streams_[core].size;
+        auto& stream=streams_[core];
+        // A stream started part way through a buffer plays only its remainder once.
+        const auto pcm=stream_samples(stream,half,skip);
+        if (pcm.empty()) return false;
+        const auto bytes=stream.size-skip;
         audio::StreamState state;
         if (!output_.stream_state(core,state)) return false;
         // A queued half keeps the position of the half still playing.
