@@ -1129,6 +1129,15 @@ int main(int argc,char** argv) {
                 std::cout<<"native_sample_start="<<nt::hex32(sample[0])
                          <<" repeat="<<nt::hex32(sample[1])<<" pitch="<<sample[2]<<'\n';
             }
+            {
+                const auto& sound=iop_reset->sound();
+                std::cout<<"native_sound_activity key_ons="<<sound.key_ons()<<" stream_submissions="<<sound.stream_submissions()
+                    <<" sample_bytes="<<sound.sample_bytes()<<" active_voices="<<sound.active_voices();
+                for (unsigned core=0;core<2;++core)
+                    std::cout<<" core"<<core<<"_master="<<nt::hex32(sound.master(core,0))<<','<<nt::hex32(sound.master(core,1))
+                        <<" mix="<<nt::hex32(sound.mix_flags(core))<<" stream="<<sound.stream_active(core)<<" output="<<sound.core_output_enabled(core);
+                std::cout<<'\n';
+            }
             std::cout<<"native_sound_call=";
             for (auto value:iop_reset->sound().last_call()) std::cout<<nt::hex32(value)<<' ';
             std::cout<<'\n';

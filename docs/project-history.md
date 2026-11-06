@@ -47,7 +47,8 @@ gameplay have not been demonstrated. Homebrew progress does not establish GT4 su
 Final Fantasy XII (PAL) reached its title screen, opening movie and first real-time 3D
 scene in headless scripted runs, with EE, IOP and VU code compiled ahead of time and no stop
 in seven minutes. Character control, later scenes, frame rate and visual or audio accuracy
-have not been established. No memory card is exposed, so saving is unavailable; the game
+have not been established. Sound output was confirmed by its level in Windows, not by comparison with a reference.
+No memory card is exposed, so saving is unavailable; the game
 continues after its own prompt for that. The menu overlay compiled into its executable stops
 if called.
 

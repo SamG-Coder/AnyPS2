@@ -132,8 +132,7 @@ extern "C" uint64_t nt_vu_sine_finite(uint32_t x) {
     return pack(nt::numeric::sine_finite(x));
 }
 extern "C" uint64_t nt_vu_efu_square_root_finite(uint32_t x) {
-    const auto root=nt::numeric::square_root_finite(x&0x7fffffffU);
-    return pack(nt::numeric::FiniteFloatResult{root.bits,false,root.supported && root.flags==0});
+    return pack(nt::numeric::FiniteFloatResult{nt::numeric::square_root_finite(x&0x7fffffffU,true).bits});
 }
 extern "C" uint64_t nt_vu_divide_finite(uint32_t left,uint32_t right) {
     return pack_flags(nt::numeric::vu_divide_finite(left,right));

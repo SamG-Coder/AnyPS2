@@ -579,7 +579,8 @@ int main() {
             check(execute(2)==nt::ee::Stop::budget && vectors.quotient==0x40c00000);
             check(execute(3)==nt::ee::Stop::budget);
             vectors.values[1][2]=0x7f800000; vectors.status=123;
-            check(execute(0)==nt::ee::Stop::unsupported_numeric && !state.executed && vectors.quotient==0x40c00000 && vectors.status==123);
+            // Exponent 255 is an ordinary large value on this unit: 12 / 2^128.
+            check(execute(0)==nt::ee::Stop::budget && vectors.quotient==0x01400000);
             vectors.values[0]={0x40c00000,0xc0a00000,0x40000000,0}; vectors.values[1][3]=0x40800000; vectors.clip=3;
             check(execute(4)==nt::ee::Stop::budget && vectors.clip==201 && owner.read(18,false).value==201);
             vectors.values[0]={0x40000000,0x40400000,0x40800000,0};

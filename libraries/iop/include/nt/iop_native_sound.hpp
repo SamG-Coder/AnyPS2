@@ -24,6 +24,19 @@ public:
     audio::SampleError sample_error() const { return sample_error_; }
     std::span<const std::uint8_t> sample_storage() const { return samples_; }
     const auto& last_call() const { return last_call_; }
+    std::uint64_t key_ons() const { return key_ons_; }
+    std::uint64_t stream_submissions() const { return stream_submissions_; }
+    std::uint64_t sample_bytes() const { return sample_bytes_; }
+    std::uint32_t master(unsigned core,unsigned side) const { return cores_[core].master[side]; }
+    std::uint32_t mix_flags(unsigned core) const { return cores_[core].mix; }
+    bool stream_active(unsigned core) const { return streams_[core].active; }
+    unsigned active_voices() const {
+        unsigned count=0;
+        for (const auto& voice:playback_) count+=voice.active;
+        return count;
+    }
+    const auto& voice_volume(unsigned index) const { return voices_[index].volume; }
+    bool core_output_enabled(unsigned core) const { return cores_[core].output_enabled; }
     std::array<std::uint32_t,3> rejected_sample() const {
         const auto& voice=voices_[rejected_voice_];
         return {voice.start,voice.loop,voice.pitch};
@@ -141,6 +154,7 @@ public:
         }
     }
 private:
+    std::uint64_t key_ons_=0,stream_submissions_=0,sample_bytes_=0;
     std::array<std::uint32_t,5> last_call_{};
     const char* transfer_failure_="none";
     std::array<std::uint32_t,5> transfer_arguments_{};
@@ -226,6 +240,7 @@ private:
         return std::clamp((32U*voice.pitch+4095)/4096,8U,128U);
     }
     NativeServiceReply key_on(unsigned core,std::uint32_t mask) {
+        key_ons_+=std::popcount(mask);
         std::array<std::vector<std::int16_t>,24> decoded;
         std::array<std::optional<audio::AdpcmStream>,24> streams;
         std::vector<audio::VoiceSample> starts;
@@ -252,7 +267,10 @@ private:
         std::array<std::uint32_t,5> effect{};
         std::uint32_t transfer_address=0,interrupt_address=0,end_mask=0;
         std::uint16_t noise_clock=0;
-        bool effect_enabled=false,irq_enabled=false,muted=false;
+        bool effect_enabled=false,irq_enabled=false;
+        // The attribute LIBSD names mute enable is the hardware bit where 1 passes
+        // the output and 0 silences it.
+        bool output_enabled=true;
     };
     struct Handler { std::uint32_t address=0,argument=0,gp=0; };
     struct Stream { bool active=false,loop=false; unsigned half=0; std::uint32_t address=0,size=0,pc=0,start=0; std::uint64_t origin=0; Handler refill; };
@@ -281,7 +299,7 @@ private:
         if (!space) return false;
         audio::CoreMix mix;
         mix.output={fixed_gain(c.master[0]),fixed_gain(c.master[1])};
-        if (c.muted) mix.output={};
+        if (!c.output_enabled) mix.output={};
         mix.external_direct=gated(c.external,c.mix,2); mix.external_effect=gated(c.external,c.mix,0);
         mix.input_direct=gated(c.input,c.mix,6); mix.input_effect=gated(c.input,c.mix,4);
         mix.reverb={*space,{linear_gain(c.depth[0]),linear_gain(c.depth[1])},c.effect_enabled};
@@ -393,7 +411,7 @@ private:
             if ((value&15)!=0 || (value&~0x0c80U)) return unavailable();
             digital_mode_=value; return returned();
         }
-        bool* field=kind==2 ? &c.effect_enabled : kind==4 ? &c.irq_enabled : kind==6 ? &c.muted : nullptr;
+        bool* field=kind==2 ? &c.effect_enabled : kind==4 ? &c.irq_enabled : kind==6 ? &c.output_enabled : nullptr;
         if (!field) return unavailable();
         if (!writing) return returned(*field);
         *field=(value&1)!=0;
@@ -405,6 +423,7 @@ private:
         if (handler.address) callbacks_.push_back({handler.address,core,handler.argument,handler.gp});
     }
     bool write_samples(std::uint32_t destination,std::span<const std::uint8_t> bytes) {
+        sample_bytes_+=bytes.size();
         auto target=std::span(samples_).subspan(destination,bytes.size());
         if (std::equal(bytes.begin(),bytes.end(),target.begin())) return true;
         std::vector<unsigned> affected;
@@ -484,6 +503,7 @@ private:
         return returned((mode&8) ? 0U : requested);
     }
     bool submit_stream(unsigned core) {
+        ++stream_submissions_;
         auto& stream=streams_[core];
         // A stream started part way through a buffer plays only its remainder once.
         const auto skip=stream.start;

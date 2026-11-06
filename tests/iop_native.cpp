@@ -911,6 +911,15 @@ int main() {
                       output.core_mix[1].reverb.depth.left==0.25f && output.core_mix[1].reverb.depth.right==-0.5f,
                       "Compiled effect configuration did not reach the native stereo reverb bus");
             }
+            // LIBSD's mute attribute is the hardware bit where 1 passes the output.
+            const auto left_before=output.core_mix[0].output.left;
+            check(left_before!=0 && call(11,6,1).first.reason==NativeStop::unmapped_code &&
+                  output.core_mix[0].output.left==left_before && call(12,6).second.registers[2]==1,
+                  "Core attribute value 1 must keep the output audible");
+            check(call(11,6,0).first.reason==NativeStop::unmapped_code && output.core_mix[0].output.left==0 &&
+                  call(12,6).second.registers[2]==0,"Core attribute value 0 must silence the output");
+            check(call(11,6,1).first.reason==NativeStop::unmapped_code && output.core_mix[0].output.left==left_before,
+                  "Core attribute value 1 must restore the output");
             check(output.reverb_clears==7 && call(11,3,1).first.reason==NativeStop::unmapped_code &&
                   output.core_mix[1].reverb.enabled && output.core_mix[1].reverb.space==nt::audio::ReverbSpace::pipe,
                   "Native effect activation or history clearing failed");

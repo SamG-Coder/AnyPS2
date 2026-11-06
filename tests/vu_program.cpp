@@ -95,7 +95,12 @@ int main() {
                 check(nt::numeric::efu_reciprocal_finite(bits(-2)).bits==bits(-0.5f));
                 check(nt::numeric::efu_reciprocal_square_root_finite(bits(-4)).bits==bits(0.5f));
                 check(nt::numeric::efu_reciprocal_finite(0x80000000U).bits==0x80000000U && nt::numeric::efu_reciprocal_finite(0).supported);
-                check(!nt::numeric::efu_sum_squares_finite(0x7f000000U,0,0).supported); // Overflow stays explicit.
+                // Overflow and the largest exponent saturate, as in other VU arithmetic.
+                check(nt::numeric::efu_sum_squares_finite(0x7f000000U,0,0).bits==0x7fffffffU);
+                check(nt::numeric::efu_sum_squares_finite(0x7f800000U,0,0).supported);
+                check(nt::numeric::efu_length_finite(0x7f800000U,0x7f800000U,0).supported);
+                check(nt::numeric::sine_finite(0x7f800000U).supported);
+                check(nt::numeric::reciprocal_length_finite(0x7f000000U,0,0).supported);
             }
             // Conditions that cannot both hold make the first target ordinary
             // code, so it may itself be a branch. Overlapping conditions may not.

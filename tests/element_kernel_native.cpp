@@ -30,8 +30,8 @@ std::vector<std::uint32_t> memory() {
     const auto row=[&](unsigned element) { return ((input_base+first+element)&(rows-1))*4; };
     data[row(30)+1]=0x80000000U;               // reciprocal of signed zero
     data[row(35)+1]^=0x80000000U;              // negative radicand: invalid flag, finite result
-    data[row(31)+0]=0x7f800000U;               // exponent 255 numerator: VU stop
-    data[row(32)+1]=0x7f812345U;               // exponent 255 denominator: VU stop
+    data[row(31)+0]=0x7f800000U;               // exponent 255 numerator: an ordinary large value
+    data[row(32)+1]=0x7f812345U;               // exponent 255 denominator: an ordinary large value
     data[row(33)+0]=0x7f000000U; data[row(33)+1]=0x00800001U;  // quotient overflow
     data[row(34)+2]=0x7f000000U;               // product beyond the finite range
     return data;
@@ -84,8 +84,8 @@ int main(int argc,char** argv) {
         const auto data=memory(),original=data;
         const auto parameters=nt::render::element_parameters(entry,first,count);
         const auto reference=expected(data);
-        require(reference[30*words_per_element]==0 && reference[31*words_per_element]==1 &&
-            reference[32*words_per_element]==1,"Fixture does not cover quotient flags and VU stops");
+        require(reference[30*words_per_element]==0 && reference[31*words_per_element]==0 &&
+            reference[32*words_per_element]==0,"Quotients with the largest exponent must not stop");
         std::vector<std::uint32_t> output(reference.size()+64,canary);
         nt_render_elements(data.data(),parameters.data(),output.data());
         require(data==original,"CPU element kernel modified its source");

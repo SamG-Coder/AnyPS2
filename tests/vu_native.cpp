@@ -685,9 +685,9 @@ int run_core_tests() {
             q.quotient_pending || q.vectors[3][0]!=0x40c00000 || q.vectors[4][0]!=0x40c00000 || q.vectors[5][0]!=0x41400000)
             throw std::runtime_error("Native synchronized quotient operations failed");
         auto invalid_q=pending_q; invalid_q.vectors[1][0]=0x7f800000;
-        const auto invalid_q_before=invalid_q;
-        if (nt_vu_q_finish(&invalid_q)!=nt::vu::Result::unsupported_numeric || invalid_q!=invalid_q_before)
-            throw std::runtime_error("Native Q numeric failure partially committed");
+        // Exponent 255 is an ordinary large value; the unit has no infinity.
+        if (nt_vu_q_finish(&invalid_q)!=nt::vu::Result::complete)
+            throw std::runtime_error("Native Q rejected a value with the largest exponent");
         auto negative_q=pending_q; negative_q.vectors[1][0]=0xc0800000;
         if (nt_vu_q_finish(&negative_q)!=nt::vu::Result::complete || negative_q.quotient!=0x40800000 ||
             (negative_q.status&0xc30)!=0x410)
@@ -696,6 +696,11 @@ int run_core_tests() {
         const auto div_invalid=nt::numeric::vu_divide_finite(0,0);
         const auto root_zero=nt::numeric::vu_square_root_finite(0x80000000);
         const auto reciprocal_zero=nt::numeric::vu_reciprocal_square_root_finite(0,0x80000000);
+        const auto huge_root=nt::numeric::vu_reciprocal_square_root_finite(0x7f800000,0x7f800000);
+        const auto huge_negative=nt::numeric::vu_reciprocal_square_root_finite(0x3f800000,0xff800000);
+        if (!huge_root.supported || !huge_negative.supported || huge_negative.flags!=0x10 ||
+            !nt::numeric::vu_divide_finite(0x7f800000,0x00800000).supported)
+            throw std::runtime_error("VU quotient rejected a large operand");
         if (div_zero.bits!=0xff7fffff || div_zero.flags!=0x20 || div_invalid.flags!=0x10 ||
             root_zero.bits!=0 || root_zero.flags!=0 || reciprocal_zero.bits!=0x80000000 || reciprocal_zero.flags!=0x30)
             throw std::runtime_error("VU quotient exceptional results failed");
@@ -1315,11 +1320,11 @@ int run_core_tests() {
                 small.scalar_p || small.status!=p_initial.status || small.mac!=p_initial.mac)
                 throw std::runtime_error("EFU squared underflow did not preserve zero-length and flag semantics");
         }
-        for (const auto invalid:{0x7f800000U,0x7f7fffffU}) {
-            auto bad_p=p_initial; bad_p.vectors[0][0]=invalid;
-            const auto before=bad_p;
-            if (nt_vu_p_0(&bad_p)!=nt::vu::Result::unsupported_numeric || bad_p!=before)
-                throw std::runtime_error("Unsupported native EFU input did not roll back");
+        for (const auto large:{0x7f800000U,0x7f7fffffU}) {
+            // The largest exponent and overflow saturate instead of stopping.
+            auto large_p=p_initial; large_p.vectors[0][0]=large;
+            if (nt_vu_p_0(&large_p)!=nt::vu::Result::transfer)
+                throw std::runtime_error("EFU rejected a large input");
         }
         for (const auto input:{0U,0x00800000U,0x80800000U,0x3f800000U,0xbf800000U}) {
             nt::vu::State sine;
