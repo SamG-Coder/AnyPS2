@@ -1,3 +1,5 @@
+#include <random>
+#include <stdexcept>
 #include <memory>
 #include <nt/vu_native.hpp>
 #include <nt/vu_dispatch.hpp>
@@ -1608,8 +1610,73 @@ static void test_vector_data_paths() {
             throw std::runtime_error("Direct vector data write differs from its plan");
     }
 }
+// The specified meaning of a mode 0 view without filling or V3, one lane at a time.
+static std::vector<nt::ee::NativeVectorWrite> reference_unpack(std::size_t storage,const nt::ee::NativeVectorDataView& view) {
+    const auto stride=nt::ee::vector_data_stride(view.format,view.components);
+    const auto width=stride/view.components;
+    std::vector<nt::ee::NativeVectorWrite> writes;
+    for (unsigned index=0;index<view.bytes.size()/stride;++index) {
+        nt::ee::NativeVectorWrite write{};
+        write.destination=unsigned((view.destination+(index/view.writes_per_cycle)*view.destination_cycle+index%view.writes_per_cycle)%storage);
+        const auto group=view.mask ? std::min(index%view.mask->cycle,3U) : 0U;
+        for (unsigned lane=0;lane<4;++lane) {
+            std::uint32_t value=0;
+            for (unsigned byte=0;byte<width;++byte)
+                value|=std::uint32_t(view.bytes[index*stride+(lane%view.components)*width+byte])<<(byte*8);
+            if (width<4 && !view.unsigned_values && (value&(1U<<(width*8-1)))) value|=~0U<<(width*8);
+            const auto selection=view.mask ? (view.mask->selectors>>(group*8+lane*2))&3U : 0U;
+            if (selection==1) value=view.mask->row_column[lane];
+            if (selection==2) value=view.mask->row_column[4+group];
+            if (selection==3) write.lanes&=~(1U<<lane);
+            write.values[lane]=value;
+        }
+        writes.push_back(write);
+    }
+    return writes;
+}
+static void test_vector_unpack_equivalence() {
+    std::mt19937 random(0x56554e50);
+    std::vector<std::uint8_t> bytes(4096);
+    for (auto& byte:bytes) byte=static_cast<std::uint8_t>(random());
+    constexpr std::array formats{nt::ee::NativeVectorFormat::words,nt::ee::NativeVectorFormat::halfwords,nt::ee::NativeVectorFormat::bytes};
+    constexpr std::array components{1U,2U,4U};
+    for (unsigned trial=0;trial<20000;++trial) {
+        nt::ee::NativeVectorDataView view{};
+        view.format=formats[random()%formats.size()]; view.components=components[random()%components.size()];
+        view.unsigned_values=random()&1; view.destination=random()%1024;
+        const auto stride=nt::ee::vector_data_stride(view.format,view.components);
+        const auto outputs=1+random()%256;
+        view.bytes=std::span<const std::uint8_t>(bytes).subspan(random()%64,outputs*stride);
+        if (random()&1) { view.writes_per_cycle=1+random()%8; view.destination_cycle=view.writes_per_cycle+random()%8; }
+        if (random()&1) {
+            nt::ee::NativeVectorMask mask;
+            mask.selectors=random(); mask.cycle=(random()&1) ? 256 : 1+random()%8;
+            for (auto& value:mask.row_column) value=random();
+            view.mask=mask;
+        }
+        std::array<std::uint32_t,4> rows{};
+        std::vector<nt::ee::NativeVectorWrite> writes;
+        if (!nt::ee::emit_vector_writes(1024,view,rows,[&](const nt::ee::NativeVectorWrite& write) { writes.push_back(write); }))
+            throw std::runtime_error("Valid vector view rejected");
+        const auto expected=reference_unpack(1024,view);
+        if (writes.size()!=expected.size()) throw std::runtime_error("Vector view produced the wrong write count");
+        for (std::size_t i=0;i<writes.size();++i)
+            if (writes[i].destination!=expected[i].destination || writes[i].lanes!=expected[i].lanes || writes[i].values!=expected[i].values)
+                throw std::runtime_error("Vector view differs from the specified unpack");
+        if (rows!=(view.mask ? std::array{view.mask->row_column[0],view.mask->row_column[1],view.mask->row_column[2],view.mask->row_column[3]} : view.rows))
+            throw std::runtime_error("Mode 0 changed the row registers");
+    }
+}
+static void test_packet_collection_wraps() {
+    std::vector<nt::graphics::Quadword> ring(8);
+    for (std::uint32_t i=0;i<ring.size();++i) ring[i]={i,i+100,i+200,i+300};
+    ring[6]={0x8003U,1U<<28,0,0}; // End of packet, three loops of one packed register.
+    const auto packet=nt::graphics::collect_packet(ring,6);
+    const std::vector<nt::graphics::Quadword> expected{ring[6],ring[7],ring[0],ring[1]};
+    if (packet!=expected) throw std::runtime_error("Graphics packet did not wrap its source ring");
+}
 int main() {
-    try { test_vector_data_paths(); test_speculative_block_failure(); test_fast_lane_arithmetic(); test_async_submission(); test_streamed_launches(false); test_streamed_launches(true); }
+    try { test_vector_unpack_equivalence(); test_packet_collection_wraps(); test_vector_data_paths(); test_speculative_block_failure(); test_fast_lane_arithmetic(); test_async_submission(); test_streamed_launches(false); test_streamed_launches(true); }
     catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
     return run_core_tests();
 }
