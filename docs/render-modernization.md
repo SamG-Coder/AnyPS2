@@ -76,8 +76,9 @@ that no bank selects any more is dropped without a gather.
 ## Resolution scale
 
 `--resolution-scale <1|3|5>` stores that many samples per console pixel along each axis
-of rendered surfaces. It is off by default. The odd scale puts one sample on the console
-sample point: that sample is what console memory holds, so memory stays exact where it
+of rendered surfaces. `ps2-native` defaults to 5; 1 draws only the console samples. The
+odd scale puts one sample on the console sample point: that sample is what console
+memory holds, so memory stays exact where it
 is tested by the replay hash. Every other sample runs the same work at its own position,
 and a read of a rendered surface as data takes the sample at the reader's own position,
 so effects that read the frame back keep their detail without being recognized.
@@ -85,7 +86,7 @@ so effects that read the frame back keep their detail without being recognized.
 Known differences at a scale above 1, all in presentation only: sprites keep one texel
 per console pixel, off-center samples of a triangle may pass a scissor edge by up to one
 console pixel, coverage antialiasing stays on the console grid, field reconstruction is
-skipped, and the window shows up to 1080 lines.
+skipped, and off-center samples of a 16-bit surface keep full colour without dither.
 
 The window shows a scaled image at up to the monitor's size. `--fullscreen`, F11 or
 Alt+Enter switch to a borderless window over the whole monitor, at the display's
@@ -116,6 +117,14 @@ checked for shape on the program's thread and expanded on the VU thread, directl
 into VU memory. Other data is planned on the program's thread as before, so what is
 rejected and when does not change. `--replay-packets` (see [testing](testing.md))
 runs this path by itself.
+
+## Submitting to the GPU
+
+Recorded work normally waits until a slot fills. While a program keeps reading memory
+back, it is also submitted once the GPU has finished everything already given to it. A
+read waits for all earlier drawing, so it then finds most of its frame already done.
+Without recent reads this does not apply, because the extra submissions cost the render
+thread and nothing is waiting. This changes when work starts, never its order or result.
 
 ## Whole-program VU kernels
 

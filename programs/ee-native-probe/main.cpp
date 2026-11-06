@@ -354,7 +354,7 @@ int main(int argc,char** argv) {
         unsigned run_seconds=0,disc_media=0;
         std::filesystem::path disc,capture_directory,stop_directory,graphics_directory,vector_directory,sample_path;
         bool profile_graphics=false,validate_graphics=false,verify_textures=false,gpu_triangles=true,gpu_triangles_required=false,capture_display_only=false,capture_graphics_when_heavy=false;
-        unsigned resolution_scale=1;
+        unsigned resolution_scale=5; // --resolution-scale 1 draws only the console samples
         bool start_fullscreen=false;
         bool has_budget=false,native_cycles=false,native_pmu=false,strict_performance=false,show_window=true,hold_window=true;
 #ifdef ANYPS2_NATIVE_IOP

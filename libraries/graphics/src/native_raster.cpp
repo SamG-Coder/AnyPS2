@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstring>
 #include <map>
+#include <optional>
 #include <unordered_map>
 #include <stdexcept>
 #include <tuple>
@@ -178,6 +179,23 @@ struct NativeRaster::Impl {
 #endif
     VkSampler sampler{};
     bool recording=false,in_pass=false,initialized=false;
+    std::uint64_t submitted_passes=0,polled_passes=0; // render-pass counts at the last submission and idle poll
+    std::optional<std::uint64_t> read_passes; // render-pass count at the last memory read
+    // While a program keeps reading memory back, recorded work is handed to the GPU once
+    // its earlier submissions have finished, so a read that must wait for the GPU finds
+    // most of its frame already done. Without recent reads nothing waits on the GPU, and
+    // each extra submission would only cost the render thread. Polled once per new pass.
+    bool idle_submit_due() {
+        constexpr std::uint64_t minimum_passes=2,read_window_passes=8192;
+        if (!recording || !read_passes || stats.render_passes-*read_passes>read_window_passes) return false;
+        if (stats.render_passes-submitted_passes<minimum_passes || stats.render_passes==polled_passes) return false;
+        polled_passes=stats.render_passes;
+        for (unsigned i=0;i<frame_slots;++i) {
+            collect(i,false);
+            if (slots[i].serial && !slots[i].measured) return false;
+        }
+        return true;
+    }
     VkDeviceSize staging_used=0;
     std::uint64_t revision=1,last_present=0;
     RenderStatistics stats;
@@ -463,7 +481,7 @@ void NativeRaster::Impl::flush(VkSemaphore acquired,VkSemaphore rendered,bool wa
         VkPipelineStageFlags stage=VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         if (acquired) { s.waitSemaphoreCount=1; s.pWaitSemaphores=&acquired; s.pWaitDstStageMask=&stage; s.signalSemaphoreCount=1; s.pSignalSemaphores=&rendered; }
         { Measure timing(stats.wait_ns,profiling); checked(vkQueueSubmit(queue,1,&s,entry.fence),"Submit native graphics"); }
-        entry.serial=++submitted; entry.measured=false;
+        entry.serial=++submitted; entry.measured=false; submitted_passes=stats.render_passes;
         if (wait) collect(slot,true);
         recording=false; staging_used=0; records_used=0; host_palettes_used=0; ++stats.submissions;
         slot=(slot+1)%frame_slots;
@@ -1586,7 +1604,7 @@ void NativeRaster::read(std::span<std::uint32_t> words,unsigned start,unsigned l
     if (words.size()!=store_words || start>=store_words || !length || length>store_words) throw std::runtime_error("Invalid native resource export");
     auto& r=*impl_; Measure timing(r.stats.read_ns,r.profiling);
     r.synchronize_source({start,length}); r.flush();
-    ++r.stats.memory_reads; r.stats.memory_read_words+=length;
+    ++r.stats.memory_reads; r.stats.memory_read_words+=length; r.read_passes=r.stats.render_passes;
     // Callers read only the range they asked to make current.
     const auto count=std::min<std::size_t>(length,r.source.size()-start);
     std::copy_n(r.source.begin()+start,count,words.begin()+start);
@@ -2075,6 +2093,7 @@ void NativeRaster::draw(std::span<const SpriteCommand> commands) {
         normalize_tests(c.draw);
         const auto& d=c.draw;
         if (r.records_used==records_per_slot || r.host_palettes_used==host_palette_slots) r.flush(VK_NULL_HANDLE,VK_NULL_HANDLE,false);
+        else if (r.idle_submit_due()) { ++r.stats.idle_submissions; r.flush(VK_NULL_HANDLE,VK_NULL_HANDLE,false); }
         if (!r.surface_palettes.empty() && d.mask!=0xffffffffU) r.prepare_write(d,(d.flags&color_16_flag) ? ((d.flags&color_16s_flag) ? 10 : 2) : 0);
         const auto& previous=cached_command.draw;
         const bool reuse=cached_color && previous.base==d.base && previous.pitch==d.pitch &&

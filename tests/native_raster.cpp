@@ -1069,7 +1069,9 @@ int main(int argc,char** argv) {
             for (unsigned i=0;i<70;++i) if (actual[rgba_word(0,1,i%64,i/64)]!=0x80000001U+i)
                 throw std::runtime_error("Upload arena overwrote a pending texture version");
             const auto& after=native.statistics();
-            if (after.upload_bytes-before.upload_bytes<70*1024*1024 || after.submissions-before.submissions>=10)
+            // Submitting to an idle GPU is not the arena running out of room.
+            const auto forced=(after.submissions-before.submissions)-(after.idle_submissions-before.idle_submissions);
+            if (after.upload_bytes-before.upload_bytes<70*1024*1024 || forced>=10)
                 throw std::runtime_error("Upload arena did not retain bounded batched transfers");
         }
         // Deferred FINISH submits native work and publishes only retired queue

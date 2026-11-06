@@ -272,7 +272,10 @@ bool commit_pixel(uint color,uint depth,uint mask,bool write_depth) {
     }
     // DIMX is added on 16-bit targets after blending and before clamping or wrap.
     int dither=0;
-    if ((draw.flags&134217728)!=0) {
+    // Only the sample console memory reads holds 16-bit precision. The others keep full
+    // colour, without the dither that exists to hide that precision's banding.
+    const bool console_sample=all(equal(ivec2(gl_FragCoord.xy)%int(resolution_scale),ivec2(resolution_scale/2u)));
+    if ((draw.flags&134217728)!=0 && console_sample) {
         const uint px=(uint(gl_FragCoord.x)/resolution_scale)&3u,py=(uint(gl_FragCoord.y)/resolution_scale)&3u;
         const uint stored=bitfieldExtract((py&2u)!=0u ? draw.dither_high : draw.dither_low,int((py&1u)*16u+px*4u),3);
         dither=int(stored)-(stored>=4u ? 8 : 0);
@@ -301,7 +304,7 @@ bool commit_pixel(uint color,uint depth,uint mask,bool write_depth) {
     }
     if((draw.flags&32)!=0) color |= 0x80000000;
     output_color=(read_color()&mask)|(color&~mask);
-    if ((draw.flags&134217728)!=0) output_color&=0x80f8f8f8;
+    if ((draw.flags&134217728)!=0) output_color&=console_sample ? 0x80f8f8f8u : 0x80ffffffu;
 #ifdef ANYPS2_ORDERED_FRAGMENTS
     imageStore(color_image,ivec2(gl_FragCoord.xy),uvec4(output_color));
     if (write_depth && (draw.flags&131072)!=0)
