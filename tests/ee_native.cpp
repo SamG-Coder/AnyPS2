@@ -3092,6 +3092,16 @@ int main() {
             check(presented==2 && platform.graphics.scanout_odd());
             check(edges_seen==std::vector<bool>({false,true,false}));
             check((platform.graphics.read(0x12001000).value&0x2008)==8);
+            {
+                // The first read after VBLANK start, however late the host delivers it,
+                // reports the completed field; the next reports the toggled one.
+                const auto status=[&] { return memory.io.read64(memory.io.context,0x12001000).value; };
+                check((status()&0x2000)!=0);
+                check(!(status()&0x2000));
+                // A first read later than half a field is not excused: it sees the truth.
+                timer_now=edge(1530+300); poll();
+                check((status()&0x2000)!=0 && !platform.graphics.scanout_odd());
+            }
             const auto before=platform.graphics.read(0x12001000).value;
             timer_now-=100; poll(); check(platform.graphics.read(0x12001000).value==before);
             check(configure(99)==nt::ee::Stop::unsupported_system && platform.graphics.mode()->standard==2);

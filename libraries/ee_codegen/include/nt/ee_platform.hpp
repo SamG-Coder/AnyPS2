@@ -114,7 +114,7 @@ private:
             return {low.status!=Stop::budget ? low.status : high.status,std::uint64_t(low.value)|(std::uint64_t(high.value)<<32)};
         }
         if (address<0x12000000 || address>=0x12002000) return {Stop::memory_fault};
-        return self.graphics.read(address);
+        return self.read_graphics(address);
     }
     // VU0 instruction memory, mapped for direct writes. Addresses count pairs of words.
     static Stop write_vector_code(NativePlatform& self,std::uint32_t address,std::span<const std::uint8_t> bytes) {
@@ -150,6 +150,18 @@ private:
         auto& self=*static_cast<NativePlatform*>(context);
         return self.write_graphics(address,value);
     }
+    // FIELD toggles about 0.2 ms after VBLANK starts. On hardware, work woken by VBLANK
+    // start reads it inside that window, and programs pick the field to flip on from what
+    // they read. Host wakeups land on either side of the toggle at random, which would
+    // make FIELD appear not to alternate and hold finished frames. So the first read soon
+    // after VBLANK start sees the completed field: as if it had arrived promptly. Later
+    // reads, and a GS sync handler, whose interrupt follows the toggle, see the new field.
+    auto read_graphics(std::uint32_t address) {
+        auto value=graphics.read(address);
+        if (address==0x12001000 && !interrupts.handling(0)) if (const auto odd=graphics.take_completed_field())
+            value.value=(value.value&~std::uint64_t(0x2000))|(*odd ? 0x2000U : 0U);
+        return value;
+    }
     Stop write_graphics(std::uint32_t address,std::uint64_t value) {
         // Interrupt controls do not consume vector output, so they may change while a
         // compiled VU job is still producing geometry. Flush/reset affect the drawing
@@ -179,7 +191,7 @@ private:
         if (video_input_address(address)) return self.video_submission.read(video_input_descriptor(address));
         if (NativeVideo::maps(address)) return self.video.read(address);
         if (NativeGraphics::maps(address)) {
-            const auto value=self.graphics.read(address); return {value.status,static_cast<std::uint32_t>(value.value)};
+            const auto value=self.read_graphics(address); return {value.status,static_cast<std::uint32_t>(value.value)};
         }
         if (address==0x10003c00 && self.packet_setup.reverse_output()) {
             if (!self.graphics.readback_status) return {Stop::unsupported_system};

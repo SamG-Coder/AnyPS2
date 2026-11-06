@@ -113,6 +113,8 @@ public:
         std::erase_if(records_,[](const auto& record) { return !record.dma; });
     }
     bool active() const { return interrupted_.has_value(); }
+    // True while a callback delivered for this INTC line (not a DMAC channel) runs.
+    bool handling(unsigned line) const { return interrupted_ && active_line_==int(line); }
     bool returning(const runtime::State& state) const { return interrupted_ && state.pc==return_gate; }
     Stop enter(runtime::State& state,Memory& memory,CodeOverlap protection) {
         if (interrupted_ || state.delay_slot || (state.cop0_status&0x10007U)!=0x10001U)
@@ -136,7 +138,7 @@ public:
         if (!protection) return Stop::invalid_state;
         if (protection(stack-0x2a0,0x2a0)) { memory.fault_address=stack-0x2a0; return Stop::code_write; }
         if (observe_delivery) observe_delivery(observation_context,dma,line,state);
-        interrupted_=state; stack_=stack-0x2a0;
+        interrupted_=state; stack_=stack-0x2a0; active_line_=dma ? -1 : int(line);
         record_exception(state,memory,ExceptionCode::interrupt);
         state.cop0_epc=state.pc; state.cop0_status=(state.cop0_status|2U)&~1U;
         callbacks_=std::move(callbacks); callback_=0;
@@ -170,6 +172,7 @@ private:
     std::size_t callback_=0;
     std::array<std::uint32_t,16> handlers_{};
     std::uint32_t pending_=0,enabled_=0,stack_=0;
+    int active_line_=-1;
     mutable std::uint32_t delivered_=0;
     std::optional<runtime::State> interrupted_;
     std::optional<DisplayFlag> display_flag_;
