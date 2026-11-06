@@ -13,6 +13,7 @@ public:
     // Whole 32-bit pixels of a transfer rectangle: one swizzle pass on the CPU
     // and one GPU pass into rendered surfaces, without per-pixel records.
     void write(const ImageRect& rect);
+    void set_dither(std::uint64_t matrix);
     void draw(std::span<const SpriteCommand> commands);
     // Vector batches need ordered fragment access; returns false without it.
     bool enable_vectors();
@@ -22,12 +23,12 @@ public:
     // guaranteed current with rendered surfaces.
     void read(std::span<std::uint32_t> words,unsigned start=0,unsigned length=1024*1024);
     void read_words(std::span<const unsigned> addresses,std::span<std::uint32_t> values);
-    // Loads palette entries first.. on the GPU when all their words lie in one
-    // rendered 32-bit surface: the new slot starts as `previous` (a slot) or,
-    // when that is 0, as `current`. Returns the slot, or 0 when the caller
-    // must read the words instead. read_palette returns a slot's words.
-    std::uint32_t load_palette(std::span<const unsigned> addresses,unsigned first,std::uint32_t previous,
-        const std::array<std::uint32_t,256>& current);
+    // A slot for palette entries first.. whose words lie in rendered memory. Only
+    // those entries are defined. Returns 0 when the caller must read the words
+    // instead. read_palette returns a slot's words.
+    std::uint32_t load_palette(std::span<const unsigned> addresses,unsigned first);
+    std::uint32_t merge_palette(const std::array<std::uint32_t,16>& banks,const std::array<std::uint32_t,256>& current);
+    void release_palette(std::uint32_t slot);
     void read_palette(std::uint32_t slot,std::span<std::uint32_t,256> words);
     void finish();
     // Completion tokens refer to actual queue fences, never assumed readiness.

@@ -176,7 +176,7 @@ void gpu_palettes(nt::graphics::VulkanRenderer& renderer) {
     ad(p,1,0x80000000); ad(p,3,8|(8ULL<<16)); ad(p,5,0); ad(p,3,264|(264ULL<<16)); ad(p,5,256|(256ULL<<16));
     finish(p); d.submit(renderer,std::array{p});
     const auto& after=renderer.statistics();
-    if (after.gpu_palette_loads==before.gpu_palette_loads ||
+    if (after.gpu_palette_loads+after.surface_palette_loads==before.gpu_palette_loads+before.surface_palette_loads ||
         after.gpu_indexed_decodes+after.shader_indexed_draws==before.gpu_indexed_decodes+before.shader_indexed_draws)
         throw std::runtime_error("Rendered palette and indexed texture did not use the GPU path");
     const auto& memory=d.pixels();
@@ -639,10 +639,10 @@ int main() {
             consumer.drawing.pixels()[0]!=0x80201008 || consumer.renderer.validation_errors())
             throw std::runtime_error("Synchronous DIRECT/FLUSH batch did not finish real Vulkan work");
         const auto before_dither_rejection=consumer.drawing.pixels();
-        const nt::graphics::Packet dithered_16{{0x8003,0x10000000,14,0},
-            {(2U<<24)|(1U<<16),0,0x4c,0},{0,0,5,0},{32U|(32U<<16),0,5,0}};
+        const nt::graphics::Packet dithered_depth_layout{{0x8003,0x10000000,14,0},
+            {(0x30U<<24)|(1U<<16),0,0x4c,0},{0,0,5,0},{32U|(32U<<16),0,5,0}};
         bool dither_rejected=false;
-        try { consumer.drawing.submit(consumer.renderer,std::array{dithered_16}); }
+        try { consumer.drawing.submit(consumer.renderer,std::array{dithered_depth_layout}); }
         catch (const std::invalid_argument&) { dither_rejected=true; }
         if (!dither_rejected || consumer.drawing.pixels()!=before_dither_rejection)
             throw std::runtime_error("Unsupported dithered target published pixels");

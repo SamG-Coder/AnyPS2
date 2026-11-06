@@ -31,6 +31,8 @@ if(WIN32)
     target_link_libraries(anyps2-host-metrics PRIVATE nt_host_metrics)
     add_executable(anyps2-display programs/anyps2-display/main.cpp)
     target_link_libraries(anyps2-display PRIVATE nt_vulkan user32)
+    add_executable(ps2-graphics-replay programs/ps2-graphics-replay/main.cpp)
+    target_link_libraries(ps2-graphics-replay PRIVATE nt_vulkan)
 endif()
 
 add_library(nt_binary libraries/binary/src/reader.cpp libraries/binary/src/staged_directory.cpp)

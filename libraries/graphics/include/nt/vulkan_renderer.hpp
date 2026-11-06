@@ -26,6 +26,8 @@ inline constexpr std::uint32_t triangle_flag=1U<<14, shaded_triangle_flag=1U<<15
 inline constexpr std::uint32_t perspective_triangle_flag=1U<<16;
 inline constexpr std::uint32_t depth_test_flag=1U<<17, depth_write_flag=1U<<18;
 inline constexpr std::uint32_t depth_24_flag=1U<<19, coverage_flag=1U<<20, alpha_blend_flag=1U<<21;
+// A PSMCT16 or PSMCT16S texture, read from memory by the draw shader.
+inline constexpr std::uint32_t texture_16_flag=1U<<22, texture_16s_flag=1U<<23;
 inline constexpr std::uint32_t line_flag=1U<<24;
 inline constexpr std::uint32_t indexed8_flag=1U<<25;
 inline constexpr std::uint32_t fog_flag=1U<<26;
@@ -73,6 +75,9 @@ struct SpriteCommand {
     // Nonzero: a 32-bit palette held on the GPU (VulkanRenderer::load_palette)
     // replaces `palette`; palette_bank is the CSA bank of that palette.
     std::uint32_t palette_slot=0,palette_bank=0;
+    // `palette` is a snapshot of a GPU-resident palette's entries: keep decoding
+    // in the draw shader, as that palette's other draws do.
+    bool shader_palette=false;
 };
 struct RenderStatistics {
     std::uint64_t submissions=0,sprites=0,upload_bytes=0,readback_bytes=0;
@@ -81,8 +86,9 @@ struct RenderStatistics {
     std::uint64_t surface_lookup_ns=0,texture_lookup_ns=0,target_bind_ns=0,draw_record_ns=0,invalidate_ns=0;
     std::uint64_t wait_ns=0,upload_ns=0,write_ns=0,draw_ns=0,texture_decode_ns=0;
     std::uint64_t surface_import_ns=0,surface_export_ns=0;
-    std::uint64_t surface_conflicts=0,texture_readbacks=0,palette_readbacks=0;
+    std::uint64_t surface_conflicts=0,surface_gpu_imports=0,texture_readbacks=0,palette_readbacks=0;
     std::uint64_t gpu_palette_loads=0,gpu_indexed_decodes=0,shader_indexed_draws=0;
+    std::uint64_t texture_recycles=0,surface_palette_loads=0;
     std::uint64_t surface_evictions=0;
     std::array<std::uint32_t,8> last_surface_conflict{}; // base, pitch, height, depth for each view.
     std::uint64_t uploads=0,feedback_barriers=0,gpu_ns=0;
@@ -129,14 +135,19 @@ public:
     void draw_vectors(const VectorLaunch& launch,const VectorAssembly& assembly,const SpriteCommand& command);
     void write(std::span<const PixelWrite> writes);
     void write(const ImageRect& rect);
+    // DIMX matrix for later draws to 16-bit targets; zero leaves colors unchanged.
+    void set_dither(std::uint64_t matrix);
     void read(std::span<std::uint32_t> memory);
     // As read(), current at least for the words [start, start+length).
     void read(std::span<std::uint32_t> memory,unsigned start,unsigned length);
     void read_words(std::span<const unsigned> addresses,std::span<std::uint32_t> values);
-    // Native renderer: copies a 256-word palette on the GPU when its words lie
-    // in rendered memory and returns its slot; 0 means read the words instead.
-    std::uint32_t load_palette(std::span<const unsigned> addresses,unsigned first,std::uint32_t previous,
-        const std::array<std::uint32_t,256>& current);
+    // Native renderer: a slot for palette entries first.. whose words lie in rendered
+    // memory. Only those entries are defined; 0 means read the words instead.
+    std::uint32_t load_palette(std::span<const unsigned> addresses,unsigned first);
+    // A slot combining sixteen-entry banks: each from its slot, or from `current` when 0.
+    std::uint32_t merge_palette(const std::array<std::uint32_t,16>& banks,const std::array<std::uint32_t,256>& current);
+    // No later draw selects this slot, so its contents need not outlive their memory.
+    void release_palette(std::uint32_t slot);
     void read_palette(std::uint32_t slot,std::span<std::uint32_t,256> words);
     const RenderStatistics& statistics() const;
     // Diagnostic readback and exact comparison. Disabled during normal play.

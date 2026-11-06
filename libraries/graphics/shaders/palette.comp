@@ -3,7 +3,9 @@
 // native surface holds (rendered memory), so neither needs a CPU readback.
 // Mode 0 gathers palette words into a slot; mode 1 decodes an indexed texture
 // through a slot; mode 2 applies host image writes to a rendered surface;
-// mode 3 copies the owned pages of a rendered surface into the memory mirror. Addresses follow nt/pixel_address.hpp exactly.
+// mode 3 copies the owned pages of a rendered surface into the memory mirror;
+// mode 5 is its inverse, loading the owned pages of a surface from the mirror.
+// Addresses follow nt/pixel_address.hpp exactly.
 layout(local_size_x=8,local_size_y=8) in;
 layout(set=0,binding=0) uniform usampler2D surface;          // CT32 surface image
 layout(std430,set=0,binding=1) buffer Palettes { uint words[]; } palettes;
@@ -126,6 +128,21 @@ void main() {
         return;
     }
     if (g.x>=p.width || g.y>=p.height) return;
+    if (p.mode==5u) {
+        // The dispatch covers the owned pages' rectangle, as in mode 3.
+        const uvec2 a=g+uvec2(p.texture_base,p.texture_pitch);
+        if ((p.layouts&4u)!=0u) {
+            const uint halfword=rgba_halfword(p.surface_base,p.surface_pitch,a.x,a.y,(p.layouts&8u)!=0u);
+            const uint word=halfword/2u,page=(word/2048u)&511u;
+            if ((p.owned[page/32u]&(1u<<(page%32u)))!=0u)
+                imageStore(decoded,ivec2(a),uvec4(expand16((mirror.words[word]>>((halfword%2u)*16u))&65535u)));
+            return;
+        }
+        const uint word=rgba_word(p.surface_base,p.surface_pitch,a.x,a.y)^((p.layouts&1u)!=0u ? 0x600u : 0u);
+        const uint page=(word/2048u)&511u;
+        if ((p.owned[page/32u]&(1u<<(page%32u)))!=0u) imageStore(decoded,ivec2(a),uvec4(mirror.words[word]));
+        return;
+    }
     if (p.mode==3u) {
         // The dispatch covers the owned pages' rectangle at (texture_base,
         // texture_pitch); the surface pixel at a holds this word (export_image's mapping).

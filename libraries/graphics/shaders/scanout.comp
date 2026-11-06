@@ -10,10 +10,25 @@ uint address(uint base,uint pitch,uint x,uint y) {
     uint word=(x&1)|((y&1)<<1)|((x&6)<<1)|((y&6)<<3);
     return (base*64+page*2048+block*64+word)&0xfffff;
 }
+uint halfword_address(uint base,uint pitch,uint x,uint y,bool alternate) {
+    x&=2047u; y&=2047u;
+    uint page=(y/64u)*pitch+x/64u;
+    uint block=((y>>3)&1u)|(((x>>4)&1u)<<1)|
+        (alternate ? (((y>>5)&1u)<<2)|(((y>>4)&1u)<<3)|(((x>>5)&1u)<<4) :
+                     (((y>>4)&1u)<<2)|(((x>>5)&1u)<<3)|(((y>>5)&1u)<<4));
+    uint h=((x>>3)&1u)|((x&1u)<<1)|((y&1u)<<2)|((x&6u)<<2)|((y&6u)<<4);
+    return (base*128u+page*4096u+block*128u+h)&0x1fffffu;
+}
 uint sample_surface(uint index,uint x,uint y) {
     Surface s=display.surfaces[index];
     x-=s.offset_x; y-=s.offset_y;
-    return memory.pixels[address(s.base,s.pitch,s.x+x,s.y+(display.half_height!=0 ? y/2 : y))]|0xff000000;
+    uint row=s.y+(display.half_height!=0 ? y/2 : y);
+    if (s.format!=0) {
+        uint half_address=halfword_address(s.base,s.pitch,s.x+x,row,s.format==10u);
+        uint value=(memory.pixels[half_address/2u]>>((half_address%2u)*16u))&0xffffu;
+        return ((value&31u)<<3)|(((value>>5)&31u)<<11)|(((value>>10)&31u)<<19)|0xff000000u;
+    }
+    return memory.pixels[address(s.base,s.pitch,s.x+x,row)]|0xff000000;
 }
 void main() {
     uint x=gl_GlobalInvocationID.x,y=gl_GlobalInvocationID.y;

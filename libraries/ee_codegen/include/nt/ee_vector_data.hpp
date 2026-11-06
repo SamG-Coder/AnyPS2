@@ -65,8 +65,10 @@ inline std::optional<NativeVectorPlan> plan_vector_data(std::size_t storage_size
     plan.writes.reserve(outputs);
     // Little-endian guest data on a little-endian host: a plain load.
     const auto read=[&](std::size_t offset,unsigned width) {
-        std::uint32_t value=0;
-        std::memcpy(&value,upload.bytes.data()+offset,width);
+        const auto* source=upload.bytes.data()+offset;
+        if (width==1) return std::uint32_t(*source);
+        if (width==2) { std::uint16_t value; std::memcpy(&value,source,2); return std::uint32_t(value); }
+        std::uint32_t value; std::memcpy(&value,source,4);
         return value;
     };
     // Unmasked 32-bit four-component data copies whole vectors (with the

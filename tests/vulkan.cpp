@@ -76,6 +76,41 @@ void bulk_transfers() {
     bool rejected=false;
     try {PacketStream stream; stream.append(bytes.first(17),result);} catch(const std::invalid_argument&) {rejected=true;}
     if (!rejected) throw std::runtime_error("Bulk packet framing accepted incomplete quadword");
+    // A 16-bit display circuit expands its stored bits at its own layout.
+    for (const unsigned format:{2U,10U}) {
+        std::vector<std::uint32_t> memory(1024*1024);
+        const auto half=rgba_halfword(0,1,3,2,format==10);
+        memory[half/2]|=std::uint32_t(1U|(2U<<5)|(3U<<10))<<((half%2)*16);
+        const std::uint64_t buffer=(1ULL<<9)|(std::uint64_t(format)<<15);
+        const std::uint64_t display=(7ULL<<32)|(3ULL<<44);
+        const auto frame=scanout(memory,1,std::array{buffer,0ULL},std::array{display,0ULL});
+        if (!frame || frame->width!=8 || frame->height!=4 || frame->pixels[2*8+3]!=0xff181008U)
+            throw std::runtime_error("16-bit display circuit differs");
+    }
+    {
+        std::vector<std::uint32_t> memory(1024*1024);
+        bool unsupported=false;
+        try { (void)scanout(memory,1,std::array{(1ULL<<9)|(3ULL<<15),0ULL},std::array{(7ULL<<32)|(3ULL<<44),0ULL}); }
+        catch (const std::invalid_argument&) { unsupported=true; }
+        if (!unsupported) throw std::runtime_error("Unknown display format accepted");
+    }
+    // A digital mode presents its display shape, fitted to a desktop window;
+    // composition stays at the drawn size. Other modes present one to one.
+    {
+        const std::uint64_t buffer=8ULL<<9;
+        const auto wide=[](unsigned clocks,unsigned magnify,unsigned lines) {
+            return std::uint64_t(clocks-1)<<32|std::uint64_t(lines-1)<<44|std::uint64_t(magnify-1)<<23;
+        };
+        const auto hd=plan_display(1,std::array{buffer,0ULL},std::array{wide(1920,3,1080),0ULL},true,0,DisplayField::even,1);
+        if (!hd || hd->width!=640 || hd->height!=1080 || hd->presented_width()!=1280 || hd->presented_height()!=720)
+            throw std::runtime_error("1080i did not present its display shape");
+        const auto progressive=plan_display(1,std::array{buffer,0ULL},std::array{wide(1280,2,480),0ULL},false,0,DisplayField::progressive,2);
+        if (!progressive || progressive->presented_width()!=640 || progressive->presented_height()!=480)
+            throw std::runtime_error("480p did not present its display shape");
+        const auto standard=plan_display(1,std::array{buffer,0ULL},std::array{wide(2560,4,448),0ULL});
+        if (!standard || standard->presented_width()!=640 || standard->presented_height()!=448 || standard->output_width)
+            throw std::runtime_error("Standard output changed its one-to-one presentation");
+    }
     // Two tags form one maximum-sized packet; a batch can contain several.
     Packet full(65536);
     full[0]={32767,0x08000000,0,0}; full[32768]={0xffff,0x08000000,0,0};

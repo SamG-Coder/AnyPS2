@@ -77,6 +77,150 @@ int main(int argc,char** argv) {
             const auto half=rgba_halfword(0,1,1,1);
             if (((drawing.pixels()[half/2]>>((half%2)*16))&65535)!=0xd95cU)
                 throw std::runtime_error("16-bit FRAME packet did not reach native rasterization");
+            // Dithering adds its matrix entry to a 16-bit color before the low bits
+            // are dropped: +3 lifts 0x1d past a 5-bit step, -1 lowers 0x20 under one.
+            const auto dithered=[&](std::uint32_t color,bool enabled,unsigned x,unsigned y) {
+                const std::uint64_t matrix=3ULL|(7ULL<<4);
+                Packet draw{{0x8009,0x10000000,14,0},{std::uint32_t(matrix),0,0x44,0},{enabled ? 1U : 0U,0,0x45,0},{6,0,0,0},
+                    {(2U<<24)|(1U<<16),0,0x4c,0},{63U<<16,63U<<16,0x40,0},{0,0,0x18,0},{color,0,1,0},
+                    {0,0,5,0},{64|(64U<<16),0,5,0}};
+                drawing.submit(native,std::array{draw});
+                const auto address=rgba_halfword(0,1,x,y);
+                return (drawing.pixels()[address/2]>>((address%2)*16))&0x7fffU;
+            };
+            const auto gray=[](unsigned level) { return level|(level<<5)|(level<<10); };
+            if (dithered(0x801d1d1d,true,0,0)!=gray(4) || dithered(0x801d1d1d,true,2,0)!=gray(3))
+                throw std::runtime_error("16-bit dithering did not lift the selected pixel");
+            if (dithered(0x80202020,true,1,0)!=gray(3) || dithered(0x80202020,true,2,0)!=gray(4))
+                throw std::runtime_error("16-bit dithering did not lower the selected pixel");
+            if (dithered(0x801d1d1d,false,0,0)!=gray(3)) throw std::runtime_error("Disabled dithering changed a pixel");
+            // A rendered 16-bit surface samples as a texture: stored bits expand,
+            // and TEXA supplies alpha by the stored bit.
+            {
+                const auto sampled=[&](unsigned format,std::uint32_t frame,std::uint32_t source) {
+                    Packet stored{{0x8005,0x10000000,14,0},{6,0,0,0},{frame,0,0x4c,0},{63U<<16,63U<<16,0x40,0},{source,0,1,0},
+                        {0,0,5,0}};
+                    stored[0][0]=0x8006U;
+                    stored.push_back({64|(64U<<16),0,5,0});
+                    drawing.submit(native,std::array{stored});
+                    const std::uint64_t tex0=64ULL*32ULL|(1ULL<<14)|(std::uint64_t(format)<<20)|(6ULL<<26)|(6ULL<<30)|(1ULL<<34)|(1ULL<<35);
+                    Packet read{{0x800a,0x10000000,14,0},{1,0,0x1a,0},{std::uint32_t(tex0),std::uint32_t(tex0>>32),6,0},{0x11,0x55,0x3b,0},{0x116,0,0,0},
+                        {200U|(1U<<16),0,0x4c,0},{3U<<16,3U<<16,0x40,0},{0,0,3,0},{0,0,5,0},{64|(64U<<16),0,3,0},{64|(64U<<16),0,5,0}};
+                    drawing.submit(native,std::array{read});
+                    return drawing.pixels()[rgba_word(200*32,1,1,1)];
+                };
+                for (const unsigned format:{2U,10U}) {
+                    const std::uint32_t frame=64U|(1U<<16)|(format<<24);
+                    if (sampled(format,frame,0x80181818)!=0x55181818U) throw std::runtime_error("16-bit texture lost color or TA1 alpha");
+                    if (sampled(format,frame,0x00181818)!=0x11181818U) throw std::runtime_error("16-bit texture lost TA0 alpha");
+                }
+            }
+            // A 32-bit view drawn over rendered 16-bit memory, and the reverse, keeps
+            // the unmasked bits of the other view. Neither needs a CPU readback.
+            {
+                const auto fill=[&](std::uint32_t frame,std::uint32_t color,std::uint32_t mask) {
+                    Packet draw{{0x8006,0x10000000,14,0},{6,0,0,0},{frame,mask,0x4c,0},{63U<<16,63U<<16,0x40,0},{color,0,1,0},
+                        {0,0,5,0},{1024|(1024U<<16),0,5,0}};
+                    drawing.submit(native,std::array{draw});
+                };
+                const auto word=[&] { return drawing.pixels()[rgba_word(128*32,1,0,0)]; };
+                const std::uint32_t frame16=128U|(1U<<16)|(2U<<24),frame32=128U|(1U<<16);
+                auto before=native.statistics();
+                fill(frame16,0x80181818,0); // Every halfword of the page becomes 0x8c63.
+                fill(frame32,0x0000005a,0xffffff00U);
+                auto after=native.statistics();
+                if (after.surface_gpu_imports==before.surface_gpu_imports || after.readback_bytes!=before.readback_bytes)
+                    throw std::runtime_error("A 32-bit view over a 16-bit surface did not import on the GPU");
+                if (word()!=0x8c638c5aU) throw std::runtime_error("A 32-bit view lost 16-bit surface bits");
+                fill(frame32,0x8c638c63U,0);
+                before=native.statistics();
+                fill(frame16,0x00ffffff,0xffffff07U); // Writes only the five red bits of each halfword.
+                after=native.statistics();
+                if (after.surface_gpu_imports==before.surface_gpu_imports || after.readback_bytes!=before.readback_bytes)
+                    throw std::runtime_error("A 16-bit view over a 32-bit surface did not import on the GPU");
+                if (word()!=0x8c7f8c7fU) throw std::runtime_error("A 16-bit view lost 32-bit surface bits");
+            }
+            // A palette in rendered memory is read in place, with no GPU work and no
+            // end to the render pass, and keeps the colors latched by its load.
+            {
+                const auto ad=[](Packet& p,unsigned reg,std::uint64_t value) { p.push_back({std::uint32_t(value),std::uint32_t(value>>32),reg,0}); };
+                const auto finish=[](Packet& p) { p[0]={0x8000U|unsigned(p.size()-1),0x10000000,14,0}; };
+                const auto tex0=[](std::uint64_t cbp,std::uint64_t csa,std::uint64_t load) {
+                    // PSMT4 in unwritten memory: every index is 0, so CSA picks the bank's first entry.
+                    return (400ULL*32)|(1ULL<<14)|(0x14ULL<<20)|(4ULL<<26)|(4ULL<<30)|(1ULL<<34)|(1ULL<<35)|(cbp<<37)|(csa<<56)|(load<<61);
+                };
+                const auto sprite=[&](Packet& p,std::uint64_t frame,unsigned x) {
+                    ad(p,0x4c,frame|(1ULL<<16)); ad(p,0x40,(63ULL<<16)|(31ULL<<48));
+                    ad(p,3,0); ad(p,5,std::uint64_t(x*16)); ad(p,3,64|(64ULL<<16)); ad(p,5,std::uint64_t((x+4)*16)|(64ULL<<16));
+                };
+                const auto output=[&](unsigned x) { return drawing.pixels()[rgba_word(210*32,1,x,1)]; };
+                const auto fill=[&](std::uint64_t frame,std::uint32_t color) {
+                    Packet p(1); ad(p,0x1a,1); ad(p,0,6); ad(p,0x4c,frame|(1ULL<<16)); ad(p,0x40,(63ULL<<16)|(31ULL<<48));
+                    ad(p,1,color); ad(p,5,0); ad(p,5,1024|(512ULL<<16)); finish(p);
+                    return p;
+                };
+                const auto draws=[&](std::initializer_list<std::tuple<std::uint64_t,std::uint64_t,std::uint64_t,unsigned>> list) {
+                    Packet p(1); ad(p,0x1a,1); ad(p,0,0x116);
+                    for (const auto& [frame,csa,load,x]:list) { ad(p,6,tex0(310*32,csa,load)); sprite(p,frame,x); }
+                    finish(p);
+                    return p;
+                };
+                drawing.submit(native,std::array{fill(210,0)});
+                auto before=native.statistics();
+                drawing.submit(native,std::array{fill(310,0x80112233),draws({{210,0,1,0}})});
+                if (native.statistics().surface_palette_loads==before.surface_palette_loads || native.statistics().gpu_palette_loads!=before.gpu_palette_loads)
+                    throw std::runtime_error("A rendered palette did not read in place");
+                if (output(1)!=0x80112233U) throw std::runtime_error("A palette read in place lost its color");
+                // Overwriting the words gathers the palette first: a later draw that
+                // reloads nothing keeps the old colors, and a reload sees the new ones.
+                drawing.submit(native,std::array{fill(310,0x80112233)});
+                before=native.statistics();
+                drawing.submit(native,std::array{draws({{210,0,1,8}}),fill(310,0x80445566),draws({{210,0,0,16}})});
+                if (native.statistics().gpu_palette_loads!=before.gpu_palette_loads+1) throw std::runtime_error("Overwriting a surface palette did not gather it once");
+                if (output(9)!=0x80112233U || output(17)!=0x80112233U) throw std::runtime_error("A surface palette lost its latched colors");
+                drawing.submit(native,std::array{fill(310,0x80445566),draws({{210,0,1,24}})});
+                if (output(25)!=0x80445566U) throw std::runtime_error("A reloaded surface palette kept old colors");
+                // A draw into the palette's own surface cannot read it in place.
+                drawing.submit(native,std::array{fill(310,0x80778899)});
+                before=native.statistics();
+                drawing.submit(native,std::array{draws({{310,0,1,32}})});
+                if (native.statistics().gpu_palette_loads!=before.gpu_palette_loads+1) throw std::runtime_error("A draw into a palette's surface did not gather it");
+                if (drawing.pixels()[rgba_word(310*32,1,33,1)]!=0x80778899U) throw std::runtime_error("A palette gathered for its own surface lost its color");
+                // Replacing a surface palette drops it: its words can change without a gather.
+                drawing.submit(native,std::array{fill(310,0x80778899),draws({{210,0,1,40}})});
+                Packet host(1); ad(host,0x50,((320ULL*32)<<32)|(1ULL<<48)); ad(host,0x51,0); ad(host,0x52,8ULL|(2ULL<<32)); ad(host,0x53,0); finish(host);
+                host[0][0]&=0x7fffU; // The image tag ends the packet.
+                host.push_back({0x8004,2U<<26,0,0});
+                for (unsigned i=0;i<4;++i) host.push_back({0x80223344,0x80223344,0x80223344,0x80223344});
+                Packet other(1); ad(other,0x1a,1); ad(other,0,0x116); ad(other,6,tex0(320*32,0,1)); sprite(other,210,48); finish(other);
+                before=native.statistics();
+                drawing.submit(native,std::array{host,other,fill(310,0x80000001)});
+                if (native.statistics().gpu_palette_loads!=before.gpu_palette_loads) throw std::runtime_error("A released surface palette was gathered");
+                if (output(49)!=0x80223344U) throw std::runtime_error("A palette held in memory lost its color");
+            }
+            // A full texture cache reuses same-sized images instead of draining the
+            // GPU to evict, and a reused image shows its new texture.
+            {
+                const auto ad=[](Packet& p,unsigned reg,std::uint64_t value) { p.push_back({std::uint32_t(value),std::uint32_t(value>>32),reg,0}); };
+                const auto finish=[](Packet& p) { p[0]={0x8000U|unsigned(p.size()-1),0x10000000,14,0}; };
+                const auto tex0=[](std::uint64_t base) { return base|(1ULL<<14)|(2ULL<<26)|(2ULL<<30)|(1ULL<<34)|(1ULL<<35); };
+                Packet many(1); ad(many,0x1a,1); ad(many,0,0x116); ad(many,0x4c,220|(1ULL<<16)); ad(many,0x40,(3ULL<<16)|(3ULL<<48));
+                for (std::uint64_t base=0;base<4200;++base) {
+                    ad(many,6,tex0(8192+base)); ad(many,3,0); ad(many,5,0); ad(many,3,64|(64ULL<<16)); ad(many,5,64|(64ULL<<16));
+                }
+                finish(many);
+                const auto evictions=native.statistics().texture_evictions;
+                drawing.submit(native,std::array{many});
+                Packet image(1); ad(image,0x50,(std::uint64_t(16000)<<32)|(1ULL<<48)); ad(image,0x51,0); ad(image,0x52,4ULL|(4ULL<<32)); ad(image,0x53,0); finish(image);
+                image[0][0]&=0x7fffU; // The image tag ends the packet.
+                image.push_back({0x8004,2U<<26,0,0});
+                for (unsigned i=0;i<4;++i) image.push_back({0x80667788,0x80667788,0x80667788,0x80667788});
+                Packet last(1); ad(last,6,tex0(16000)); ad(last,3,0); ad(last,5,0); ad(last,3,64|(64ULL<<16)); ad(last,5,64|(64ULL<<16)); finish(last);
+                drawing.submit(native,std::array{image,last});
+                if (native.statistics().texture_recycles==0 || native.statistics().texture_evictions!=evictions)
+                    throw std::runtime_error("A full texture cache did not reuse an image");
+                if (drawing.pixels()[rgba_word(220*32,1,1,1)]!=0x80667788U) throw std::runtime_error("A reused image kept its old texture");
+            }
         }
         {
             // Keep a tall cached framebuffer, then alternate writes above and
@@ -406,9 +550,19 @@ int main(int argc,char** argv) {
                 }
             const std::array<std::uint64_t,2> aligned{(3ULL<<23)|(15ULL<<32)|(3ULL<<44),
                 (3ULL<<23)|(15ULL<<32)|(3ULL<<44)};
-            for (unsigned malformed:{0U,1U,2U}) {
+            // A fractional displacement moves to the nearest source pixel: a documented
+            // presentation difference, since output is composed on source pixels.
+            {
                 auto displays=aligned;
-                if (malformed==0) displays[1]|=1; // Fractional source-pixel displacement.
+                displays[1]|=1;
+                auto rounded=plan_display(35,buffers,displays);
+                if (!rounded || rounded->surfaces[1].offset_x!=0) throw std::runtime_error("Fractional displacement did not round down");
+                displays[1]=(displays[1]&~std::uint64_t(4095))|2;
+                rounded=plan_display(35,buffers,displays);
+                if (!rounded || rounded->surfaces[1].offset_x!=1) throw std::runtime_error("Fractional displacement did not round up");
+            }
+            for (unsigned malformed:{1U,2U}) {
+                auto displays=aligned;
                 if (malformed==1) displays[1]^=1ULL<<23; // Different magnification.
                 if (malformed==2) displays[1]|=2047ULL<<12; // Excessive output union.
                 bool rejected=false;

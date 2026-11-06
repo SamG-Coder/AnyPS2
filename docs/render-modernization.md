@@ -43,6 +43,46 @@ related CTest tests passed. Vulkan-target LLVM was emitted but SPIR-V compilatio
 validation and GPU execution were not performed in that environment. The normal
 Windows build and commercial menu replay were not tested. No speedup is claimed.
 
+## Display modes
+
+`SetGsCrt` supports interlaced and non-interlaced NTSC and PAL, 480p, 720p and 1080i,
+each with its own scan timing. VESA modes stop explicitly. Display circuits may show
+32, 24 or 16-bit framebuffers, and draws may sample PSMCT16 and PSMCT16S surfaces. Dithering applies to 16-bit targets after blending and
+before clamping. The window takes a digital mode's display shape, fitted to 720 lines,
+and filters linearly between composed pixels.
+
+Output is composed on source pixels, while hardware places a circuit in finer display
+clocks. A circuit displacement that is not a whole source pixel moves to the nearest
+one. This differs from hardware by under one source pixel in presentation only; rendered
+memory is unaffected.
+
+## Surface aliases
+
+When a surface needs pages another view rendered, in any mix of 16-bit, 32-bit and depth
+layouts, those pages move through the GPU memory mirror: the writer publishes and the
+reader imports, so the CPU does not wait for a readback. Backing memory is only brought up
+to date when a CPU consumer asks, or when no surface holds a page's newest words.
+
+## Palettes and indexed textures
+
+The draw shader decodes indexed textures from the GPU memory mirror, so textures do
+not need a CPU decode per palette and do not divide batches. Each 16-color palette
+bank is held on the CPU when its words are known there, or in a GPU slot. A palette
+whose words one rendered 32-bit surface holds is read from that surface in place,
+which costs no GPU work and does not end the render pass. A write to those words
+first gathers the palette into a slot, keeping the colors its load latched; a palette
+that no bank selects any more is dropped without a gather.
+
+## Measuring without the game
+
+`--capture-graphics <new-directory> --capture-graphics-when-heavy` records submitted
+graphics data once a scene is heavy. `ps2-graphics-replay <packets.bin> [repeat]`
+replays it through the native renderer and reports its cost and a hash of the
+resulting memory, so two builds with the same hash rendered that capture identically.
+A capture excludes EE and VU work and may start mid-scene. `--sample-threads <file>`
+records a 30-second statistical profile of every thread, also from a heavy scene.
+Keep captures and samples under the ignored `work/` directory.
+
 ## Whole-program VU kernels
 
 The VU block generator has a Vulkan target: `ps2-vu-recompile input.bin output.ll

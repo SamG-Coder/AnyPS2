@@ -7,6 +7,7 @@
 #include <nt/iop_native_callbacks.hpp>
 #include <nt/iop_native_heap.hpp>
 #include <algorithm>
+#include <chrono>
 #include <bit>
 #include <deque>
 
@@ -28,27 +29,35 @@ public:
         return {voice.start,voice.loop,voice.pitch};
     }
     void connect(NativeHeapServices& heap) { heap_=&heap; }
+    std::chrono::steady_clock::duration voice_poll_interval=std::chrono::milliseconds(1);
     std::optional<NativeCallback> take() override {
         if (active_ || failure_) return {};
-        for (unsigned index=0;index<playback_.size();++index) if (playback_[index].active && !refresh_voice(index)) {
-            failure_=NativeResult{NativeStop::service_request,0,0,7}; return {};
-        }
-        for (unsigned core=0;core<2;++core) {
-            auto& stream=streams_[core];
-            if (!stream.active) continue;
-            audio::StreamState state;
-            if (!output_.stream_state(core,state)) { failure_=NativeResult{NativeStop::service_request,stream.pc,0,18}; return {}; }
-            if (state.queued) continue;
-            if (stream.refill.address) {
-                store_native_word(arena_,scratch_,0); store_native_word(arena_,scratch_+4,0);
-                active_=true; active_stream_=core;
-                return NativeCallback{stream.refill.address,core,stream.refill.argument,stream.refill.gp,scratch_,scratch_+4};
+        // Each voice query takes the audio engine's lock, and this runs for every slice
+        // of game code. Host playback advances asynchronously, so polling once a
+        // millisecond observes the same progress; game reads still refresh directly.
+        const auto now=std::chrono::steady_clock::now();
+        if (now>=next_voice_poll_) {
+            next_voice_poll_=now+voice_poll_interval;
+            for (unsigned index=0;index<playback_.size();++index) if (playback_[index].active && !refresh_voice(index)) {
+                failure_=NativeResult{NativeStop::service_request,0,0,7}; return {};
             }
-            if (stream.loop) {
-                stream.half^=1; stream.start=0;
-                if (!submit_stream(core)) { failure_=NativeResult{NativeStop::service_request,stream.pc,0,18}; return {}; }
-            } else stream.active=false;
-            notify(core);
+            for (unsigned core=0;core<2;++core) {
+                auto& stream=streams_[core];
+                if (!stream.active) continue;
+                audio::StreamState state;
+                if (!output_.stream_state(core,state)) { failure_=NativeResult{NativeStop::service_request,stream.pc,0,18}; return {}; }
+                if (state.queued) continue;
+                if (stream.refill.address) {
+                    store_native_word(arena_,scratch_,0); store_native_word(arena_,scratch_+4,0);
+                    active_=true; active_stream_=core;
+                    return NativeCallback{stream.refill.address,core,stream.refill.argument,stream.refill.gp,scratch_,scratch_+4};
+                }
+                if (stream.loop) {
+                    stream.half^=1; stream.start=0;
+                    if (!submit_stream(core)) { failure_=NativeResult{NativeStop::service_request,stream.pc,0,18}; return {}; }
+                } else stream.active=false;
+                notify(core);
+            }
         }
         if (callbacks_.empty()) return {};
         const auto callback=callbacks_.front(); callbacks_.pop_front(); active_=true;
@@ -613,6 +622,7 @@ private:
     std::array<Handler,3> handlers_{};
     std::vector<std::uint8_t> samples_;
     std::array<Playback,48> playback_{};
+    std::chrono::steady_clock::time_point next_voice_poll_{};
     unsigned rejected_voice_=0;
     audio::SampleError sample_error_=audio::SampleError::none;
     std::array<Stream,2> streams_{};

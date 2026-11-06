@@ -9,9 +9,7 @@ uint sample_surface(uint index,uint x,uint y) {
     ivec2 p=ivec2(s.x+x,s.y+(display.half_height!=0 ? y/2 : y));
     return (index==0 ? texelFetch(surfaces[0],p,0).r : texelFetch(surfaces[1],p,0).r)|0xff000000;
 }
-void main() {
-    uint x=uint(gl_FragCoord.x),y=uint(gl_FragCoord.y);
-    if (x>=display.width || y>=display.height) discard;
+vec3 composed(uint x,uint y) {
     uint color=compose_display(x,y);
     vec3 rgb=vec3(color&255,(color>>8)&255,(color>>16)&255);
     if (display.smoothing!=0) {
@@ -20,6 +18,24 @@ void main() {
         const uint above=compose_display(x,y>0 ? y-1 : 0),below=compose_display(x,min(y+1,display.height-1));
         const float w=float(display.smoothing)/256.0;
         rgb=rgb*(1.0-2.0*w)+(vec3(above&255,(above>>8)&255,(above>>16)&255)+vec3(below&255,(below>>8)&255,(below>>16)&255))*w;
+    }
+    return rgb;
+}
+void main() {
+    uint x=uint(gl_FragCoord.x),y=uint(gl_FragCoord.y);
+    vec3 rgb;
+    if (display.output_width!=0) {
+        // A resized digital mode filters between composed pixels, so uneven
+        // scaling does not make rows and columns visibly different sizes.
+        const vec2 position=max(gl_FragCoord.xy*vec2(display.width,display.height)/vec2(display.output_width,display.output_height)-0.5,vec2(0.0));
+        const uvec2 first=min(uvec2(position),uvec2(display.width,display.height)-1u);
+        const uvec2 last=min(first+1u,uvec2(display.width,display.height)-1u);
+        const vec2 weight=fract(position);
+        rgb=mix(mix(composed(first.x,first.y),composed(last.x,first.y),weight.x),
+                mix(composed(first.x,last.y),composed(last.x,last.y),weight.x),weight.y);
+    } else {
+        if (x>=display.width || y>=display.height) discard;
+        rgb=composed(x,y);
     }
     output_color=vec4(rgb,255)/255.0;
 }

@@ -20,15 +20,29 @@ public:
         if (!display_only_) word(1); // Version; subsequent records are little-endian uint32 words.
         frames_<<"frame\tmilliseconds\tbatch\tdraws\tcontrol\tbuffer0\tbuffer1\tdisplay0\tdisplay1\thalf_height\tfield\n";
     }
-    void reset() { if (!display_only_) { reserve(4); word(2); } }
+    void reset() { if (armed_ && !display_only_) { reserve(4); word(2); } }
+    // A held capture records nothing until armed, then ends quietly at its limit:
+    // this reaches a heavy scene that a capture from startup could not.
+    void hold() { armed_=false; end_at_limit_=true; }
+    void arm() { armed_=true; }
+    // Record 3: a display update, which separates frames in the packet stream.
+    void mark_update() {
+        if (!armed_ || full_ || display_only_ || bytes_>128*1024*1024-4) return;
+        bytes_+=4; word(3);
+    }
     bool ready() const {
-        return frames_count_<(display_only_ ? 360U : 128U) &&
+        return armed_ && !full_ && frames_count_<(display_only_ ? 360U : 128U) &&
             image_bytes_<1024ULL*1024*1024 && std::chrono::steady_clock::now()>=next_frame_;
     }
     void submit(std::span<const nt::graphics::Packet> packets) {
         if (display_only_) { ++batches_; return; }
+        if (!armed_ || full_) return;
         std::size_t bytes=8+packets.size()*4;
         for (const auto& packet:packets) bytes+=packet.size()*16;
+        if (end_at_limit_ && (batches_==65536 || bytes>128*1024*1024-bytes_)) {
+            full_=true; packets_.flush(); frames_.flush();
+            return;
+        }
         if (batches_==65536)
             throw std::runtime_error("Graphics capture reached its diagnostic limit");
         reserve(bytes);
@@ -75,7 +89,7 @@ private:
     std::chrono::steady_clock::time_point started_=std::chrono::steady_clock::now(),next_frame_{};
     std::size_t bytes_=4;
     std::size_t image_bytes_=0;
-    bool display_only_=false;
+    bool display_only_=false,armed_=true,end_at_limit_=false,full_=false;
     std::uint64_t last_hash_=0;
     bool last_half_height_=false;
     unsigned batches_=0,frames_count_=0,burst_frames_=0;

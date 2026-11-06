@@ -121,6 +121,8 @@ public:
                 if (pending.empty()) return;
                 renderer.draw(pending); pending.clear(); dirty_=true;
             };
+            // A reset clears drawing state, so restate the matrix for each batch.
+            renderer.set_dither(state_.dither_applied);
             for (const auto& operation:draws) {
                 if (const auto* draw=std::get_if<Draw>(&operation)) {
                     SpriteCommand command{draw->sprite,{},draw->triangle,draw->fog_color,draw->fog,draw->levels};
@@ -139,15 +141,20 @@ public:
                     renderer.draw_vectors(launch,batch->assembly,command);
                     dirty_=true;
                 } else if (const auto* load=std::get_if<PaletteLoad>(&operation)) {
-                    // A full 32-bit load replaces every entry, so it extends no GPU palette.
-                    const bool full=!load->narrow && !load->bank && load->addresses.size()==256;
-                    if (full) candidate.palette_slot=0;
-                    // A 32-bit palette load from rendered memory stays on the GPU.
-                    if (!load->narrow && load->bank*16+load->addresses.size()<=256)
-                        if (const auto slot=renderer.load_palette(load->addresses,load->bank*16,candidate.palette_slot,candidate.palette)) {
-                            candidate.palette_slot=slot; continue;
-                        }
-                    materialize_palette(renderer,candidate);
+                    // Whole 32-bit banks stay where their words are: on the GPU when
+                    // rendered, otherwise in the CPU palette. Neither touches other banks.
+                    const bool banks=!load->narrow && load->addresses.size()%16==0 && load->bank*16+load->addresses.size()<=256;
+                    const unsigned first_bank=load->bank,last_bank=first_bank+unsigned(load->addresses.size())/16;
+                    std::uint32_t slot=0;
+                    if (banks) slot=renderer.load_palette(load->addresses,load->bank*16);
+                    else materialize_palette(renderer,candidate);
+                    if (banks) for (unsigned bank=first_bank;bank<last_bank;++bank) {
+                        const auto replaced=candidate.palette_banks[bank];
+                        candidate.palette_banks[bank]=slot;
+                        if (replaced && std::find(candidate.palette_banks.begin(),candidate.palette_banks.end(),replaced)==candidate.palette_banks.end())
+                            renderer.release_palette(replaced);
+                    }
+                    if (slot) continue;
                     std::array<std::uint32_t,256> words{};
                     const auto selected=std::span(words).first(load->addresses.size());
                     renderer.read_words(load->addresses,selected);
@@ -170,6 +177,8 @@ public:
                     renderer.read(storage,low,high-low+1); download_=download->pack(storage); download_offset_=0;
                 } else if (std::holds_alternative<CancelDownload>(operation)) {
                     download_.clear(); download_offset_=0;
+                } else if (const auto* dither=std::get_if<DitherChange>(&operation)) {
+                    renderer.set_dither(dither->matrix);
                 } else if (const auto* copy=std::get_if<ImageCopy>(&operation)) {
                     std::vector<std::uint32_t> storage(1024*1024);
                     const auto [low,high]=copy->source.word_range();
@@ -210,6 +219,9 @@ public:
                     download_=download->pack(pixels); download_offset_=0;
                 } else if (std::holds_alternative<CancelDownload>(operation)) {
                     download_.clear(); download_offset_=0;
+                } else if (std::holds_alternative<DitherChange>(operation)) {
+                    // The CPU-mirrored path has no dithered 16-bit output; a draw
+                    // that needs it was rejected or is handled by the resident path.
                 } else if (const auto* copy=std::get_if<ImageCopy>(&operation)) {
                     (void)copy->apply(pixels);
                 } else if (const auto* rect=std::get_if<ImageRect>(&operation)) {
@@ -231,6 +243,9 @@ private:
     struct Draw { Sprite sprite; unsigned bank; std::array<RasterVertex,3> triangle{}; std::uint32_t fog_color=0,fog=0; bool palette16=false; std::uint64_t texa=0; TextureLevels levels{}; };
     struct Finish {};
     struct CancelDownload {};
+    // The dither matrix later draws use, zero when dithering is off. Queued like
+    // other operations so a change keeps its order and batches never span it.
+    struct DitherChange { std::uint64_t matrix; };
     // A kicked PACKED triangle tag drawn by GPU primitive assembly from its records.
     struct PacketVectors {
         VectorAssembly assembly;
@@ -241,14 +256,14 @@ private:
         TextureLevels levels{};
         unsigned bank=0; bool palette16=false; std::uint64_t texa=0; std::uint32_t fog_color=0;
     };
-    using Operation=std::variant<Draw,ImageWrites,PaletteLoad,Finish,ImageDownload,ImageCopy,CancelDownload,PacketVectors,ImageRect>;
+    using Operation=std::variant<Draw,ImageWrites,PaletteLoad,Finish,ImageDownload,ImageCopy,CancelDownload,DitherChange,PacketVectors,ImageRect>;
     struct Workspace {
         std::vector<Operation> operations;
         std::vector<SpriteCommand> commands;
         void clear() {
             operations.clear(); commands.clear();
             // A large one-off upload/batch must not pin its planning allocation.
-            if (operations.capacity()>4096) std::vector<Operation>().swap(operations);
+            if (operations.capacity()>65536) std::vector<Operation>().swap(operations);
         }
     } workspace_;
     struct Context;
@@ -310,29 +325,53 @@ private:
         std::array<RasterVertex,3> vertices{};
         unsigned vertex_count=0;
         bool color_clamp=false,per_pixel_blend=false;
-        std::uint64_t dither_matrix=0;
+        std::uint64_t dither_matrix=0,dither_applied=0;
         bool dither_enabled=false;
         std::uint64_t transfer_buffer=0,transfer_position=0,transfer_extent=0;
         ImageUpload upload;
         std::array<std::uint32_t,256> palette{};
-        std::uint32_t palette_slot=0; // nonzero: the palette is GPU-resident (VulkanRenderer::load_palette)
+        // Nonzero: the GPU slot holding this sixteen-entry bank (VulkanRenderer::load_palette);
+        // otherwise the bank is in `palette`.
+        std::array<std::uint32_t,16> palette_banks{};
         std::array<unsigned,2> palette_bases{};
         std::uint64_t palette_config=0;
     } state_;
-    // While state.palette_slot is set, the current palette lives only on the
-    // GPU; 32-bit indexed draws reference it and other uses read it back once.
+    // Brings every GPU-resident bank into state.palette; each read waits for the GPU.
     static void materialize_palette(VulkanRenderer& renderer,State& state) {
-        if (!state.palette_slot) return;
-        renderer.read_palette(state.palette_slot,std::span<std::uint32_t,256>(state.palette));
-        state.palette_slot=0;
+        std::array<std::uint32_t,256> resident{};
+        std::uint32_t loaded=0;
+        for (unsigned bank=0;bank<16;++bank) if (const auto slot=state.palette_banks[bank]) {
+            if (slot!=loaded) { renderer.read_palette(slot,std::span<std::uint32_t,256>(resident)); loaded=slot; }
+            std::copy_n(resident.begin()+bank*16,16,state.palette.begin()+bank*16);
+            state.palette_banks[bank]=0;
+        }
     }
     static void attach_palette(VulkanRenderer& renderer,State& state,SpriteCommand& command,unsigned bank,bool narrow,std::uint64_t texa) {
-        if (state.palette_slot && !narrow && (command.draw.flags&64)) {
-            command.palette_slot=state.palette_slot; command.palette_bank=bank;
+        const auto entries=std::span(command.palette).first((command.draw.flags&indexed8_flag) ? 256 : 16);
+        // A 16-bit bank number reaches past the sixteen 32-bit banks.
+        if (!(command.draw.flags&64) || narrow) {
+            if (command.draw.flags&64) materialize_palette(renderer,state);
+            snapshot_palette(entries,state.palette,bank,narrow,texa);
             return;
         }
-        if (command.draw.flags&64) materialize_palette(renderer,state);
-        snapshot_palette(std::span(command.palette).first((command.draw.flags&indexed8_flag) ? 256 : 16),state.palette,bank,narrow,texa);
+        // CSA clamps eight-bit indices to the banks from `bank` upward.
+        const auto first=state.palette_banks.begin()+bank;
+        const auto last=(command.draw.flags&indexed8_flag) ? state.palette_banks.end() : first+1;
+        if (*first && std::all_of(first,last,[&](std::uint32_t slot) { return slot==*first; })) {
+            command.palette_slot=*first; command.palette_bank=bank;
+            return;
+        }
+        if (std::any_of(first,last,[](std::uint32_t slot) { return slot!=0; })) {
+            const auto merged=renderer.merge_palette(state.palette_banks,state.palette);
+            state.palette_banks.fill(merged);
+            command.palette_slot=merged; command.palette_bank=bank;
+            return;
+        }
+        // Every selected bank is in the CPU palette: its entries travel with the draw,
+        // and the shader decodes the texture from memory instead of the CPU decoding
+        // one image per palette, which also keeps textures from dividing batches.
+        snapshot_palette(entries,state.palette,bank,narrow,texa);
+        command.shader_palette=true;
     }
     static constexpr unsigned unknown_vertices=1U<<5,unknown_packed_q=1U<<6;
     bool gpu_packets_=false;
@@ -607,8 +646,13 @@ private:
         case 0x18: case 0x19: set_offset(state.contexts[reg-0x18],value); return;
         case 0x40: case 0x41: state.contexts[reg-0x40].scissor=value; update_frame(state.contexts[reg-0x40]); return;
         case 0x42: case 0x43: state.contexts[reg-0x42].alpha=value; return;
-        case 0x44: state.dither_matrix=value&0x7777777777777777ULL; return;
-        case 0x45: state.dither_enabled=(value&1)!=0; return;
+        case 0x44: case 0x45: {
+            if (reg==0x44) state.dither_matrix=value&0x7777777777777777ULL;
+            else state.dither_enabled=(value&1)!=0;
+            const auto applied=state.dither_enabled ? state.dither_matrix : 0;
+            if (applied!=state.dither_applied) { state.dither_applied=applied; draws.emplace_back(DitherChange{applied}); }
+            return;
+        }
         case 0x46: state.color_clamp=(value&1)!=0; return;
         case 0x49: state.per_pixel_blend=(value&1)!=0; return;
         case 0x47: case 0x48: state.contexts[reg-0x47].test=value; return;
@@ -733,7 +777,8 @@ private:
         }
     }
     static void configure_draw(const State& state,const Context& context,unsigned attributes,Sprite& draw) {
-        if (state.dither_enabled && ((context.frame>>24)&63)>1 && (draw.mask&0xffffffU)!=0xffffffU)
+        const auto frame_format=unsigned((context.frame>>24)&63);
+        if (state.dither_enabled && frame_format>1 && frame_format!=2 && frame_format!=10 && (draw.mask&0xffffffU)!=0xffffffU)
             throw std::invalid_argument("Unsupported native dithered surface format");
         if (context.test&0x10000U) {
             const auto format=unsigned((context.depth>>24)&15);

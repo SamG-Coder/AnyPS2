@@ -830,6 +830,7 @@ int main() {
             NativeLibraryServices libraries({declaration});
             FixtureAudio output;
             NativeSoundServices sound(libraries,output);
+            sound.voice_poll_interval={}; // Each poll below must observe the fake output at once.
             NativeHeapServices sound_heap(0x20000,0x1b000,0x1f000); sound.connect(sound_heap);
             const auto call=[&](unsigned ordinal,unsigned argument=0,unsigned value=0,unsigned third=0,unsigned fourth=0,unsigned fifth=0) {
                 auto cpu=initial(); cpu.pc=declaration.functions.at(ordinal); cpu.registers[4]=argument;

@@ -26,6 +26,7 @@
 #include "input_latency.hpp"
 #include <nt/vulkan_renderer.hpp>
 #include <nt/native_drawing_worker.hpp>
+#include "thread_sampler.hpp"
 #include <charconv>
 #include <cstdio>
 #include <iostream>
@@ -350,8 +351,8 @@ int main(int argc,char** argv) {
     try {
         std::uint64_t budget=1000000;
         unsigned run_seconds=0,disc_media=0;
-        std::filesystem::path disc,capture_directory,stop_directory,graphics_directory,vector_directory;
-        bool profile_graphics=false,validate_graphics=false,verify_textures=false,gpu_triangles=true,gpu_triangles_required=false,capture_display_only=false;
+        std::filesystem::path disc,capture_directory,stop_directory,graphics_directory,vector_directory,sample_path;
+        bool profile_graphics=false,validate_graphics=false,verify_textures=false,gpu_triangles=true,gpu_triangles_required=false,capture_display_only=false,capture_graphics_when_heavy=false;
         bool has_budget=false,native_cycles=false,native_pmu=false,strict_performance=false,show_window=true,hold_window=true;
 #ifdef ANYPS2_NATIVE_IOP
         std::filesystem::path iop_data;
@@ -431,6 +432,12 @@ int main(int argc,char** argv) {
                 capture_display_only=text=="--capture-display";
                 graphics_directory=argv[++index];
                 if (std::filesystem::exists(graphics_directory)) throw std::runtime_error("Graphics capture directory already exists");
+                continue;
+            }
+            if (text=="--capture-graphics-when-heavy") { capture_graphics_when_heavy=true; continue; }
+            if (text=="--sample-threads") {
+                if (!sample_path.empty() || index+1==argc) throw std::runtime_error("Expected one thread sample path");
+                sample_path=argv[++index];
                 continue;
             }
             if (text=="--capture-stop") {
@@ -533,6 +540,13 @@ int main(int argc,char** argv) {
         gpu.verify_textures=verify_textures;
         gpu.gpu_triangles=gpu_triangles; gpu.gpu_triangles_required=gpu_triangles_required;
         if (!graphics_directory.empty()) gpu.capture=std::make_unique<probe::GraphicsCapture>(graphics_directory,capture_display_only);
+        if (capture_graphics_when_heavy && !gpu.capture) throw std::runtime_error("--capture-graphics-when-heavy requires --capture-graphics");
+        if (capture_graphics_when_heavy) gpu.capture->hold();
+#ifdef _WIN32
+        // Arms in a heavy scene, as a capture does, and writes its samples at exit.
+        std::unique_ptr<probe::ThreadSampler> thread_sampler;
+        if (!sample_path.empty()) thread_sampler=std::make_unique<probe::ThreadSampler>(sample_path);
+#endif
         nt::ee::NativePlatform platform; platform.attach(memory);
         platform.scratchpad_copy.protection=native_code_overlap;
         platform.video_output.protection=native_code_overlap;
@@ -743,6 +757,7 @@ int main(int argc,char** argv) {
             nt::graphics::DisplayField::odd : nt::graphics::DisplayField::even; };
         auto present_output=[&] {
             // Headless runs still present to a display capture.
+            if (gpu.capture) gpu.capture->mark_update();
             const bool capturing=gpu.capture && gpu.capture->ready();
             const auto script_ms=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now()-script_epoch).count());
@@ -751,7 +766,7 @@ int main(int argc,char** argv) {
             try {
                 const auto& output=platform.graphics.output();
                 const auto plan=nt::graphics::plan_display(output.control,output.buffers,output.displays,
-                    platform.graphics.half_height_output(),std::uint32_t(output.background),display_field());
+                    platform.graphics.half_height_output(),std::uint32_t(output.background),display_field(),platform.graphics.clocks_per_pixel());
                 if (!plan) return;
                 if (window && window->presentable()) {
                     gpu.ensure_renderer();
@@ -790,6 +805,10 @@ int main(int argc,char** argv) {
             if (profile_graphics && now>=next_profile && gpu.renderer) {
                 gpu.join();
                 const auto& s=gpu.renderer->statistics(); const auto& p=previous_statistics;
+                if (capture_graphics_when_heavy && s.render_passes-p.render_passes>50000) gpu.capture->arm();
+#ifdef _WIN32
+                if (thread_sampler && s.render_passes-p.render_passes>50000) thread_sampler->arm();
+#endif
                 auto& update_intervals=presented->intervals;
                 std::sort(update_intervals.begin(),update_intervals.end());
                 const auto percentile=[&](double fraction) {
@@ -877,6 +896,7 @@ int main(int argc,char** argv) {
                     <<" finish_not_ready_reads="<<display_profile.finish_not_ready-previous_display.finish_not_ready
                     <<" vsync_not_ready_reads="<<display_profile.vsync_not_ready-previous_display.vsync_not_ready
                     <<" display_buffer_changes="<<display_profile.buffer_changes-previous_display.buffer_changes
+                    <<" circuit_changes="<<display_profile.circuit_changes[0]-previous_display.circuit_changes[0]<<','<<display_profile.circuit_changes[1]-previous_display.circuit_changes[1]
                     <<" vsync_clear_to_observe_ms="<<(display_profile.vsync_clear_to_observe_ns-previous_display.vsync_clear_to_observe_ns)/1e6
                     <<" vsync_observations="<<display_profile.vsync_observations-previous_display.vsync_observations
                     <<" vsync_deadlines="<<display_profile.vsync_deadlines-previous_display.vsync_deadlines
@@ -896,6 +916,7 @@ int main(int argc,char** argv) {
                     <<" surface_import_ms="<<(s.surface_import_ns-p.surface_import_ns)/1e6
                     <<" surface_export_ms="<<(s.surface_export_ns-p.surface_export_ns)/1e6
                     <<" surface_conflicts="<<(s.surface_conflicts-p.surface_conflicts)
+                    <<" surface_gpu_imports="<<(s.surface_gpu_imports-p.surface_gpu_imports)
                     <<" surface_evictions="<<(s.surface_evictions-p.surface_evictions)
                     <<" texture_readbacks="<<(s.texture_readbacks-p.texture_readbacks)
                     <<" palette_readbacks="<<(s.palette_readbacks-p.palette_readbacks)
@@ -904,6 +925,8 @@ int main(int argc,char** argv) {
                     <<" texture_kernels="<<(s.texture_kernel_dispatches-p.texture_kernel_dispatches)
                     <<" texture_kernels_verified="<<(s.texture_kernel_verified-p.texture_kernel_verified)
                     <<" validation_errors="<<gpu.renderer->validation_errors()
+                    <<" surface_palette_loads="<<(s.surface_palette_loads-p.surface_palette_loads)
+                    <<" texture_recycles="<<(s.texture_recycles-p.texture_recycles)
                     <<" submissions="<<s.submissions-p.submissions<<" uploads="<<s.uploads-p.uploads
                     <<" triangles="<<s.triangles-p.triangles<<" barriers="<<s.feedback_barriers-p.feedback_barriers
                     <<" draw_calls="<<s.draw_calls-p.draw_calls<<" batched_primitives="<<s.batched_primitives-p.batched_primitives<<" render_passes="<<s.render_passes-p.render_passes<<" gpu_palette_loads="<<s.gpu_palette_loads-p.gpu_palette_loads<<" gpu_indexed_decodes="<<s.gpu_indexed_decodes-p.gpu_indexed_decodes<<" shader_indexed_draws="<<s.shader_indexed_draws-p.shader_indexed_draws<<" ordering_barriers="<<s.ordering_barriers-p.ordering_barriers<<'\n'<<std::flush;

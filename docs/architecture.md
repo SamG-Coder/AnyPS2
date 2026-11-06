@@ -82,6 +82,8 @@ occupy those segments. Unresolved callbacks remain coverage gaps. See
 - Input uses SDL gamepad capabilities and haptics. Audio uses native XAudio2 owners
   for supported sample services. Open-ended ADPCM streams decode into bounded
   owned PCM queues; the host playback cursor drives refill and end notifications.
+  The background voice scan runs at most once a millisecond, because each query takes
+  the audio engine lock; direct guest reads of voice state still refresh immediately.
   Voice position reports the encoded word corresponding to consumed PCM, rather
   than modeling the console decoder's internal prefetch distance.
   Per-voice envelopes run on downstream 48 kHz native mixing stages. Zero pitch

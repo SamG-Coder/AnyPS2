@@ -21,7 +21,7 @@ struct DrawData {
     // Levels with bit set in indexed_levels are decoded by native.frag;
     // level_buffers holds MIPTBP levels 1-6 as base | pitch << 16.
     uint palette,palette_bank,indexed_format,indexed_levels;
-    uint level_buffers[6]; uint reserved0,reserved1;
+    uint level_buffers[6]; uint dither_low,dither_high;
 };
 layout(std430,set=0,binding=3) readonly buffer DrawRecords { DrawData items[]; } records;
 
@@ -34,6 +34,8 @@ layout(set=0,binding=0) uniform usampler2D texture_levels[7];
 layout(std430,set=0,binding=4) readonly buffer Mirror { uint words[]; } mirror;
 layout(std430,set=0,binding=5) readonly buffer Palettes { uint words[]; } palettes;
 // Palettes known on the CPU, written by the host per draw (palette bit 31 set).
+// Palette bit 30 set: entries are read in place from a rendered surface, bound as
+// texture level 6, as the GS would have loaded them (CSM1 addresses, palette_plan.hpp).
 layout(std430,set=0,binding=6) readonly buffer HostPalettes { uint words[]; } host_palettes;
 uint rgba_word(uint base,uint pitch,uint x,uint y) {
     x&=2047u; y&=2047u;
@@ -58,13 +60,30 @@ uint indexed_nibble(uint base,uint pitch,uint x,uint y) {
         ((x&8u)>>2)|((x&16u)>>2)|((y&1u)<<4)|((y&2u)>>1)|((y&4u)<<5)|((y&8u)<<5);
     return (base*512u+page*16384u+block*512u+column)&0x7fffffu;
 }
+uint rgba_halfword(uint base,uint pitch,uint x,uint y,bool alternate) {
+    x&=2047u; y&=2047u;
+    const uint page=(y/64u)*pitch+x/64u;
+    const uint block=((y>>3)&1u)|(((x>>4)&1u)<<1)|
+        (alternate ? (((y>>5)&1u)<<2)|(((y>>4)&1u)<<3)|(((x>>5)&1u)<<4) :
+                     (((y>>4)&1u)<<2)|(((x>>5)&1u)<<3)|(((y>>5)&1u)<<4));
+    const uint h=((x>>3)&1u)|((x&1u)<<1)|((y&1u)<<2)|((x&6u)<<2)|((y&6u)<<4);
+    return (base*128u+page*4096u+block*128u+h)&0x1fffffu;
+}
 // indexed_format: 1 PSMT8, 2 PSMT4, 3 PSMT8H, 4 PSMT4HL, 5 PSMT4HH; 6 PSMCT32
-// and 7 PSMCT32 in the depth page layout read memory without a palette.
+// and 7 PSMCT32 in the depth page layout read memory without a palette; so do
+// 8 PSMCT16 and 9 PSMCT16S, which take their alpha from TEXA.
 uint indexed_texel(uint level,ivec2 p) {
     const uint format=draw.indexed_format-1u,x=uint(p.x),y=uint(p.y);
     const uint base=level==0u ? draw.texture_base : draw.level_buffers[level-1u]&0xffffu;
     const uint pitch=level==0u ? draw.texture_pitch : draw.level_buffers[level-1u]>>16;
     uint word,shift,mask=255u;
+    if (format>=7u) {
+        const uint half_address=rgba_halfword(base,pitch,x,y,format==8u);
+        const uint value=(mirror.words[half_address/2u]>>((half_address%2u)*16u))&0xffffu;
+        // TEXA: bit 15 selects TA1 or TA0; AEM makes stored black transparent.
+        const uint alpha=value==0u && (draw.texa&0x8000u)!=0u ? 0u : (value&0x8000u)!=0u ? (draw.texa>>16)&255u : draw.texa&255u;
+        return ((value&31u)<<3)|(((value>>5)&31u)<<11)|(((value>>10)&31u)<<19)|(alpha<<24);
+    }
     if (format>=5u) return mirror.words[rgba_word(base,pitch,x,y)^(format==6u ? 0x600u : 0u)];
     if (format==0u) { const uint b=indexed_byte(base,pitch,x,y); word=b/4u; shift=(b%4u)*8u; }
     else if (format==1u) { const uint n=indexed_nibble(base,pitch,x,y); word=n/8u; shift=(n%8u)*4u; mask=15u; }
@@ -72,8 +91,17 @@ uint indexed_texel(uint level,ivec2 p) {
     const uint index=(mirror.words[word&0xfffffu]>>shift)&mask;
     // nt::graphics::snapshot_palette for 32-bit palettes: CSA selects the bank;
     // eight-bit indices keep their low four bits within a clamped bank.
-    const uint entry=mask==255u ? min(draw.palette_bank+index/16u,15u)*16u+(index&15u) : draw.palette_bank*16u+index;
-    return draw.palette>=0x80000000u ? host_palettes.words[(draw.palette&0x7fffffffu)*256u+entry] : palettes.words[draw.palette*256u+entry];
+    const uint bank=draw.palette_bank&255u;
+    const uint entry=mask==255u ? min(bank+index/16u,15u)*16u+(index&15u) : bank*16u+index;
+    if (draw.palette>=0x80000000u) return host_palettes.words[(draw.palette&0x7fffffffu)*256u+entry];
+    if (draw.palette<0x40000000u) return palettes.words[draw.palette*256u+entry];
+    // Inverse of rgba_word within the surface at (palette_bank>>8), of the pitch in palette bits 14-19.
+    const uint entry_word=(draw.palette&0x3fffu)*64u+(entry&1u)+((entry&6u)<<1)+((entry&8u)>>2)+((entry&16u)<<2)+((entry&96u)>>1)+(entry&128u);
+    const uint relative=(entry_word-(draw.palette_bank>>8)*64u)&0xfffffu;
+    const uint page=relative/2048u,within=relative%2048u,block=within/64u,w=within%64u,surface_pitch=(draw.palette>>14)&63u;
+    const uint sx=(page%surface_pitch)*64u+(((block>>4)&1u)<<5)+(((block>>2)&1u)<<4)+((block&1u)<<3)+(((w>>2)&3u)<<1)+(w&1u);
+    const uint sy=(page/surface_pitch)*32u+(((block>>3)&1u)<<4)+(((block>>1)&1u)<<3)+(((w>>4)&3u)<<1)+((w>>1)&1u);
+    return texelFetch(texture_levels[6],ivec2(sx,sy),0).r;
 }
 #ifdef ANYPS2_ORDERED_FRAGMENTS
 layout(r32ui,set=0,binding=1) coherent uniform uimage2D color_image;
@@ -227,17 +255,34 @@ bool commit_pixel(uint color,uint depth,uint mask,bool write_depth) {
             output_depth=(output_depth&~depth_mask)|depth;
         }
     }
+    // DIMX is added on 16-bit targets after blending and before clamping or wrap.
+    int dither=0;
+    if ((draw.flags&134217728)!=0) {
+        const uint px=uint(gl_FragCoord.x)&3u,py=uint(gl_FragCoord.y)&3u;
+        const uint stored=bitfieldExtract((py&2u)!=0u ? draw.dither_high : draw.dither_low,int((py&1u)*16u+px*4u),3);
+        dither=int(stored)-(stored>=4u ? 8 : 0);
+    }
+    bool dithered=false;
     if((draw.flags&256)!=0 && ((draw.flags&1024)==0 || (color&0x80000000)!=0)) {
+        dithered=true;
         uint a=draw.blend&3,b=(draw.blend>>2)&3,c=(draw.blend>>4)&3,d=(draw.blend>>6)&3;
         int factor=int(c==0 ? color>>24 : c==1 ? ((draw.flags&512)!=0 ? 128 : destination>>24) : (draw.blend>>8)&255);
         uint blended=color&0xff000000;
         for(uint channel=0;channel<3;++channel) {
             int source=int((color>>(channel*8))&255),dest=int((destination>>(channel*8))&255);
-            int value=floor_div((blend_channel(a,source,dest)-blend_channel(b,source,dest))*factor,128)+blend_channel(d,source,dest);
+            int value=floor_div((blend_channel(a,source,dest)-blend_channel(b,source,dest))*factor,128)+blend_channel(d,source,dest)+dither;
             uint result=(draw.flags&2048)!=0 ? uint(value)&255 : uint(clamp(value,0,255));
             blended|=result<<(channel*8);
         }
         color=blended;
+    }
+    if (!dithered && dither!=0) {
+        uint adjusted=color&0xff000000;
+        for(uint channel=0;channel<3;++channel) {
+            int value=int((color>>(channel*8))&255)+dither;
+            adjusted|=((draw.flags&2048)!=0 ? uint(value)&255 : uint(clamp(value,0,255)))<<(channel*8);
+        }
+        color=adjusted;
     }
     if((draw.flags&32)!=0) color |= 0x80000000;
     output_color=(read_color()&mask)|(color&~mask);

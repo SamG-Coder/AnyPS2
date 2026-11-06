@@ -7,7 +7,8 @@ struct Scanout {
     unsigned width=0,height=0;
     std::vector<std::uint32_t> pixels;
 };
-struct DisplaySurface { std::uint32_t base=0,pitch=0,x=0,y=0,width=0,height=0,offset_x=0,offset_y=0; };
+// format is 0 for 32 and 24-bit circuits, or the 16-bit GS format (2 or 10).
+struct DisplaySurface { std::uint32_t base=0,pitch=0,x=0,y=0,width=0,height=0,offset_x=0,offset_y=0,format=0; };
 enum class DisplayField : std::uint32_t { progressive,even,odd };
 struct DisplayPlan {
     std::array<DisplaySurface,2> surfaces{};
@@ -18,6 +19,11 @@ struct DisplayPlan {
     // row. It reproduces a CRT's averaging of sub-pixel drawing-offset jitter
     // that rendering suppresses (see NativeDrawing::offset_jitter).
     std::uint32_t smoothing=0;
+    // Presented size: the plan's pixels at the display's real shape. Zero presents
+    // one window pixel per plan pixel. Composition stays at width and height.
+    std::uint32_t output_width=0,output_height=0;
+    std::uint32_t presented_width() const { return output_width ? output_width : width; }
+    std::uint32_t presented_height() const { return output_height ? output_height : height; }
 };
 // Neighbour weight for a jitter of +/- jitter_sixteenths of a pixel: the mean
 // of the image at -a, 0 and +a lines (linear between rows) gives each
@@ -28,7 +34,8 @@ inline std::uint32_t jitter_smoothing(unsigned jitter_sixteenths,bool half_heigh
 }
 inline std::optional<DisplayPlan> plan_display(std::uint64_t control,
     const std::array<std::uint64_t,2>& buffers,const std::array<std::uint64_t,2>& displays,
-    bool half_height=false,std::uint32_t background=0,DisplayField field=DisplayField::progressive) {
+    bool half_height=false,std::uint32_t background=0,DisplayField field=DisplayField::progressive,
+    unsigned clocks_per_pixel=0) {
     const auto enabled=control&3;
     if (!enabled) return {};
     if (enabled==3 && !(control&32))
@@ -50,17 +57,29 @@ inline std::optional<DisplayPlan> plan_display(std::uint64_t control,
         surface={unsigned(b&511)*32,unsigned((b>>9)&63),unsigned((b>>32)&2047),unsigned((b>>43)&2047),
             unsigned((((d>>32)&4095)+1)/(((d>>23)&15)+1)),
             unsigned((((d>>44)&2047)+1)/(((d>>27)&3)+1))};
-        if (((b>>15)&31)>1 || !surface.pitch) throw std::invalid_argument("Unsupported native display surface");
+        const unsigned format=(b>>15)&31;
+        if ((format>2 && format!=10) || !surface.pitch) throw std::invalid_argument("Unsupported native display surface");
+        surface.format=format>1 ? format : 0;
         if (!surface.width || !surface.height || surface.width>2048 || surface.height>2048)
             throw std::invalid_argument("Invalid native display extent");
         const unsigned dx=unsigned(d&4095)-origin_x,dy=unsigned((d>>12)&2047)-origin_y;
-        if (dx%scale_x || dy%scale_y)
-            throw std::invalid_argument("Fractional display circuit displacement is unsupported");
-        surface.offset_x=dx/scale_x; surface.offset_y=dy/scale_y;
+        // Output is composed on the source pixel grid, while hardware places a
+        // circuit in finer display clocks. A fractional displacement, which only
+        // shifts presentation, moves to the nearest source pixel.
+        surface.offset_x=(dx+scale_x/2)/scale_x; surface.offset_y=(dy+scale_y/2)/scale_y;
         plan.width=std::max(plan.width,surface.offset_x+surface.width);
         plan.height=std::max(plan.height,surface.offset_y+surface.height);
     }
     if (plan.width>2048 || plan.height>2048) throw std::invalid_argument("Native display composition exceeds output bounds");
+    // A digital mode has square display clocks, so its shape follows from them
+    // even when the program draws fewer pixels. Large modes fit a desktop window.
+    if (clocks_per_pixel) {
+        constexpr unsigned maximum_height=720;
+        const auto display_width=plan.width*scale_x/clocks_per_pixel;
+        const auto divisor=std::max(plan.height,maximum_height);
+        plan.output_width=display_width*std::min(plan.height,maximum_height)/plan.height;
+        plan.output_height=plan.height*maximum_height/divisor;
+    }
     return plan;
 }
 // Offsets position circuits in a shared output rectangle. Source coordinates
@@ -75,7 +94,13 @@ inline Scanout scanout(std::span<const std::uint32_t> memory,const DisplayPlan& 
     };
     const auto sample=[&](unsigned circuit,unsigned x,unsigned y) {
         const auto& s=plan.surfaces[circuit]; x-=s.offset_x; y-=s.offset_y;
-        return memory[rgba_word(s.base,s.pitch,s.x+x,s.y+(plan.half_height ? y/2 : y))]|0xff000000U;
+        const auto row=s.y+(plan.half_height ? y/2 : y);
+        if (s.format) {
+            const auto half=rgba_halfword(s.base,s.pitch,s.x+x,row,s.format==10);
+            const auto value=(memory[half/2]>>((half%2)*16))&0xffffU;
+            return ((value&31U)<<3)|(((value>>5)&31U)<<11)|(((value>>10)&31U)<<19)|0xff000000U;
+        }
+        return memory[rgba_word(s.base,s.pitch,s.x+x,row)]|0xff000000U;
     };
     const auto compose=[&](unsigned x,unsigned y) {
         auto color=plan.background|0xff000000U;

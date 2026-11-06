@@ -13,6 +13,7 @@ class NativeGraphics {
 public:
     struct Profile {
         std::uint64_t status_reads=0,finish_not_ready=0,vsync_not_ready=0,buffer_changes=0;
+        std::array<std::uint64_t,2> circuit_changes{};
         std::uint64_t vsync_clear_to_observe_ns=0,vsync_observations=0;
         std::uint64_t vsync_deadlines=0,vsync_coalesced=0,vsync_acknowledged=0,scanout_missed=0;
     };
@@ -43,7 +44,10 @@ public:
     void* scanout_context=nullptr;
     void (*scanout_ready)(void*)=nullptr;
     Stop configure(std::uint32_t interlace,std::uint32_t standard,std::uint32_t frame) {
-        if (interlace!=1 || (standard!=2 && standard!=3) || frame>1) return Stop::unsupported_system;
+        // NTSC and PAL may be either; the digital modes each define one scan type.
+        const bool supported=(standard==2 || standard==3) ? interlace<=1 :
+            (standard==0x50 || standard==0x52) ? interlace==0 : standard==0x51 && interlace==1;
+        if (!supported || frame>1) return Stop::unsupported_system;
         if (!synchronize) return Stop::unsupported_system;
         const auto ready=synchronize(context);
         if (ready!=Stop::budget) return ready;
@@ -55,6 +59,12 @@ public:
         return Stop::budget;
     }
     const std::optional<DisplayMode>& mode() const { return mode_; }
+    // Display clocks per pixel of a digital mode, whose clocks are square. NTSC
+    // and PAL return zero: their output keeps one window pixel per plan pixel.
+    unsigned clocks_per_pixel() const {
+        if (!mode_) return 0;
+        return mode_->standard==0x50 ? 2 : (mode_->standard==0x51 || mode_->standard==0x52) ? 1 : 0;
+    }
     bool half_height_output() const { return mode_ && mode_->interlace && mode_->frame; }
     bool scanout_odd() const { return scanout_odd_; }
     // Monotonic nominal line deadlines share the display clock, independent of
@@ -101,7 +111,7 @@ public:
         if (address==0x120000e0) { output_.background=value&0xffffffU; return Stop::budget; }
         if (address>=0x12000070 && address<=0x120000a0 && address%16==0) {
             const auto slot=(address-0x12000070)/16;
-            if (profile && !(slot&1) && output_.buffers[slot/2]!=value) ++profile->buffer_changes;
+            if (profile && !(slot&1) && output_.buffers[slot/2]!=value) { ++profile->buffer_changes; ++profile->circuit_changes[slot/2]; }
             (slot&1 ? output_.displays[slot/2] : output_.buffers[slot/2])=value;
             return Stop::budget;
         }
@@ -144,11 +154,7 @@ public:
     // runs. A deadline already passed requests an immediate service poll.
     std::optional<std::uint64_t> event_wait_ns() const {
         if (!mode_) return {};
-        const std::uint64_t period=mode_->standard==2 ? 525 : 625;
-        const std::uint64_t blank=mode_->standard==2 ? 480 : 576;
-        const std::uint64_t sync=mode_->standard==2 ? 487 : 582;
-        const std::uint64_t numerator=mode_->standard==2 ? 63 : 1;
-        const std::uint64_t denominator=mode_->standard==2 ? 2002000 : 32000;
+        const auto [period,blank,sync,numerator,denominator]=timing();
         const auto base=(ticks_/period)*period;
         const auto phase=ticks_%period;
         const auto target=base+(phase<blank ? blank : phase<sync ? sync : period);
@@ -164,10 +170,7 @@ public:
         advance();
         if (!mode_) return {};
         if (flags_&8) return 0;
-        const std::uint64_t period=mode_->standard==2 ? 525 : 625;
-        const std::uint64_t sync=mode_->standard==2 ? 487 : 582;
-        const std::uint64_t numerator=mode_->standard==2 ? 63 : 1;
-        const std::uint64_t denominator=mode_->standard==2 ? 2002000 : 32000;
+        const auto [period,blank,sync,numerator,denominator]=timing();
         auto target=(ticks_/period)*period+sync;
         if (target<=ticks_) target+=period;
         const auto deadline=epoch_+(target/numerator)*denominator+
@@ -176,6 +179,19 @@ public:
         return deadline>now ? deadline-now : 0;
     }
 private:
+    // In scan ticks per displayed field or frame. The duration of one tick is
+    // denominator/numerator nanoseconds: half lines when interlaced or NTSC/PAL,
+    // lines for digital progressive modes. Rates are 60000/1001 for NTSC and
+    // 480p, and 50 or 60 otherwise.
+    struct Timing { std::uint64_t period,blank,sync,numerator,denominator; };
+    Timing timing() const {
+        switch (mode_->standard) {
+        case 3: return {625,576,582,1,32000};
+        case 0x51: return {1125,1080,1084,27,400000};
+        case 0x52: return {750,720,725,9,200000};
+        default: return {525,480,487,63,2002000};
+        }
+    }
     static std::uint64_t edges(std::uint64_t ticks,std::uint32_t period,std::uint32_t offset) {
         return ticks<offset ? 0 : (ticks-offset)/period+1;
     }
@@ -186,19 +202,16 @@ private:
     std::uint64_t half_line_ticks(std::uint64_t time) const {
         if (time<epoch_) return ticks_;
         const auto elapsed=time-epoch_;
-        // Reduced rational half-line deadlines: NTSC 60000/1001 fields/sec,
-        // PAL 50 fields/sec. Quotient/remainder avoids overflow and catch-up loops.
-        const std::uint64_t numerator=mode_->standard==2 ? 63 : 1;
-        const std::uint64_t denominator=mode_->standard==2 ? 2002000 : 32000;
+        // Reduced rational deadlines. Quotient/remainder avoids overflow and catch-up loops.
+        const auto [period,blank,sync,numerator,denominator]=timing();
         return std::max(ticks_,(elapsed/denominator)*numerator+(elapsed%denominator)*numerator/denominator);
     }
     void advance() {
         if (!mode_) return;
         const auto ticks=half_line_ticks(clock_());
         if (ticks<ticks_) return;
-        const auto period=mode_->standard==2 ? 525U : 625U;
-        const auto blank=mode_->standard==2 ? 480U : 576U;
-        const auto sync=mode_->standard==2 ? 487U : 582U;
+        const auto [period64,blank64,sync64,numerator,denominator]=timing();
+        const auto period=static_cast<std::uint32_t>(period64),blank=static_cast<std::uint32_t>(blank64),sync=static_cast<std::uint32_t>(sync64);
         if (display_edge || try_display_edge) {
             // Bound catch-up work and preserve chronological delivery. A
             // backpressured subscriber retains the last accepted deadline;

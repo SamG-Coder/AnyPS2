@@ -3097,6 +3097,26 @@ int main() {
             fail=true; check(configure(3)==nt::ee::Stop::unsupported_system && platform.graphics.mode()->standard==2);
             fail=false; platform.interrupts.write(0x1000f000,15);
             const auto epoch=timer_now;
+            {
+                // Each digital mode keeps its own scan type and blanks at its own line.
+                struct Mode { std::uint32_t interlace,standard; std::uint64_t blank,numerator,denominator; };
+                for (const auto mode:{Mode{0,0x50,480,63,2002000},Mode{0,0x52,720,9,200000},Mode{1,0x51,1080,27,400000},Mode{0,2,480,63,2002000}}) {
+                    platform.interrupts.write(0x1000f000,15);
+                    const auto start=timer_now;
+                    check(platform.graphics.configure(mode.interlace,mode.standard,0)==nt::ee::Stop::budget);
+                    check(platform.graphics.read(0x12000020).value==mode.interlace);
+                    check(platform.graphics.write(0x12000020,mode.interlace)==nt::ee::Stop::budget);
+                    const auto deadline=(mode.blank*mode.denominator+mode.numerator-1)/mode.numerator;
+                    timer_now=start+deadline-2; poll(); check(!(platform.interrupts.read(0x1000f000).value&4));
+                    timer_now=start+deadline+1; poll(); check((platform.interrupts.read(0x1000f000).value&4)!=0);
+                    (void)platform.interrupts.read(0x1000f000);
+                }
+                check(platform.graphics.configure(1,0x50,0)==nt::ee::Stop::unsupported_system);
+                check(platform.graphics.configure(0,0x51,0)==nt::ee::Stop::unsupported_system);
+                check(platform.graphics.configure(1,0x52,0)==nt::ee::Stop::unsupported_system);
+                check(platform.graphics.configure(0,0x1a,0)==nt::ee::Stop::unsupported_system);
+                timer_now=epoch;
+            }
             check(configure(3,0)==nt::ee::Stop::budget && platform.graphics.read(0x12000020).value==1);
             timer_now=epoch+576*32000ULL; poll(); check(platform.interrupts.read(0x1000f000).value==4);
             timer_now=epoch+625*32000ULL*1000000; poll();

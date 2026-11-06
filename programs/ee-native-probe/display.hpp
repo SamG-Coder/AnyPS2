@@ -60,10 +60,10 @@ public:
     }
     // A size change recreates the swapchain: the caller must first join the
     // render thread, which is the renderer's only other user.
-    bool needs_resize(const nt::graphics::DisplayPlan& plan) const { return width_!=plan.width || height_!=plan.height; }
+    bool needs_resize(const nt::graphics::DisplayPlan& plan) const { return width_!=plan.presented_width() || height_!=plan.presented_height(); }
     void prepare(const nt::graphics::DisplayPlan& plan) {
 #ifdef _WIN32
-        resize(plan.width,plan.height);
+        resize(plan.presented_width(),plan.presented_height());
 #endif
     }
     // Render thread: shows the plan if it changed the displayed image.
