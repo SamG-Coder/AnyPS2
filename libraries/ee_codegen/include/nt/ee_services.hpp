@@ -1,4 +1,7 @@
 #pragma once
+#include <cstring>
+#include <optional>
+#include <string_view>
 #include <nt/ee_native.hpp>
 #include <nt/ee_startup.hpp>
 #include <nt/ee_syscalls.hpp>
@@ -42,6 +45,8 @@ public:
     // Owner pumps external native completions. A bounded idle wait preserves
     // resumable state and never consumes the compiled operation budget.
     std::function<Stop()> idle_pump;
+    // The program's debug console text. Without this, the call stops as unsupported.
+    std::function<void(std::string_view)> console_output;
     std::function<Stop()> poll_native_jobs;
     std::function<bool()> native_jobs_pending;
     std::function<std::uint64_t()> native_jobs_completed;
@@ -102,6 +107,25 @@ public:
             return handlers_.install(state,memory);
         }
         number=native_syscall_number(number);
+        // Deci2Call kputs: a1 points to a word holding the text's address.
+        if (number==0x7c && static_cast<std::uint32_t>(state.gpr[4].lo)==0x10 && console_output) {
+            const auto read_text=[&]() -> std::optional<std::string_view> {
+                const auto holder=runtime::default_ram_address(static_cast<std::uint32_t>(state.gpr[5].lo));
+                if (!memory.data || holder%4 || std::uint64_t(holder)+4>memory.size) return {};
+                std::uint32_t pointer=0; std::memcpy(&pointer,memory.data+holder,4);
+                const auto text=runtime::default_ram_address(pointer);
+                if (text>=memory.size) return {};
+                const auto limit=std::min<std::uint64_t>(memory.size-text,4096);
+                const auto* begin=reinterpret_cast<const char*>(memory.data+text);
+                const auto length=strnlen(begin,limit);
+                if (length==limit) return {};
+                return std::string_view(begin,length);
+            };
+            const auto text=read_text();
+            if (!text) { memory.fault_address=static_cast<std::uint32_t>(state.gpr[5].lo); return Stop::memory_fault; }
+            console_output(*text);
+            return returned(state,0);
+        }
         if (!startup_syscall(number)) return Stop::syscall;
         if (number==7) return replace_image(state,memory);
         if (number==2) {

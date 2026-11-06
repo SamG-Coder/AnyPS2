@@ -58,6 +58,7 @@ Native services aim to reproduce the *observable behavior* of console operations
 | VU / VIF / GIF | Bounded vector-code conversion, native vector services and supported packet paths; incomplete game integration and unsupported operations remain |
 | Graphics | Vulkan sprite, texture and triangle paths, resolution scaling and full screen; not a complete PS2 Graphics Synthesizer replacement |
 | Audio | Native audsrv mono ADPCM sample playback, volume and looping through XAudio2; broader LIBSD/game audio and streaming remain incomplete |
+| Saves | Memory cards as ordinary PC files through the standard card library; PCSX2 card images and PS1 cards are not supported |
 | Code discovery | Direct/indirect call and callback analysis; verification mode reports remaining flow and callback-binding gaps before LLVM generation or compilation |
 | Game compatibility | **GT4 reaches menus and races in local runs**, with known stops and performance limits. No general game-compatibility claim |
 

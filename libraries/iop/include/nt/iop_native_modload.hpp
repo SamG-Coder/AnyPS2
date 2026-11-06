@@ -81,6 +81,11 @@ public:
     bool cancel_wait(std::uint32_t,std::uint32_t) override { return false; }
     void attach_catalog(std::vector<std::uint64_t> source_hashes) { catalog_=std::move(source_hashes); }
     void attach_sealed(std::vector<SealedModule> modules) { sealed_=std::move(modules); }
+    // The version in the identity of the module whose initializer is running.
+    std::optional<std::uint16_t> initializing_version() const {
+        if (!pending_) return {};
+        return pending_->module.module.details.version;
+    }
     // Startup and disc-loaded entries share one actual lifecycle registry.
     // A compiled catalog entry is not registered until initialization begins.
     std::uint32_t begin_startup(const NativeModule& module) {

@@ -64,6 +64,13 @@ occupy those segments. Unresolved callbacks remain coverage gaps. See
 - Disc access is read-only and bounded. Guest paths must not escape to arbitrary
   host files. The [legacy FILEIO contract](fileio.md) describes that endpoint;
   other native file/module services have separate support boundaries.
+- Memory cards replace the public `MCMAN` library with native files, one host file or
+  folder per card entry plus a manifest for the exact names and attributes. `MCSERV`
+  stays converted game-supplied code and calls the replacement. Card transport,
+  authentication, pages and ECC do not exist. Semantic differences: calls take no card
+  time; capacity is a fixed 8000 clusters with no bad blocks; a deleted entry cannot be
+  restored; listings are snapshots; the `mc` file device is not registered, so programs
+  using `mc0:` paths instead of the library stop; raw page and block calls stop.
 - Video initialization supports reset, bitstream clearing, format/threshold settings
   and uploaded quantization/palette tables. Bounded native input submissions feed
   fixed-length and MPEG variable-length header reads and signal completion as

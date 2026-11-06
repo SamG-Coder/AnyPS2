@@ -2,7 +2,7 @@
 #include <nt/iop_native.hpp>
 
 namespace nt::iop {
-enum class NativeServiceKind { syscall, sysmem, loadcore, library_call, ioman, intrman, thevent, thbase, sifman, stdio, sifcmd, thsemap, thmsgbx, native_return, sysclib, heaplib, modload, romdrv, dmacman, cdvdman, secrman, serial, timrman, vblank, libsd, usbd, dev9, thfpool };
+enum class NativeServiceKind { syscall, sysmem, loadcore, library_call, ioman, intrman, thevent, thbase, sifman, stdio, sifcmd, thsemap, thmsgbx, native_return, sysclib, heaplib, modload, romdrv, dmacman, cdvdman, secrman, serial, timrman, vblank, libsd, usbd, dev9, thfpool, mcman };
 struct NativeServiceRequest {
     std::uint32_t selector;
     std::array<std::uint32_t,4> arguments;
@@ -111,6 +111,7 @@ inline NativeResult run_native(NativeEntry entry,Cpu& cpu,std::span<std::uint8_t
         case 22: kind=NativeServiceKind::usbd; break;
         case 23: kind=NativeServiceKind::dev9; break;
         case 24: kind=NativeServiceKind::thfpool; break;
+        case 25: kind=NativeServiceKind::mcman; break;
         default: return result;
         }
         const auto resume=imported ? reg(31) : cpu.pc+4;

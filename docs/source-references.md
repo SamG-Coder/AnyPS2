@@ -44,7 +44,8 @@ The principal source areas consulted at those pins are:
   PS2SDK `ee/startup`, `ee/kernel` (including Cause, BadVAddr and BadPAddr
   selector names in `kernel.h`) and public ELF section/symbol specifications.
 - **IOP and native services:** PS2SDK `iop/system`, `iop/kernel`, `iop/fs`, `iop/cdvd`,
-  `iop/network`, `iop/usb`, `iop/input`, `iop/sound`, `ee/rpc`, plus public
+  `iop/network`, `iop/usb`, `iop/input`, `iop/sound`, `iop/memorycard` (public `MCMAN`
+  and `MCSERV` call behaviour, result codes and entry layout), `ee/rpc`, plus public
   `libsd-common.h`, `fileio-common.h`, `sifcmd-common.h` and `sifrpc-common.h`;
   PS2SDK `threadman/src/thbase.c` and `thcommon.c` for thread-entry stack ABI;
   Play! `Source/iop/IopBios.cpp`, `Iop_FileIo*` and `Iop_Sysclib*`.

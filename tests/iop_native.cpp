@@ -38,6 +38,8 @@
 #include <nt/iop_native_dmacman.hpp>
 #include <nt/iop_native_cdvdman.hpp>
 #include <nt/iop_native_secrman.hpp>
+#include <nt/iop_native_memory_card.hpp>
+#include <filesystem>
 #include "reboot_fixture.hpp"
 #include "disc_fixture.hpp"
 #include <algorithm>
@@ -502,6 +504,85 @@ int main() {
             check(threads.run(nt_iop_generated_run,data,64,services).reason==NativeStop::unmapped_code &&
                   threads.state(first_id).registers[2]==(interrupt_rotation ? 99U : 42U),
                   "Rotated thread did not resume its compiled continuation");
+        }
+        {
+            // A card reached through the public library calls, with guest memory arguments.
+            const auto root=std::filesystem::temp_directory_path()/"anyps2-iop-memory-card-test";
+            std::error_code ignored;
+            std::filesystem::remove_all(root,ignored);
+            std::vector<std::uint8_t> data(0x30000);
+            constexpr std::uint32_t table=0x24000,entry=0x24f00,name=0x28000,buffer=0x28100,stack=0x29000;
+            store_native_word(data,table,0x41c00000); store_native_word(data,table+8,0x207);
+            const std::string library_name="mcman"; std::copy(library_name.begin(),library_name.end(),data.begin()+table+12);
+            NativeLibrarySpec declaration{table,0x207,"mcman",{},entry};
+            for (unsigned ordinal=0;ordinal<54;++ordinal) {
+                declaration.functions.push_back(0x24100+ordinal*8);
+                store_native_word(data,table+20+ordinal*4,0x24100+ordinal*8);
+            }
+            NativeLibraryServices libraries({declaration});
+            NativeHeapServices heap(data.size(),0x20000,0x24000);
+            NativeSemaphoreServices semaphores;
+            NativeMemoryCardServices cards(libraries,heap,semaphores);
+            const auto call=[&](std::uint32_t selector,std::array<std::uint32_t,4> arguments,std::uint32_t site=0) {
+                NativeServiceRequest request{selector,arguments,NativeServiceKind::mcman};
+                request.call_site=site; request.stack_pointer=stack;
+                return cards.invoke(request,data);
+            };
+            const auto put_text=[&](const std::string& text) {
+                std::fill_n(data.begin()+name,256,std::uint8_t(0));
+                std::copy(text.begin(),text.end(),data.begin()+name);
+            };
+            const auto put_stack=[&](unsigned index,std::uint32_t value) { std::memcpy(data.data()+stack+16+index*4,&value,4); };
+            check(call(21,{0,0}).status==NativeServiceStatus::unavailable,"A card call ran before the library started");
+            const auto started=call(0x100,{},entry);
+            check(started.status==NativeServiceStatus::returned && !started.value && libraries.resolve("mcman",0x207,6),
+                  "The native card library did not register its public exports");
+            const auto info=call(42,{}).value;
+            std::uint16_t version=0; std::memcpy(&version,data.data()+info+4,2);
+            check(version==0x207,"McGetModuleInfo did not report the library version");
+            check(semaphores.invoke({8,{call(53,{}).value},NativeServiceKind::thsemap},data).status==NativeServiceStatus::returned,
+                  "The card lock is not a usable semaphore");
+            check(call(21,{0,0}).value==static_cast<std::uint32_t>(NativeMemoryCardFiles::no_card) && call(39,{0,0}).value==0,
+                  "No configured folder still presented a card");
+            cards.set_root(root);
+            check(call(21,{0,0}).value==static_cast<std::uint32_t>(NativeMemoryCardFiles::changed_card) &&
+                  call(21,{0,0}).value==0 && call(39,{0,0}).value==2 && call(22,{0,0}).value==1,"A new card was not detected");
+            put_text("/GAME");
+            check(call(6,{0,0,name,NativeMemoryCardFiles::create_directory}).value==0,"McOpen could not create a folder");
+            put_text("/GAME/save");
+            const auto fd=call(6,{0,0,name,NativeMemoryCardFiles::create_file|1|2}).value;
+            check(fd<3,"McOpen could not create a file");
+            const std::string saved="guest bytes";
+            std::copy(saved.begin(),saved.end(),data.begin()+buffer);
+            check(call(9,{fd,buffer,static_cast<std::uint32_t>(saved.size())}).value==saved.size() && call(7,{fd}).value==0,
+                  "McWrite and McClose did not store a file");
+            const auto reopened=call(6,{0,0,name,1}).value;
+            std::fill_n(data.begin()+buffer,64,std::uint8_t(0));
+            check(reopened<3 && call(8,{reopened,buffer,64}).value==saved.size() &&
+                  std::equal(saved.begin(),saved.end(),data.begin()+buffer) && call(7,{reopened}).value==0,"McRead did not return a stored file");
+            check(call(8,{reopened,0x7ffffff0,64}).status==NativeServiceStatus::address_fault,"McRead accepted a buffer outside guest memory");
+            put_text("/GAME/*");
+            put_stack(0,4); put_stack(1,buffer);
+            check(call(12,{0,0,name,0}).value==3,"McGetDir did not list a folder");
+            check(std::string(reinterpret_cast<const char*>(data.data()+buffer+2*64+32))=="save","McGetDir wrote the wrong entry layout");
+            std::uint32_t listed_size=0; std::memcpy(&listed_size,data.data()+buffer+2*64+16,4);
+            check(listed_size==saved.size(),"McGetDir reported the wrong file size");
+            put_text("/GAME/save");
+            std::fill_n(data.begin()+buffer,64,std::uint8_t(0));
+            data[buffer+8]=9; put_stack(0,2);
+            check(call(16,{0,0,name,buffer}).value==0,"McSetFileInfo did not change a file");
+            put_text("GAME");
+            check(call(15,{0,0,name,buffer}).value==0 && std::string(reinterpret_cast<const char*>(data.data()+buffer))=="/GAME",
+                  "McChDir did not report the current folder");
+            put_text("/GAME");
+            check(call(23,{0,0,name}).value==1,"McGetEntSpace did not count a free directory slot");
+            check(call(45,{0,0,0}).status==NativeServiceStatus::unavailable && call(36,{0,0}).status==NativeServiceStatus::unavailable &&
+                  call(0xff,{}).status==NativeServiceStatus::unavailable && call(26,{0}).value==1,
+                  "A raw or unknown card call reported success");
+            NativeServiceRequest interrupted{6,{0,0,name,1},NativeServiceKind::mcman};
+            interrupted.interrupt_context=true;
+            check(cards.invoke(interrupted,data).status==NativeServiceStatus::unavailable,"A card call ran in interrupt context");
+            std::filesystem::remove_all(root,ignored);
         }
         {
             std::vector<std::uint8_t> data(0x25000);

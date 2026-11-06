@@ -1392,6 +1392,34 @@ int main(int argc,char** argv) {
             try { nt::iop_codegen::ir::discover(dev9,private_entry); } catch (const std::runtime_error&) { rejected=true; }
             if (!rejected) throw std::runtime_error("DEV9 replacement exposed private driver code");
         }
+        nt::elf::IopModule card{0x26000,0x26300,nt::Bytes(0x400),0x400,{}};
+        fixture::put32(card.memory,0,0x41c00000); fixture::put32(card.memory,8,0x207);
+        constexpr char card_name[]="mcman";
+        std::copy(std::begin(card_name),std::end(card_name),card.memory.begin()+12);
+        constexpr unsigned card_ordinals=54;
+        for (unsigned ordinal=0;ordinal<card_ordinals;++ordinal) {
+            // Ordinals 0 to 4 repeat one empty function, as a real table does.
+            const auto offset=0x100+(ordinal<5 ? 0U : ordinal)*8;
+            fixture::put32(card.memory,20+ordinal*4,card.base+offset);
+            fixture::put32(card.memory,offset,0xfc000000);
+        }
+        fixture::put32(card.memory,0x300,0xfc000000);
+        {
+            const auto replaced=nt::iop_codegen::ir::discover(card);
+            if (replaced.instructions.at(card.entry).immediate!=0x190100 ||
+                replaced.instructions.at(card.base+0x100).immediate!=0x1900ff ||
+                replaced.instructions.at(card.base+0x100+6*8).immediate!=0x190006 ||
+                replaced.instructions.at(card.base+0x100+53*8).immediate!=0x190035)
+                throw std::runtime_error("MCMAN public ABI was not lowered to native card services");
+            auto invalid=card; fixture::put32(invalid.memory,8,0x307);
+            bool rejected=false;
+            try { nt::iop_codegen::ir::discover(invalid); } catch (const std::runtime_error&) { rejected=true; }
+            if (!rejected) throw std::runtime_error("Unknown MCMAN ABI accepted a native replacement");
+            rejected=false;
+            const std::array private_entry{0x263f0U};
+            try { nt::iop_codegen::ir::discover(card,private_entry); } catch (const std::runtime_error&) { rejected=true; }
+            if (!rejected) throw std::runtime_error("MCMAN replacement exposed private card code");
+        }
         nt::elf::IopModule fixed_pool{0x25000,0x25014,nt::Bytes(0x100),0x100,{}};
         fixture::put32(fixed_pool.memory,0,0x41e00000); fixture::put32(fixed_pool.memory,8,0x101);
         constexpr char pool_library[]="thfpool";

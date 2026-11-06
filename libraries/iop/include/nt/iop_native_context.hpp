@@ -26,6 +26,7 @@
 #include <nt/iop_native_sound.hpp>
 #include <nt/iop_native_usb.hpp>
 #include <nt/iop_native_dev9.hpp>
+#include <nt/iop_native_memory_card.hpp>
 #include <memory>
 
 namespace nt::iop {
@@ -57,7 +58,7 @@ public:
           commands(peer_.get()),inbound(ram,layout.packet_buffer),callbacks({&alarms,&sif,&inbound,&hard_timers,&vblank,&cdvdman,&rpc_clients,&usb,&sound}),
           interrupts(layout.interrupt_stack,&callbacks),sif_control(interrupts,&sif),threads(interrupts,&heap),
           rpc_servers(peer_.get(),&threads),rpc_data(peer_.get()),rpc_clients(heap,threads,peer_.get(),[this] { return command_session.rpc_ready(); },ram),
-          events(&threads),semaphores(&threads),mailboxes(&threads),fixed_pools(heap,&threads),
+          events(&threads),semaphores(&threads),memory_card(libraries,heap,semaphores),mailboxes(&threads),fixed_pools(heap,&threads),
           system(events,boot,ram),command_session(events,system,sif_control,peer_.get()),stdio(std::move(output)),
           disc_service(disc.empty() ? nullptr : std::make_unique<NativeDiscServices>(disc,&descriptors,&events)),
           dmacman_(dmac_priority_),router(providers()),arena_(ram),packet_buffer_(layout.packet_buffer) {
@@ -68,6 +69,7 @@ public:
         vblank.connect(events,ram);
         serial_.connect_disconnected_ports(interrupts);
         modload.attach_heap(heap);
+        memory_card.attach_loader(modload);
         modload.attach_scheduler(threads);
         if (!disc.empty()) modload.attach_disc(disc);
     }
@@ -135,6 +137,7 @@ public:
     NativeRpcClients rpc_clients;
     NativeEventServices events;
     NativeSemaphoreServices semaphores;
+    NativeMemoryCardServices memory_card;
     NativeMailboxServices mailboxes;
     NativeFixedPoolServices fixed_pools;
     NativeSystemServices system;
@@ -152,7 +155,7 @@ private:
     std::vector<NativeServices*> providers() {
         std::vector<NativeServices*> result{&boot_callbacks,&heaplib,&prnt,&jumps,&sysclib,&drivers,&driver_files,&archives,&heap,&libraries,
             &boot,&modload,&interrupts,&events,&semaphores,&mailboxes,&fixed_pools,&threads,&system,&alarms,&sif,&sif_control,&stdio,
-            &commands,&command_session,&rpc_servers,&rpc_data,&rpc_clients,&serial_,&dmacman_,&cdvdman,&secrman,&hard_timers,&vblank,&sound,&usb,&dev9};
+            &commands,&command_session,&rpc_servers,&rpc_data,&rpc_clients,&serial_,&dmacman_,&cdvdman,&secrman,&hard_timers,&vblank,&sound,&usb,&dev9,&memory_card};
         if (disc_service) result.push_back(disc_service.get());
         return result;
     }

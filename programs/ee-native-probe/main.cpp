@@ -2,6 +2,7 @@
 #include "graphics_capture.hpp"
 #include "vector_capture.hpp"
 #include "packet_capture.hpp"
+#include <cstdlib>
 #include <nt/host_isa.hpp>
 #include <nt/ee_services.hpp>
 #include <nt/ee_platform.hpp>
@@ -335,7 +336,7 @@ nt::ee::Stop execute(nt::runtime::State* state,nt::ee::Memory* memory,std::uint6
 int main(int argc,char** argv) {
     if (argc<2) {
         std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [options]\n"
-                   "  Play: --disc <image.iso> --disc-media cd|dvd --fullscreen --resolution-scale 1|3|5 --close-on-stop --display-stop --run-seconds N --headless\n"
+                   "  Play: --disc <image.iso> --disc-media cd|dvd --memory-card <folder> --fullscreen --resolution-scale 1|3|5 --close-on-stop --display-stop --run-seconds N --headless\n"
                    "  Input: --pad-script <file> --input-latency\n"
                    "  Rendering: --gpu-triangles | --cpu-triangles --validate-graphics --verify-textures\n"
                    "  Profiling: --profile-graphics --sample-threads <file> --trace-services --strict-performance | --native-thread-cycles | --native-pmu\n"
@@ -359,7 +360,7 @@ int main(int argc,char** argv) {
     try {
         std::uint64_t budget=1000000;
         unsigned run_seconds=0,disc_media=0;
-        std::filesystem::path disc,capture_directory,stop_directory,graphics_directory,vector_directory,sample_path;
+        std::filesystem::path disc,memory_card,capture_directory,stop_directory,graphics_directory,vector_directory,sample_path;
         bool profile_graphics=false,validate_graphics=false,verify_textures=false,gpu_triangles=true,gpu_triangles_required=false,capture_display_only=false,capture_graphics_when_heavy=false;
         unsigned resolution_scale=5; // --resolution-scale 1 draws only the console samples
         bool start_fullscreen=false;
@@ -373,8 +374,8 @@ int main(int argc,char** argv) {
         bool measure_input_latency=false;
 #ifdef ANYPS2_NATIVE_VU1
         VuJobCapture vu_job_capture;
-        std::filesystem::path packet_capture_path,packet_replay_path;
 #endif
+        std::filesystem::path packet_capture_path,packet_replay_path;
         for (int index=2;index<argc;++index) {
             const std::string_view text=argv[index];
             if (text=="--native-thread-cycles") { native_cycles=true; continue; }
@@ -486,6 +487,10 @@ int main(int argc,char** argv) {
             if (text=="--disc") {
                 if (!disc.empty() || index+1==argc) throw std::runtime_error("Expected one disc image path");
                 disc=argv[++index]; continue;
+            }
+            if (text=="--memory-card") {
+                if (!memory_card.empty() || index+1==argc) throw std::runtime_error("Expected one memory card folder");
+                memory_card=argv[++index]; continue;
             }
             if (text=="--disc-media") {
                 if (disc_media || index+1==argc) throw std::runtime_error("Expected one disc media kind: cd or dvd");
@@ -696,6 +701,9 @@ int main(int argc,char** argv) {
             iop_reset=std::make_unique<probe::IopReset>(iop_data,disc,memory,platform,native_code_overlap,iop_session,iop_default,disc_media,
                 [&](unsigned port) { return sample_pad(port); },
                 rumble_pad);
+            // Saves belong to the user, so by default they live outside any game's output.
+            if (memory_card.empty()) if (const auto* local=std::getenv("LOCALAPPDATA")) memory_card=std::filesystem::path(local)/"AnyPS2"/"memory-cards";
+            iop_reset->set_memory_card(memory_card);
             if (!command_peer.reset_owner(iop_reset->owner())) throw std::runtime_error("Cannot bind compiled IOP reset probe");
             active_iop=iop_reset.get();
         }
@@ -760,6 +768,7 @@ int main(int argc,char** argv) {
         services.publish_image=[](nt::ee::Memory& m,std::uint32_t entry) { return nt_ee_generated_publish_image(&m,entry); };
 #ifdef ANYPS2_NATIVE_IOP
         if (iop_reset) services.idle_pump=[&] { return iop_reset->pump(); };
+        services.console_output=[](std::string_view text) { std::cerr<<"program_console: "<<text; };
 #endif
         if (show_window) {
             window=std::make_unique<probe::NativeWindow>(validate_graphics,resolution_scale,start_fullscreen);
@@ -1121,6 +1130,7 @@ int main(int argc,char** argv) {
                      <<" native_usb_drivers="<<iop_reset->usb().driver_count()
                      <<" native_usb_error="<<iop_reset->usb().error()
                      <<" native_dev9_unavailable="<<iop_reset->dev9().unavailable_initializations()
+                     <<" memory_card_error=\""<<iop_reset->memory_card().error()<<'"'
                      <<" native_sample_error="<<static_cast<unsigned>(iop_reset->sound().sample_error())
                      <<" native_sample_voice="<<iop_reset->sound().rejected_voice()
                      <<" native_sample_transfer="<<iop_reset->sound().transfer_failure()

@@ -779,7 +779,8 @@ static Program discover_module(const elf::IopModule& module,std::span<const std:
             }
             for (const auto& client:data_modules) {
                 if (registry_sites.empty()) break;
-                if (client.base==module.base) continue;
+                // A natively replaced library runs none of its code, so it registers nothing.
+                if (client.base==module.base || native_library_module(client)) continue;
                 const auto imports=elf::iop_imports(client);
                 const bool connected=std::any_of(imports.begin(),imports.end(),[&](const auto& import) {
                     return std::any_of(exports.begin(),exports.end(),[&](const auto& library) {

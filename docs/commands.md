@@ -65,12 +65,29 @@ always an error: the `host_stop=` and `stop=` lines in the output say what happe
 | --- | --- |
 | `--disc <image.iso>` | Disc image to read from |
 | `--disc-media cd\|dvd` | Disc type to report to the game |
+| `--memory-card <folder>` | Folder holding the [memory cards](#memory-cards). Default `%LOCALAPPDATA%\AnyPS2\memory-cards` |
 | `--fullscreen` | Start in borderless full screen. F11 or Alt+Enter switches while running |
 | `--resolution-scale 1\|3\|5` | Samples per console pixel on each axis. Default 5; 1 draws only the console's own pixels |
 | `--close-on-stop` | Close the window when the game stops |
 | `--display-stop` | Keep the window open after a stop. This is the default |
 | `--run-seconds <1..86400>` | Stop after this long, for measured runs |
 | `--headless` | Run with no window |
+
+### Memory cards
+
+Saves are ordinary files on your PC. Both card slots are always present, as `slot1` and
+`slot2` inside the memory card folder, and each save folder a game writes appears as a
+folder inside them. Back up a card by copying its folder. A file you copy in appears on
+the card under its own name.
+
+Games that use the standard `MCMAN` card library get this automatically, once converted
+with this version. A file reaches the PC when the game closes or flushes it, and the old
+version stays in place until the new one is complete. Formatting a card sets its folder
+aside as `slot1.before-format-1` rather than deleting it, so nothing is lost and you
+delete those folders yourself. PCSX2 card images cannot be used yet.
+
+Each card reports a fixed 8000 KB of space. Memory card time stamps use the console's
+Japan time. `memory_card_error=` in the run's final line says why a card could not be used.
 
 ### Converted IOP sessions
 

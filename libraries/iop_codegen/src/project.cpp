@@ -222,6 +222,9 @@ target_compile_definitions(iop-native PRIVATE ANYPS2_IOP_LLVM=1)
         if (library.name=="dev9") diagnostics<<"Native DEV9 public ABI: no expansion network/storage provider is installed. "
             "Initialization returns MODULE_NO_RESIDENT_END without registering exports. "
             "Direct export calls stop explicitly; no hardware identity or successful I/O is fabricated.\n";
+    for (const auto& item:compiled) for (const auto& library:elf::iop_exports(item))
+        if (library.name=="mcman") diagnostics<<"Native MCMAN public ABI: LLVM entry stubs call native memory card files. "
+            "Card transport and authentication are not converted. Raw page and block calls stop explicitly.\n";
     for (const auto& item:compiled) for (const auto& import:elf::iop_imports(item))
         if (import.library=="cdvdman" && import.ordinal==22)
             diagnostics<<"Unavailable native service: cdvdman ordinal 22 (console iLink identity) at "

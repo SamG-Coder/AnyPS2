@@ -81,6 +81,11 @@ public:
     const nt::input::PadTransactions& pads() const { return *state_->pads; }
     const nt::iop::NativeUsbServices& usb() const { return state_->services->usb; }
     const nt::iop::NativeDev9Services& dev9() const { return state_->services->dev9; }
+    const nt::iop::NativeMemoryCardServices& memory_card() const { return state_->services->memory_card; }
+    void set_memory_card(std::filesystem::path root) {
+        memory_card_=std::move(root);
+        state_->services->memory_card.set_root(memory_card_);
+    }
     const nt::iop::NativeSoundServices& sound() const { return state_->services->sound; }
     const nt::audio::Output& audio() const { return *state_->services->audio_output; }
     const auto& rejected_transfer() const { return state_->services->sif.rejected_transfer(); }
@@ -152,6 +157,7 @@ private:
         next->services->bind_native_ports([pads=next->pads.get()](auto batch) { return pads->exchange(batch); });
         next->services->modload.attach_catalog(nt_iop_generated_source_hashes());
         next->services->cdvdman.enable_application_exit();
+        next->services->memory_card.set_root(memory_card_);
         install_sealed(data,*next);
         next->startup=std::make_unique<nt::iop::NativeModuleStartup>(nt::iop::run_llvm,*next->services,next->ram,module_,nt_iop_generated_entries(),0x1ff000);
         next->incoming=std::make_unique<nt::ee::NativeIopCommands>(next->services->sif_control,next->services->inbound,next->ram,
@@ -294,7 +300,7 @@ private:
     nt::ee::NativePlatform& platform_;
     nt::iop::NativeModule module_;
     bool session_=false,default_reset_=false,accepted_=false;
-    std::filesystem::path disc_,data_;
+    std::filesystem::path disc_,data_,memory_card_;
     std::uint32_t disc_media_=0;
     nt::input::PadTransactions::Sampler pad_sample_;
     nt::input::PadTransactions::Rumbler pad_rumble_;

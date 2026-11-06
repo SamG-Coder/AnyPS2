@@ -50,7 +50,7 @@ inline const NativeMatch& mapping_for(const LibraryCall& call,std::string_view n
         "Coalesce contiguous reads and reuse buffers; preserve request completion order.",
         "https://learn.microsoft.com/en-us/windows/win32/fileio/file-buffering"};
     static constexpr NativeMatch saves{
-        "save-storage","Partial file service; no general memory-card replacement","Existing file service with explicit save-container adapter","project implementation",
+        "save-storage","Native MCMAN public ABI on host files","Native files behind the public MCMAN library","project implementation",
         "Native files with validated metadata and atomic updates",
         "Preserve directory metadata, capacity/errors and commit semantics; raw page/ECC interfaces are not normal file calls.",
         "Operate on files above the card transport boundary; coalesce writes only at defined commit points.",
