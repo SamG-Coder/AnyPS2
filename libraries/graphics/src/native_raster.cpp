@@ -1603,8 +1603,13 @@ void NativeRaster::upload(std::span<const std::uint32_t> words) {
 void NativeRaster::read(std::span<std::uint32_t> words,unsigned start,unsigned length) {
     if (words.size()!=store_words || start>=store_words || !length || length>store_words) throw std::runtime_error("Invalid native resource export");
     auto& r=*impl_; Measure timing(r.stats.read_ns,r.profiling);
-    r.synchronize_source({start,length}); r.flush();
-    ++r.stats.memory_reads; r.stats.memory_read_words+=length; r.read_passes=r.stats.render_passes;
+    // `source` is current once newer surface pages are exported, and an export waits for
+    // the GPU itself. A read of pages no queued work renders to must not wait: programs
+    // copy memory thousands of times per second, and each wait stalls the whole frame.
+    const auto submissions=r.stats.submissions;
+    r.synchronize_source({start,length});
+    ++r.stats.memory_reads; r.stats.memory_read_words+=length;
+    if (r.stats.submissions!=submissions) r.read_passes=r.stats.render_passes;
     // Callers read only the range they asked to make current.
     const auto count=std::min<std::size_t>(length,r.source.size()-start);
     std::copy_n(r.source.begin()+start,count,words.begin()+start);
