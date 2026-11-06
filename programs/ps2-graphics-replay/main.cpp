@@ -1,4 +1,5 @@
 #include <nt/native_drawing.hpp>
+#include <nt/pixel_address.hpp>
 #include <nt/vulkan_renderer.hpp>
 #include <chrono>
 #include <cstdint>
@@ -31,12 +32,56 @@ struct Reader {
     }
 };
 }
+namespace {
+// Writes one memory surface as a binary PPM. PSMCT32 and PSMCT24 ignore alpha;
+// PSMCT16 (format 2) and PSMCT16S (format 10) expand to eight bits per channel.
+void write_surface(const std::string& request,const std::vector<std::uint32_t>& memory,nt::graphics::VulkanRenderer& renderer) {
+    std::vector<std::string> parts;
+    std::size_t cursor=request.size();
+    for (unsigned field=0;field<5;++field) {
+        const auto colon=request.rfind(':',cursor-1);
+        if (colon==std::string::npos) throw std::runtime_error("Invalid surface request");
+        parts.insert(parts.begin(),request.substr(colon+1,cursor-colon-1));
+        cursor=colon;
+    }
+    const unsigned frame=static_cast<unsigned>(std::stoul(parts[0])),pitch=static_cast<unsigned>(std::stoul(parts[1]));
+    const unsigned format=static_cast<unsigned>(std::stoul(parts[2])),width=static_cast<unsigned>(std::stoul(parts[3])),height=static_cast<unsigned>(std::stoul(parts[4]));
+    std::ofstream file(request.substr(0,cursor),std::ios::binary);
+    if (!file) throw std::runtime_error("Cannot write surface");
+    // A scaled surface writes every sample; its pixels are already expanded.
+    unsigned sample_width=0,sample_height=0;
+    const auto samples=renderer.read_surface_samples(frame*32,pitch,format,sample_width,sample_height);
+    if (!samples.empty() && sample_width>=width*3) {
+        const unsigned scale_x=sample_width/(pitch*64),out_width=width*scale_x,out_height=std::min(height*scale_x,sample_height);
+        file<<"P6\n"<<out_width<<' '<<out_height<<"\n255\n";
+        for (unsigned y=0;y<out_height;++y) for (unsigned x=0;x<out_width;++x) {
+            const auto pixel=samples[std::size_t(y)*sample_width+x];
+            const char rgb[]{char(pixel),char(pixel>>8),char(pixel>>16)};
+            file.write(rgb,3);
+        }
+        return;
+    }
+    file<<"P6\n"<<width<<' '<<height<<"\n255\n";
+    for (unsigned y=0;y<height;++y) for (unsigned x=0;x<width;++x) {
+        std::uint32_t pixel;
+        if (format==2 || format==10) {
+            const auto half=nt::graphics::rgba_halfword(frame*32,pitch,x,y,format==10);
+            const auto value=(memory[half/2]>>((half%2)*16))&65535U;
+            pixel=((value&31U)<<3)|(((value>>5)&31U)<<11)|(((value>>10)&31U)<<19);
+        } else pixel=memory[nt::graphics::rgba_word(frame*32,pitch,x,y)];
+        const char rgb[]{char(pixel),char(pixel>>8),char(pixel>>16)};
+        file.write(rgb,3);
+    }
+}
+}
 int main(int argc,char** argv) {
     try {
-        if (argc<2 || argc>3) { std::cerr<<"usage: ps2-graphics-replay <packets.bin> [repeat]\n"; return 2; }
+        unsigned scale=1;
+        if (argc>2 && std::string(argv[1])=="--scale") { scale=static_cast<unsigned>(std::stoul(argv[2])); argc-=2; argv+=2; }
+        if (argc<2 || argc>4) { std::cerr<<"usage: ps2-graphics-replay [--scale n] <packets.bin> [repeat] [surface.ppm:fbp:fbw:psm:width:height]\n"; return 2; }
         const auto data=read_all(argv[1]);
-        const unsigned repeat=argc==3 ? static_cast<unsigned>(std::stoul(argv[2])) : 1;
-        nt::graphics::VulkanRenderer renderer;
+        const unsigned repeat=argc>=3 ? static_cast<unsigned>(std::stoul(argv[2])) : 1;
+        nt::graphics::VulkanRenderer renderer(nullptr,false,nt::graphics::RenderPath::native_images,scale);
         renderer.profile_commands(true);
         nt::graphics::NativeDrawing drawing(true);
         drawing.assemble_triangles_on_gpu(renderer);
@@ -66,6 +111,7 @@ int main(int argc,char** argv) {
         const auto recorded=std::chrono::steady_clock::now();
         std::vector<std::uint32_t> memory(1024*1024);
         renderer.read(memory);
+        if (argc==4) write_surface(argv[3],memory,renderer);
         std::uint64_t hash=0xcbf29ce484222325ULL;
         for (const auto word:memory) hash=(hash^word)*0x100000001b3ULL;
         const auto& s=renderer.statistics();

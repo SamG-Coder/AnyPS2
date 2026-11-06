@@ -100,6 +100,7 @@ public:
         }
         return {Stop::budget,mask_};
     }
+    std::uint64_t displayed_buffer(unsigned circuit) const { return output_.buffers[circuit]; }
     Stop write(std::uint32_t address,std::uint64_t value) {
         if (address==0x12001040) {
             if (value>1 || !synchronize) return Stop::unsupported_system;

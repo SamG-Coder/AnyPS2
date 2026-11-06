@@ -6,7 +6,7 @@ namespace nt::graphics {
 // Image-backed hardware rasterization. Console layouts exist only at import/export.
 class NativeRaster {
 public:
-    NativeRaster(VkPhysicalDevice physical,VkDevice device,VkQueue queue,unsigned family,bool ordered_fragments);
+    NativeRaster(VkPhysicalDevice physical,VkDevice device,VkQueue queue,unsigned family,bool ordered_fragments,unsigned resolution_scale=1);
     ~NativeRaster();
     void upload(std::span<const std::uint32_t> words);
     void write(std::span<const PixelWrite> writes);
@@ -29,6 +29,7 @@ public:
     std::uint32_t load_palette(std::span<const unsigned> addresses,unsigned first);
     std::uint32_t merge_palette(const std::array<std::uint32_t,16>& banks,const std::array<std::uint32_t,256>& current);
     void release_palette(std::uint32_t slot);
+    std::vector<std::uint32_t> read_surface_samples(unsigned base,unsigned pitch,unsigned format,unsigned& width,unsigned& height);
     void read_palette(std::uint32_t slot,std::span<std::uint32_t,256> words);
     void finish();
     // Completion tokens refer to actual queue fences, never assumed readiness.

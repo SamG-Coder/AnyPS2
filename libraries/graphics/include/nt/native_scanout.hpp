@@ -22,6 +22,7 @@ struct DisplayPlan {
     // Presented size: the plan's pixels at the display's real shape. Zero presents
     // one window pixel per plan pixel. Composition stays at width and height.
     std::uint32_t output_width=0,output_height=0;
+    std::uint32_t scale=1; // samples per console pixel of the surfaces
     std::uint32_t presented_width() const { return output_width ? output_width : width; }
     std::uint32_t presented_height() const { return output_height ? output_height : height; }
 };

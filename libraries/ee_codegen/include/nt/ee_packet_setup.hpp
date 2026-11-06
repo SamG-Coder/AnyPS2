@@ -1,4 +1,5 @@
 #pragma once
+#include <chrono>
 #include <string>
 #include <deque>
 #include <nt/ee_native.hpp>
@@ -51,6 +52,8 @@ public:
     // never an execution path and cannot alter the submission.
     void* observe_context=nullptr;
     void (*observe_submission)(void*,unsigned,std::span<const NativeSubmissionStep>)=nullptr;
+    // Optional diagnostic observer of each accepted transfer, under the same rules.
+    void (*observe_packet)(void*,unsigned,std::span<const std::uint8_t>,std::span<const NativePacketOrigin>)=nullptr;
     bool reverse_output() const { return reverse_output_; }
     static bool maps(std::uint32_t address) { return address>=0x10003000 && address<0x10007000; }
     IoRead read(std::uint32_t address) const {
@@ -71,7 +74,7 @@ public:
         if (!decode(address,channel,field)) return {Stop::unsupported_system};
         const auto& unit=units_[channel];
         switch (field) {
-        case 0: return {Stop::budget,(!deferred_[channel].empty() ? 4U : 0U)|(unit.stopped ? 0x100U : 0U)|(unit.broken ? 0x200U : 0U)|
+        case 0: return {Stop::budget,(!deferred_[channel].empty() || outstanding(channel) ? 4U : 0U)|(unit.stopped ? 0x100U : 0U)|(unit.broken ? 0x200U : 0U)|
             (unit.interrupt_stall ? 0x400U : 0U)|(unit.interrupt ? 0x800U : 0U)|(unit.double_buffer ? 0x80U : 0U)|(channel && reverse_output_ ? 0x800000U : 0U)};
         case 2: return {Stop::budget,unit.error_mask};
         case 3: return {Stop::budget,unit.mark};
@@ -101,6 +104,10 @@ public:
         unsigned channel,field;
         if (!decode(address,channel,field)) return Stop::unsupported_system;
         if (!deferred_[channel].empty()) return Stop::native_wait;
+        // Reversing direction or resetting the unit must follow its queued work.
+        if ((field==0 || (field==1 && (value&1))) && outstanding(channel)) return Stop::native_wait;
+        // An interrupt on its way was raised before this reset, so it is delivered first.
+        if (field==1 && (value&1) && (delayed_interrupts_&(1U<<channel))) return Stop::native_wait;
         auto& unit=units_[channel];
         switch (field) {
         case 0:
@@ -128,15 +135,18 @@ public:
     unsigned rejected_command() const { return rejected_command_; }
     const std::string& rejected_packet() const { return rejected_packet_; }
     bool pending(unsigned channel) const { return channel<2 && (!deferred_[channel].empty() || !pending_[channel].bytes.empty()); }
-    bool working() const { return !deferred_[0].empty() || !deferred_[1].empty() || outstanding(0) || outstanding(1); }
+    bool working() const { return !deferred_[0].empty() || !deferred_[1].empty() || outstanding(0) || outstanding(1) || delayed_interrupts_; }
     Stop poll(unsigned channel,bool vector_active) {
         if (channel>=2) return Stop::invalid_state;
+        // State was applied when the failed job was accepted, so no later poll may
+        // report success once that job has failed.
+        if (submission_failure_!=Stop::budget) return submission_failure_;
         // Outstanding submissions without deferred packets (queued GIF drawing)
         // still need polling to publish their graphics.
         if (!deferred_[channel].empty() || outstanding(channel)) {
             if (!poll_sequence || !sequence_tickets) return Stop::invalid_state;
             const auto result=poll_sequence(launch_context,channel);
-            if (result!=Stop::budget) return result;
+            if (result!=Stop::budget) { submission_failure_=result; return result; }
             const auto completed=sequence_tickets(launch_context,channel,true);
             auto& deferred=deferred_[channel];
             while (!deferred.empty() && deferred.front().ticket<=completed) {
@@ -146,9 +156,27 @@ public:
             }
             if (!deferred.empty()) return Stop::budget;
         }
-        return resume(channel,vector_active);
+        // A full queue leaves the suffix pending; a later poll resumes it.
+        const auto resumed=resume(channel,vector_active);
+        return resumed==Stop::vector_pending ? Stop::budget : resumed;
     }
-    unsigned take_interrupts() { const auto result=interrupt_events_; interrupt_events_=0; return result; }
+    // How long a VIF interrupt follows the access that started its transfer.
+    std::chrono::steady_clock::duration interrupt_latency=std::chrono::microseconds(50);
+    // The latency exists so a program can arm its wait after the starting access. A
+    // program with no runnable thread has armed every wait, so nothing is left to protect.
+    void release_delayed_interrupts() { interrupt_events_|=delayed_interrupts_; delayed_interrupts_=0; }
+    unsigned take_interrupts() {
+        if (delayed_interrupts_) {
+            const auto now=std::chrono::steady_clock::now();
+            // Polls count the program's own progress, so a paused host thread cannot let
+            // the time pass without the program reaching its wait.
+            for (unsigned channel=0;channel<2;++channel) if (delayed_interrupts_&(1U<<channel)) {
+                if (interrupt_polls_[channel]) --interrupt_polls_[channel];
+                else if (now>=interrupt_due_[channel]) { interrupt_events_|=1U<<channel; delayed_interrupts_&=~(1U<<channel); }
+            }
+        }
+        const auto result=interrupt_events_; interrupt_events_=0; return result;
+    }
     Stop consume(unsigned channel,std::span<const std::uint8_t> bytes,bool vector_active,std::span<const NativePacketOrigin> origins={}) {
         std::size_t consumed=0;
         // VU0 and VU1 have independent native ownership. Only the shared GIF
@@ -158,7 +186,9 @@ public:
         if (channel>=2) {
             // GIF packets queue behind outstanding VU1 work, in order; VU0 is synchronous.
             if (!deferred_[0].empty()) return Stop::native_wait;
-            return consume_segment(channel,bytes,vector_active,consumed);
+            const auto result=consume_segment(channel,bytes,vector_active,consumed);
+            if (result==Stop::budget && observe_packet) observe_packet(observe_context,channel,bytes,origins);
+            return result;
         }
         if (!pending_[channel].bytes.empty()) return deferred_[channel].empty() ? Stop::unsupported_system : Stop::native_wait;
         if (!deferred_[channel].empty()) {
@@ -169,14 +199,14 @@ public:
         for (std::size_t i=0;i<origins.size();++i)
             if (origins[i].offset>=bytes.size() || origins[i].offset%4 || origins[i].quadword_offset>=16 || origins[i].quadword_offset%4 ||
                 (i ? origins[i].offset<=origins[i-1].offset : origins[i].offset!=0)) return Stop::invalid_state;
-        // Retain source data independently of subsequent caller writes. No
-        // command is re-executed when an interrupt handler releases the suffix.
-        Pending candidate{{bytes.begin(),bytes.end()},0,{origins.begin(),origins.end()}};
-        const auto result=consume_segment(channel,candidate.bytes,vector_active,consumed,candidate.origins);
+        const auto result=consume_segment(channel,bytes,vector_active,consumed,origins);
         if (result!=Stop::budget) return result;
-        if (consumed<candidate.bytes.size()) {
-            candidate.offset=consumed; pending_[channel]=std::move(candidate);
-        }
+        // Submissions own their input, so only a suffix outlives this call. It is
+        // retained apart from later caller writes and no command is re-executed when
+        // an interrupt handler releases it.
+        if (consumed<bytes.size())
+            pending_[channel]=Pending{{bytes.begin(),bytes.end()},consumed,{origins.begin(),origins.end()}};
+        if (observe_packet) observe_packet(observe_context,channel,bytes,origins);
         return Stop::budget;
     }
     Stop resume(unsigned channel,bool vector_active) {
@@ -352,11 +382,14 @@ private:
                     const auto cycle=(next.cycle>>8)&255U;
                     data.back().mask=NativeVectorMask{next.mask,next.row_column,cycle ? cycle : 256U};
                 }
-                auto plan=plan_vector_data(channel ? 1024 : 256,view);
-                if (!plan) return Stop::unsupported_vector;
-                std::copy(plan->rows.begin(),plan->rows.end(),next.row_column.begin());
-                data_plans.push_back(std::move(*plan));
-                view.planned=data_plans.back().writes;
+                // Deferrable data is planned where it is written, away from this thread.
+                if (!vector_plan_deferrable(view)) {
+                    auto plan=plan_vector_data(channel ? 1024 : 256,view);
+                    if (!plan) return Stop::unsupported_vector;
+                    std::copy(plan->rows.begin(),plan->rows.end(),next.row_column.begin());
+                    data_plans.push_back(std::move(*plan));
+                    view.planned=data_plans.back().writes;
+                } else if (!vector_data_valid(channel ? 1024 : 256,view)) return Stop::unsupported_vector;
                 offset+=padded;
                 break;
             }
@@ -493,20 +526,24 @@ private:
         NativeSubmissionStep step{{},{},std::move(packets),{}};
         return submit_sequence(launch_context,1,std::span(&step,1));
     }
-    // Applies a consumed packet's VIF state now, or after the submissions
-    // accepted so far finish, keeping packet order.
+    // Applies a consumed packet's VIF state on acceptance: as on the console, the VIF
+    // moves on once a microprogram starts, so later work can be prepared while earlier
+    // submissions execute. The interrupt arrives after a transfer's latency, not inside
+    // the access that started it, because programs arm their wait just after that access.
     Stop complete_packet(unsigned channel,const Unit& next,bool notify,std::size_t offset,std::size_t& consumed) {
-        const auto ticket=sequence_tickets ? sequence_tickets(launch_context,channel,false) : 0;
         consumed=offset; rejected_command_=0;
-        if (outstanding(channel) || !deferred_[channel].empty()) {
-            deferred_[channel].push_back(Deferred{next,notify,ticket});
-            return Stop::budget;
-        }
         units_[channel]=next;
-        if (notify) interrupt_events_|=1U<<channel;
+        if (notify) {
+            delayed_interrupts_|=1U<<channel;
+            interrupt_due_[channel]=std::chrono::steady_clock::now()+interrupt_latency;
+            interrupt_polls_[channel]=interrupt_latency==std::chrono::steady_clock::duration{} ? 0U : 2U;
+        }
         return Stop::budget;
     }
-    unsigned interrupt_events_=0;
+    unsigned interrupt_events_=0,delayed_interrupts_=0;
+    Stop submission_failure_=Stop::budget;
+    std::array<std::chrono::steady_clock::time_point,2> interrupt_due_{};
+    std::array<unsigned,2> interrupt_polls_{};
     graphics::PacketStream gif_stream_,direct_stream_;
     bool gif_paused_=false;
     std::uint32_t gif_mode_=0;

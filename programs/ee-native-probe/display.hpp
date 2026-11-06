@@ -14,7 +14,7 @@ namespace probe {
 // committed game pixels and keeps the last frame visible at a diagnostic stop.
 class NativeWindow {
 public:
-    explicit NativeWindow(bool validation=false) {
+    explicit NativeWindow(bool validation=false,unsigned resolution_scale=1) {
 #ifdef _WIN32
         SetProcessDPIAware();
         WNDCLASSW wc{};
@@ -31,7 +31,7 @@ public:
             nullptr,nullptr,wc.hInstance,nullptr);
         if (!window_.handle) throw std::runtime_error("Cannot create native output window");
         ShowWindow(window_.handle,SW_SHOW);
-        renderer_=std::make_unique<nt::graphics::VulkanRenderer>(window_.handle,validation);
+        renderer_=std::make_unique<nt::graphics::VulkanRenderer>(window_.handle,validation,nt::graphics::RenderPath::native_images,resolution_scale);
 #else
         throw std::runtime_error("Native output window is unavailable on this platform");
 #endif

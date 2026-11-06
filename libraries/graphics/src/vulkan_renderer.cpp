@@ -64,7 +64,7 @@ constexpr VkDeviceSize display_offset=9*1024*1024+1024;
 constexpr VkDeviceSize display_bytes=2048*2048*4;
 constexpr VkDeviceSize buffer_bytes=display_offset+display_bytes;
 static_assert(writes_offset+max_writes*sizeof(PixelWrite)<display_offset-4);
-static_assert(sizeof(DisplayPlan)==116 && sizeof(DisplayPlan)<=128);
+static_assert(sizeof(DisplayPlan)==120 && sizeof(DisplayPlan)<=128);
 static_assert(sizeof(PixelWrite)==12);
 static_assert(sizeof(RasterVertex)==40);
 static_assert(sizeof(Sprite)==128);
@@ -78,6 +78,7 @@ const std::uint32_t scanout_code[] =
 #endif
 }
 struct VulkanRenderer::Impl {
+    unsigned resolution_scale=1;
     std::unique_ptr<NativeRaster> native;
     RenderPath path=RenderPath::native_images;
     std::uint32_t api_version=VK_API_VERSION_1_1;
@@ -302,7 +303,7 @@ struct VulkanRenderer::Impl {
 #endif
         check(vkCreateDevice(physical,&dc,nullptr,&device),"Create device"); vkGetDeviceQueue(device,family,0,&queue);
         if (path==RenderPath::native_images) {
-            native=std::make_unique<NativeRaster>(physical,device,queue,family,ordered_fragments);
+            native=std::make_unique<NativeRaster>(physical,device,queue,family,ordered_fragments,resolution_scale);
             if (surface) create_swapchain();
             return;
         }
@@ -355,7 +356,7 @@ struct VulkanRenderer::Impl {
         if (selected==formats.end() || !(caps.supportedUsageFlags&VK_IMAGE_USAGE_TRANSFER_DST_BIT)) throw std::runtime_error("No supported Vulkan presentation format/transfer usage");
         if (!(caps.supportedCompositeAlpha&VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)) throw std::runtime_error("Opaque presentation unsupported");
         extent=caps.currentExtent; format=selected->format;
-        if (!extent.width || !extent.height || std::uint64_t(extent.width)*extent.height*4>memory_bytes) throw std::runtime_error("Unsupported presentation extent");
+        if (!extent.width || !extent.height || extent.width>8192 || extent.height>8192) throw std::runtime_error("Unsupported presentation extent");
         VkSwapchainCreateInfoKHR sc{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR}; sc.surface=surface;
         sc.minImageCount=std::min(caps.minImageCount+1,caps.maxImageCount?caps.maxImageCount:~0U);
         sc.imageFormat=format; sc.imageColorSpace=selected->colorSpace; sc.imageExtent=extent; sc.imageArrayLayers=1; sc.imageUsage=VK_IMAGE_USAGE_TRANSFER_DST_BIT|(native ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : 0);
@@ -433,7 +434,7 @@ struct VulkanRenderer::Impl {
         check(vkWaitForFences(device,1,&fence,VK_TRUE,UINT64_MAX),"Wait for GPU");
     }
 };
-VulkanRenderer::VulkanRenderer(void* window,bool validation,RenderPath path):impl_(std::make_unique<Impl>()) {impl_->path=path; impl_->initialize(window,validation);}
+VulkanRenderer::VulkanRenderer(void* window,bool validation,RenderPath path,unsigned resolution_scale):impl_(std::make_unique<Impl>()) {if (!resolution_scale || !(resolution_scale&1) || resolution_scale>5) throw std::invalid_argument("Unsupported resolution scale"); impl_->resolution_scale=resolution_scale; impl_->path=path; impl_->initialize(window,validation);}
 VulkanRenderer::~VulkanRenderer()=default;
 void VulkanRenderer::synchronize() { if (impl_->native) { impl_->native->finish(); return; } impl_->flush(); check(vkDeviceWaitIdle(impl_->device),"Synchronize graphics"); }
 const std::string& VulkanRenderer::device_name() const {return impl_->name;}
@@ -507,7 +508,9 @@ void validate_sprite(const Sprite& draw) {
     }
     if ((draw.flags&1) && ((!(draw.flags&triangle_flag) && (!draw.dx || !draw.dy)) || !draw.texture_pitch || !draw.texture_width ||
         !draw.texture_height || draw.right>draw.pitch*64 || ((draw.bottom-1)/32-draw.top/32)*draw.pitch+(draw.right-1)/64-draw.left/64>=512))
-        throw std::runtime_error("Unsupported textured sprite dimensions or aliased framebuffer");
+        throw std::runtime_error("Unsupported textured sprite dimensions or aliased framebuffer: rect="+std::to_string(draw.left)+','+std::to_string(draw.top)+','+
+            std::to_string(draw.right)+','+std::to_string(draw.bottom)+" pitch="+std::to_string(draw.pitch)+" base="+std::to_string(draw.base)+" dx="+std::to_string(draw.dx)+" dy="+std::to_string(draw.dy)+
+            " texture="+std::to_string(draw.texture_width)+'x'+std::to_string(draw.texture_height)+" texture_pitch="+std::to_string(draw.texture_pitch)+" flags="+std::to_string(draw.flags));
     if (draw.flags&1) {
         const auto power_of_two=[](unsigned n){return n && !(n&(n-1)) && n<=1024;};
         const auto coordinate=[](int n){return n>=-65535 && n<=65535;};
@@ -711,6 +714,9 @@ std::uint32_t VulkanRenderer::load_palette(std::span<const unsigned> addresses,u
 std::uint32_t VulkanRenderer::merge_palette(const std::array<std::uint32_t,16>& banks,const std::array<std::uint32_t,256>& current) {
     if (!impl_->native) throw std::runtime_error("GPU palettes require the native Vulkan image renderer");
     return impl_->native->merge_palette(banks,current);
+}
+std::vector<std::uint32_t> VulkanRenderer::read_surface_samples(unsigned base,unsigned pitch,unsigned format,unsigned& width,unsigned& height) {
+    return impl_->native ? impl_->native->read_surface_samples(base,pitch,format,width,height) : std::vector<std::uint32_t>{};
 }
 void VulkanRenderer::release_palette(std::uint32_t slot) {
     if (impl_->native) impl_->native->release_palette(slot);

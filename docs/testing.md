@@ -87,6 +87,17 @@ fingerprint), direct graphics packets and program launches. It observes after
 acceptance and does not alter execution. Use it to measure render structure, such
 as which streams are unchanged between frames; keep captures under ignored `work/`.
 
+`ps2-native --capture-packets <private-file>` records accepted VIF and GIF transfers:
+program uploads from the start, the rest once a heavy scene arms it, up to 1.5 GB.
+`ps2-native <program.data> 1000 --replay-packets <private-file>` then runs those
+transfers through the real packet path and compiled VU programs, with no game code,
+window or GPU, and prints what the program's thread pays per channel and a hash of
+everything drawn. Each submission finishes before the next, so the costs exclude
+queueing. A change to this path must leave the hash unchanged; add `--profile-graphics`
+for VU thread time, or `--sample-threads <file>` to sample the replay. The recording
+starts mid-game, so VU memory differs from the original run: the hash compares builds
+and says nothing about the original frames.
+
 ## Before committing
 
 Run the repository-content guard before staging and again after staging:

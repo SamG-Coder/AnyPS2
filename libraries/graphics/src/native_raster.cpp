@@ -69,7 +69,7 @@ void normalize_tests(Sprite& draw) {
 // Indexed sampling done by the fragment shader (native.frag): a GPU palette
 // slot, its CSA bank, the format (0: none) and the levels it applies to.
 // `host`, when set, is a CPU palette snapshot the draw record publishes.
-struct IndexedSampling { std::uint32_t palette=0,bank=0,format=0,levels=0; const std::array<std::uint32_t,256>* host=nullptr; void* palette_surface=nullptr; };
+struct IndexedSampling { std::uint32_t palette=0,bank=0,format=0,levels=0; const std::array<std::uint32_t,256>* host=nullptr; void* palette_surface=nullptr; void* texture_surface=nullptr; std::uint32_t texture_view=0; };
 struct DrawRecord {
     Sprite draw; std::array<RasterVertex,3> vertices; unsigned width,height,fog_color,fog; std::uint32_t lod_control; float lod_q;
     std::uint32_t palette=0,palette_bank=0,indexed_format=0,indexed_levels=0;
@@ -156,6 +156,7 @@ struct NativeRaster::Impl {
     std::array<std::uint64_t,512> mirror_revisions{};
     VkDescriptorSetLayout palette_descriptors{}; VkPipelineLayout palette_layout{}; VkPipeline palette_pipeline{};
     std::uint32_t next_palette=1;
+    unsigned resolution_scale=1;
     // Slot holding the last CPU palette snapshot uploaded for a GPU decode.
     std::uint32_t uploaded_palette=0; std::array<std::uint32_t,256> uploaded_snapshot{};
     struct PaletteParameters {
@@ -164,6 +165,7 @@ struct NativeRaster::Impl {
         std::uint32_t texture_base=0,texture_pitch=0,format=0,bank=0,width=0,height=0;
         std::array<std::uint32_t,16> owned{};
         std::uint32_t layout=0; // bit 0: surface in depth layout; bit 1: texture in depth layout
+        std::uint32_t scale=1;
     };
     static_assert(sizeof(PaletteParameters)<=128);
 #ifdef ANYPS2_LLVM_TEXTURES
@@ -186,10 +188,12 @@ struct NativeRaster::Impl {
     void* readback_mapping=nullptr;
     struct Image {
         VkDevice device; VkImage image{}; VkDeviceMemory memory{}; VkImageView view{};
-        unsigned width,height,base=0,pitch=0,format=0; bool depth=false,dirty=false,valid=true,scratch=false;
+        // width and height are console pixels; the image holds scale times as many per axis.
+        unsigned width,height,base=0,pitch=0,format=0,scale=1; bool depth=false,dirty=false,valid=true,scratch=false;
         std::uint64_t revision=0,last_use=0,scope=0; Region region{};
         std::array<std::uint64_t,512> pages{};
         VkDeviceSize allocation_bytes=0;
+        std::unique_ptr<Image> console_view;
         Image(VkDevice d,unsigned w,unsigned h):device(d),width(w),height(h) {}
         ~Image() {
             if (view) vkDestroyImageView(device,view,nullptr);
@@ -209,6 +213,7 @@ struct NativeRaster::Impl {
     void gather_palette(std::uint32_t id,std::span<const unsigned> addresses,unsigned first);
     void gather_surface_palette(std::uint32_t id);
     void gather_surface_palettes();
+    Image* sampled_surface(const Sprite&,Region);
     void prepare_write(const Sprite&,unsigned format);
     void prepare_write(Region);
     struct Texture {
@@ -289,12 +294,13 @@ struct NativeRaster::Impl {
     void flush(VkSemaphore acquired=VK_NULL_HANDLE,VkSemaphore rendered=VK_NULL_HANDLE,bool wait=true);
     VkPipeline make_pipeline(VkRenderPass pass,VkPipelineLayout pipeline_layout,std::span<const std::uint32_t> vs,
         std::span<const std::uint32_t> fs,unsigned colors,bool coverage);
-    std::unique_ptr<Image> image(unsigned width,unsigned height);
+    std::unique_ptr<Image> image(unsigned width,unsigned height,unsigned scale=1);
     void upload_image(Image&,std::span<const std::uint32_t>);
     void copy_surface_pages(Image& destination,const Image& source,const std::bitset<512>& requested);
     void written(Image&,const Sprite&);
     bool current(const Image&,const Sprite&) const;
     // Publishes the surface's newer pages within `requested` to `source`.
+    void blit_console_samples(const Image& source,Image& destination,unsigned first_row,unsigned last_row);
     void export_image(Image&,Region requested={0,store_words}); void synchronize_source(Region); void clear_views();
     void trim_surfaces();
     Image& surface(unsigned base,unsigned pitch,unsigned height,bool depth,bool scratch=false,bool display=false,const Sprite* draw=nullptr,unsigned format=0);
@@ -370,6 +376,7 @@ void NativeRaster::Impl::append_draw(VkDescriptorSet set,const SpriteCommand& c,
     DrawRecord record{c.draw,c.triangle,current_width,current_height,c.fog_color,c.fog,c.levels.control,c.levels.q,
         indexed.host ? host_palette(*indexed.host) : indexed.palette,indexed.bank,indexed.format,indexed.levels};
     for (unsigned level=0;level<6;++level) record.level_buffers[level]=c.levels.base[level]|(c.levels.pitch[level]<<16);
+    if (indexed.texture_surface) record.level_buffers[0]=indexed.texture_view;
     record.dither[0]=std::uint32_t(dither_matrix); record.dither[1]=std::uint32_t(dither_matrix>>32);
     std::memcpy(static_cast<std::byte*>(record_mapping)+index*sizeof(DrawRecord),&record,sizeof(record));
     if (!batch_count) { batch_first=index; batch_set=set; batch_pipeline=selected; batch_vertices=vertices; }
@@ -472,6 +479,9 @@ VkPipeline NativeRaster::Impl::make_pipeline(VkRenderPass pass,VkPipelineLayout 
     if (fragment_result!=VK_SUCCESS) { vkDestroyShaderModule(device,modules[0],nullptr); checked(fragment_result,"Create native fragment shader"); }
     std::array<VkPipelineShaderStageCreateInfo,2> stages{};
     for (unsigned i=0;i<2;++i) { stages[i].sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; stages[i].stage=i ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT; stages[i].module=modules[i]; stages[i].pName="main"; }
+    const VkSpecializationMapEntry scale_entry{0,0,sizeof(resolution_scale)};
+    const VkSpecializationInfo fragment_constants{1,&scale_entry,sizeof(resolution_scale),&resolution_scale};
+    stages[1].pSpecializationInfo=&fragment_constants;
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO}; ia.topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO}; vp.viewportCount=vp.scissorCount=1;
@@ -690,9 +700,9 @@ NativeRaster::Impl::~Impl() {
     if (pool) vkDestroyCommandPool(device,pool,nullptr);
     if (timestamps) vkDestroyQueryPool(device,timestamps,nullptr);
 }
-std::unique_ptr<NativeRaster::Impl::Image> NativeRaster::Impl::image(unsigned width,unsigned height) {
-    auto i=std::make_unique<Image>(device,width,height);
-    VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO}; ci.imageType=VK_IMAGE_TYPE_2D; ci.format=VK_FORMAT_R32_UINT; ci.extent={width,height,1}; ci.mipLevels=ci.arrayLayers=1; ci.samples=VK_SAMPLE_COUNT_1_BIT; ci.tiling=VK_IMAGE_TILING_OPTIMAL;
+std::unique_ptr<NativeRaster::Impl::Image> NativeRaster::Impl::image(unsigned width,unsigned height,unsigned scale) {
+    auto i=std::make_unique<Image>(device,width,height); i->scale=scale;
+    VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO}; ci.imageType=VK_IMAGE_TYPE_2D; ci.format=VK_FORMAT_R32_UINT; ci.extent={width*scale,height*scale,1}; ci.mipLevels=ci.arrayLayers=1; ci.samples=VK_SAMPLE_COUNT_1_BIT; ci.tiling=VK_IMAGE_TILING_OPTIMAL;
     ci.usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     ci.usage|=VK_IMAGE_USAGE_STORAGE_BIT;
     checked(vkCreateImage(device,&ci,nullptr,&i->image),"Create native image"); VkMemoryRequirements mr{}; vkGetImageMemoryRequirements(device,i->image,&mr); i->allocation_bytes=mr.size; i->memory=allocate(mr,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
@@ -705,6 +715,27 @@ std::unique_ptr<NativeRaster::Impl::Image> NativeRaster::Impl::image(unsigned wi
 void NativeRaster::Impl::upload_image(Image& image,std::span<const std::uint32_t> pixels) {
     Measure timing(stats.upload_ns,profiling); ++stats.uploads;
     if (pixels.size()!=std::size_t(image.width)*image.height || pixels.size_bytes()>staging_bytes) throw std::runtime_error("Invalid native image upload");
+    if (image.scale>1) {
+        // Every sample of a pixel takes its value, in bands that fit the staging arena.
+        const std::size_t row_bytes=std::size_t(image.width)*image.scale*image.scale*4;
+        const unsigned band=unsigned(std::max<VkDeviceSize>(1,staging_bytes/row_bytes));
+        for (unsigned y=0;y<image.height;y+=band) {
+            const unsigned rows=std::min(band,image.height-y);
+            const std::size_t bytes=row_bytes*rows;
+            if (bytes>staging_bytes-staging_used) flush();
+            prepare_slot();
+            const auto offset=slot*staging_bytes+staging_used;
+            auto* out=reinterpret_cast<std::uint32_t*>(static_cast<std::byte*>(mapped)+offset);
+            for (unsigned row=0;row<rows;++row) for (unsigned sy=0;sy<image.scale;++sy) for (unsigned x=0;x<image.width;++x)
+                for (unsigned sx=0;sx<image.scale;++sx) *out++=pixels[std::size_t(y+row)*image.width+x];
+            staging_used+=bytes; order();
+            VkBufferImageCopy copy{}; copy.bufferOffset=offset; copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
+            copy.imageOffset={0,int(y*image.scale),0}; copy.imageExtent={image.width*image.scale,rows*image.scale,1};
+            vkCmdCopyBufferToImage(command,staging,image.image,VK_IMAGE_LAYOUT_GENERAL,1,&copy); stats.upload_bytes+=bytes;
+        }
+        image.valid=true;
+        return;
+    }
     // Append uploads to unused host-visible storage. Recorded transfers keep
     // their bytes until the submission fence completes; no per-texture stall.
     if (pixels.size_bytes()>staging_bytes-staging_used) flush();
@@ -714,6 +745,17 @@ void NativeRaster::Impl::upload_image(Image& image,std::span<const std::uint32_t
     staging_used+=pixels.size_bytes(); order();
     VkBufferImageCopy copy{}; copy.bufferOffset=offset; copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; copy.imageExtent={image.width,image.height,1};
     vkCmdCopyBufferToImage(command,staging,image.image,VK_IMAGE_LAYOUT_GENERAL,1,&copy); stats.upload_bytes+=pixels.size_bytes(); image.valid=true;
+}
+// Nearest filtering of an odd scale lands on each pixel's center sample.
+void NativeRaster::Impl::blit_console_samples(const Image& source,Image& destination,unsigned first_row,unsigned last_row) {
+    order();
+    const auto width=std::min(source.width,destination.width);
+    VkImageBlit region{};
+    region.srcSubresource=region.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
+    region.srcOffsets[0]={0,int(first_row*source.scale),0}; region.dstOffsets[0]={0,int(first_row),0};
+    region.srcOffsets[1]={int(width*source.scale),int(last_row*source.scale),1}; region.dstOffsets[1]={int(width),int(last_row),1};
+    vkCmdBlitImage(command,source.image,VK_IMAGE_LAYOUT_GENERAL,destination.image,VK_IMAGE_LAYOUT_GENERAL,1,&region,VK_FILTER_NEAREST);
+    order();
 }
 void NativeRaster::Impl::export_image(Image& image,Region requested) {
     if (!image.dirty || image.scratch) return;
@@ -741,9 +783,15 @@ void NativeRaster::Impl::export_image(Image& image,Region requested) {
         if (y1<=y0) { y0=0; y1=image.height; }
     }
     order();
+    // A scaled surface keeps a console-sized view for repeated reads of its center
+    // samples, and each read resolves only the rows it needs.
+    if (image.scale>1) {
+        if (!image.console_view) image.console_view=this->image(image.width,image.height);
+        blit_console_samples(image,*image.console_view,y0,y1);
+    }
     VkBufferImageCopy copy{}; copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
     copy.imageOffset={0,int(y0),0}; copy.imageExtent={image.width,y1-y0,1};
-    vkCmdCopyImageToBuffer(command,image.image,VK_IMAGE_LAYOUT_GENERAL,readback,1,&copy); flush();
+    vkCmdCopyImageToBuffer(command,image.console_view ? image.console_view->image : image.image,VK_IMAGE_LAYOUT_GENERAL,readback,1,&copy); flush();
     // Host-visible staging may be uncached/write-combined. Read it once with a
     // contiguous copy before CPU address conversion instead of scalar loads
     // directly from the mapped allocation for every pixel.
@@ -822,8 +870,8 @@ void NativeRaster::Impl::copy_surface_pages(Image& destination,const Image& sour
             copied.set(storage_page);
             VkImageCopy copy{};
             copy.srcSubresource=copy.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
-            copy.srcOffset={int(sx),int(sy),0}; copy.dstOffset={int(x),int(y),0};
-            copy.extent={tile_width,tile_height,1};
+            copy.srcOffset={int(sx*source.scale),int(sy*source.scale),0}; copy.dstOffset={int(x*destination.scale),int(y*destination.scale),0};
+            copy.extent={tile_width*source.scale,tile_height*source.scale,1};
             if (!copies.empty()) {
                 auto& previous=copies.back();
                 if (previous.srcOffset.y==copy.srcOffset.y && previous.dstOffset.y==copy.dstOffset.y &&
@@ -918,7 +966,7 @@ NativeRaster::Impl::Image& NativeRaster::Impl::surface(unsigned base,unsigned pi
         std::sort(writers.begin(),writers.end(),[](auto a,auto b){return a->revision<b->revision;});
     }
     if (!slot) {
-        slot=image(width,height);
+        slot=image(width,height,resolution_scale);
         slot->base=base; slot->pitch=pitch; slot->depth=depth; slot->scratch=scratch; slot->format=format;
         slot->region=scratch ? Region{} : requested; slot->valid=false;
         slot->last_use=++surface_use; slot->scope=surface_scope;
@@ -1188,7 +1236,8 @@ void NativeRaster::Impl::palette_pass(Image& source,Image* output,const PaletteP
     order();
     vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_COMPUTE,palette_pipeline);
     vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_COMPUTE,palette_layout,0,1,&set,0,nullptr);
-    vkCmdPushConstants(command,palette_layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(parameters),&parameters);
+    auto scaled=parameters; scaled.scale=source.scale;
+    vkCmdPushConstants(command,palette_layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(scaled),&scaled);
     if (parameters.mode==0 || parameters.mode==2 || parameters.mode==4) vkCmdDispatch(command,(parameters.count+7)/8,1,1);
     else vkCmdDispatch(command,(parameters.width+7)/8,(parameters.height+7)/8,1);
     order();
@@ -1228,6 +1277,8 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
         });
         if ((command.palette_slot || command.shader_palette || rendered) && gpu_source(r)) {
             std::uint32_t slot=command.palette_slot,bank=command.palette_bank;
+            if (direct && !command.levels.control && !high)
+                if (auto* holder=sampled_surface(d,r)) { direct->texture_surface=holder; direct->texture_view=holder->base|(holder->pitch<<16); }
             if (!slot && direct) {
                 // The snapshot already applied CSA; the draw record publishes it.
                 direct->host=&command.palette; direct->bank=0;
@@ -1348,6 +1399,15 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
     if ((d.flags&64) && tex.palette!=command.palette) { tex.palette=command.palette; tex.valid=false; }
     const auto generation=source_revision(r);
     if (generation!=tex.source_revision) { tex.valid=false; tex.source_revision=generation; }
+    // A scaled surface read as a texture keeps every sample.
+    if (direct && (d.flags&1) && !(d.flags&(64|texture_z_flag)) && !command.levels.control) {
+        if (auto* holder=sampled_surface(d,r)) {
+            direct->format=6U; direct->texture_surface=holder; direct->texture_view=holder->base|(holder->pitch<<16);
+            if (!placeholder) placeholder=image(1,1);
+            ++stats.shader_indexed_draws;
+            return *placeholder;
+        }
+    }
     // Identical surface views use an ordered native image copy for feedback.
     // No CPU conversion is involved in the common framebuffer texture path.
     if ((d.flags&1) && !(d.flags&64)) {
@@ -1359,8 +1419,12 @@ NativeRaster::Impl::Image& NativeRaster::Impl::texture(const SpriteCommand& comm
             // image must first resolve all pages of the requested source view.
             auto& from=surface(d.texture_base,d.texture_pitch,height,depth_layout);
             if (!tex.valid || tex.image->revision!=from.revision) {
-                order(); VkImageCopy copy{}; copy.srcSubresource=copy.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; copy.extent={width,height,1};
-                vkCmdCopyImage(this->command,from.image,VK_IMAGE_LAYOUT_GENERAL,tex.image->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
+                order();
+                if (from.scale>1) blit_console_samples(from,*tex.image,0,height);
+                else {
+                    VkImageCopy copy{}; copy.srcSubresource=copy.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; copy.extent={width,height,1};
+                    vkCmdCopyImage(this->command,from.image,VK_IMAGE_LAYOUT_GENERAL,tex.image->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
+                }
                 tex.image->revision=from.revision; tex.valid=true; stats.texture_snapshot_bytes+=std::size_t(width)*height*4;
             }
             return *tex.image;
@@ -1435,6 +1499,7 @@ NativeRaster::Impl::TextureSet NativeRaster::Impl::textures_for(const SpriteComm
     result[0]=&lookup(command,0);
     for (unsigned level=levels+1;level<texture_level_slots;++level) result[level]=result[0];
     if (direct && direct->palette_surface) result[texture_level_slots-1]=static_cast<Image*>(direct->palette_surface);
+    if (direct && direct->texture_surface) { result[texture_level_slots-2]=static_cast<Image*>(direct->texture_surface); direct->levels|=256U; }
     return result;
 }
 VkDescriptorSet NativeRaster::Impl::bind_target(Image& color,Image& depth,const TextureSet& textures,const Sprite& draw) {
@@ -1444,15 +1509,15 @@ VkDescriptorSet NativeRaster::Impl::bind_target(Image& color,Image& depth,const 
     auto& fb=framebuffers[{&color,&depth}];
     const unsigned height=std::min(color.height,depth.height);
     if (!fb) {
-        const VkImageView views[]{color.view,depth.view}; VkFramebufferCreateInfo f{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO}; f.renderPass=render_pass; f.attachmentCount=2; f.pAttachments=views; f.width=color.width; f.height=height; f.layers=1;
+        const VkImageView views[]{color.view,depth.view}; VkFramebufferCreateInfo f{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO}; f.renderPass=render_pass; f.attachmentCount=2; f.pAttachments=views; f.width=color.width*color.scale; f.height=height*color.scale; f.layers=1;
         if (ordered_fragments) f.attachmentCount=0;
         checked(vkCreateFramebuffer(device,&f,nullptr,&fb),"Create native framebuffer");
     }
     if (!in_pass || current_framebuffer!=fb) {
-        order(); VkRenderPassBeginInfo b{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO}; b.renderPass=render_pass; b.framebuffer=fb; b.renderArea.extent={color.width,height};
+        order(); VkRenderPassBeginInfo b{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO}; b.renderPass=render_pass; b.framebuffer=fb; b.renderArea.extent={color.width*color.scale,height*color.scale};
         vkCmdBeginRenderPass(command,&b,VK_SUBPASS_CONTENTS_INLINE); in_pass=true; ++stats.render_passes; current_framebuffer=fb; current_width=color.width; current_height=height;
-        const VkViewport viewport{0,0,float(current_width),float(current_height),0,1};
-        const VkRect2D scissor{{0,0},{current_width,current_height}};
+        const VkViewport viewport{0,0,float(current_width*color.scale),float(current_height*color.scale),0,1};
+        const VkRect2D scissor{{0,0},{current_width*color.scale,current_height*color.scale}};
         vkCmdSetViewport(command,0,1,&viewport); vkCmdSetScissor(command,0,1,&scissor);
     } else if (!ordered_fragments && hazards.overlaps(draw.left,draw.top,draw.right,draw.bottom)) {
         flush_batch();
@@ -1489,7 +1554,8 @@ VkDescriptorSet NativeRaster::Impl::bind_target(Image& color,Image& depth,const 
     }
     return set;
 }
-NativeRaster::NativeRaster(VkPhysicalDevice p,VkDevice d,VkQueue q,unsigned family,bool ordered):impl_(std::make_unique<Impl>(p,d,q,ordered)) {
+NativeRaster::NativeRaster(VkPhysicalDevice p,VkDevice d,VkQueue q,unsigned family,bool ordered,unsigned resolution_scale):impl_(std::make_unique<Impl>(p,d,q,ordered)) {
+    impl_->resolution_scale=resolution_scale;
     impl_->initialize(family);
 #ifdef ANYPS2_LLVM_TEXTURES
     impl_->initialize_texture_decoder();
@@ -1518,7 +1584,13 @@ void NativeRaster::upload(std::span<const std::uint32_t> words) {
 }
 void NativeRaster::read(std::span<std::uint32_t> words,unsigned start,unsigned length) {
     if (words.size()!=store_words || start>=store_words || !length || length>store_words) throw std::runtime_error("Invalid native resource export");
-    auto& r=*impl_; r.synchronize_source({start,length}); r.flush(); std::copy(r.source.begin(),r.source.end(),words.begin());
+    auto& r=*impl_; Measure timing(r.stats.read_ns,r.profiling);
+    r.synchronize_source({start,length}); r.flush();
+    ++r.stats.memory_reads; r.stats.memory_read_words+=length;
+    // Callers read only the range they asked to make current.
+    const auto count=std::min<std::size_t>(length,r.source.size()-start);
+    std::copy_n(r.source.begin()+start,count,words.begin()+start);
+    if (count<length) std::copy_n(r.source.begin(),length-count,words.begin());
 }
 std::uint32_t NativeRaster::merge_palette(const std::array<std::uint32_t,16>& banks,const std::array<std::uint32_t,256>& current) {
     auto& r=*impl_;
@@ -1578,6 +1650,28 @@ std::uint32_t NativeRaster::load_palette(std::span<const unsigned> addresses,uns
     r.gather_palette(id,addresses,first);
     return id;
 }
+std::vector<std::uint32_t> NativeRaster::read_surface_samples(unsigned base,unsigned pitch,unsigned format,unsigned& width,unsigned& height) {
+    auto& r=*impl_;
+    const auto found=r.surfaces.find(std::tuple(base,pitch,format));
+    if (found==r.surfaces.end() || !found->second) return {};
+    auto& image=*found->second;
+    width=image.width*image.scale; height=image.height*image.scale;
+    const VkDeviceSize bytes=VkDeviceSize(width)*height*4;
+    VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO}; info.size=bytes; info.usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VkBuffer buffer{}; checked(vkCreateBuffer(r.device,&info,nullptr,&buffer),"Create sample readback");
+    VkMemoryRequirements requirements{}; vkGetBufferMemoryRequirements(r.device,buffer,&requirements);
+    const auto memory=r.allocate(requirements,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    checked(vkBindBufferMemory(r.device,buffer,memory,0),"Bind sample readback");
+    r.order();
+    VkBufferImageCopy copy{}; copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; copy.imageExtent={width,height,1};
+    vkCmdCopyImageToBuffer(r.command,image.image,VK_IMAGE_LAYOUT_GENERAL,buffer,1,&copy);
+    r.flush(VK_NULL_HANDLE,VK_NULL_HANDLE,true);
+    std::vector<std::uint32_t> samples(std::size_t(width)*height);
+    void* mapped=nullptr; checked(vkMapMemory(r.device,memory,0,bytes,0,&mapped),"Map sample readback");
+    std::memcpy(samples.data(),mapped,bytes);
+    vkUnmapMemory(r.device,memory); vkFreeMemory(r.device,memory,nullptr); vkDestroyBuffer(r.device,buffer,nullptr);
+    return samples;
+}
 void NativeRaster::release_palette(std::uint32_t slot) {
     auto& r=*impl_;
     const auto found=std::find_if(r.surface_palettes.begin(),r.surface_palettes.end(),[&](const auto& palette) { return palette.id==slot; });
@@ -1585,6 +1679,24 @@ void NativeRaster::release_palette(std::uint32_t slot) {
     r.surface_palettes.erase(found);
     r.surface_palette_blocks.reset();
     for (const auto& palette:r.surface_palettes) for (const auto address:palette.addresses) r.surface_palette_blocks.set(address/64);
+}
+// A scaled surface a draw can read at each sample's own position: plain 32-bit, holding
+// the newest copy of every page of the texture, and not the draw's own target.
+NativeRaster::Impl::Image* NativeRaster::Impl::sampled_surface(const Sprite& d,Region source) {
+    if (resolution_scale==1 || (d.base==d.texture_base && d.pitch==d.texture_pitch)) return nullptr;
+    for (auto& [key,image]:surfaces) {
+        if (!image || !image->valid || image->scratch || image->format || image->depth || image->base%32 || !image->pitch ||
+            !image->region.overlaps(source)) continue;
+        bool holds=true;
+        for (unsigned word=source.start,left=source.length;holds && left;) {
+            const auto page=(word/2048)%512;
+            const auto relative=(page+512-image->base/32)%512;
+            holds=image->pages[page]==source_revisions[page] && (relative/image->pitch)*32+32<=image->height;
+            const unsigned step=std::min(left,2048-word%2048); word=(word+step)%store_words; left-=step;
+        }
+        if (holds) return image.get();
+    }
+    return nullptr;
 }
 NativeRaster::Impl::SurfacePalette* NativeRaster::Impl::surface_palette(std::uint32_t id) {
     const auto found=std::find_if(surface_palettes.begin(),surface_palettes.end(),[&](const auto& palette) { return palette.id==id; });
@@ -1907,6 +2019,7 @@ void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly&
     DrawRecord record{target,{},color.width,std::min(color.height,depth.height),command.fog_color,0,
         command.levels.control,command.levels.q,indexed.host ? r.host_palette(*indexed.host) : indexed.palette,indexed.bank,indexed.format,indexed.levels};
     for (unsigned level=0;level<6;++level) record.level_buffers[level]=command.levels.base[level]|(command.levels.pitch[level]<<16);
+    if (indexed.texture_surface) record.level_buffers[0]=indexed.texture_view;
     record.dither[0]=std::uint32_t(r.dither_matrix); record.dither[1]=std::uint32_t(r.dither_matrix>>32);
     const auto words=std::bit_cast<std::array<std::uint32_t,NativeVectors::record_words>>(record);
     // The slot's vector command buffer also receives the upload and assembly at submission.
@@ -2129,6 +2242,12 @@ void NativeRaster::wait_submission(std::uint64_t token) {
 std::uint64_t NativeRaster::present(const DisplayPlan& source_plan,VkImage target,VkFormat format,VkSemaphore acquired,VkSemaphore rendered) {
     auto& r=*impl_;
     auto plan=source_plan;
+    plan.scale=r.resolution_scale;
+    // A scaled surface is already complete detail: show it whole, with no field weave.
+    if (plan.scale>1) {
+        plan.field=DisplayField::progressive; plan.smoothing=0;
+        if (!plan.output_width) { plan.output_width=plan.width; plan.output_height=plan.height; }
+    }
     Impl::Image* images[2]{};
     if (plan.field!=DisplayField::progressive) {
         images[0]=images[1]=&r.reconstruct(plan);

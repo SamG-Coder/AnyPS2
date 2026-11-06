@@ -139,10 +139,12 @@ private:
         return self.write_graphics(address,value);
     }
     Stop write_graphics(std::uint32_t address,std::uint64_t value) {
-        // Display selection and interrupt controls do not consume vector output.
-        // They may change while a compiled VU job is still producing geometry.
-        // Flush/reset affect the drawing owner and must await its publication.
-        if (address==0x12001000 && (value&0x300) && packet_setup.working())
+        // Interrupt controls do not consume vector output, so they may change while a
+        // compiled VU job is still producing geometry. Flush/reset affect the drawing
+        // owner, and a display buffer change shows what was drawn before it: both must
+        // await the publication of queued work.
+        const bool buffer_change=(address==0x12000070 || address==0x12000090) && graphics.displayed_buffer((address-0x12000070)/32)!=value;
+        if (((address==0x12001000 && (value&0x300)) || buffer_change) && packet_setup.working())
             return Stop::native_wait;
         return graphics.write(address,value);
     }

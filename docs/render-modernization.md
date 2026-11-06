@@ -73,15 +73,45 @@ which costs no GPU work and does not end the render pass. A write to those words
 first gathers the palette into a slot, keeping the colors its load latched; a palette
 that no bank selects any more is dropped without a gather.
 
+## Resolution scale
+
+`--resolution-scale <1|3|5>` stores that many samples per console pixel along each axis
+of rendered surfaces. It is off by default. The odd scale puts one sample on the console
+sample point: that sample is what console memory holds, so memory stays exact where it
+is tested by the replay hash. Every other sample runs the same work at its own position,
+and a read of a rendered surface as data takes the sample at the reader's own position,
+so effects that read the frame back keep their detail without being recognized.
+
+Known differences at a scale above 1, all in presentation only: sprites keep one texel
+per console pixel, off-center samples of a triangle may pass a scissor edge by up to one
+console pixel, coverage antialiasing stays on the console grid, field reconstruction is
+skipped, and the window shows up to 1080 lines.
+
 ## Measuring without the game
 
 `--capture-graphics <new-directory> --capture-graphics-when-heavy` records submitted
-graphics data once a scene is heavy. `ps2-graphics-replay <packets.bin> [repeat]`
+graphics data once a scene is heavy. `ps2-graphics-replay [--scale n] <packets.bin> [repeat] [surface.ppm:fbp:fbw:psm:width:height]`
 replays it through the native renderer and reports its cost and a hash of the
 resulting memory, so two builds with the same hash rendered that capture identically.
 A capture excludes EE and VU work and may start mid-scene. `--sample-threads <file>`
 records a 30-second statistical profile of every thread, also from a heavy scene.
 Keep captures and samples under the ignored `work/` directory.
+
+## VIF transfers and VU jobs
+
+VIF state and the transfer's interrupt follow acceptance of a packet, not completion
+of its VU job, so a program can prepare later work while earlier jobs run. The
+interrupt arrives after a small latency, because programs arm their wait just after
+the access that starts a transfer. That latency is released as soon as every program
+thread is waiting: all waits are then armed, and sleeping through it costs more than
+the work it delays. Displayed-buffer changes wait for queued VU work, because a flip
+shows what was drawn before it. A failed job keeps reporting failure on later polls.
+
+Vector data that cannot fail planning and leaves the row registers unchanged is
+checked for shape on the program's thread and expanded on the VU thread, directly
+into VU memory. Other data is planned on the program's thread as before, so what is
+rejected and when does not change. `--replay-packets` (see [testing](testing.md))
+runs this path by itself.
 
 ## Whole-program VU kernels
 

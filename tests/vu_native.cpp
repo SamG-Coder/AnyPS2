@@ -194,17 +194,19 @@ void test_async_submission() {
         memory.io.write32(memory.io.context,0x12001000,8)!=nt::ee::Stop::budget ||
         memory.io.write64(memory.io.context,0x12001000,0x200)!=nt::ee::Stop::native_wait ||
         memory.io.write64(memory.io.context,0x12001000,0x100)!=nt::ee::Stop::native_wait ||
-        memory.io.write64(memory.io.context,0x12000070,0x14000a008cULL)!=nt::ee::Stop::budget ||
-        platform.graphics.output().buffers[0]!=0x14000a008cULL)
-        throw std::runtime_error("Pending VU job blocked display/interrupt controls or released flush/reset");
+        memory.io.write64(memory.io.context,0x12000070,0x14000a008cULL)!=nt::ee::Stop::native_wait ||
+        platform.graphics.output().buffers[0]==0x14000a008cULL ||
+        memory.io.write64(memory.io.context,0x12000070,platform.graphics.output().buffers[0])!=nt::ee::Stop::budget ||
+        memory.io.write64(memory.io.context,0x12000080,0x1234)!=nt::ee::Stop::budget ||
+        platform.graphics.output().displays[0]!=0x1234)
+        throw std::runtime_error("Pending VU job blocked display/interrupt controls, or released flush, reset or a buffer change");
     const std::array<std::uint32_t,4> independent{0x01000101,0x20000000,0x12345678,0};
     const auto independent_bytes=std::span(reinterpret_cast<const std::uint8_t*>(independent.data()),sizeof(independent));
     if (platform.packet_setup.consume(0,independent_bytes,false)!=nt::ee::Stop::budget ||
         platform.packet_setup.read(0x10003870).value!=0x12345678 ||
         platform.packet_setup.write(0x10003870,0x87654321)!=nt::ee::Stop::budget ||
         platform.packet_setup.read(0x10003870).value!=0x87654321 ||
-        platform.packet_setup.write(0x10003c70,0)!=nt::ee::Stop::native_wait ||
-        platform.packet_setup.consume(1,independent_bytes,false)!=nt::ee::Stop::native_wait)
+        platform.packet_setup.write(0x10003c00,0)!=nt::ee::Stop::native_wait)
         throw std::runtime_error("Independent VU0 work stalled behind VU1 or conflicting work escaped ownership");
     // A GIF transfer queues behind the outstanding VU1 job instead of stalling
     // the caller, and must reach the consumer after that job's graphics.
@@ -217,11 +219,14 @@ void test_async_submission() {
         !(platform.packet_setup.read(0x10003c00).value&4) || !*memory.vector_data[1].active)
         throw std::runtime_error("Async submission published completion or state early");
     std::fill(ram.begin(),ram.end(),0); // The queued job must own its input.
+    // A delayed interrupt counts as work until the platform's poll takes it.
+    unsigned taken_interrupts=0;
     const auto finish=[&] {
         const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
         while (platform.packet_setup.working()) {
             const auto result=platform.poll_submissions();
             if (result!=nt::ee::Stop::budget) return result;
+            taken_interrupts|=platform.packet_setup.take_interrupts();
             if (std::chrono::steady_clock::now()>deadline) throw std::runtime_error("Async native job did not finish");
             std::this_thread::yield();
         }
@@ -234,6 +239,7 @@ void test_async_submission() {
         while (owner.pending() || platform.packet_setup.working()) {
             const auto result=platform.poll_submissions();
             if (result!=nt::ee::Stop::budget) return result;
+            taken_interrupts|=platform.packet_setup.take_interrupts();
             if (sink.calls==1 && vector_output.empty()) vector_output=sink.packets;
             if (std::chrono::steady_clock::now()>deadline) throw std::runtime_error("Async native job did not finish");
             std::this_thread::yield();
@@ -245,19 +251,31 @@ void test_async_submission() {
         vector_output[0][1]!=std::array<std::uint32_t,4>{11,22,33,44} ||
         vector_output[1][1]!=std::array<std::uint32_t,4>{55,66,77,88} ||
         sink.packets.size()!=1 || sink.packets[0][1]!=std::array<std::uint32_t,4>{0x5a5a,0,0x3f,0} ||
-        platform.packet_setup.take_interrupts()!=2 || !platform.packet_setup.pending(1) ||
+        taken_interrupts!=2 || !platform.packet_setup.pending(1) ||
         platform.completions.status()&(1U<<1))
         throw std::runtime_error("Async publication lost snapshots, GIF order or interrupt-stalled suffix");
     if (memory.io.write32(memory.io.context,0x10003c10,8)!=nt::ee::Stop::budget ||
         platform.packet_setup.pending(1) || !(platform.completions.status()&(1U<<1)) ||
         platform.packet_submission.read(0x10009000).value&0x100)
         throw std::runtime_error("Async suffix completion was not delivered exactly once");
+    // A delayed VIF interrupt survives polls until its latency passes, and an idle
+    // program, which has already armed its waits, receives it at once.
+    platform.completions.acknowledge(2);
+    platform.packet_setup.interrupt_latency=std::chrono::hours(1);
+    start();
+    bool interrupt_held=true;
+    for (unsigned poll=0;poll<4;++poll) interrupt_held=interrupt_held && !platform.packet_setup.take_interrupts();
+    platform.packet_setup.release_delayed_interrupts();
+    if (!interrupt_held || platform.packet_setup.take_interrupts()!=2 || platform.packet_setup.take_interrupts() ||
+        finish()!=nt::ee::Stop::budget || memory.io.write32(memory.io.context,0x10003c10,8)!=nt::ee::Stop::budget)
+        throw std::runtime_error("Delayed VIF interrupt was not held, or not released to an idle program exactly once");
+    platform.packet_setup.interrupt_latency={};
     owner.state=before; sink.accept=false; platform.completions.acknowledge(2);
     start();
     if (finish()!=nt::ee::Stop::unsupported_vector || owner.state!=before ||
-        platform.completions.status()&2 || sink.calls!=3)
+        platform.completions.status()&2 || sink.calls!=4)
         throw std::runtime_error("Async renderer rejection committed private state");
-    if (platform.poll_submissions()!=nt::ee::Stop::unsupported_vector || owner.state!=before || sink.calls!=3)
+    if (platform.poll_submissions()!=nt::ee::Stop::unsupported_vector || owner.state!=before || sink.calls!=4)
         throw std::runtime_error("Failed asynchronous job later reported success");
 }
 nt::vu::Entry streamed_entry=nullptr;
@@ -1553,8 +1571,40 @@ void test_fast_lane_arithmetic() {
             throw std::runtime_error("Square root differs from the integer reference at "+std::to_string(bits));
     }
 }
+// A mask selecting input in every lane takes the general path, so it checks the
+// unmasked three-component path and the direct write against the same data.
+static void test_vector_data_paths() {
+    std::array<std::uint32_t,32> words{};
+    for (unsigned i=0;i<words.size();++i) words[i]=0x10203040U+i*0x01010101U;
+    const auto bytes=std::as_bytes(std::span(words));
+    const std::span source(reinterpret_cast<const std::uint8_t*>(bytes.data()),bytes.size());
+    for (unsigned alignment=1;alignment<=4;++alignment) for (unsigned count:{1U,2U,3U,5U,8U}) for (std::size_t following:{0U,3U,4U,16U}) {
+        nt::ee::NativeVectorDataView view{};
+        view.destination=1022; view.components=3; view.output_count=count; view.source_alignment=alignment;
+        view.bytes=source.first(count*12U); view.following_bytes=source.subspan(count*12U,following);
+        auto masked=view;
+        masked.mask=nt::ee::NativeVectorMask{};
+        const auto fast=nt::ee::plan_vector_data(1024,view),general=nt::ee::plan_vector_data(1024,masked);
+        if (fast.has_value()!=general.has_value())
+            throw std::runtime_error("Vector data paths disagree on rejecting a view");
+        if (!fast) {
+            if (following>=nt::ee::maximum_vector_lookahead) throw std::runtime_error("Deferrable vector data view was rejected");
+            continue;
+        }
+        if (fast->rows!=general->rows || fast->writes.size()!=general->writes.size())
+            throw std::runtime_error("Vector data paths disagree on rows or write count");
+        std::array<std::array<std::uint32_t,4>,1024> planned{},direct{};
+        for (std::size_t i=0;i<fast->writes.size();++i) {
+            const auto& a=fast->writes[i]; const auto& b=general->writes[i];
+            if (a.destination!=b.destination || a.lanes!=b.lanes || a.values!=b.values)
+                throw std::runtime_error("Vector data paths disagree on a write");
+        }
+        if (!nt::ee::apply_vector_writes(planned,fast->writes) || !nt::ee::write_vector_data(direct,view) || planned!=direct)
+            throw std::runtime_error("Direct vector data write differs from its plan");
+    }
+}
 int main() {
-    try { test_speculative_block_failure(); test_fast_lane_arithmetic(); test_async_submission(); test_streamed_launches(false); test_streamed_launches(true); }
+    try { test_vector_data_paths(); test_speculative_block_failure(); test_fast_lane_arithmetic(); test_async_submission(); test_streamed_launches(false); test_streamed_launches(true); }
     catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
     return run_core_tests();
 }

@@ -44,6 +44,9 @@ public:
     std::function<Stop()> idle_pump;
     std::function<Stop()> poll_native_jobs;
     std::function<bool()> native_jobs_pending;
+    std::function<std::uint64_t()> native_jobs_completed;
+    // Called while no program thread can run, before the idle loop sleeps.
+    std::function<void()> program_waiting;
     // Validate and activate an AOT image after arguments/ownership are checked.
     // Failure must preserve image identity and all application state.
     std::function<Stop(Memory&,std::uint32_t)> publish_image;
@@ -329,6 +332,7 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
                 const auto pumped=services.idle_pump();
                 if (pumped!=Stop::budget) return pumped;
             }
+            if (services.program_waiting) services.program_waiting();
             if (memory.io.poll) memory.io.poll(memory.io.context);
             if (memory.completions) memory.completions->publish(memory);
             if (memory.interrupts) memory.interrupts->publish(memory);
@@ -383,6 +387,7 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
         if ((result==Stop::display_wait || job_wait) && budget) {
             if ((!job_wait && !memory.graphics) || (job_wait && (!services.poll_native_jobs || !services.native_jobs_pending))) return Stop::invalid_state;
             const auto waiting_since=std::chrono::steady_clock::now();
+            const auto completed_before=services.native_jobs_completed ? services.native_jobs_completed() : 0U;
             if (services.profile) {
                 if (job_wait) ++services.profile->job_waits; else ++services.profile->display_waits;
             }
@@ -410,6 +415,9 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
                 if (memory.completions) memory.completions->publish(memory);
                 if (memory.interrupts) memory.interrupts->publish(memory);
                 if (!state.delay_slot && (state.cop0_status&0x10007U)==0x10001U && (state.cop0_status&memory.pending_interrupts&0xff00U)) break;
+                // A full queue needs one free place, not an empty queue: retry once a
+                // submission has completed, instead of waiting for all of them.
+                if (result==Stop::vector_pending && services.native_jobs_completed && services.native_jobs_completed()!=completed_before) break;
                 auto delay=job_wait ? std::optional<std::uint64_t>(services.native_jobs_pending() ? 100000U : 0U) : memory.graphics->display_wait_ns();
                 if (!delay || !*delay) break;
                 if (memory.graphics) {

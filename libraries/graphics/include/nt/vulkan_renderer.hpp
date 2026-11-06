@@ -5,6 +5,7 @@
 #include <string>
 #include <array>
 #include <algorithm>
+#include <vector>
 #include <nt/image_upload.hpp>
 #include <nt/native_scanout.hpp>
 #include <nt/vector_draw.hpp>
@@ -88,7 +89,7 @@ struct RenderStatistics {
     std::uint64_t surface_import_ns=0,surface_export_ns=0;
     std::uint64_t surface_conflicts=0,surface_gpu_imports=0,texture_readbacks=0,palette_readbacks=0;
     std::uint64_t gpu_palette_loads=0,gpu_indexed_decodes=0,shader_indexed_draws=0;
-    std::uint64_t texture_recycles=0,surface_palette_loads=0;
+    std::uint64_t texture_recycles=0,surface_palette_loads=0,read_ns=0,memory_reads=0,memory_read_words=0;
     std::uint64_t surface_evictions=0;
     std::array<std::uint32_t,8> last_surface_conflict{}; // base, pitch, height, depth for each view.
     std::uint64_t uploads=0,feedback_barriers=0,gpu_ns=0;
@@ -106,7 +107,9 @@ struct RenderStatistics {
 enum class RenderPath { native_images, reference_compute };
 class VulkanRenderer {
 public:
-    explicit VulkanRenderer(void* native_window = nullptr, bool validation = false, RenderPath path = RenderPath::native_images);
+    // resolution_scale: samples per console pixel along each axis of rendered surfaces.
+    // Odd, so that one sample reproduces console memory. Presentation requires 1.
+    explicit VulkanRenderer(void* native_window = nullptr, bool validation = false, RenderPath path = RenderPath::native_images, unsigned resolution_scale = 1);
     ~VulkanRenderer();
     VulkanRenderer(const VulkanRenderer&) = delete;
     VulkanRenderer& operator=(const VulkanRenderer&) = delete;
@@ -149,6 +152,8 @@ public:
     // No later draw selects this slot, so its contents need not outlive their memory.
     void release_palette(std::uint32_t slot);
     void read_palette(std::uint32_t slot,std::span<std::uint32_t,256> words);
+    // Every sample of a rendered surface, row by row; empty when no such surface exists.
+    std::vector<std::uint32_t> read_surface_samples(unsigned base,unsigned pitch,unsigned format,unsigned& width,unsigned& height);
     const RenderStatistics& statistics() const;
     // Diagnostic readback and exact comparison. Disabled during normal play.
     void verify_texture_kernels(bool enable);

@@ -170,20 +170,20 @@ public:
                         poll_completions(renderer);
                     } else renderer.synchronize();
                 } else if (const auto* download=std::get_if<ImageDownload>(&operation)) {
-                    std::vector<std::uint32_t> storage(1024*1024);
                     // Only the rectangle's words need to be current: rendered
-                    // surfaces publish just those pages.
+                    // surfaces publish just those pages, and only they are copied.
+                    if (download_words_.empty()) download_words_.resize(1024*1024);
                     const auto [low,high]=download->word_range();
-                    renderer.read(storage,low,high-low+1); download_=download->pack(storage); download_offset_=0;
+                    renderer.read(download_words_,low,high-low+1); download_=download->pack(download_words_); download_offset_=0;
                 } else if (std::holds_alternative<CancelDownload>(operation)) {
                     download_.clear(); download_offset_=0;
                 } else if (const auto* dither=std::get_if<DitherChange>(&operation)) {
                     renderer.set_dither(dither->matrix);
                 } else if (const auto* copy=std::get_if<ImageCopy>(&operation)) {
-                    std::vector<std::uint32_t> storage(1024*1024);
+                    if (download_words_.empty()) download_words_.resize(1024*1024);
                     const auto [low,high]=copy->source.word_range();
-                    renderer.read(storage,low,high-low+1);
-                    renderer.write(copy->apply(storage)); dirty_=true;
+                    renderer.read(download_words_,low,high-low+1);
+                    renderer.write(copy->apply(download_words_)); dirty_=true;
                 } else if (const auto* rect=std::get_if<ImageRect>(&operation)) {
                     renderer.write(*rect); dirty_=true;
                 } else {
@@ -374,6 +374,7 @@ private:
         command.shader_palette=true;
     }
     static constexpr unsigned unknown_vertices=1U<<5,unknown_packed_q=1U<<6;
+    std::vector<std::uint32_t> download_words_;
     bool gpu_packets_=false;
     std::uint64_t gpu_packet_batches_=0;
     std::map<std::string,std::uint64_t> gpu_packet_fallbacks_;

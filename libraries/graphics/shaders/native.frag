@@ -33,6 +33,9 @@ layout(set=0,binding=0) uniform usampler2D texture_levels[7];
 // layout), so no separate decode pass runs per draw.
 layout(std430,set=0,binding=4) readonly buffer Mirror { uint words[]; } mirror;
 layout(std430,set=0,binding=5) readonly buffer Palettes { uint words[]; } palettes;
+// Surfaces hold this many samples per console pixel along each axis. The odd scale
+// puts one sample on the console's own sample point, which reproduces console memory.
+layout(constant_id=0) const uint resolution_scale=1;
 // Palettes known on the CPU, written by the host per draw (palette bit 31 set).
 // Palette bit 30 set: entries are read in place from a rendered surface, bound as
 // texture level 6, as the GS would have loaded them (CSM1 addresses, palette_plan.hpp).
@@ -69,6 +72,22 @@ uint rgba_halfword(uint base,uint pitch,uint x,uint y,bool alternate) {
     const uint h=((x>>3)&1u)|((x&1u)<<1)|((y&1u)<<2)|((x&6u)<<2)|((y&6u)<<4);
     return (base*128u+page*4096u+block*128u+h)&0x1fffffu;
 }
+// Inverse of rgba_word within a surface, of the base and pitch given.
+ivec2 surface_position(uint word,uint base,uint pitch) {
+    const uint relative=(word-base*64u)&0xfffffu;
+    const uint page=relative/2048u,within=relative%2048u,block=within/64u,w=within%64u;
+    return ivec2((page%pitch)*64u+(((block>>4)&1u)<<5)+(((block>>2)&1u)<<4)+((block&1u)<<3)+(((w>>2)&3u)<<1)+(w&1u),
+                 (page/pitch)*32u+(((block>>3)&1u)<<4)+(((block>>1)&1u)<<3)+(((w>>4)&3u)<<1)+((w>>1)&1u));
+}
+// Each sample position sees rendered memory at its own position, so work that reads
+// a surface back as data keeps its detail. The center sample is console memory.
+ivec2 own_sample(ivec2 pixel) { return pixel*int(resolution_scale)+ivec2(gl_FragCoord.xy)%int(resolution_scale); }
+// indexed_levels bit 8: the texture lies in a rendered surface bound as level 5, whose
+// base and pitch are level_buffers[0].
+uint texture_word(uint word) {
+    if ((draw.indexed_levels&256u)==0u) return mirror.words[word&0xfffffu];
+    return texelFetch(texture_levels[5],own_sample(surface_position(word,draw.level_buffers[0]&0xffffu,draw.level_buffers[0]>>16)),0).r;
+}
 // indexed_format: 1 PSMT8, 2 PSMT4, 3 PSMT8H, 4 PSMT4HL, 5 PSMT4HH; 6 PSMCT32
 // and 7 PSMCT32 in the depth page layout read memory without a palette; so do
 // 8 PSMCT16 and 9 PSMCT16S, which take their alpha from TEXA.
@@ -84,24 +103,20 @@ uint indexed_texel(uint level,ivec2 p) {
         const uint alpha=value==0u && (draw.texa&0x8000u)!=0u ? 0u : (value&0x8000u)!=0u ? (draw.texa>>16)&255u : draw.texa&255u;
         return ((value&31u)<<3)|(((value>>5)&31u)<<11)|(((value>>10)&31u)<<19)|(alpha<<24);
     }
-    if (format>=5u) return mirror.words[rgba_word(base,pitch,x,y)^(format==6u ? 0x600u : 0u)];
+    if (format>=5u) return format==6u ? mirror.words[rgba_word(base,pitch,x,y)^0x600u] : texture_word(rgba_word(base,pitch,x,y));
     if (format==0u) { const uint b=indexed_byte(base,pitch,x,y); word=b/4u; shift=(b%4u)*8u; }
     else if (format==1u) { const uint n=indexed_nibble(base,pitch,x,y); word=n/8u; shift=(n%8u)*4u; mask=15u; }
     else { word=rgba_word(base,pitch,x,y); shift=format==4u ? 28u : 24u; mask=format==2u ? 255u : 15u; }
-    const uint index=(mirror.words[word&0xfffffu]>>shift)&mask;
+    const uint index=(texture_word(word)>>shift)&mask;
     // nt::graphics::snapshot_palette for 32-bit palettes: CSA selects the bank;
     // eight-bit indices keep their low four bits within a clamped bank.
     const uint bank=draw.palette_bank&255u;
     const uint entry=mask==255u ? min(bank+index/16u,15u)*16u+(index&15u) : bank*16u+index;
     if (draw.palette>=0x80000000u) return host_palettes.words[(draw.palette&0x7fffffffu)*256u+entry];
     if (draw.palette<0x40000000u) return palettes.words[draw.palette*256u+entry];
-    // Inverse of rgba_word within the surface at (palette_bank>>8), of the pitch in palette bits 14-19.
+    // The surface is at (palette_bank>>8), of the pitch in palette bits 14-19.
     const uint entry_word=(draw.palette&0x3fffu)*64u+(entry&1u)+((entry&6u)<<1)+((entry&8u)>>2)+((entry&16u)<<2)+((entry&96u)>>1)+(entry&128u);
-    const uint relative=(entry_word-(draw.palette_bank>>8)*64u)&0xfffffu;
-    const uint page=relative/2048u,within=relative%2048u,block=within/64u,w=within%64u,surface_pitch=(draw.palette>>14)&63u;
-    const uint sx=(page%surface_pitch)*64u+(((block>>4)&1u)<<5)+(((block>>2)&1u)<<4)+((block&1u)<<3)+(((w>>2)&3u)<<1)+(w&1u);
-    const uint sy=(page/surface_pitch)*32u+(((block>>3)&1u)<<4)+(((block>>1)&1u)<<3)+(((w>>4)&3u)<<1)+((w>>1)&1u);
-    return texelFetch(texture_levels[6],ivec2(sx,sy),0).r;
+    return texelFetch(texture_levels[6],own_sample(surface_position(entry_word,draw.palette_bank>>8,(draw.palette>>14)&63u)),0).r;
 }
 #ifdef ANYPS2_ORDERED_FRAGMENTS
 layout(r32ui,set=0,binding=1) coherent uniform uimage2D color_image;
@@ -258,7 +273,7 @@ bool commit_pixel(uint color,uint depth,uint mask,bool write_depth) {
     // DIMX is added on 16-bit targets after blending and before clamping or wrap.
     int dither=0;
     if ((draw.flags&134217728)!=0) {
-        const uint px=uint(gl_FragCoord.x)&3u,py=uint(gl_FragCoord.y)&3u;
+        const uint px=(uint(gl_FragCoord.x)/resolution_scale)&3u,py=(uint(gl_FragCoord.y)/resolution_scale)&3u;
         const uint stored=bitfieldExtract((py&2u)!=0u ? draw.dither_high : draw.dither_low,int((py&1u)*16u+px*4u),3);
         dither=int(stored)-(stored>=4u ? 8 : 0);
     }
@@ -295,9 +310,14 @@ bool commit_pixel(uint color,uint depth,uint mask,bool write_depth) {
     return true;
 }
 void main() {
-    uint x=uint(gl_FragCoord.x), y=uint(gl_FragCoord.y);
+    uint x=uint(gl_FragCoord.x)/resolution_scale, y=uint(gl_FragCoord.y)/resolution_scale;
+    // This sample's offset from the console sample point, in samples.
+    const ivec2 sub_sample=ivec2(gl_FragCoord.xy)%int(resolution_scale)-int(resolution_scale/2u);
     if ((draw.flags&4096)!=0 && (y&1)==((draw.flags>>13)&1)) discard;
-    if (x<draw.left || y<draw.top || x>=draw.right || y>=draw.bottom) discard;
+    // A triangle's bounds are whole console pixels around its console samples, so other
+    // samples inside it can lie one pixel beyond them. A scissor edge lets those through.
+    const uint bound_slack=(draw.flags&16384)!=0 && sub_sample!=ivec2(0) ? 1u : 0u;
+    if (x+bound_slack<draw.left || y+bound_slack<draw.top || x>=draw.right+bound_slack || y>=draw.bottom+bound_slack) discard;
     uint color=draw.color;
     uint depth=draw.depth,coverage=16,line_alpha=128;
     uint64_t fog_weight=uint64_t(draw.fog),fog_area=uint64_t(1);
@@ -314,7 +334,12 @@ void main() {
             color=line_color(draw.vertices[0].color,draw.vertices[1].color,numerator,denominator);
     }
     if ((draw.flags&16384)!=0) {
-        ivec2 a=vertex_position(0),b=vertex_position(1),c=vertex_position(2),p=ivec2(x,y)*16;
+        // Edges evaluate at the exact sample position, in units of 1/(16*scale) pixel, so
+        // they agree with rasterization and adjoining triangles leave no gaps. Coverage
+        // antialiasing keeps its console sample grid.
+        const int edge_scale=(draw.flags&1048576)!=0 ? 1 : int(resolution_scale);
+        ivec2 a=vertex_position(0)*edge_scale,b=vertex_position(1)*edge_scale,c=vertex_position(2)*edge_scale;
+        ivec2 p=ivec2(x,y)*16*edge_scale+(edge_scale==1 ? ivec2(0) : sub_sample*16);
         int64_t w0=edge(b,c,p),w1=edge(c,a,p),w2=edge(a,b,p);
         triangle_interior=covered(w0,b,c) && covered(w1,c,a) && covered(w2,a,b);
         if ((draw.flags&1048576)!=0) {
@@ -350,7 +375,10 @@ void main() {
                 coverage=min(coverage,15u);
             }
         } else if (!covered(w0,b,c) || !covered(w1,c,a) || !covered(w2,a,b)) discard;
+        // Interpolation stays in console units, which the center sample meets exactly.
+        w0/=int64_t(edge_scale*edge_scale); w1/=int64_t(edge_scale*edge_scale); w2/=int64_t(edge_scale*edge_scale);
         int64_t area=w0+w1+w2;
+        if (area==0) discard;
         if ((draw.flags&67108864)!=0) {
             fog_area=uint64_t(area);
             fog_weight=uint64_t(draw.vertices[0].fog)*uint64_t(w0)+

@@ -54,7 +54,7 @@ public:
         if (unit()!=1 || shared_) throw std::invalid_argument("Asynchronous launches require private VU1 state");
         asynchronous_=true;
     }
-    static constexpr std::size_t queue_limit=16;
+    static constexpr std::size_t queue_limit=256;
     NativeVuLaunch(const NativeVuLaunch&)=delete;
     NativeVuLaunch& operator=(const NativeVuLaunch&)=delete;
     ~NativeVuLaunch() {
@@ -334,6 +334,7 @@ private:
     struct OwnedStep {
         std::vector<std::vector<std::uint8_t>> uploads;
         std::vector<std::vector<NativeVectorWrite>> writes;
+        std::vector<std::uint8_t> vector_bytes; // One allocation for all unplanned data.
         NativeSubmissionStep view;
         explicit OwnedStep(const NativeSubmissionStep& source) {
             view.launch=source.launch; view.drawing=source.drawing;
@@ -343,14 +344,24 @@ private:
                 view.uploads.push_back({upload.destination,uploads.back()});
             }
             writes.reserve(source.data.size()); view.data.reserve(source.data.size());
+            std::size_t unplanned=0;
+            for (const auto& data:source.data)
+                if (data.planned.empty()) unplanned+=data.bytes.size()+std::min(data.following_bytes.size(),maximum_vector_lookahead);
+            vector_bytes.reserve(unplanned);
             for (const auto& data:source.data) {
-                if (!data.planned.empty()) writes.emplace_back(data.planned.begin(),data.planned.end());
-                else {
-                    const auto plan=plan_vector_data(1024,data);
-                    if (!plan) throw std::invalid_argument("Invalid native vector job input");
-                    writes.push_back(plan->writes);
+                if (!data.planned.empty()) {
+                    writes.emplace_back(data.planned.begin(),data.planned.end());
+                    NativeVectorDataView owned{}; owned.planned=writes.back();
+                    view.data.push_back(owned);
+                    continue;
                 }
-                NativeVectorDataView owned{}; owned.planned=writes.back();
+                const auto following=data.following_bytes.first(std::min(data.following_bytes.size(),maximum_vector_lookahead));
+                const auto start=vector_bytes.size();
+                vector_bytes.insert(vector_bytes.end(),data.bytes.begin(),data.bytes.end());
+                vector_bytes.insert(vector_bytes.end(),following.begin(),following.end());
+                auto owned=data;
+                owned.bytes=std::span<const std::uint8_t>(vector_bytes).subspan(start,data.bytes.size());
+                owned.following_bytes=std::span<const std::uint8_t>(vector_bytes).subspan(start+data.bytes.size(),following.size());
                 view.data.push_back(owned);
             }
         }

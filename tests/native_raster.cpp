@@ -198,6 +198,38 @@ int main(int argc,char** argv) {
                 if (native.statistics().gpu_palette_loads!=before.gpu_palette_loads) throw std::runtime_error("A released surface palette was gathered");
                 if (output(49)!=0x80223344U) throw std::runtime_error("A palette held in memory lost its color");
             }
+            // A scaled surface keeps console memory exact at its center samples, adds
+            // detail at the others, and carries it through a read of the surface as data.
+            {
+                VulkanRenderer scaled(nullptr,true,RenderPath::native_images,3);
+                NativeDrawing scaled_drawing(true),exact_drawing(true);
+                VulkanRenderer exact(nullptr,true);
+                const auto ad=[](Packet& p,unsigned reg,std::uint64_t value) { p.push_back({std::uint32_t(value),std::uint32_t(value>>32),reg,0}); };
+                const auto finish=[](Packet& p) { p[0]={0x8000U|unsigned(p.size()-1),0x10000000,14,0}; };
+                Packet scene(1); ad(scene,0x1a,1); ad(scene,0x40,(63ULL<<16)|(63ULL<<48)); ad(scene,0x4c,4|(1ULL<<16));
+                ad(scene,0,6); ad(scene,1,0x80101010); ad(scene,5,0); ad(scene,5,1024|(1024ULL<<16));
+                ad(scene,0,3); ad(scene,1,0x80f0f0f0); ad(scene,5,16|(16ULL<<16)|(1ULL<<32)); ad(scene,5,(40*16)|(16ULL<<16)|(1ULL<<32)); ad(scene,5,16|((30*16ULL)<<16)|(1ULL<<32));
+                // Copy the surface elsewhere as a texture, one texel to one pixel.
+                ad(scene,6,(4ULL*32)|(1ULL<<14)|(6ULL<<26)|(6ULL<<30)|(1ULL<<34)|(1ULL<<35));
+                ad(scene,0,0x116); ad(scene,0x4c,8|(1ULL<<16)); ad(scene,3,0); ad(scene,5,0); ad(scene,3,1024|(1024ULL<<16)); ad(scene,5,1024|(1024ULL<<16));
+                finish(scene);
+                exact_drawing.submit(exact,std::array{scene}); scaled_drawing.submit(scaled,std::array{scene});
+                if (exact_drawing.pixels()!=scaled_drawing.pixels()) throw std::runtime_error("A scaled surface changed console memory");
+                unsigned sample_width=0,sample_height=0;
+                const auto samples=scaled.read_surface_samples(8*32,1,0,sample_width,sample_height);
+                if (samples.empty() || sample_width!=64*3) throw std::runtime_error("A scaled surface has the wrong sample count");
+                // Along the slanted edge, a pixel's samples differ on some row.
+                bool detail=false;
+                for (unsigned y=0;!detail && y+3<=sample_height && y<90;y+=3) for (unsigned x=0;x<40;++x) {
+                    const auto first=samples[y*sample_width+x*3];
+                    for (unsigned sy=0;sy<3;++sy) for (unsigned sx=0;sx<3;++sx)
+                        detail=detail || samples[(y+sy)*sample_width+x*3+sx]!=first;
+                }
+                if (!detail) throw std::runtime_error("A surface read as a texture lost its samples");
+                for (unsigned y=0;y<30;++y) for (unsigned x=0;x<30;++x)
+                    if ((samples[(y*3+1)*sample_width+x*3+1]&0xffffffU)!=(exact_drawing.pixels()[rgba_word(8*32,1,x,y)]&0xffffffU))
+                        throw std::runtime_error("A scaled center sample differs from console memory");
+            }
             // A full texture cache reuses same-sized images instead of draining the
             // GPU to evict, and a reused image shows its new texture.
             {

@@ -325,7 +325,7 @@ int main() {
             }
         }
         {
-            nt::ee::NativePlatform platform; nt::ee::Memory memory; platform.attach(memory);
+            nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={}; nt::ee::Memory memory; platform.attach(memory);
             for (const auto address:{0x10004000U,0xb0005000U,0x1000500fU}) {
                 nt::runtime::State state; state.pc=0x4f0000; state.set(4,address);
                 state.set128(6,{0x01000202,0x0700002aULL<<32});
@@ -490,7 +490,7 @@ int main() {
         // Interrupt enables are deliberately independent of this selection.
         for (unsigned selector=0;selector<4;++selector) for (unsigned completed : {0U,1U,4U,5U}) {
             nt::ee::Memory memory;
-            nt::ee::NativePlatform platform;
+            nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={};
             platform.attach(memory);
             check(memory.io.write32(memory.io.context,0x1000e020,5)==nt::ee::Stop::budget);
             if (completed&1) check(platform.completions.complete(0));
@@ -1101,7 +1101,7 @@ int main() {
             check(status[0]==0 && status[3]==0); // Direct handoff did not create another token.
         }
         {
-            nt::ee::Memory memory; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::ee::Memory memory; nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={}; platform.attach(memory);
             nt::runtime::State state; state.pc=0x360008; state.set(4,0x1000f130);
             check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system);
             std::vector<std::uint8_t> output;
@@ -2040,7 +2040,7 @@ int main() {
             }
         }
         {
-            nt::ee::NativePlatform platform; nt::ee::Memory memory; platform.attach(memory);
+            nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={}; nt::ee::Memory memory; platform.attach(memory);
             auto& owner=platform.vector_owner;
             check(memory.vectors==&owner.storage);
             // Compiled microprograms cannot deliver debug or trap breaks, so
@@ -2661,7 +2661,7 @@ int main() {
             }
         }
         {
-            nt::ee::NativePlatform platform;
+            nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={};
             nt::ee::Memory memory; platform.attach(memory);
             nt::runtime::State state;
             const auto access=[&](bool write,std::uint32_t value=0) {
@@ -2692,7 +2692,7 @@ int main() {
         }
         {
             std::array<std::uint8_t,0x5000> ram{};
-            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={}; platform.attach(memory);
             nt::runtime::State state;
             const auto write=[&](std::uint32_t address,std::uint32_t value) {
                 state={}; state.pc=0x360000; state.set(4,address); state.set(8,value);
@@ -2726,7 +2726,7 @@ int main() {
             check(deliver(0x4020)==nt::ee::Stop::unsupported_system && ram[0x4020]==0);
         }
         {
-            nt::ee::Memory memory; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::ee::Memory memory; nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={}; platform.attach(memory);
             nt::ee::StartupServices services(nt_ee_generated_code_overlap);
             nt::runtime::State state; state.set(2,42);
             const auto call=[&](unsigned number,unsigned id=0,unsigned value=0) {
@@ -2751,7 +2751,7 @@ int main() {
         }
         {
             std::vector<std::uint8_t> ram(0x10000);
-            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={}; platform.attach(memory);
             nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
             nt::runtime::State state;
             const auto call=[&](unsigned number,unsigned line,unsigned arg=0,unsigned next=0,unsigned callback_arg=0) {
@@ -2790,7 +2790,7 @@ int main() {
                 unsigned accepted=0;
             } peer;
             std::vector<std::uint8_t> ram(0x8000);
-            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={}; platform.attach(memory);
             nt::ee::StartupServices services(nt_ee_generated_code_overlap);
             nt::runtime::State state;
             const auto call=[&](unsigned number,unsigned pointer,unsigned count=0) {
@@ -2830,7 +2830,7 @@ int main() {
         }
         {
             std::vector<std::uint8_t> ram(0x10000);
-            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={}; platform.attach(memory);
             nt::ee::NativeSifCommandPeer peer(platform.sif_link,memory,nt_ee_generated_code_overlap,0x1000);
             check(peer.connect(platform.sif_outbound) && !peer.connect(platform.sif_outbound));
             nt::ee::StartupServices services(nt_ee_generated_code_overlap);
@@ -2860,7 +2860,7 @@ int main() {
         }
         {
             std::vector<std::uint8_t> ram(0x10000);
-            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={}; platform.attach(memory);
             nt::ee::NativeSifCommandPeer peer(platform.sif_link,memory,nt_ee_generated_code_overlap,0x1000,&platform.sif_receive);
             check(peer.connect(platform.sif_outbound));
             nt::ee::StartupServices services(nt_ee_generated_code_overlap,nt_ee_generated_contains);
@@ -2903,7 +2903,7 @@ int main() {
         }
         {
             std::vector<std::uint8_t> ram(0x300000);
-            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={}; platform.attach(memory);
             nt::runtime::State state;
             const auto access=[&](std::uint32_t address,bool write) {
                 state={}; state.pc=write ? 0x360000 : 0x360008; state.set(4,address); state.set(8,0x89abcdef);
@@ -2934,7 +2934,7 @@ int main() {
             std::vector<std::uint8_t> ram(0x10000,0xcc);
             const auto original=ram;
             nt::ee::Memory memory{ram.data(),ram.size()};
-            nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={}; platform.attach(memory);
             nt::runtime::State state;
             state.gpr[8]={0x1234567812345678ULL,0xabcdefff12345678ULL};
             for (unsigned index=0;const auto width:{16U,8U,4U,1U}) {
@@ -2983,7 +2983,7 @@ int main() {
             check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system && state.gpr[9].lo==7 && state.executed==retired && state.pc==0x3d0018);
             const auto calls=backend.calls; state.set(4,0x12001004);
             check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::memory_fault && backend.calls==calls);
-            nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={}; platform.attach(memory);
             state.pc=0x3d0010; state.set(4,0x12001000); state.set(8,0x200);
             check(nt_ee_generated_run(&state,&memory,1)==nt::ee::Stop::unsupported_system && !platform.graphics.resets());
             platform.graphics.context=&backend;
@@ -3031,7 +3031,7 @@ int main() {
         {
             std::vector<std::uint8_t> ram(0x10000,0);
             nt::ee::Memory memory{ram.data(),ram.size()};
-            nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={}; platform.attach(memory);
             struct PendingDraw { nt::ee::NativeGraphics* graphics; bool ready=false,fail=false; } pending{&platform.graphics};
             platform.graphics.context=&pending;
             platform.graphics.poll_drawing=[](void* context) {
@@ -3144,7 +3144,7 @@ int main() {
             receiver.capacity=10; poll(); check(receiver.edges.size()==600);
         }
         {
-            nt::ee::Memory memory; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::ee::Memory memory; nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={}; platform.attach(memory);
             nt::runtime::State state;
             const auto write=[&](unsigned address,unsigned value) {
                 state.pc=0x360000; state.set(4,address); state.set(8,value);
@@ -3181,7 +3181,7 @@ int main() {
         }
         {
             std::array<std::uint8_t,64> ram{}; ram[0]=17; ram[16]=42;
-            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={}; platform.attach(memory);
             struct Sink { unsigned calls=0,channel=99; std::size_t bytes=0; unsigned first=0; nt::ee::Stop result=nt::ee::Stop::unsupported_system; } sink;
             nt::runtime::State state;
             const auto write=[&](unsigned address,unsigned value) {
@@ -3272,7 +3272,7 @@ int main() {
         {
             auto owned_ram=std::make_unique<std::array<std::uint8_t,0x210000>>();
             auto& ram=*owned_ram;
-            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.attach(memory);
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={}; platform.attach(memory);
             nt::runtime::State state;
             const auto put=[&](unsigned at,std::uint32_t value) { std::memcpy(ram.data()+at,&value,4); };
             const auto write=[&](unsigned address,unsigned value) {
@@ -3383,7 +3383,7 @@ int main() {
             // A native graphics batch pauses at command interrupts. Its compiled
             // handler releases each owned suffix; final completion cannot race it.
             std::vector<std::uint8_t> ram(0x10000);
-            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform;
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={};
             platform.attach(memory);
             struct Sink { unsigned batches=0,packets=0,waits=0; bool ready=true; } sink;
             platform.packet_setup.graphics={&sink,[](void* raw,std::span<const nt::graphics::Packet> packets) {
@@ -3463,7 +3463,7 @@ int main() {
             // A GIF image can span DIRECT/DIRECTHL extents and submissions.
             // Rejected suffixes must leave the previously accepted prefix intact.
             std::vector<std::uint8_t> ram(0x2000);
-            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform;
+            nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={};
             platform.attach(memory);
             struct Sink { bool ready=true; std::vector<nt::graphics::Packet> packets; } sink;
             platform.packet_setup.graphics={&sink,[](void* raw,std::span<const nt::graphics::Packet> packets) {

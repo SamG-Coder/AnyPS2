@@ -1,6 +1,7 @@
 #include "capture.hpp"
 #include "graphics_capture.hpp"
 #include "vector_capture.hpp"
+#include "packet_capture.hpp"
 #include <nt/host_isa.hpp>
 #include <nt/ee_services.hpp>
 #include <nt/ee_platform.hpp>
@@ -353,6 +354,7 @@ int main(int argc,char** argv) {
         unsigned run_seconds=0,disc_media=0;
         std::filesystem::path disc,capture_directory,stop_directory,graphics_directory,vector_directory,sample_path;
         bool profile_graphics=false,validate_graphics=false,verify_textures=false,gpu_triangles=true,gpu_triangles_required=false,capture_display_only=false,capture_graphics_when_heavy=false;
+        unsigned resolution_scale=1;
         bool has_budget=false,native_cycles=false,native_pmu=false,strict_performance=false,show_window=true,hold_window=true;
 #ifdef ANYPS2_NATIVE_IOP
         std::filesystem::path iop_data;
@@ -363,6 +365,7 @@ int main(int argc,char** argv) {
         bool measure_input_latency=false;
 #ifdef ANYPS2_NATIVE_VU1
         VuJobCapture vu_job_capture;
+        std::filesystem::path packet_capture_path,packet_replay_path;
 #endif
         for (int index=2;index<argc;++index) {
             const std::string_view text=argv[index];
@@ -435,6 +438,11 @@ int main(int argc,char** argv) {
                 continue;
             }
             if (text=="--capture-graphics-when-heavy") { capture_graphics_when_heavy=true; continue; }
+            if (text=="--resolution-scale") {
+                if (index+1==argc) throw std::runtime_error("Expected a resolution scale");
+                resolution_scale=static_cast<unsigned>(std::stoul(argv[++index]));
+                continue;
+            }
             if (text=="--sample-threads") {
                 if (!sample_path.empty() || index+1==argc) throw std::runtime_error("Expected one thread sample path");
                 sample_path=argv[++index];
@@ -446,6 +454,12 @@ int main(int argc,char** argv) {
                 stop_directory=argv[++index];
                 if (std::filesystem::exists(stop_directory))
                     throw std::runtime_error("Stop capture directory already exists");
+                continue;
+            }
+            if (text=="--capture-packets" || text=="--replay-packets") {
+                auto& path=text=="--capture-packets" ? packet_capture_path : packet_replay_path;
+                if (!path.empty() || index+1==argc) throw std::runtime_error("Expected one private packet capture file");
+                path=argv[++index];
                 continue;
             }
             if (text=="--capture-vectors") {
@@ -596,6 +610,21 @@ int main(int argc,char** argv) {
         compiled_uploads.connect(platform.packet_setup);
         compiled_submissions.connect(platform.packet_setup);
 #endif
+#ifdef ANYPS2_NATIVE_VU1
+        if (!packet_replay_path.empty()) {
+            probe::PacketReplaySink replay_sink;
+            platform.packet_setup.graphics={&replay_sink,probe::PacketReplaySink::submit,probe::PacketReplaySink::fence,true};
+            compiled_vu1_launch.graphics={&replay_sink,probe::PacketReplaySink::submit};
+            compiled_vu1_launch.graphics.take=probe::PacketReplaySink::take;
+#ifdef _WIN32
+            if (thread_sampler) thread_sampler->arm();
+#endif
+            const auto replayed=probe::replay_packets(packet_replay_path,platform,memory,replay_sink,std::cout);
+            if (profile_graphics) std::cout<<"packet_replay_vector jobs="<<vector_profile.jobs<<" job_ms="<<vector_profile.job_ns/1e6
+                <<" compiled_ms="<<vector_profile.compiled_ns/1e6<<" overhead_ms="<<(vector_profile.job_ns-vector_profile.compiled_ns)/1e6<<'\n';
+            return replayed;
+        }
+#endif
         if (!capture_directory.empty()) {
             platform.packet_setup.upload_context=&capture;
             platform.packet_setup.uncompiled_upload=VuCapture::observe;
@@ -687,10 +716,21 @@ int main(int argc,char** argv) {
         nt::ee::ExecutionProfile execution_profile{},previous_execution{};
         services.poll_native_jobs=[&] { return platform.poll_submissions(); };
         services.native_jobs_pending=[&] { return platform.packet_setup.working(); };
+        services.program_waiting=[&] { platform.packet_setup.release_delayed_interrupts(); };
+#ifdef ANYPS2_NATIVE_VU1
+        services.native_jobs_completed=[&] { return compiled_vu1_launch.completed_jobs(); };
+#endif
         if (profile_graphics) services.profile=&execution_profile;
         nt::ee::NativeGraphics::Profile display_profile{},previous_display{};
         // Vector capture delimits frames by displayed-buffer changes.
         if (profile_graphics || !vector_directory.empty()) platform.graphics.profile=&display_profile;
+        std::optional<probe::PacketCapture> packet_capture;
+        if (!packet_capture_path.empty()) {
+            packet_capture.emplace(packet_capture_path);
+            platform.packet_setup.observe_context=&*packet_capture;
+            platform.packet_setup.observe_submission=probe::PacketCapture::observe_submission;
+            platform.packet_setup.observe_packet=probe::PacketCapture::observe_packet;
+        }
         std::optional<probe::VectorCapture> vector_capture;
         if (!vector_directory.empty()) {
             vector_capture.emplace(vector_directory,std::span<const std::uint8_t>(ram.data(),ram.size()),&display_profile.buffer_changes);
@@ -713,7 +753,7 @@ int main(int argc,char** argv) {
         if (iop_reset) services.idle_pump=[&] { return iop_reset->pump(); };
 #endif
         if (show_window) {
-            window=std::make_unique<probe::NativeWindow>(validate_graphics);
+            window=std::make_unique<probe::NativeWindow>(validate_graphics,resolution_scale);
             gpu.renderer=&window->renderer();
             gpu.renderer->verify_texture_kernels(verify_textures);
             gpu.renderer->profile_commands(profile_graphics);
@@ -765,9 +805,15 @@ int main(int argc,char** argv) {
             if ((!window && !capturing && !timing_input) || window_closed || display_failed) return;
             try {
                 const auto& output=platform.graphics.output();
-                const auto plan=nt::graphics::plan_display(output.control,output.buffers,output.displays,
+                auto plan=nt::graphics::plan_display(output.control,output.buffers,output.displays,
                     platform.graphics.half_height_output(),std::uint32_t(output.background),display_field(),platform.graphics.clocks_per_pixel());
                 if (!plan) return;
+                if (resolution_scale>1) {
+                    // Show the scaled surfaces at up to 1080 lines, keeping the display shape.
+                    const auto shown_width=plan->presented_width(),shown_height=plan->presented_height();
+                    plan->output_height=std::min(shown_height*resolution_scale,1080U);
+                    plan->output_width=shown_width*plan->output_height/shown_height;
+                }
                 if (window && window->presentable()) {
                     gpu.ensure_renderer();
                     if (window->needs_resize(*plan)) { gpu.join(); window->prepare(*plan); }
@@ -807,7 +853,8 @@ int main(int argc,char** argv) {
                 const auto& s=gpu.renderer->statistics(); const auto& p=previous_statistics;
                 if (capture_graphics_when_heavy && s.render_passes-p.render_passes>50000) gpu.capture->arm();
 #ifdef _WIN32
-                if (thread_sampler && s.render_passes-p.render_passes>50000) thread_sampler->arm();
+                if (thread_sampler && s.render_passes-p.render_passes>20000) thread_sampler->arm();
+                if (packet_capture && s.render_passes-p.render_passes>20000) packet_capture->arm();
 #endif
                 auto& update_intervals=presented->intervals;
                 std::sort(update_intervals.begin(),update_intervals.end());
@@ -926,6 +973,8 @@ int main(int argc,char** argv) {
                     <<" texture_kernels_verified="<<(s.texture_kernel_verified-p.texture_kernel_verified)
                     <<" validation_errors="<<gpu.renderer->validation_errors()
                     <<" surface_palette_loads="<<(s.surface_palette_loads-p.surface_palette_loads)
+                    <<" memory_reads="<<(s.memory_reads-p.memory_reads)<<" memory_read_words="<<(s.memory_read_words-p.memory_read_words)
+                    <<" memory_read_ms="<<(s.read_ns-p.read_ns)/1e6
                     <<" texture_recycles="<<(s.texture_recycles-p.texture_recycles)
                     <<" submissions="<<s.submissions-p.submissions<<" uploads="<<s.uploads-p.uploads
                     <<" triangles="<<s.triangles-p.triangles<<" barriers="<<s.feedback_barriers-p.feedback_barriers
