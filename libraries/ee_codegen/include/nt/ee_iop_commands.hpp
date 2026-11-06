@@ -29,7 +29,7 @@ private:
         if (command.destination!=control_.sub_address() || command.bytes.size()<16) return {Stop::invalid_state};
         const auto header=iop::load_native_word(command.bytes,0),size=header&255U,payload_size=header>>8;
         if (size<16 || size>112 || command.bytes.size()!=((size+15U)&~15U) ||
-            payload_size>0x100000 || packets.size()!=(payload_size ? 2U : 1U)) return {Stop::invalid_state};
+            payload_size>0x100000 || (payload_size && packets.size()!=2U)) return {Stop::invalid_state};
         std::span<const std::uint8_t> payload;
         if (payload_size) {
             const auto& data=packets.front();
@@ -38,6 +38,12 @@ private:
             payload=std::span(data.bytes).first(payload_size);
         }
         if (inbound_.busy()) return {Stop::budget,0};
+        // A command that declares no payload can still follow its own data
+        // transfer in the same batch; that data is a plain memory write.
+        if (packets.size()==2 && !payload_size) {
+            const auto written=write_memory(packets.first(1));
+            if (written.status!=Stop::budget) return written;
+        }
         const auto result=inbound_.submit(std::span(command.bytes).first(size),payload);
         if (result.status!=iop::NativeServiceStatus::returned) return {Stop::unsupported_system};
         if (result.value!=1) return {Stop::invalid_state};

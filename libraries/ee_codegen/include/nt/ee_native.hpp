@@ -1,4 +1,5 @@
 #pragma once
+#include <span>
 #include <nt/ee_state.hpp>
 #include <nt/ee_address.hpp>
 #include <nt/ee_vector.hpp>
@@ -91,6 +92,9 @@ struct Memory {
     // Converter-assigned lifetime identity, not an address mapping. Generated
     // code uses constant comparisons; resident services have no image lifetime.
     std::uint32_t executable_image=1;
+    // A program writing VU0 instruction memory directly. Bytes select compiled
+    // code by content; they are never decoded.
+    Stop (*upload_vector)(void*,unsigned,std::span<const std::uint8_t>)=nullptr;
 };
 // Syscall boundaries retain PC and do not retire until a native service handles them.
 using Entry = Stop (*)(runtime::State*,Memory*,std::uint64_t);

@@ -11,7 +11,7 @@ public:
                         NativeModule image,std::vector<NativeModule> entries,std::uint32_t stack_top)
         : execute_(execute),services_(services),ram_(ram),entries_(std::move(entries)),stack_top_(stack_top),
           initial_executed_(services.threads.executed()) {
-        if (!execute || entries_.empty() || stack_top%16 || stack_top<16 || stack_top>ram.size() ||
+        if (!execute || stack_top%16 || stack_top<16 || stack_top>ram.size() ||
             image.base>ram.size() || image.memory_size>ram.size()-image.base || image.initialized_size>image.memory_size)
             throw std::invalid_argument("Invalid native module startup context");
         for (const auto& entry:entries_) {

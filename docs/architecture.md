@@ -64,6 +64,13 @@ occupy those segments. Unresolved callbacks remain coverage gaps. See
 - Disc access is read-only and bounded. Guest paths must not escape to arbitrary
   host files. The [legacy FILEIO contract](fileio.md) describes that endpoint;
   other native file/module services have separate support boundaries.
+- MFIFO routes scratchpad output through a RAM ring into the vector channel. Only that
+  drain is supported. Filling the ring forwards each complete descriptor in order, and
+  the channel position advances once the consumer owns the bytes. Call and return tags
+  stop, as does a transfer interrupt on the channel.
+- Modules start, stop and unload through the native loader. Starting a file twice needs
+  one converted placement per instance. A stopped module's imports are released, and a
+  restart begins from its pristine image, as a reload from disc would.
 - Video initialization supports reset, bitstream clearing, format/threshold settings
   and uploaded quantization/palette tables. Bounded native input submissions feed
   fixed-length and MPEG variable-length header reads and signal completion as

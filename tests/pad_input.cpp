@@ -39,8 +39,8 @@ int main(int argc,char**) {
             request[1]=0x43; request[3]=1;
             check(exchange() && response[1]==0x41,"Configuration entry reports previous mode");
             request[1]=0x45;
-            check(exchange() && response[1]==0xf3 && response[3]==1 && response[6]==2,
-                  "Native analog profile must not claim pressure sensors");
+            check(exchange() && response[1]==0xf3 && response[3]==3 && response[6]==2,
+                  "Native profile must report a DS2 model");
             request[1]=0x44; request[3]=1; request[4]=3;
             check(exchange(),"Select analog mode");
             request[1]=0x4d; request[3]=1; request[4]=0;
@@ -70,6 +70,28 @@ int main(int argc,char**) {
             item.port=1; check(exchange() && !item.acknowledged,"Absent second port must remain absent");
             item.port=0; request[0]=0x81;
             check(exchange() && !item.acknowledged,"Controller cannot acknowledge a memory card request");
+        }
+        {
+            // Host buttons report full or no pressure in the 18-byte DS2 mode.
+            nt::input::PadSnapshot host{true,0x4008,{0,255,32,224},false};
+            nt::input::PadTransactions pad([&](unsigned port) { return port==0 ? host : nt::input::PadSnapshot{}; });
+            std::array<std::uint8_t,21> request{1,0x43,0,1},response{};
+            nt::NativePortExchange item{0,request,response};
+            const auto exchange=[&] { return pad.exchange({&item,1}); };
+            check(exchange(),"Enter configuration for DS2 mode");
+            request[1]=0x44; request[3]=1; request[4]=3;
+            check(exchange(),"Select analog mode for DS2 mode");
+            request[1]=0x41; request[3]=0; request[4]=0;
+            check(exchange() && response[3]==0xff && response[5]==3 && response[8]==0x5a,"Report masks must list the pressure words");
+            request[1]=0x40;
+            check(exchange() && response[8]==0x5a,"Pressure calibration is accepted");
+            request[1]=0x4f; request[3]=0xff; request[4]=0xff; request[5]=3;
+            check(exchange() && response[8]==0x5a,"Enable pressure report");
+            request[1]=0x43; request[3]=0; request[4]=0; request[5]=0;
+            check(exchange(),"Leave configuration");
+            request[1]=0x42;
+            check(exchange() && response[1]==0x79 && response[9+6]==0xff && response[9+0]==0,"Pressure report must follow buttons");
+            check(response[3]==0xf7 && response[4]==0xbf && response[5]==0 && response[6]==255,"DS2 report keeps buttons and sticks");
         }
         check(nt::input::pad_axis(-32768)==0 && nt::input::pad_axis(0)==128 && nt::input::pad_axis(32767)==255,"Axis normalization");
         std::vector<std::uint8_t> ram(0x10000,0xcc);

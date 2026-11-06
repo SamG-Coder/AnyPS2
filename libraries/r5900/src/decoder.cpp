@@ -41,7 +41,7 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
         if (w == 0x42000008) i.op = Op::tlbp;
         if (w == 0x42000018) i.op = Op::eret;
         if (((i.rd == 0 || i.rd == 2 || i.rd == 3 || i.rd == 5 || i.rd == 10 || i.rd == 6 || i.rd == 12 || i.rd == 14 || i.rd == 30 || ((i.rd == 28 || i.rd == 9 || i.rd == 1 || i.rd == 8 || i.rd == 13 || i.rd == 23) && i.rs == 0)) && (w & 0x7ff) == 0) ||
-            (i.rd == 25 && (w & 0x7c0) == 0)) {
+            (i.rd == 25 && (w & 0x7c0) == 0) || i.rd == 24) {
             if (i.rs == 0) i.op = Op::mfc0;
             if (i.rs == 4) i.op = Op::mtc0;
         }
@@ -95,6 +95,10 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
             if (fn==34) i.op=Op::vadd_i;
             if (fn==36) i.op=Op::vsub_q;
             if (fn==38) i.op=Op::vsub_i;
+            if (fn==33) i.op=Op::vmadd_q;
+            if (fn==35) i.op=Op::vmadd_i;
+            if (fn==37) i.op=Op::vmsub_q;
+            if (fn==39) i.op=Op::vmsub_i;
             if (fn>=24 && fn<28) i.op=Op::vmul_bc;
             if (fn==43) i.op=Op::vmax;
             if (fn>=16 && fn<20) i.op=Op::vmax_bc;
@@ -112,6 +116,11 @@ Instruction decode(std::uint32_t pc, std::uint32_t w) {
             F(0x03c,vadda_bc); F(0x03d,vadda_bc); F(0x03e,vadda_bc); F(0x03f,vadda_bc);
             F(0x07c,vsuba_bc); F(0x07d,vsuba_bc); F(0x07e,vsuba_bc); F(0x07f,vsuba_bc);
             F(0x2bc,vadda); F(0x2fc,vsuba);
+            F(0x1fc,vmula_q); F(0x1fe,vmula_i);
+            F(0x23c,vadda_q); F(0x23d,vmadda_q); F(0x23e,vadda_i); F(0x23f,vmadda_i);
+            F(0x27c,vsuba_q); F(0x27d,vmsuba_q); F(0x27e,vsuba_i); F(0x27f,vmsuba_i);
+            F(0x3fc,vmtir); F(0x3fd,vmfir);
+            F(0x37c,vlqi); F(0x37d,vsqi); F(0x37e,vlqd); F(0x37f,vsqd); F(0x3fe,vilwr); F(0x3ff,viswr);
             F(0x3bc,vdiv); F(0x3bd,vsqrt); F(0x3be,vrsqrt); F(0x3bf,vwaitq);
             F(0x43c,vrnext); F(0x43d,vrget); F(0x43e,vrinit); F(0x43f,vrxor);
             }
@@ -260,6 +269,7 @@ std::string_view name(Op op) {
     N(vdiv); N(vsqrt); N(vrsqrt); N(vwaitq); N(vclip); N(vopmula); N(vopmsub);
     N(vrnext); N(vrget); N(vrinit); N(vrxor);
     N(vadda); N(vsuba); N(vadda_bc); N(vsuba_bc); N(vmul_q); N(vmul_i);
+    N(vmadd_q); N(vmadd_i); N(vmsub_q); N(vmsub_i); N(vmula_q); N(vmula_i); N(vadda_q); N(vadda_i); N(vsuba_q); N(vsuba_i); N(vmadda_q); N(vmadda_i); N(vmsuba_q); N(vmsuba_i); N(vmfir); N(vmtir); N(vlqi); N(vsqi); N(vlqd); N(vsqd); N(vilwr); N(viswr);
     N(sdl); N(sdr); N(lwl); N(lwr); N(swl); N(swr); N(add); N(sub); N(addi);
     N(pceqb); N(pceqh); N(pceqw);
     N(ppac5); N(pext5);

@@ -372,7 +372,10 @@ private:
         else if (kind==0x21) field=&voices_[core*24+voice].loop;
         else return unavailable();
         if (!writing) return returned(*field);
-        if (value>=sample_capacity || (kind==0x21 && playback_[core*24+voice].active)) return unavailable();
+        // A voice already playing keeps the loop point it started with; the new one
+        // applies from its next start. Limitation: a program that redirects a loop
+        // while the voice plays hears the old loop until then.
+        if (value>=sample_capacity) return unavailable();
         *field=kind==0x1d ? value|0x1ffffU : value&~15U;
         return returned();
     }

@@ -116,7 +116,16 @@ private:
         if (address<0x12000000 || address>=0x12002000) return {Stop::memory_fault};
         return self.graphics.read(address);
     }
+    // VU0 instruction memory, mapped for direct writes. Addresses count pairs of words.
+    static Stop write_vector_code(NativePlatform& self,std::uint32_t address,std::span<const std::uint8_t> bytes) {
+        if (!self.memory_ || !self.memory_->upload_vector || address%8) return Stop::memory_fault;
+        return self.memory_->upload_vector(self.memory_->vector_launch_context,(address-0x11000000U)/8U,bytes);
+    }
+    static bool vector_code_address(std::uint32_t address) { return address>=0x11000000U && address<0x11001000U; }
     static Stop write128(void* context,std::uint32_t address,runtime::Register value) {
+        if (vector_code_address(address))
+            return write_vector_code(*static_cast<NativePlatform*>(context),address,
+                std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(&value),sizeof(value)));
         if (address==0x10007010) {
             auto& self=*static_cast<NativePlatform*>(context);
             const auto bytes=std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(&value),sizeof(value));
@@ -133,6 +142,9 @@ private:
         return self.packet_setup.consume(channel,bytes,self.vector_owner.storage.active);
     }
     static Stop write64(void* context,std::uint32_t address,std::uint64_t value) {
+        if (vector_code_address(address))
+            return write_vector_code(*static_cast<NativePlatform*>(context),address,
+                std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(&value),sizeof(value)));
         if (NativeVideo::maps(address)) return write(context,address,static_cast<std::uint32_t>(value));
         if (address<0x12000000 || address>=0x12002000) return Stop::memory_fault;
         auto& self=*static_cast<NativePlatform*>(context);
@@ -180,7 +192,15 @@ private:
         if (NativePacketSetup::maps(address)) return self.packet_setup.read(address);
         if (NativeScratchpadCopy::maps(address)) return self.scratchpad_copy.read(address);
         if (NativeSubmissionPolicy::maps(address)) return self.packet_submission.policy.read(address);
-        if (NativePacketSubmission::maps(address)) return self.packet_submission.read(address);
+        if (NativePacketSubmission::maps(address)) {
+            if (self.memory_) {
+                const auto drained=self.packet_submission.mfifo_retry(*self.memory_);
+                if (drained!=Stop::budget) return {drained};
+                const auto deferred=self.packet_submission.take_mfifo_status();
+                if (deferred!=Stop::budget) return {deferred};
+            }
+            return self.packet_submission.read(address);
+        }
         if (NativeSifReceive::maps(address)) return self.sif_receive.read(address);
         if (address==0x1000e010) return {Stop::budget,self.completions.status()};
         if (event_address(address)) return self.interrupts.read(address);
@@ -188,6 +208,21 @@ private:
     }
     static Stop write8(void* context,std::uint32_t address,std::uint8_t value) {
         auto& self=*static_cast<NativePlatform*>(context);
+        // The control register has no side effect beyond its stored value, so one
+        // byte of it can merge with the rest.
+        if ((address&~3U)==0x1000e000) {
+            const auto shift=(address&3U)*8U;
+            const auto current=self.packet_submission.policy.read(0x1000e000).value;
+            return self.packet_submission.policy.write(0x1000e000,(current&~(255U<<shift))|(std::uint32_t(value)<<shift));
+        }
+        // A byte of a channel control word: its start and stop bits act on the
+        // whole word, which the channel already holds.
+        if ((address&~3U)==0x10009000) {
+            const auto shift=(address&3U)*8U;
+            const auto current=self.packet_submission.read(0x10009000);
+            if (current.status!=Stop::budget) return current.status;
+            return write(context,0x10009000,(current.value&~(255U<<shift))|(std::uint32_t(value)<<shift));
+        }
         if (address!=0x1000f180) return Stop::memory_fault;
         return self.debug_byte ? self.debug_byte(self.debug_context,value) : Stop::unsupported_system;
     }
@@ -225,7 +260,12 @@ private:
                 self.packet_submission.complete(*self.memory_,channel);
             return resumed;
         }
-        if (NativeScratchpadCopy::maps(address)) return self.memory_ ? self.scratchpad_copy.write(*self.memory_,self.packet_submission.policy,address,value) : Stop::invalid_state;
+        if (NativeScratchpadCopy::maps(address)) {
+            if (!self.memory_) return Stop::invalid_state;
+            const auto status=self.scratchpad_copy.write(*self.memory_,self.packet_submission.policy,address,value);
+            if (status!=Stop::budget || address!=0x1000d000 || !(value&0x100) || !self.packet_submission.policy.mfifo_to_vector()) return status;
+            return self.packet_submission.mfifo_filled(*self.memory_,self.scratchpad_copy.read(0x1000d010).value);
+        }
         if (NativeSubmissionPolicy::maps(address)) {
             const auto status=self.packet_submission.policy.write(address,value);
             if (status!=Stop::budget || !self.memory_) return status;
@@ -234,7 +274,11 @@ private:
             if (resumed==Stop::budget) self.publish_video();
             return resumed;
         }
-        if (NativePacketSubmission::maps(address)) return self.memory_ ? self.packet_submission.write(*self.memory_,address,value) : Stop::invalid_state;
+        if (NativePacketSubmission::maps(address)) {
+            // A restarted MFIFO channel drains up to the fill position it finds.
+            if (address==0x10009000 && (value&0x100)) self.packet_submission.mfifo_fill_position(self.scratchpad_copy.read(0x1000d010).value);
+            return self.memory_ ? self.packet_submission.write(*self.memory_,address,value) : Stop::invalid_state;
+        }
         if (NativeSifReceive::maps(address)) return self.sif_receive.write(address,value);
         if (address==0x1000e010) { self.completions.acknowledge(value); return Stop::budget; }
         if (event_address(address)) return self.interrupts.write(address,value);

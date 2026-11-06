@@ -14,6 +14,7 @@ struct PreparedProject {
     std::vector<CodeRange> ranges;
     // Swept words that guard themselves instead of being write-protected.
     std::vector<CodeRange> unverified_code;
+    std::vector<CodePatch> code_patches;
     std::vector<CodeRange> selected_regions;
     std::vector<CodePayload> payloads;
     Bytes image;

@@ -257,6 +257,7 @@ public:
             shared_->mac=state.mac; shared_->status=state.status; shared_->accumulator=state.accumulator;
             shared_->quotient=state.quotient; shared_->clip=state.clip;
             shared_->random=state.random; shared_->immediate=state.immediate;
+            shared_->program_counter=state.next_pair;
         }
         return Stop::budget;
     }
@@ -285,12 +286,22 @@ public:
     }
     void connect_macro(Memory& memory) {
         if (!shared_) throw std::invalid_argument("Macro launch requires VU0 shared state");
+        connect_upload(memory);
         memory.vector_launch_context=this;
         memory.launch_vector=[](void* raw,bool indirect,unsigned entry) {
             auto& self=*static_cast<NativeVuLaunch*>(raw);
             const NativeLaunchView request{(indirect ? self.shared_->launch_address : entry)&511U,
                 self.state.input_top,self.state.input_itop};
             return self.submit(0,{},&request);
+        };
+    }
+    void connect_upload(Memory& memory) {
+        memory.vector_launch_context=this;
+        memory.upload_vector=[](void* raw,unsigned pair,std::span<const std::uint8_t> bytes) {
+            auto& self=*static_cast<NativeVuLaunch*>(raw);
+            if ((self.shared_ && self.shared_->active) || self.busy_) return Stop::vector_pending;
+            const std::array views{vu::UploadView{pair,bytes}};
+            return self.binding_.upload(0,views,true) ? Stop::budget : Stop::unsupported_vector;
         };
     }
     void connect_data(Memory& memory) {

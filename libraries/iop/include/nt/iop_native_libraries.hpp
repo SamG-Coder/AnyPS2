@@ -60,6 +60,15 @@ public:
                 return library.address;
         return {};
     }
+    // A module's imports exist only while it is loaded: an unloaded module must not
+    // keep the libraries it used in use, and a reloaded one binds them again.
+    void set_module_imports(std::uint32_t base,std::uint32_t size,bool loaded) {
+        for (std::size_t index=0;index<imports_.size();++index)
+            if (imports_[index].table>=base && imports_[index].table-base<size) {
+                enabled_[index]=loaded;
+                bindings_[index]=loaded ? select(imports_[index]) : std::optional<std::size_t>{};
+            }
+    }
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
         if (request.kind==NativeServiceKind::library_call) {
             const auto site=ram_offset(request.call_site,4,0x200000);

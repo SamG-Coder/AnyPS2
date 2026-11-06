@@ -10,7 +10,8 @@
 namespace nt::input {
 // Native gamepad service for compiled PADMAN callers. Translate whole command
 // packets to host input; no serial clock, device firmware or runtime code decoder.
-// Advertise the analog-pad profile: host buttons do not have DS2 pressure sensors.
+// Advertise the DS2 profile. Host buttons have no pressure sensors, so a pressed
+// button reports full pressure and a released one none.
 class PadTransactions {
 public:
     using Sampler=std::function<PadSnapshot(unsigned)>;
@@ -30,7 +31,7 @@ public:
             if (sample_) snapshots[port]=sample_(port);
             if (!snapshots[port].connected) next[port]={};
         }
-        std::array<std::array<std::uint8_t,9>,16> replies{};
+        std::array<std::array<std::uint8_t,21>,16> replies{};
         std::array<bool,16> acknowledged{};
         struct Motor { unsigned port; std::uint16_t low,high; };
         std::vector<Motor> motors;
@@ -51,13 +52,20 @@ public:
             // Configuration changes the reported mode byte. It is not a gate
             // on supported commands; some drivers query capabilities first.
             reply.fill(0); reply[0]=0xff;
-            reply[1]=config ? 0xf3 : port.analog ? 0x73 : 0x41;
+            reply[1]=config ? 0xf3 : port.analog ? (port.pressure ? 0x79 : 0x73) : 0x41;
             reply[2]=0x5a;
             const auto report=[&] {
                 const auto buttons=static_cast<std::uint16_t>(~snapshot.buttons);
                 reply[3]=static_cast<std::uint8_t>(buttons);
                 reply[4]=static_cast<std::uint8_t>(buttons>>8);
                 if (port.analog) std::copy(snapshot.axes.begin(),snapshot.axes.end(),reply.begin()+5);
+                if (port.analog && port.pressure) {
+                    // Report order: right, left, up, down, triangle, circle, cross,
+                    // square, L1, R1, L2, R2, as bit numbers of the button word.
+                    constexpr std::array<unsigned,12> order{5,7,4,6,12,13,14,15,10,11,8,9};
+                    for (unsigned at=0;at<order.size();++at)
+                        reply[9+at]=(snapshot.buttons>>order[at])&1U ? 0xff : 0;
+                }
             };
             if (command==0x42) {
                 if (request.size()<5 || item.response.size()<5) return false;
@@ -78,12 +86,24 @@ public:
             } else {
                 if (request.size()<9 || item.response.size()<9) return false;
                 switch (command) {
+                case 0x40: // Pressure sensor calibration has nothing to change.
+                    reply[8]=0x5a;
+                    break;
+                case 0x41:
+                    // The report words the DS2 mode can enable.
+                    reply[3]=0xff; reply[4]=0xff; reply[5]=3; reply[8]=0x5a;
+                    break;
+                case 0x4f:
+                    port.pressure=request[5]!=0;
+                    reply[8]=0x5a;
+                    break;
                 case 0x44:
                     if (request[3]>1 || (request[4]!=0 && request[4]!=3)) return false;
                     port.analog=request[3]!=0; port.locked=request[4]==3;
+                    if (!port.analog) port.pressure=false;
                     break;
                 case 0x45:
-                    reply[3]=1; reply[4]=2; reply[5]=port.analog;
+                    reply[3]=3; reply[4]=2; reply[5]=port.analog;
                     reply[6]=snapshot.rumble && rumble_ ? 2 : 0;
                     reply[7]=reply[6] ? 1 : 0;
                     break;
@@ -133,7 +153,7 @@ public:
     }
 private:
     struct Port {
-        bool config=false,analog=false,locked=false;
+        bool config=false,analog=false,locked=false,pressure=false;
         std::array<std::uint8_t,6> alignment{0xff,0xff,0xff,0xff,0xff,0xff};
     };
     Sampler sample_;

@@ -35,7 +35,8 @@ public:
             (mode!=0 && mode!=4)) return Stop::unsupported_system;
         if (!memory.scratchpad || memory.scratchpad_bytes<scratchpad_size) return Stop::memory_fault;
         auto next=config; next[0]=value;
-        const auto result=channel ? to_scratch(memory,next,mode) : from_scratch(memory,next,mode);
+        const auto result=channel ? to_scratch(memory,next,mode) : (!mode && policy.mfifo_to_vector()) ?
+            to_ring(memory,policy,next) : from_scratch(memory,next,mode);
         if (result!=Stop::budget) return result;
         next[0]&=~0x100U; next[2]=0; config=next;
         memory.completions->complete(8+channel); memory.completions->publish(memory);
@@ -83,6 +84,23 @@ private:
             batch.bytes.assign(source.begin(),source.end()); next[1]+=next[2]*16;
         }
         scratch_copy(memory,next[8],batch.bytes,true);
+        return Stop::budget;
+    }
+    // MFIFO output wraps inside the configured ring, and the address follows it.
+    Stop to_ring(Memory& memory,const NativeSubmissionPolicy& policy,Config& next) const {
+        if (!protection) return Stop::invalid_state;
+        auto remaining=next[2]*16U;
+        auto address=policy.mfifo_address(next[1]);
+        while (remaining) {
+            const auto wrapped=policy.mfifo_address(address+remaining-1);
+            const auto size=wrapped>=address ? remaining : policy.mfifo_address(0xffffffffU)+16U-address;
+            if (address%16 || !memory.data || std::uint64_t(address)+size>memory.size) return Stop::memory_fault;
+            if (protection(address,size)) { memory.fault_address=address; return Stop::code_write; }
+            scratch_copy(memory,next[8],{memory.data+address,size},false);
+            remaining-=size;
+            address=policy.mfifo_address(address+size);
+        }
+        next[1]=address;
         return Stop::budget;
     }
     Stop from_scratch(Memory& memory,Config& next,unsigned mode) const {

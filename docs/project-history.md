@@ -44,6 +44,13 @@ and [homebrew testing](ps2-test-programs.md#larger-homebrew-tests).
 GT4 has displayed its opening warning through Vulkan. Its title screen and playable
 gameplay have not been demonstrated. Homebrew progress does not establish GT4 support.
 
+Final Fantasy XII (PAL) reached its title screen, opening movie and first real-time 3D
+scene in headless scripted runs, with EE, IOP and VU code compiled ahead of time and no stop
+in seven minutes. Character control, later scenes, frame rate and visual or audio accuracy
+have not been established. No memory card is exposed, so saving is unavailable; the game
+continues after its own prompt for that. The menu overlay compiled into its executable stops
+if called.
+
 Public references include PCSX2, PS2SDK, Play! and recompilation projects. Their
 roles, pins and licenses are recorded in the [provenance ledger](source-references.md).
 PCSX2 is used only as an external reference when requested. No games, BIOS/firmware,

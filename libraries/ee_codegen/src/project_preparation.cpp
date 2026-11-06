@@ -98,6 +98,11 @@ PreparedProject prepare(ByteView bytes,std::span<const PayloadMapping> mappings,
             if (segment.address<last && first<finish) throw std::runtime_error("EE project has overlapping ELF segments");
         extents.emplace_back(segment.address,finish); end=std::max(end,finish);
     }
+    for (const auto& segment:executable.overlay_segments) {
+        if (std::uint64_t(segment.address)+segment.memory_size>0x2000000)
+            throw std::runtime_error("EE project requires ELF segments in physical RAM");
+        end=std::max(end,segment.address+segment.memory_size);
+    }
     const auto initial_executable=executable;
     std::vector<CodePayload> payloads;
     std::vector<std::uint32_t> payload_entries;
@@ -126,7 +131,8 @@ PreparedProject prepare(ByteView bytes,std::span<const PayloadMapping> mappings,
             if (!region.size || region.offset%4 || region.size%4 || region.offset<cursor || end>mapping.size)
                 throw std::runtime_error("Invalid copied payload code classification");
             if (region.offset>cursor) executable.non_executable_sections.push_back({destination+cursor,region.offset-cursor});
-            if (whole_code) executable.code_sections.push_back({destination+region.offset,region.size});
+            // A copy found by discovery may mix data; only its reached flow compiles.
+            if (whole_code && entry_at_start) executable.code_sections.push_back({destination+region.offset,region.size});
             cursor=static_cast<std::uint32_t>(end);
         }
         if (cursor<mapping.size) executable.non_executable_sections.push_back({destination+cursor,mapping.size-cursor});
@@ -157,11 +163,10 @@ PreparedProject prepare(ByteView bytes,std::span<const PayloadMapping> mappings,
     std::map<std::uint32_t,std::set<std::uint32_t>> switch_edges;
     std::vector<PreparedProject::Pass> passes;
     std::vector<bool> accepted(observations.size(),false);
-    if (whole_code) {
-        discovered=analysis::whole_code(bytes,executable,program_instruction_limit);
-        passes.push_back({1,1,discovered.instructions.size(),0,0});
-    }
-    while (!whole_code) {
+    std::vector<analysis::CodeStore> code_stores;
+    // Whole-code conversion still runs flow discovery: registered handlers and
+    // copied code reach outside the declared sections.
+    while (true) {
         const auto previous_roots=continuations.size();
         pointers.clear();
         discovered=analysis::discover(bytes,executable,program_instruction_limit,continuations,true);
@@ -264,6 +269,14 @@ PreparedProject prepare(ByteView bytes,std::span<const PayloadMapping> mappings,
                 continuations.push_back(edge.target); added=true;
             }
         }
+        code_stores=analysis::code_stores(executable,discovered);
+        for (const auto& store:code_stores) {
+            if (!store.value || (*store.value>>26)!=2) continue;
+            const auto target=(store.address&0xf0000000U)|((*store.value&0x03ffffffU)<<2);
+            if (discovered.instructions.contains(target) || !elf::executable_address(executable,target) ||
+                std::find(continuations.begin(),continuations.end(),target)!=continuations.end()) continue;
+            continuations.push_back(target); added=true;
+        }
         added|=registered_calls.size()!=previous_calls;
         passes.push_back({1,passes.size()+1,discovered.instructions.size(),
             continuations.size()-previous_roots,registered_calls.size()-previous_calls});
@@ -272,6 +285,14 @@ PreparedProject prepare(ByteView bytes,std::span<const PayloadMapping> mappings,
     for (std::size_t index=0;index<observations.size();++index) {
         if (!accepted[index]) throw std::runtime_error("Observed source is not reached compiled flow at "+hex32(observations[index].site));
         observation::validate_code(observations[index],discovered);
+    }
+    if (whole_code) {
+        auto selected=analysis::whole_code(bytes,executable,program_instruction_limit);
+        discovered.instructions.merge(selected.instructions);
+        discovered.ordinary.merge(selected.ordinary);
+        discovered.entries.merge(selected.entries);
+        if (discovered.instructions.size()>program_instruction_limit) throw std::runtime_error("Whole-code instruction limit exceeded");
+        passes.push_back({1,passes.size()+1,discovered.instructions.size(),0,0});
     }
     if (executable.inferred_permissions || executable.writable_code) for (const auto& [pc,instruction]:discovered.instructions) {
         // Copied payloads own their destination instructions; they are not ELF code.
@@ -292,6 +313,20 @@ PreparedProject prepare(ByteView bytes,std::span<const PayloadMapping> mappings,
         throw std::runtime_error("No native syscall metadata extent available");
     PreparedProject result;
     result.whole_code=whole_code;
+    // Patched words and their delay slots leave write protection and guard themselves.
+    std::set<std::uint32_t> patched_words;
+    for (const auto& store:code_stores) {
+        patched_words.insert(store.address);
+        if (!store.value || (*store.value>>26)!=2) continue;
+        patched_words.insert(store.address+4);
+        const CodePatch patch{store.address,*store.value,(store.address&0xf0000000U)|((*store.value&0x03ffffffU)<<2)};
+        const auto same=[&](const CodePatch& other) { return other.address==patch.address && other.word==patch.word; };
+        if (std::none_of(result.code_patches.begin(),result.code_patches.end(),same)) result.code_patches.push_back(patch);
+    }
+    for (const auto address:patched_words) { // Ascending, as the emitter expects.
+        if (!discovered.instructions.contains(address)) throw std::runtime_error("Patched code word is not compiled at "+hex32(address));
+        result.unverified_code.push_back({address,4});
+    }
     if (whole_code) for (const auto& region:executable.code_sections)
         result.selected_regions.push_back({region.address,region.size,1});
     if (function_symbols) for (const auto entry:executable.function_entries) result.function_roots.emplace_back(1,entry);
@@ -310,6 +345,8 @@ PreparedProject prepare(ByteView bytes,std::span<const PayloadMapping> mappings,
     result.wrapper_candidates=wrappers.size();
     result.image.assign(end,0);
     for (const auto& segment:initial_executable.segments)
+        std::copy_n(bytes.begin()+segment.offset,segment.file_size,result.image.begin()+segment.address);
+    for (const auto& segment:initial_executable.overlay_segments)
         std::copy_n(bytes.begin()+segment.offset,segment.file_size,result.image.begin()+segment.address);
     return result;
 }
@@ -355,7 +392,10 @@ PreparedProject prepare_project(const std::filesystem::path& input,std::span<con
     auto prepared=prepare(bytes,mappings,diagnose_flow,observed[0],function_symbols,whole_code);
     // Additional images have native lifetimes that swept extents cannot overlap.
     if (!whole_code && prepared.executable.writable_code && images.empty())
-        prepared.unverified_code=sweep_mixed_code(bytes,prepared.executable,prepared.discovered);
+        {
+            auto swept=sweep_mixed_code(bytes,prepared.executable,prepared.discovered);
+            prepared.unverified_code.insert(prepared.unverified_code.end(),swept.begin(),swept.end());
+        }
     prepared.input_identity=input_identity;
     if (!images.empty()) {
         const auto snapshot=[](ByteView source,const elf::Executable& executable,std::uint32_t id) {

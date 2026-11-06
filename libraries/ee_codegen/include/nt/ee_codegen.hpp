@@ -29,6 +29,9 @@ struct PayloadMapping {
 struct CodePayload { std::uint32_t address; std::vector<std::uint8_t> bytes; };
 using LayoutDeclaration=std::array<std::uint32_t,4>;
 struct CodeRange { std::uint32_t address,size,image=0; }; // image 0 is permanently resident.
+// A constant jump the program stores over an instruction. The word stays writable,
+// each execution compares it, and the patched form transfers to compiled code.
+struct CodePatch { std::uint32_t address,word,target; };
 struct ExecutableImage { std::uint32_t entry,id; std::vector<CodePayload> segments; };
 // Emits a sorted, bounded set of compiled instructions. Additional ranges protect
 // executable ELF contents that have not yet been reached by discovery.
@@ -43,7 +46,8 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
                std::span<const ExecutableImage> images = {},
                const std::function<std::ostream&(std::size_t)>& module_output = {},
                std::uint64_t input_identity=0,
-               std::span<const CodeRange> unverified_code = {});
+               std::span<const CodeRange> unverified_code = {},
+               std::span<const CodePatch> code_patches = {});
 // True when the generator can lower this word. next is the instruction compiled
 // at the following address, or null when that address has no compiled word.
 bool lowerable(const r5900::Instruction& instruction,const r5900::Instruction* next);

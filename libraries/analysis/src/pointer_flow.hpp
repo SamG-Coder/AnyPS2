@@ -72,7 +72,8 @@ inline std::optional<unsigned> write(const r5900::Instruction& i) {
     case Op::vmadda: case Op::vmsuba: case Op::vmadda_bc: case Op::vmsuba_bc:
     case Op::vdiv: case Op::vsqrt: case Op::vrsqrt: case Op::vwaitq: case Op::vclip:
     case Op::vopmula: case Op::vopmsub: case Op::vrnext: case Op::vrget: case Op::vrinit: case Op::vrxor:
-    case Op::vadda: case Op::vsuba: case Op::vadda_bc: case Op::vsuba_bc: case Op::vmul_q: case Op::vmul_i: return 0;
+    case Op::vadda: case Op::vsuba: case Op::vadda_bc: case Op::vsuba_bc: case Op::vmul_q: case Op::vmul_i:
+    case Op::vmadd_q: case Op::vmadd_i: case Op::vmsub_q: case Op::vmsub_i: case Op::vmula_q: case Op::vmula_i: case Op::vadda_q: case Op::vadda_i: case Op::vsuba_q: case Op::vsuba_i: case Op::vmadda_q: case Op::vmadda_i: case Op::vmsuba_q: case Op::vmsuba_i: case Op::vmfir: case Op::vmtir: case Op::vlqi: case Op::vsqi: case Op::vlqd: case Op::vsqd: case Op::vilwr: case Op::viswr: return 0;
     }
     return {};
 }
@@ -89,6 +90,10 @@ struct Edge {
 // and finally apply a call's ABI clobbers. Likely-false edges omit the slot.
 struct Graph {
     std::map<std::uint32_t,std::vector<Edge>> next,previous;
+    // Addresses also entered by a call or as a discovery root. The edges above
+    // describe local flow only, so register values there are unknown even when a
+    // tail jump is the one recorded predecessor.
+    std::set<std::uint32_t> external_entries;
     explicit Graph(const Program& program,const std::map<std::uint32_t,std::set<std::uint32_t>>& candidate_edges={}) {
         using r5900::Op;
         const auto add=[&](Edge edge) {
@@ -102,7 +107,10 @@ struct Graph {
             const bool link=i.op==Op::jal || (i.op==Op::jalr && i.rd) || (i.op>=Op::bltzal && i.op<=Op::bgezall);
             const bool always=always_taken(i);
             const bool never=(i.op==Op::bne || i.op==Op::bnel) && i.rs==i.rt;
-            if (link) add({pc,pc+8,true,true});
+            if (link) {
+                add({pc,pc+8,true,true});
+                if (!i.indirect()) external_entries.insert(i.target());
+            }
             else if (!i.indirect() && !never) add({pc,i.target(),true});
             else if (i.op==Op::jr && i.rs!=31) {
                 if (const auto targets=candidate_edges.find(pc);targets!=candidate_edges.end())
@@ -114,6 +122,7 @@ struct Graph {
         // Independent entries can expose otherwise disconnected instructions.
         // After pruning a constant edge, those instructions must not act as
         // fresh roots in a backward slice unless reachable from an entry.
+        external_entries.insert(program.entries.begin(),program.entries.end());
         if (!program.entries.empty()) {
             std::deque<std::uint32_t> pending(program.entries.begin(),program.entries.end());
             std::set<std::uint32_t> reached;
@@ -300,6 +309,7 @@ inline std::optional<std::uint64_t> constant_gpr(const Program& program,const Gr
         auto state=std::move(pending.front()); pending.pop_front();
         if (!state.reg) { accept(state,0); continue; }
         if (!visited.insert(state).second) continue;
+        if (graph.external_entries.contains(state.pc)) { unknown=true; break; }
         const auto edges=graph.previous.find(state.pc);
         if (edges==graph.previous.end()) { unknown=true; break; }
         for (const auto& edge:edges->second) {

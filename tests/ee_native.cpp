@@ -3223,10 +3223,13 @@ int main() {
                 check(platform.sif_receive.accepting() && !platform.completions.status());
             }
             check(write(0x1000c000,0)==nt::ee::Stop::budget && !platform.sif_receive.accepting());
-            for (const auto address:{0x1000e030U,0x1000e040U,0x1000e050U}) {
+            check(write(0x1000e030,0)==nt::ee::Stop::budget && read(0x1000e030)==0);
+            check(write(0x1000e030,16)==nt::ee::Stop::unsupported_system && read(0x1000e030)==0);
+            check(read(0x1000e000)==0);
+            // The MFIFO ring configuration is stored; only the vector channel can use it.
+            for (const auto address:{0x1000e040U,0x1000e050U}) {
+                check(write(address,16)==nt::ee::Stop::budget && read(address)==16);
                 check(write(address,0)==nt::ee::Stop::budget && read(address)==0);
-                check(write(address,16)==nt::ee::Stop::unsupported_system && read(address)==0);
-                check(read(0x1000e000)==0);
             }
             check(write(0x10008000,0x101)==nt::ee::Stop::unsupported_system && !platform.completions.status());
             check(write(0x1000e000,1)==nt::ee::Stop::budget);

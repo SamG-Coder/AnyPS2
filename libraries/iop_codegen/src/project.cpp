@@ -37,6 +37,7 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
     if (inputs.empty()) throw std::runtime_error("IOP conversion: empty module bundle");
     std::vector<elf::IopModule> modules;
     std::vector<std::uint64_t> source_hashes;
+    std::vector<std::size_t> source_sizes;
     for (const auto& input : inputs) {
         if (input.native_romdrv && input.sealed)
             throw std::runtime_error("IOP conversion: sealed@ cannot be combined with romdrv@");
@@ -44,6 +45,7 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
             throw std::runtime_error("IOP conversion: sealed module base is not 256-byte aligned");
         const auto bytes=read_file(input.path);
         source_hashes.push_back(fingerprint(bytes));
+        source_sizes.push_back(bytes.size());
         modules.push_back(elf::load_iop_module(bytes,input.base));
     }
     std::vector<elf::IopModule> compiled;
@@ -122,7 +124,7 @@ void project_bundle(std::span<const ModuleSource> inputs,const std::filesystem::
             const auto image=ByteView(item.memory).first(item.initialized_size);
             code<<"{"<<source_hashes[index]<<"ULL,"<<fingerprint(image)<<"ULL,"<<item.base<<"U,"<<item.entry<<"U,"
                 <<item.initialized_size<<"U,"<<item.memory.size()<<"U,"<<(item.info ? item.info->global_pointer : 0)<<"U,";
-            details(item); code<<"},\n";
+            details(item); code<<","<<source_sizes[index]<<"U},\n";
             sealed_image.insert(sealed_image.end(),image.begin(),image.end());
         }
     }

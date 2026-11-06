@@ -1775,6 +1775,84 @@ std::uint32_t physical_address(std::uint32_t address) {
     return address>=0x80000000U && address<0xc0000000U ? address&0x1fffffffU : address;
 }
 }
+namespace {
+// Value of a register before an instruction, following arithmetic that builds a
+// constant word. Any other write, a merge of different values or a call fails.
+std::optional<std::uint32_t> constant_word(const Program& program,const pointer_flow::Graph& graph,
+        std::uint32_t before,unsigned reg,unsigned depth=0);
+std::optional<std::uint32_t> written_word(const Program& program,const pointer_flow::Graph& graph,
+        const r5900::Instruction& i,std::uint32_t before,unsigned depth) {
+    using r5900::Op;
+    const auto source=[&](unsigned reg) { return constant_word(program,graph,before,reg,depth+1); };
+    switch (i.op) {
+    case Op::lui: return std::uint32_t(i.immediate)<<16;
+    case Op::addiu: case Op::daddiu: if (const auto left=source(i.rs)) return *left+std::uint32_t(i.immediate); return {};
+    case Op::ori: if (const auto left=source(i.rs)) return *left|std::uint16_t(i.immediate); return {};
+    case Op::sll: if (const auto left=source(i.rt)) return *left<<i.sa; return {};
+    case Op::srl: if (const auto left=source(i.rt)) return *left>>i.sa; return {};
+    case Op::addu: case Op::daddu: case Op::bit_or: {
+        const auto left=source(i.rs),right=source(i.rt);
+        if (!left || !right) return {};
+        return i.op==Op::bit_or ? *left|*right : *left+*right;
+    }
+    default: return {};
+    }
+}
+std::optional<std::uint32_t> constant_word(const Program& program,const pointer_flow::Graph& graph,
+        std::uint32_t before,unsigned reg,unsigned depth) {
+    if (!reg) return 0U;
+    if (depth>64 || graph.external_entries.contains(before)) return {};
+    const auto edges=graph.previous.find(before);
+    if (edges==graph.previous.end() || edges->second.empty()) return {};
+    std::optional<std::uint32_t> result;
+    for (const auto& edge:edges->second) {
+        if (edge.call && !pointer_flow::preserved(reg)) return {};
+        const auto from=program.instructions.find(edge.from);
+        if (from==program.instructions.end()) return {};
+        std::optional<std::uint32_t> value;
+        const auto written=[&](std::uint32_t pc)->std::optional<bool> {
+            const auto found=program.instructions.find(pc);
+            if (found==program.instructions.end()) return {};
+            const auto effect=pointer_flow::write(found->second);
+            if (!effect) return {};
+            return *effect==reg;
+        };
+        if (edge.delay) {
+            const auto slot=written(edge.from+4);
+            if (!slot) return {};
+            if (*slot) value=written_word(program,graph,program.instructions.at(edge.from+4),edge.from,depth);
+            else {
+                const auto branch=written(edge.from);
+                if (!branch || *branch) return {};
+                value=constant_word(program,graph,edge.from,reg,depth+1);
+            }
+        } else {
+            const auto own=written(edge.from);
+            if (!own) return {};
+            value=*own ? written_word(program,graph,from->second,edge.from,depth) : constant_word(program,graph,edge.from,reg,depth+1);
+        }
+        if (!value || (result && *result!=*value)) return {};
+        result=value;
+    }
+    return result;
+}
+}
+std::vector<CodeStore> code_stores(const elf::Executable& executable,const Program& program) {
+    const pointer_flow::Graph graph(program);
+    std::vector<CodeStore> result;
+    for (const auto& [pc,i]:program.instructions) {
+        if (i.op!=r5900::Op::sw || i.rs==29 || i.rs==28) continue;
+        // A delay-slot store sees the state before its branch.
+        const auto before=program.ordinary.contains(pc) ? pc : pc-4;
+        const auto base=pointer_flow::constant_gpr(program,graph,before,i.rs);
+        if (!base) continue;
+        const auto address=static_cast<std::uint32_t>(*base)+static_cast<std::uint32_t>(std::int32_t(i.immediate));
+        if (address%4 || std::none_of(executable.code_sections.begin(),executable.code_sections.end(),[&](const auto& section) {
+                return address-section.address<section.size; })) continue;
+        result.push_back({pc,address,constant_word(program,graph,before,i.rt)});
+    }
+    return result;
+}
 std::vector<CopiedCode> copied_code(ByteView bytes,const elf::Executable& elf,const Program& program) {
     const auto loaded=[&](std::uint32_t address) {
         return std::any_of(elf.segments.begin(),elf.segments.end(),[&](const auto& segment) {

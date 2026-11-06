@@ -54,7 +54,7 @@ std::optional<Operation> native_import_operation(const elf::IopImport& import) {
          (import.ordinal>=33 && import.ordinal<=35)))
         return Operation::native_import;
     if (import.library=="cdvdman" && (import.version>>8)==1 &&
-        (import.ordinal==6 || import.ordinal==8 || (import.ordinal>=11 && import.ordinal<=15) ||
+        (import.ordinal==5 || import.ordinal==6 || import.ordinal==8 || import.ordinal==10 || (import.ordinal>=11 && import.ordinal<=15) ||
          import.ordinal==22 || import.ordinal==24 || import.ordinal==28 || import.ordinal==37 || import.ordinal==39 || import.ordinal==51 ||
          import.ordinal==74 || import.ordinal==78 || import.ordinal==83))
         return Operation::native_import;

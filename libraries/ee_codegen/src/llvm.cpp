@@ -75,7 +75,7 @@ bool contains_address(std::span<const CodeRange> ranges,std::uint32_t address) {
     });
     return after!=ranges.begin() && address-std::prev(after)->address<std::prev(after)->size;
 }
-void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> ranges,std::span<const CodePayload> payloads,const NativeLayout& layout,bool external=false,std::span<const CodeRange> unverified={}) {
+void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> ranges,std::span<const CodePayload> payloads,const NativeLayout& layout,bool external=false,std::span<const CodeRange> unverified={},std::span<const CodePatch> patches={}) {
     w.out<<"define "<<(external ? "" : "internal ")<<"i32 @nt_ee_part_"<<instructions.front().pc<<"(ptr %state, ptr %memory, i64 %budget) noinline {\nentry:\n"
          <<"  %remaining = alloca i64\n  store i64 %budget, ptr %remaining\n  br label %dispatch\ndispatch:\n";
     const auto pc=w.load("i32",offsetof(runtime::State,pc));
@@ -166,8 +166,21 @@ void emit_part(Writer& w,std::span<const r5900::Instruction> instructions,std::s
             const auto pointer=w.pointer(address,data);
             const auto word=w.value("load i32, ptr "+pointer);
             const auto matches=w.value("icmp eq i32 "+word+", "+std::to_string(i.word));
-            w.out<<"  br i1 "<<matches<<", label %sweep_ready"<<suffix<<", label %sweep_stop"<<suffix
-                 <<"\nsweep_stop"<<suffix<<":\n";
+            w.out<<"  br i1 "<<matches<<", label %sweep_ready"<<suffix<<", label %sweep_patched"<<suffix
+                 <<"\nsweep_patched"<<suffix<<":\n";
+            // A proven patch replaces this word with a jump over a NOP delay slot.
+            // The delay word is checked too, so a half-written patch stops.
+            unsigned patch_index=0;
+            for (const auto& patch:patches) if (patch.address==address) {
+                const auto label=suffix+"_"+std::to_string(patch_index++);
+                const auto patched=w.value("icmp eq i32 "+word+", "+std::to_string(patch.word));
+                const auto slot=w.value("icmp eq i32 "+w.value("load i32, ptr "+w.pointer(address+4,data))+", 0");
+                const auto taken=w.binary("and","i1",w.binary("and","i1",patched,slot),w.binary("xor","i1",is_delay,"true"));
+                w.out<<"  br i1 "<<taken<<", label %patch_taken"<<label<<", label %patch_next"<<label<<"\npatch_taken"<<label<<":\n";
+                w.store("i32",std::to_string(patch.target),offsetof(runtime::State,pc));
+                w.out<<"  br label %dispatch\npatch_next"<<label<<":\n";
+            }
+            w.out<<"  br label %sweep_stop"<<suffix<<"\nsweep_stop"<<suffix<<":\n";
             w.store("i32",std::to_string(address),offsetof(ee::Memory,fault_address),"%memory");
             w.out<<"  ret i32 14\nsweep_ready"<<suffix<<":\n";
         }
@@ -336,10 +349,8 @@ void add_constraint(EeRejection& rejection,std::string message) {
 std::optional<std::string> instruction_constraint(const r5900::Instruction& i,const r5900::Instruction* next) {
     std::ostringstream where;
     where<<"0x"<<std::hex<<i.pc;
-    if ((i.op==r5900::Op::mfc0 || i.op==r5900::Op::mtc0) && i.rd!=0 && i.rd!=2 && i.rd!=3 && i.rd!=5 && i.rd!=10 && i.rd!=25 && i.rd!=12 && i.rd!=14 && i.rd!=30 && i.rd!=6 && !((i.rd==28 || i.rd==9 || i.rd==1 || i.rd==8 || i.rd==13 || i.rd==23) && i.op==r5900::Op::mfc0))
+    if ((i.op==r5900::Op::mfc0 || i.op==r5900::Op::mtc0) && i.rd!=0 && i.rd!=2 && i.rd!=3 && i.rd!=5 && i.rd!=10 && i.rd!=25 && i.rd!=12 && i.rd!=14 && i.rd!=30 && i.rd!=6 && i.rd!=24 && !((i.rd==28 || i.rd==9 || i.rd==1 || i.rd==8 || i.rd==13 || i.rd==23) && i.op==r5900::Op::mfc0))
         return "EE system transfer selector is not supported at "+where.str();
-    if (i.op==r5900::Op::cfc2 && i.rd==20)
-        return "EE vector random-register transfer is not implemented at "+where.str();
     if ((i.op==r5900::Op::ctc1 || i.op==r5900::Op::cfc1) && i.rd!=31)
         return "EE floating control transfer supports FCR31 only at "+where.str();
     if (i.op==r5900::Op::sync && (i.rs || i.rt || i.rd || (i.sa!=0 && i.sa!=16)))
@@ -403,6 +414,7 @@ void emit_declarations(Writer& w) {
     w.out<<"declare i64 @nt_ee_performance(ptr, i32, i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_test_completions(ptr)\n";
     w.out<<"declare i32 @nt_ee_wait_display(ptr, i32)\n";
+    w.out<<"declare i64 @nt_ee_io_read8(ptr, i32)\n";
     w.out<<"declare i64 @nt_ee_io_read32(ptr, i32)\ndeclare i32 @nt_ee_io_write32(ptr, i32, i32)\ndeclare i32 @nt_ee_io_write8(ptr, i32, i32)\n";
     w.out<<"declare i32 @nt_ee_io_read64(ptr, ptr, i32, i32)\ndeclare i32 @nt_ee_io_write64(ptr, i32, i64)\n";
     w.out<<"declare i32 @nt_ee_io_write128(ptr, i32, i64, i64)\n";
@@ -423,6 +435,7 @@ void emit_declarations(Writer& w) {
     w.out<<"declare i64 @nt_ee_vector_read(ptr, i32, i32)\n";
     w.out<<"declare i32 @nt_ee_vector_launch(ptr, i32, i32)\n";
     w.out<<"declare i32 @nt_ee_vector_memory(ptr, i32)\n";
+    w.out<<"declare i32 @nt_ee_vector_transfer(ptr, i32, i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_vector_write(ptr, i32, i32, i32)\n";
     w.out<<"declare i64 @nt_ee_multiply_finite(i32, i32)\n";
     w.out<<"declare i64 @nt_ee_divide_finite(i32, i32)\n"
@@ -444,7 +457,7 @@ void emit_payloads(Writer& w,std::span<const CodePayload> payloads) {
     }
 }
 void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instructions,std::span<const CodeRange> protected_code,std::span<const CodePayload> payloads,std::span<const LayoutDeclaration> layouts,std::span<const ExecutableImage> images,
-               const std::function<std::ostream&(std::size_t)>& module_output,std::uint64_t input_identity,std::span<const CodeRange> unverified_code) {
+               const std::function<std::ostream&(std::size_t)>& module_output,std::uint64_t input_identity,std::span<const CodeRange> unverified_code,std::span<const CodePatch> code_patches) {
     static_assert(std::is_standard_layout_v<runtime::State> && std::is_standard_layout_v<ee::Memory>);
     static_assert(sizeof(void*)==8 && std::endian::native==std::endian::little,
                   "EE LLVM currently requires a little-endian 64-bit host ABI");
@@ -515,7 +528,17 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
         }
         merged.push_back(range);
     }
-    ranges=std::move(merged);
+    // Self-guarding words stay writable even inside a declared whole-code range.
+    ranges.clear();
+    for (auto range:merged) {
+        for (const auto& hole:unverified_code) {
+            if (hole.address<range.address || std::uint64_t(hole.address)+hole.size>std::uint64_t(range.address)+range.size) continue;
+            if (hole.address>range.address) ranges.push_back({range.address,hole.address-range.address,range.image});
+            const auto end=hole.address+hole.size;
+            range.size-=end-range.address; range.address=end;
+        }
+        if (range.size) ranges.push_back(range);
+    }
     std::vector<std::span<const r5900::Instruction>> parts;
     for (std::size_t first=0;first<instructions.size();) {
         const auto unit=instructions[first].pc/module_address_span;
@@ -547,7 +570,7 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
             unit.out<<"declare i1 @nt_ee_check_code_range(i64, i64, i32)\n";
             emit_payloads(unit,payloads);
             for (auto index=first;index<end;++index) {
-                emit_part(unit,parts[index],ranges,payloads,layout,true,unverified_code);
+                emit_part(unit,parts[index],ranges,payloads,layout,true,unverified_code,code_patches);
                 w.out<<"declare i32 @nt_ee_part_"<<parts[index].front().pc<<"(ptr, ptr, i64)\n";
             }
             if (!stream) throw std::runtime_error("Cannot finish EE LLVM module");
@@ -555,7 +578,7 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
         }
     } else {
         emit_payloads(w,payloads);
-        for (const auto part:parts) emit_part(w,part,ranges,payloads,layout,false,unverified_code);
+        for (const auto part:parts) emit_part(w,part,ranges,payloads,layout,false,unverified_code,code_patches);
     }
     emit_dispatcher(w,parts);
     emit_contains(w,instructions);

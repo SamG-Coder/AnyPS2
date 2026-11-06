@@ -458,12 +458,14 @@ int main(int argc,char** argv) {
                     throw std::runtime_error("Stop capture directory already exists");
                 continue;
             }
+#ifdef ANYPS2_NATIVE_VU1
             if (text=="--capture-packets" || text=="--replay-packets") {
                 auto& path=text=="--capture-packets" ? packet_capture_path : packet_replay_path;
                 if (!path.empty() || index+1==argc) throw std::runtime_error("Expected one private packet capture file");
                 path=argv[++index];
                 continue;
             }
+#endif
             if (text=="--capture-vectors") {
                 if (!vector_directory.empty() || index+1==argc) throw std::runtime_error("Expected one private vector capture directory");
                 vector_directory=argv[++index];
@@ -726,6 +728,7 @@ int main(int argc,char** argv) {
         nt::ee::NativeGraphics::Profile display_profile{},previous_display{};
         // Vector capture delimits frames by displayed-buffer changes.
         if (profile_graphics || !vector_directory.empty()) platform.graphics.profile=&display_profile;
+#ifdef ANYPS2_NATIVE_VU1
         std::optional<probe::PacketCapture> packet_capture;
         if (!packet_capture_path.empty()) {
             packet_capture.emplace(packet_capture_path);
@@ -733,6 +736,7 @@ int main(int argc,char** argv) {
             platform.packet_setup.observe_submission=probe::PacketCapture::observe_submission;
             platform.packet_setup.observe_packet=probe::PacketCapture::observe_packet;
         }
+#endif
         std::optional<probe::VectorCapture> vector_capture;
         if (!vector_directory.empty()) {
             vector_capture.emplace(vector_directory,std::span<const std::uint8_t>(ram.data(),ram.size()),&display_profile.buffer_changes);
@@ -851,7 +855,9 @@ int main(int argc,char** argv) {
                 if (capture_graphics_when_heavy && s.render_passes-p.render_passes>50000) gpu.capture->arm();
 #ifdef _WIN32
                 if (thread_sampler && s.render_passes-p.render_passes>20000) thread_sampler->arm();
+#ifdef ANYPS2_NATIVE_VU1
                 if (packet_capture && s.render_passes-p.render_passes>20000) packet_capture->arm();
+#endif
 #endif
                 auto& update_intervals=presented->intervals;
                 std::sort(update_intervals.begin(),update_intervals.end());

@@ -10,6 +10,7 @@ inline bool vector_operation(Op op) {
     case Op::vadd_q: case Op::vsub_q: case Op::vadd_i: case Op::vsub_i:
     case Op::vadd: case Op::vsub: case Op::vadd_bc: case Op::vsub_bc:
     case Op::vadda: case Op::vsuba: case Op::vadda_bc: case Op::vsuba_bc: case Op::vmul_q: case Op::vmul_i:
+    case Op::vmadd_q: case Op::vmadd_i: case Op::vmsub_q: case Op::vmsub_i: case Op::vmula_q: case Op::vmula_i: case Op::vadda_q: case Op::vadda_i: case Op::vsuba_q: case Op::vsuba_i: case Op::vmadda_q: case Op::vmadda_i: case Op::vmsuba_q: case Op::vmsuba_i: case Op::vmfir: case Op::vmtir: case Op::vlqi: case Op::vsqi: case Op::vlqd: case Op::vsqd: case Op::vilwr: case Op::viswr:
     case Op::vmadd: case Op::vmsub: case Op::vmadd_bc: case Op::vmsub_bc:
     case Op::vmadda: case Op::vmsuba: case Op::vmadda_bc: case Op::vmsuba_bc: case Op::vmula:
     case Op::vmula_bc: case Op::vmul: case Op::vmul_bc: case Op::vmax: case Op::vmax_bc: case Op::vmini: case Op::vmini_bc:
@@ -41,17 +42,35 @@ inline void emit_vector(Writer& w,const r5900::Instruction& i) {
              <<"\nlaunch_stop"<<suffix<<":\n  ret i32 "<<result<<"\nlaunch_ready"<<suffix<<":\n";
         return;
     }
+    if (i.op==Op::vlqi || i.op==Op::vsqi || i.op==Op::vlqd || i.op==Op::vsqd || i.op==Op::vilwr || i.op==Op::viswr) {
+        const auto kind=i.op==Op::vlqi ? 0 : i.op==Op::vsqi ? 1 : i.op==Op::vlqd ? 2 : i.op==Op::vsqd ? 3 : i.op==Op::vilwr ? 4 : 5;
+        const bool register_is_source=i.op==Op::vsqi || i.op==Op::vsqd;
+        const auto outcome=w.value("call i32 @nt_ee_vector_transfer(ptr %memory, i32 "+std::to_string(kind)+", i32 "+
+            std::to_string(register_is_source ? i.rd : i.rt)+", i32 "+std::to_string((register_is_source ? i.rt : i.rd)&15U)+", i32 "+std::to_string(i.rs&15)+")");
+        const auto ready=w.value("icmp eq i32 "+outcome+", 0");
+        w.out<<"  br i1 "<<ready<<", label %vector_transfer_ready"<<suffix<<", label %vector_transfer_stop"<<suffix
+             <<"\nvector_transfer_stop"<<suffix<<":\n  ret i32 "<<outcome<<"\nvector_transfer_ready"<<suffix<<":\n";
+        return;
+    }
     const bool accumulate=i.op==Op::vmadd || i.op==Op::vmsub || i.op==Op::vmadd_bc || i.op==Op::vmsub_bc ||
-        i.op==Op::vmadda || i.op==Op::vmsuba || i.op==Op::vmadda_bc || i.op==Op::vmsuba_bc;
-    const bool accumulator=i.op==Op::vmula || i.op==Op::vmula_bc || i.op==Op::vmadda || i.op==Op::vmsuba ||
+        i.op==Op::vmadda || i.op==Op::vmsuba || i.op==Op::vmadda_bc || i.op==Op::vmsuba_bc ||
+        i.op==Op::vmadd_q || i.op==Op::vmadd_i || i.op==Op::vmsub_q || i.op==Op::vmsub_i ||
+        i.op==Op::vmadda_q || i.op==Op::vmadda_i || i.op==Op::vmsuba_q || i.op==Op::vmsuba_i;
+    const bool accumulator=i.op==Op::vmula_q || i.op==Op::vmula_i || i.op==Op::vadda_q || i.op==Op::vadda_i ||
+        i.op==Op::vsuba_q || i.op==Op::vsuba_i || i.op==Op::vmadda_q || i.op==Op::vmadda_i ||
+        i.op==Op::vmsuba_q || i.op==Op::vmsuba_i || i.op==Op::vmula || i.op==Op::vmula_bc || i.op==Op::vmadda || i.op==Op::vmsuba ||
         i.op==Op::vmadda_bc || i.op==Op::vmsuba_bc || i.op==Op::vadda || i.op==Op::vsuba || i.op==Op::vadda_bc || i.op==Op::vsuba_bc;
-    const bool multiply=i.op==Op::vmul || i.op==Op::vmul_bc || i.op==Op::vmula || i.op==Op::vmula_bc || i.op==Op::vmul_q || i.op==Op::vmul_i;
-    const bool scalar_q=i.op==Op::vmul_q || i.op==Op::vadd_q || i.op==Op::vsub_q;
-    const bool scalar_i=i.op==Op::vmul_i || i.op==Op::vadd_i || i.op==Op::vsub_i;
-    const bool add_subtract=i.op==Op::vadd_q || i.op==Op::vsub_q || i.op==Op::vadd_i || i.op==Op::vsub_i || i.op==Op::vadd || i.op==Op::vsub || i.op==Op::vadd_bc || i.op==Op::vsub_bc ||
+    const bool multiply=i.op==Op::vmul || i.op==Op::vmul_bc || i.op==Op::vmula || i.op==Op::vmula_bc || i.op==Op::vmul_q || i.op==Op::vmul_i ||
+        i.op==Op::vmula_q || i.op==Op::vmula_i;
+    const bool scalar_q=i.op==Op::vmul_q || i.op==Op::vadd_q || i.op==Op::vsub_q || i.op==Op::vmadd_q || i.op==Op::vmsub_q ||
+        i.op==Op::vmula_q || i.op==Op::vadda_q || i.op==Op::vsuba_q || i.op==Op::vmadda_q || i.op==Op::vmsuba_q;
+    const bool scalar_i=i.op==Op::vmul_i || i.op==Op::vadd_i || i.op==Op::vsub_i || i.op==Op::vmadd_i || i.op==Op::vmsub_i ||
+        i.op==Op::vmula_i || i.op==Op::vadda_i || i.op==Op::vsuba_i || i.op==Op::vmadda_i || i.op==Op::vmsuba_i;
+    const bool add_subtract=i.op==Op::vadda_q || i.op==Op::vadda_i || i.op==Op::vsuba_q || i.op==Op::vsuba_i || i.op==Op::vadd_q || i.op==Op::vsub_q || i.op==Op::vadd_i || i.op==Op::vsub_i || i.op==Op::vadd || i.op==Op::vsub || i.op==Op::vadd_bc || i.op==Op::vsub_bc ||
         i.op==Op::vadda || i.op==Op::vsuba || i.op==Op::vadda_bc || i.op==Op::vsuba_bc;
     if (multiply || add_subtract || accumulate) {
-        const bool subtract=i.op==Op::vsub_q || i.op==Op::vsub_i || i.op==Op::vsub || i.op==Op::vsub_bc || i.op==Op::vmsub || i.op==Op::vmsub_bc ||
+        const bool subtract=i.op==Op::vsuba_q || i.op==Op::vsuba_i || i.op==Op::vmsub_q || i.op==Op::vmsub_i ||
+            i.op==Op::vmsuba_q || i.op==Op::vmsuba_i || i.op==Op::vsub_q || i.op==Op::vsub_i || i.op==Op::vsub || i.op==Op::vsub_bc || i.op==Op::vmsub || i.op==Op::vmsub_bc ||
             i.op==Op::vmsuba || i.op==Op::vmsuba_bc || i.op==Op::vsuba || i.op==Op::vsuba_bc;
         const bool broadcast=i.op==Op::vadd_bc || i.op==Op::vsub_bc || i.op==Op::vmul_bc || i.op==Op::vmula_bc ||
             i.op==Op::vmadd_bc || i.op==Op::vmsub_bc || i.op==Op::vmadda_bc || i.op==Op::vmsuba_bc || i.op==Op::vadda_bc || i.op==Op::vsuba_bc;
@@ -68,6 +87,23 @@ inline void emit_vector(Writer& w,const r5900::Instruction& i) {
     }
     const auto vectors=w.vector_storage(suffix);
     if (i.op==Op::vnop || i.op==Op::vwaitq) return;
+    if (i.op==Op::vmfir) {
+        // VI registers hold 16 bits; VI0 reads as zero and VF0 ignores writes.
+        if (!i.rt || !(i.rs&15)) return;
+        const auto integer=!(i.rd&15) ? std::string("0") : w.value("sext i16 "+
+            w.load("i16",offsetof(ee::VectorStorage,integers)+((i.rd&15)-1)*sizeof(std::uint16_t),vectors)+" to i32");
+        auto result=w.vu_reg(vectors,i.rt);
+        for (unsigned lane=0;lane<4;++lane) if (i.rs&(8U>>lane))
+            result=w.value("insertelement <4 x i32> "+result+", i32 "+integer+", i32 "+std::to_string(lane));
+        w.store("<4 x i32>",result,offsetof(ee::VectorStorage,values)+(i.rt-1)*16,vectors);
+        return;
+    }
+    if (i.op==Op::vmtir) {
+        if (!(i.rt&15)) return;
+        const auto lane=w.value("extractelement <4 x i32> "+w.vu_reg(vectors,i.rd)+", i32 "+std::to_string(i.rs&3));
+        w.store("i16",w.value("trunc i32 "+lane+" to i16"),offsetof(ee::VectorStorage,integers)+((i.rt&15)-1)*sizeof(std::uint16_t),vectors);
+        return;
+    }
     if (i.op==Op::vclip) {
         const auto left=w.vu_reg(vectors,i.rd),right=w.vu_reg(vectors,i.rt);
         std::string args;

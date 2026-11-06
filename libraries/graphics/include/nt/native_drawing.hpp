@@ -317,7 +317,7 @@ private:
         std::array<Context,2> contexts;
         unsigned primitive=0,attributes=0,color=0,x=0,y=0;
         unsigned scan_mask=0;
-        std::uint32_t uv=0,first_uv=0;
+        std::uint32_t uv=0,first_uv=0,first_s=0,first_t=0,first_q=0;
         std::uint64_t texa=0;
         std::uint32_t s=0,t=0,q=0x3f800000,packed_q=0x3f800000;
         std::uint32_t fog_color=0,fog=0;
@@ -675,7 +675,8 @@ private:
             }
             state.upload=ImageUpload::begin(state.transfer_buffer,state.transfer_position,state.transfer_extent,unsigned(value&3)); return;
         case 0x61: draws.emplace_back(Finish{}); return;
-        case 0xf: case 0x7f: return;
+        // Addresses with no GS register, or its no-operation: writes have no effect.
+        case 0xe: case 0xf: case 0x7f: return;
         case 4: case 5: case 12: case 13: break;
         default: throw std::invalid_argument("Unsupported native graphics command: "+std::to_string(reg));
         }
@@ -706,6 +707,27 @@ private:
             state.vertex_count=primitive==2 ? 1 : 0;
             if (primitive==2) state.vertices[0]=vertices[1];
             if (reg==12 || reg==13) return;
+            if (primitive && (attributes&16U) && !(attributes&~0x3ffU)) {
+                // A textured line draws as a one-pixel-wide quad through the triangle
+                // path, which owns texture sampling. Its covered pixels can differ
+                // from the GS line walk by part of a pixel.
+                if (state.suppress_draws) return;
+                const auto& context=state.contexts[(attributes>>9)&1];
+                if (context.wraps) throw std::invalid_argument("Line on a wrapping zero-width frame is unsupported");
+                const bool flat=std::abs(vertices[1].x-vertices[0].x)>=std::abs(vertices[1].y-vertices[0].y);
+                auto a=vertices[0],b=vertices[0],c=vertices[1],d=vertices[1];
+                (flat ? a.y : a.x)-=8; (flat ? b.y : b.x)+=8;
+                (flat ? c.y : c.x)-=8; (flat ? d.y : d.x)+=8;
+                for (const auto& corners:{std::array<RasterVertex,3>{a,b,c},std::array<RasterVertex,3>{b,c,d}}) {
+                    if (auto draw=plan_triangle(context.frame,context.offset,context.scissor,corners,(attributes&8)!=0,false)) {
+                        configure_draw(state,context,attributes,draw->draw);
+                        auto levels=plan_texture(draw->draw,context.texture,context.filter,context.clamp,state.texa,context.mipmap_bases);
+                        if (!(attributes&256)) draw->draw.flags|=perspective_triangle_flag;
+                        draws.push_back(Draw{draw->draw,unsigned((context.texture>>56)&(palette_is16(context.texture) ? 31 : 15)),draw->triangle,state.fog_color,state.fog,palette_is16(context.texture),state.texa,levels});
+                    }
+                }
+                return;
+            }
             if (attributes&~0x3cfU)
                 throw std::invalid_argument("Unsupported native point/line attributes: "+std::to_string(attributes));
             const auto& context=state.contexts[(attributes>>9)&1];
@@ -746,12 +768,12 @@ private:
             if (reg==12 || reg==13) {
                 // Vertex writes with a suppressed kick initialize the latch;
                 // unsupported primitives still stop when a draw is requested.
-                state.x=x; state.y=y; state.first_uv=state.uv; state.first=true; return;
+                state.x=x; state.y=y; state.first_uv=state.uv; state.first_s=state.s; state.first_t=state.t; state.first_q=state.q; state.first=true; return;
             }
             throw std::invalid_argument("Unsupported native primitive/attributes: "+
                 std::to_string(state.primitive&7)+"/"+std::to_string(attributes));
         }
-        if (!state.first) { state.x=x; state.y=y; state.first_uv=state.uv; state.first=true; return; }
+        if (!state.first) { state.x=x; state.y=y; state.first_uv=state.uv; state.first_s=state.s; state.first_t=state.t; state.first_q=state.q; state.first=true; return; }
         state.first=false;
         if (reg==12 || reg==13 || state.suppress_draws) return;
         const auto& context=state.contexts[(attributes>>9)&1];
@@ -762,8 +784,21 @@ private:
             TextureLevels levels{};
             if (attributes&16) {
                 // Sprites use the Q latched with their final vertex for LOD.
-                levels=plan_sprite_texture(*draw,attributes,context.texture,context.filter,context.clamp,state.texa,
-                    context.mipmap_bases,context.offset,state.x,state.y,x,y,state.first_uv,state.uv,std::bit_cast<float>(state.q));
+                // A sprite has no perspective across it: its S/T/Q corners project to
+                // the fixed-point texel coordinates the UV form carries directly.
+                const auto project=[&](std::uint32_t s,std::uint32_t t,std::uint32_t q) {
+                    const auto axis=[&](std::uint32_t coordinate,unsigned shift) {
+                        const auto extent=float(1U<<std::min(unsigned((context.texture>>shift)&15U),10U));
+                        const auto scaled=std::bit_cast<float>(coordinate)/std::bit_cast<float>(q)*extent*16.0f;
+                        return std::isfinite(scaled) ? std::uint32_t(std::clamp(scaled+0.5f,0.0f,16383.0f)) : 0U;
+                    };
+                    return axis(s,26)|(axis(t,30)<<16);
+                };
+                const bool projected=!(attributes&256U);
+                levels=plan_sprite_texture(*draw,attributes|256U,context.texture,context.filter,context.clamp,state.texa,
+                    context.mipmap_bases,context.offset,state.x,state.y,x,y,
+                    projected ? project(state.first_s,state.first_t,state.first_q) : state.first_uv,
+                    projected ? project(state.s,state.t,state.q) : state.uv,std::bit_cast<float>(state.q));
             }
             const Draw planned{*draw,unsigned((context.texture>>56)&(palette_is16(context.texture) ? 31 : 15)),{},state.fog_color,state.fog,palette_is16(context.texture),state.texa,levels};
             if (!context.wraps) { draws.push_back(planned); return; }
@@ -851,7 +886,8 @@ private:
                     const auto z=(reg&1) ? q[2] : (q[2]>>4)&0xffffffU;
                     const auto fog=(reg&1) ? 0ULL : (std::uint64_t((q[3]>>4)&255)<<56);
                     command(state,target,(q[0]&65535)|(std::uint64_t(q[1]&65535)<<16)|(std::uint64_t(z)<<32)|fog,draws);
-                } else throw std::invalid_argument("Unsupported packed native graphics register");
+                } else if (reg>=6 && reg<=9) command(state,reg,half(q,0),draws); // TEX0 and CLAMP pass through.
+                else throw std::invalid_argument("Unsupported packed native graphics register "+std::to_string(reg));
             };
             // Runs of vertex entries may be drawn by GPU assembly, planned from the
             // GS state at the run; state entries end a run and apply normally, as

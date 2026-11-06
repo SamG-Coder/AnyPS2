@@ -37,15 +37,36 @@ public:
     IoRead read(std::uint32_t address) const {
         unsigned channel,field;
         if (!decode(address,channel,field)) return {Stop::unsupported_system};
+        // Drained MFIFO bytes belong to the consumer, so the ring position is
+        // already final while it works through them.
+        if (channel==mfifo_channel && mfifo_running_) return {Stop::budget,channels_[channel][field]};
         if (pending_[channel]) {
             if (consumer.accepted) return {Stop::budget,position(channel)[field]};
             if (field>=1 && field<=5) return {Stop::unsupported_system};
         }
         return {Stop::budget,channels_[channel][field]};
     }
+    // The ring's fill position advanced. Forward complete descriptors.
+    Stop mfifo_filled(Memory& memory,std::uint32_t position) {
+        mfifo_end_=position;
+        return mfifo_drain(memory);
+    }
+    void mfifo_fill_position(std::uint32_t position) { mfifo_end_=position; }
+    // Retry work a busy consumer refused earlier.
+    Stop mfifo_retry(Memory& memory) { return mfifo_running_ ? mfifo_drain(memory) : Stop::budget; }
     Stop write(Memory& memory,std::uint32_t address,std::uint32_t value) {
         unsigned channel,field;
         if (!decode(address,channel,field)) return Stop::unsupported_system;
+        if (channel==mfifo_channel && !field && (value&0x100) && policy.mfifo_to_vector() && direction_==Direction::selectable) {
+            // The channel stays active and drains whatever the ring holds. Its
+            // chain carries descriptors with transferred tags and no interrupts.
+            if ((value&7U)!=5U || (value&0x80) || pending_[channel] || !consumer.consume_with_origins || !memory.completions)
+                return Stop::unsupported_system;
+            channels_[channel][0]=value;
+            mfifo_running_=true;
+            return mfifo_drain(memory);
+        }
+        if (channel==mfifo_channel && !field && !(value&0x100)) mfifo_running_=false;
         if (pending_[channel]) {
             if (!field && !(value&0x100) && direction_==Direction::fixed_input && consumer.accepted && consumer.cancel) {
                 auto next=position(channel);
@@ -159,6 +180,11 @@ public:
     }
     void complete(Memory& memory,unsigned channel) {
         if (channel>=pending_.size() || !pending_[channel]) return;
+        if (channel==mfifo_channel && mfifo_running_) {
+            pending_[channel].reset();
+            mfifo_status_=mfifo_drain(memory);
+            return;
+        }
         auto next=*pending_[channel]; next[0]&=~0x100U; next[2]=0;
         channels_[channel]=next; pending_[channel].reset(); chunks_[channel].clear();
         if (memory.completions) {
@@ -169,7 +195,74 @@ public:
         if (channel>=pending_.size() || !pending_[channel]) return;
         pending_[channel].reset(); channels_[channel][0]&=~0x100U; channels_[channel][2]=0;
     }
+    // A failure found while draining outside a guest access reports at the next one.
+    Stop take_mfifo_status() { const auto status=mfifo_status_; mfifo_status_=Stop::budget; return status; }
 private:
+    static constexpr unsigned mfifo_channel=1;
+    Stop mfifo_drain(Memory& memory) {
+        if (!mfifo_running_ || pending_[mfifo_channel]) return Stop::budget;
+        auto& config=channels_[mfifo_channel];
+        const auto used=[&](std::uint32_t from) {
+            return (policy.mfifo_address(mfifo_end_)-from)&(policy.mfifo_address(0xffffffffU)-policy.mfifo_address(0U)+15U);
+        };
+        const auto ring=[&](std::uint32_t address) { return policy.mfifo_address(address); };
+        NativePacketBatch batch;
+        const auto append=[&](std::uint32_t address,std::uint32_t size,bool in_ring)->Stop {
+            while (size) {
+                const auto chunk=in_ring ? std::min(size,policy.mfifo_address(0xffffffffU)+16U-address) : size;
+                std::span<const std::uint8_t> bytes;
+                const auto viewed=NativePacketBatch::view(memory,address,chunk,bytes);
+                if (viewed!=Stop::budget) return viewed;
+                batch.bytes.insert(batch.bytes.end(),bytes.begin(),bytes.end());
+                size-=chunk;
+                address=in_ring ? ring(address+chunk) : address+chunk;
+            }
+            return Stop::budget;
+        };
+        auto tag=ring(config[3]);
+        bool ended=false;
+        std::uint32_t bits=config[0]&0xffff0000U;
+        // Bounded so a very long ring still reaches the consumer in order.
+        while (tag!=ring(mfifo_end_) && batch.bytes.size()<0x100000U) {
+            std::span<const std::uint8_t> descriptor;
+            const auto viewed=NativePacketBatch::view(memory,tag,16,descriptor);
+            if (viewed!=Stop::budget) return viewed;
+            std::uint32_t words[2]; std::memcpy(words,descriptor.data(),sizeof(words));
+            const auto kind=(words[0]>>28)&7U,size=(words[0]&0xffffU)*16U;
+            const auto after=ring(tag+16);
+            const bool inline_payload=kind==1 || kind==2 || kind==7;
+            if (kind==5 || kind==6) return Stop::unsupported_system;
+            // Wait for the rest of a descriptor; its filler is still in progress.
+            if (inline_payload && used(after)<size) break;
+            batch.origins.push_back({batch.bytes.size(),8});
+            batch.bytes.insert(batch.bytes.end(),descriptor.end()-8,descriptor.end());
+            if (size) batch.origins.push_back({batch.bytes.size(),0});
+            const auto copied=inline_payload ? append(after,size,true) : append(words[1],size,false);
+            if (copied!=Stop::budget) return copied;
+            bits=words[0]&0xffff0000U;
+            config[1]=inline_payload ? ring(after+size) : words[1]+size;
+            tag=kind==1 ? ring(after+size) : kind==2 ? ring(words[1]) : after;
+            if (kind==0 || kind==7) { ended=true; break; }
+        }
+        if (batch.bytes.empty()) return Stop::budget;
+        const auto result=consumer.consume_with_origins(consumer.context,mfifo_channel,batch.bytes,batch.origins);
+        // A busy consumer keeps its state unchanged. The fill loop polls the channel
+        // position before it overwrites anything, which retries this batch.
+        if (result==Stop::native_wait || result==Stop::vector_pending) return Stop::budget;
+        if (result!=Stop::budget) return result;
+        config[3]=tag;
+        config[0]=(config[0]&0xffffU)|bits;
+        if (consumer.pending && consumer.pending(consumer.context,mfifo_channel)) pending_[mfifo_channel]=config;
+        if (ended && !pending_[mfifo_channel]) {
+            mfifo_running_=false;
+            config[0]&=~0x100U; config[2]=0;
+            memory.completions->complete(completion_base_+mfifo_channel); memory.completions->publish(memory);
+        }
+        return Stop::budget;
+    }
+    bool mfifo_running_=false;
+    std::uint32_t mfifo_end_=0;
+    Stop mfifo_status_=Stop::budget;
     std::array<std::uint32_t,9> position(unsigned channel) const {
         auto current=channels_[channel];
         const auto accepted=consumer.accepted(consumer.context,channel);
