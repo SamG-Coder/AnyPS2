@@ -180,9 +180,75 @@ void bulk_transfers() {
 }
 }
 
+namespace {
+// A wide display narrows positions alike on the CPU and GPU paths. Clears and full-width
+// copies of rendered surfaces keep their position, while other sprites narrow.
+void wide_display() {
+    using namespace nt::graphics;
+    using Packet=NativeDrawing::Packet;
+    const auto registers=[](std::initializer_list<std::pair<std::uint32_t,std::uint64_t>> values) {
+        Packet packet{{0x8000U|static_cast<std::uint32_t>(values.size()),0x10000000,14,0}};
+        for (const auto& [reg,value]:values) packet.push_back({std::uint32_t(value),std::uint32_t(value>>32),reg,0});
+        return packet;
+    };
+    const auto setup=[&](NativeDrawing& drawing,VulkanRenderer& renderer,unsigned primitive) {
+        drawing.set_wide_display(64);
+        const auto state=registers({{0x1a,1},{0,primitive},{0x4c,1ULL<<16},{0x18,0},
+            {0x40,0ULL|(63ULL<<16)|(0ULL<<32)|(63ULL<<48)},{0x42,0x44},{0x46,1},{0x4e,8},{0x47,0}});
+        drawing.submit(renderer,std::span(&state,1));
+    };
+    VulkanRenderer gpu_renderer(nullptr,true),cpu_renderer(nullptr,true);
+    // Bright triangles and blended sprites running past the sides of the target.
+    for (const unsigned primitive:{3U|64U,6U|64U}) {
+        const unsigned vertices=(primitive&7)==3 ? 3 : 2;
+        Packet draw{{0x8000U|1U,(vertices*2)<<28,0,0}};
+        for (unsigned n=0;n<vertices*2;n+=2) draw[0][2]|=(1U<<(n*4))|(5U<<((n+1)*4));
+        const std::array<std::array<unsigned,2>,3> corners{{{(primitive&7)==3 ? 56U*16 : 56U*16,4*16},{72*16,24*16},{56*16,44*16}}};
+        for (unsigned n=0;n<vertices;++n) {
+            draw.push_back({255,255,255,128});
+            draw.push_back({corners[n][0],corners[n][1],0,0});
+        }
+        NativeDrawing gpu(true),cpu(true);
+        if (!gpu.assemble_triangles_on_gpu(gpu_renderer)) throw std::runtime_error("GPU packet assembly unavailable");
+        setup(gpu,gpu_renderer,primitive); setup(cpu,cpu_renderer,primitive);
+        const auto before=gpu.gpu_packet_batches();
+        gpu.submit(gpu_renderer,std::span(&draw,1)); cpu.submit(cpu_renderer,std::span(&draw,1));
+        if (gpu.gpu_packet_batches()!=before+1) throw std::runtime_error("Wide packet was not assembled on the GPU");
+        if (gpu.pixels()!=cpu.pixels()) throw std::runtime_error("GPU and CPU wide positions differ");
+        // x=56 narrows to 50, so the shape starts well inside the target.
+        if (!cpu.pixels()[rgba_word(0,1,54,(primitive&7)==3 ? 24 : 8)]) throw std::runtime_error("A wide display did not narrow the primitive");
+        if (cpu.pixels()[rgba_word(0,1,63,(primitive&7)==3 ? 44 : 8)]) throw std::runtime_error("A wide display drew past the narrowed primitive");
+    }
+    // Full-width sprites: 0 clear, 1 image, 2 copy of a rendered surface.
+    for (const unsigned kind:{0U,1U,2U}) {
+        NativeDrawing drawing(true);
+        const auto transfer_texture=registers({{0x50,(0x1000ULL<<32)|(1ULL<<48)},{0x51,0},{0x52,1ULL|(1ULL<<32)},{0x53,0}});
+        drawing.submit(cpu_renderer,std::span(&transfer_texture,1));
+        const Packet pixel{{0x8000U|1U,0x08000000,0,0},{0xffffffffU,0,0,0}};
+        drawing.submit(cpu_renderer,std::span(&pixel,1));
+        drawing.set_wide_display(64);
+        // The program targeting the texture's pages marks them as rendered content.
+        if (kind==2) {
+            const auto rendered=registers({{0x4c,128ULL|(1ULL<<16)}});
+            drawing.submit(cpu_renderer,std::span(&rendered,1));
+        }
+        setup(drawing,cpu_renderer,6);
+        const std::uint64_t texture=0x1000ULL|(1ULL<<14)|(0ULL<<26)|(0ULL<<30)|(1ULL<<34)|(1ULL<<35);
+        const auto sprite=registers({{0,kind ? 6U|16U|256U : 6U},{6,texture},{1,0x80ffffffULL},{3,0},{5,std::uint64_t(0)|(std::uint64_t(16)<<16)},
+            {3,0},{5,std::uint64_t(64*16)|(std::uint64_t(160)<<16)}});
+        drawing.submit(cpu_renderer,std::span(&sprite,1));
+        // x=4 lies past a narrowed full-width sprite, which covers 8 to 56.
+        const bool written=drawing.pixels()[rgba_word(0,1,4,4)]!=0;
+        if (written==(kind==1)) throw std::runtime_error("Full-width wide sprite "+std::to_string(kind)+" took the wrong position");
+    }
+    if (gpu_renderer.validation_errors()) throw std::runtime_error(gpu_renderer.validation_message());
+    if (cpu_renderer.validation_errors()) throw std::runtime_error(cpu_renderer.validation_message());
+}
+}
 int main(int argc,char**) {
     try {
         bulk_transfers();
+        wide_display();
         nt::graphics::VulkanRenderer gpu(nullptr,true,nt::graphics::RenderPath::reference_compute);
         gpu.synchronize();
         nt::graphics::NativeDrawing native(argc>1);

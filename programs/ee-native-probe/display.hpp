@@ -15,7 +15,11 @@ namespace probe {
 // committed game pixels and keeps the last frame visible at a diagnostic stop.
 class NativeWindow {
 public:
-    explicit NativeWindow(bool validation=false,unsigned resolution_scale=1,bool fullscreen=false) : fullscreen_requested_(fullscreen),resolution_scale_(resolution_scale) {
+    // A shape of 0:0 shows one display pixel per plan pixel, as the plan's size says.
+    struct Shape { std::uint32_t width=0,height=0; };
+    explicit NativeWindow(bool validation=false,unsigned resolution_scale=1,bool fullscreen=false,
+                          nt::graphics::ImageFilter image_filter=nt::graphics::ImageFilter::console,Shape shape={})
+        : fullscreen_requested_(fullscreen),resolution_scale_(resolution_scale),shape_(shape) {
 #ifdef _WIN32
         SetProcessDPIAware();
         WNDCLASSW wc{};
@@ -40,7 +44,7 @@ public:
         if (!window_.handle) throw std::runtime_error("Cannot create native output window");
         SetWindowLongPtrW(window_.handle,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(this));
         ShowWindow(window_.handle,SW_SHOW);
-        renderer_=std::make_unique<nt::graphics::VulkanRenderer>(window_.handle,validation,nt::graphics::RenderPath::native_images,resolution_scale);
+        renderer_=std::make_unique<nt::graphics::VulkanRenderer>(window_.handle,validation,nt::graphics::RenderPath::native_images,resolution_scale,image_filter);
 #else
         throw std::runtime_error("Native output window is unavailable on this platform");
 #endif
@@ -82,8 +86,9 @@ public:
     // monitor's size, and full screen fills the monitor at the display's shape.
     void fit(nt::graphics::DisplayPlan& plan) const {
 #ifdef _WIN32
-        if (resolution_scale_<=1 && !fullscreen_requested_) return;
-        const auto shown_width=plan.presented_width(),shown_height=plan.presented_height();
+        if (resolution_scale_<=1 && !fullscreen_requested_ && !shape_.height) return;
+        const auto shown_height=plan.presented_height();
+        const auto shown_width=shape_.height ? shown_height*shape_.width/shape_.height : plan.presented_width();
         MONITORINFO monitor{sizeof(monitor)};
         if (!shown_width || !shown_height || !GetMonitorInfoW(MonitorFromWindow(window_.handle,MONITOR_DEFAULTTOPRIMARY),&monitor)) return;
         const auto area=fullscreen_requested_ ? monitor.rcMonitor : monitor.rcWork;
@@ -216,5 +221,6 @@ private:
 #endif
     bool fullscreen_=false,fullscreen_requested_=false;
     unsigned resolution_scale_=1;
+    Shape shape_;
 };
 }

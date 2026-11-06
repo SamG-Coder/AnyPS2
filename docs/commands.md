@@ -68,6 +68,8 @@ always an error: the `host_stop=` and `stop=` lines in the output say what happe
 | `--memory-card <folder>` | Folder holding the [memory cards](#memory-cards). Default `%LOCALAPPDATA%\AnyPS2\memory-cards` |
 | `--fullscreen` | Start in borderless full screen. F11 or Alt+Enter switches while running |
 | `--resolution-scale 1\|3\|5` | Samples per console pixel on each axis. Default 5; 1 draws only the console's own pixels |
+| `--image-filter console\|linear\|cubic` | How 2D images fill the samples between console pixels. Default `console`, which keeps them blocky |
+| `--shape pixels\|4:3\|16:9\|wide` | Display shape. Default `pixels`. `16:9` stretches; `wide` is an [experimental](render-modernization.md#display-shape) 16:9 view that shows more at the sides |
 | `--close-on-stop` | Close the window when the game stops |
 | `--display-stop` | Keep the window open after a stop. This is the default |
 | `--run-seconds <1..86400>` | Stop after this long, for measured runs |

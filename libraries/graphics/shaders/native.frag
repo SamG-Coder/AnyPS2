@@ -163,6 +163,71 @@ uint texel_at(uint level,int u,int v) {
         }
         return texel;
 }
+// Image filter for the off-center samples of a sprite at a scale above 1:
+// 0 keeps one texel per console pixel, 1 is bilinear and 2 is Catmull-Rom.
+layout(constant_id=1) const uint image_filter=0;
+int64_t floor_div64(int64_t n,int64_t d) {int64_t q=n/d;return q-((n%d)!=0 && ((n<0)!=(d<0)) ? int64_t(1):int64_t(0));}
+struct ImageAxis { int position,low,high; };
+// A sample's position in 1/256 texel, and the texels this sprite's own console samples
+// read. Staying inside them keeps neighbouring atlas tiles out of the filter. A nearest
+// sprite's phase is removed so that its console samples land exactly on texels.
+ImageAxis image_axis(int pixel,int offset,int origin,int extent,int start,int delta,bool linear) {
+    const int first=floor_div(min(origin,origin+extent)+15,16),last=floor_div(max(origin,origin+extent)+15,16)-1;
+    const int a=start+floor_div((first*16-origin)*delta,extent),b=start+floor_div((last*16-origin)*delta,extent);
+    const int bias=linear ? 8 : 0;
+    // A plain variable: specialization constants cannot be converted to 64 bits in SPIR-V 1.3.
+    uint samples=resolution_scale;
+    const int64_t scale=int64_t(samples);
+    const int64_t position=int64_t(start)*16+floor_div64(
+        (int64_t(pixel)*16*scale+int64_t(offset)*16-int64_t(origin)*scale)*int64_t(delta)*16,int64_t(extent)*scale);
+    const int phase=linear ? 0 : a-floor_div(a,16)*16;
+    ImageAxis axis;
+    axis.position=int(position)-(bias+phase)*16;
+    axis.low=floor_div(min(a,b)-bias,16);
+    axis.high=floor_div(max(a,b)-bias,16)+(linear ? 1 : 0);
+    return axis;
+}
+vec4 image_texel(ImageAxis u,ImageAxis v,int x,int y,bool weighted) {
+    const uint texel=texel_at(0u,clamp(x,u.low,u.high),clamp(y,v.low,v.high));
+    vec4 color=vec4(float(texel&255u),float((texel>>8)&255u),float((texel>>16)&255u),float(texel>>24));
+    if (weighted) color.rgb*=color.a;
+    return color;
+}
+vec4 cubic_weights(float t) {
+    const float t2=t*t,t3=t2*t;
+    return vec4(-0.5*t3+t2-0.5*t,1.5*t3-2.5*t2+1.0,-1.5*t3+2.0*t2+0.5*t,0.5*t3-0.5*t2);
+}
+uint sample_image(int pixel_x,int pixel_y,ivec2 sub_sample) {
+    const bool linear=(draw.flags&128u)!=0u;
+    const ImageAxis u=image_axis(pixel_x,sub_sample.x,draw.x0,draw.dx,draw.u0,draw.du,linear);
+    const ImageAxis v=image_axis(pixel_y,sub_sample.y,draw.y0,draw.dy,draw.v0,draw.dv,linear);
+    const int tu=floor_div(u.position,256),tv=floor_div(v.position,256);
+    const vec2 f=vec2(float(u.position-tu*256),float(v.position-tv*256))/256.0;
+    // Transparent texels hold no meaningful colour when the draw depends on alpha.
+    const bool textured_alpha=(draw.flags&4u)!=0u;
+    const bool weighted=textured_alpha && ((draw.test&1u)!=0u || ((draw.flags&256u)!=0u && ((draw.blend>>4)&3u)==0u));
+    const vec4 c00=image_texel(u,v,tu,tv,weighted),c10=image_texel(u,v,tu+1,tv,weighted);
+    const vec4 c01=image_texel(u,v,tu,tv+1,weighted),c11=image_texel(u,v,tu+1,tv+1,weighted);
+    vec4 color;
+    if (image_filter==1u) color=mix(mix(c00,c10,f.x),mix(c01,c11,f.x),f.y);
+    else {
+        const vec4 wx=cubic_weights(f.x),wy=cubic_weights(f.y);
+        color=vec4(0.0);
+        for (int j=0;j<4;++j) {
+            vec4 row=vec4(0.0);
+            for (int i=0;i<4;++i) {
+                const bool inner=i>=1 && i<=2 && j>=1 && j<=2;
+                row+=wx[i]*(inner ? (j==1 ? (i==1 ? c00 : c10) : (i==1 ? c01 : c11)) : image_texel(u,v,tu+i-1,tv+j-1,weighted));
+            }
+            color+=wy[j]*row;
+        }
+        // Holding the result within the nearest texels prevents halos around hard edges.
+        color=clamp(color,min(min(c00,c10),min(c01,c11)),max(max(c00,c10),max(c01,c11)));
+    }
+    if (weighted && color.a>0.0) color.rgb/=color.a;
+    const uvec4 result=uvec4(clamp(color+0.5,vec4(0.0),vec4(255.0)));
+    return result.r|(result.g<<8)|(result.b<<16)|(result.a<<24);
+}
 uint interpolate(uint a,uint b,uint fraction) {
     uint result=0;
     for(uint channel=0;channel<4;++channel) {
@@ -421,7 +486,11 @@ void main() {
             uf=draw.u0+floor_div((int(x)*16-draw.x0)*draw.du,draw.dx);
             vf=draw.v0+floor_div((int(y)*16-draw.y0)*draw.dv,draw.dy);
         }
-        uint texel=sample_texture(uf,vf,lod_q);
+        // The center sample stays on console memory's texel. A rendered surface read at each
+        // sample's own position already has its detail, and level-of-detail keeps its levels.
+        const bool filtered_image=image_filter!=0u && (draw.flags&16384)==0 && sub_sample!=ivec2(0) &&
+            (draw.lod_control&1u)==0u && (draw.indexed_levels&256u)==0u;
+        uint texel=filtered_image ? sample_image(int(x),int(y),sub_sample) : sample_texture(uf,vf,lod_q);
         uint function=(draw.flags>>3)&3;
         uint vertex_color=color;
         color=0;

@@ -291,6 +291,14 @@ public:
         for (auto& context:state_.contexts) { jitter=std::max(jitter,unsigned(context.jitter_y)); context.jitter_y=0; }
         return jitter;
     }
+    // Experimental wide view. Screen-sized targets hold a 16:9 image squeezed to the
+    // console's width: positions narrow by 3/4 about the center, which brings in what
+    // the program drew past the sides of its 4:3 view. Plain opaque sprites keep their
+    // position, as do sprites spanning the whole width unless they show an image the program
+    // did not render, so clears and full-screen copies still cover the image and a full-screen
+    // picture keeps its shape. Console memory then holds the squeezed image. Zero turns it off.
+    // Call from the submitting thread.
+    void set_wide_display(unsigned width) { state_.wide_width=width; }
 private:
     struct Context {
         std::uint64_t frame=0,offset=0,scissor=0,test=0,depth=0,texture=0,filter=0,clamp=0,alpha=0;
@@ -335,7 +343,37 @@ private:
         std::array<std::uint32_t,16> palette_banks{};
         std::array<unsigned,2> palette_bases{};
         std::uint64_t palette_config=0;
+        unsigned wide_width=0;
+        // Recent frame bases plus one, in texture block units; zero is empty. A texture
+        // here is rendered content.
+        std::array<std::uint16_t,16> frame_bases{};
+        unsigned next_frame_base=0;
     } state_;
+    static void note_frame(State& state,std::uint64_t frame) {
+        if (!state.wide_width) return;
+        const auto entry=std::uint16_t((frame&511)*32+1);
+        if (std::find(state.frame_bases.begin(),state.frame_bases.end(),entry)!=state.frame_bases.end()) return;
+        state.frame_bases[state.next_frame_base++%state.frame_bases.size()]=entry;
+    }
+    static bool shows_image(const State& state,const Context& context,unsigned attributes) {
+        const auto entry=std::uint16_t((context.texture&16383)+1);
+        return (attributes&16) && std::find(state.frame_bases.begin(),state.frame_bases.end(),entry)==state.frame_bases.end();
+    }
+    static int wide_center(const State& state,const Context& context) {
+        if (!state.wide_width || context.wraps) return 0;
+        const auto pitch=unsigned((context.frame>>16)&63),format=unsigned((context.frame>>24)&63);
+        if (pitch*64!=state.wide_width || format>=0x30) return 0;
+        return int(state.wide_width*8);
+    }
+    static int narrowed(const Context& context,int center,int x) {
+        const auto origin=int(context.offset&65535);
+        return std::clamp(origin+center+(((x-origin-center)*3)>>2),0,65535);
+    }
+    template <std::size_t count>
+    static std::array<RasterVertex,count> narrowed(const State& state,const Context& context,std::array<RasterVertex,count> vertices) {
+        if (const auto center=wide_center(state,context)) for (auto& vertex:vertices) vertex.x=narrowed(context,center,vertex.x);
+        return vertices;
+    }
     // Brings every GPU-resident bank into state.palette; each read waits for the GPU.
     static void materialize_palette(VulkanRenderer& renderer,State& state) {
         std::array<std::uint32_t,256> resident{};
@@ -439,6 +477,8 @@ private:
         const auto& context=state.contexts[(attributes>>9)&1];
         if (context.wraps) throw std::invalid_argument("Vector drawing on a wrapping zero-width frame is unsupported");
         assembly.offset_x=int(context.offset&65535); assembly.offset_y=int((context.offset>>32)&65535);
+        assembly.wide_center=wide_center(state,context);
+        assembly.wide_image=shows_image(state,context,attributes) ? 1U : 0U;
         assembly.scissor={unsigned(context.scissor&2047),unsigned((context.scissor>>16)&2047),
             unsigned((context.scissor>>32)&2047),unsigned((context.scissor>>48)&2047)};
         assembly.state={state.color,state.q,state.s,state.t,state.uv,state.fog};
@@ -587,6 +627,11 @@ private:
             low_x=std::min(low_x,x(vertex)); high_x=std::max(high_x,x(vertex));
             low_y=std::min(low_y,y(vertex)); high_y=std::max(high_y,y(vertex));
         }
+        // A narrowed primitive can land inside the target from past its side.
+        if (a.wide_center) {
+            const auto narrow=[&](int value) { return a.offset_x+a.wide_center+(((value-a.offset_x-a.wide_center)*3)>>2); };
+            low_x=std::min(low_x,narrow(low_x)); high_x=std::max(high_x,narrow(high_x));
+        }
         const auto ceil_pixel=[](int value) { return value>=0 ? (value+15)/16 : value/16; };
         const int coverage=a.coverage ? 15 : 0;
         const int left=std::max(ceil_pixel(std::max(0,low_x-coverage)-a.offset_x),int(a.scissor[0]));
@@ -658,7 +703,7 @@ private:
         case 0x49: state.per_pixel_blend=(value&1)!=0; return;
         case 0x47: case 0x48: state.contexts[reg-0x47].test=value; return;
         case 0x4a: case 0x4b: state.contexts[reg-0x4a].force_alpha=(value&1)!=0; return;
-        case 0x4c: case 0x4d: state.contexts[reg-0x4c].written_frame=value; update_frame(state.contexts[reg-0x4c]); return;
+        case 0x4c: case 0x4d: state.contexts[reg-0x4c].written_frame=value; update_frame(state.contexts[reg-0x4c]); note_frame(state,value); return;
         case 0x4e: case 0x4f: state.contexts[reg-0x4e].depth=value; return;
         case 0x50: state.transfer_buffer=value; return;
         case 0x51: state.transfer_position=value; return;
@@ -710,7 +755,7 @@ private:
                 throw std::invalid_argument("Unsupported native point/line attributes: "+std::to_string(attributes));
             const auto& context=state.contexts[(attributes>>9)&1];
             if (context.wraps) throw std::invalid_argument("Line or point on a wrapping zero-width frame is unsupported");
-            if (auto draw=plan_line_or_point(context.frame,context.offset,context.scissor,vertices,primitive==0,(attributes&8)!=0,(attributes&128)!=0)) {
+            if (auto draw=plan_line_or_point(context.frame,context.offset,context.scissor,narrowed(state,context,vertices),primitive==0,(attributes&8)!=0,(attributes&128)!=0)) {
                 configure_draw(state,context,attributes,draw->draw);
                 draws.push_back(Draw{draw->draw,0,draw->triangle});
             }
@@ -728,7 +773,7 @@ private:
             if (attributes&~0x3ffU) throw std::invalid_argument("Unsupported native triangle attributes: "+std::to_string(attributes));
             const auto& context=state.contexts[(attributes>>9)&1];
             if (context.wraps) throw std::invalid_argument("Triangle on a wrapping zero-width frame is unsupported");
-            if (auto draw=plan_triangle(context.frame,context.offset,context.scissor,vertices,(attributes&8)!=0,(attributes&128)!=0)) {
+            if (auto draw=plan_triangle(context.frame,context.offset,context.scissor,narrowed(state,context,vertices),(attributes&8)!=0,(attributes&128)!=0)) {
                 configure_draw(state,context,attributes,draw->draw);
                 TextureLevels levels{};
                 if (attributes&16) {
@@ -755,7 +800,14 @@ private:
         state.first=false;
         if (reg==12 || reg==13 || state.suppress_draws) return;
         const auto& context=state.contexts[(attributes>>9)&1];
-        auto draw=plan_sprite(context.frame,context.offset,context.scissor,state.x,state.y,x,y,state.color);
+        unsigned first_x=state.x,last_x=x;
+        if (const auto center=wide_center(state,context)) {
+            const auto origin=int(context.offset&65535);
+            const bool spans=int(std::min(first_x,last_x))-origin<=0 && int(std::max(first_x,last_x))-origin>=center*2;
+            // Plain opaque sprites clear surfaces, often in tiles that must still cover them.
+            if ((!spans || shows_image(state,context,attributes)) && (attributes&(16|64))) { first_x=unsigned(narrowed(context,center,int(first_x))); last_x=unsigned(narrowed(context,center,int(last_x))); }
+        }
+        auto draw=plan_sprite(context.frame,context.offset,context.scissor,first_x,state.y,last_x,y,state.color);
         if (draw) {
             draw->depth=z;
             configure_draw(state,context,attributes,*draw);
@@ -763,7 +815,7 @@ private:
             if (attributes&16) {
                 // Sprites use the Q latched with their final vertex for LOD.
                 levels=plan_sprite_texture(*draw,attributes,context.texture,context.filter,context.clamp,state.texa,
-                    context.mipmap_bases,context.offset,state.x,state.y,x,y,state.first_uv,state.uv,std::bit_cast<float>(state.q));
+                    context.mipmap_bases,context.offset,first_x,state.y,last_x,y,state.first_uv,state.uv,std::bit_cast<float>(state.q));
             }
             const Draw planned{*draw,unsigned((context.texture>>56)&(palette_is16(context.texture) ? 31 : 15)),{},state.fog_color,state.fog,palette_is16(context.texture),state.texa,levels};
             if (!context.wraps) { draws.push_back(planned); return; }

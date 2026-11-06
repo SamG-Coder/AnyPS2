@@ -6,7 +6,7 @@ namespace nt::graphics {
 // Image-backed hardware rasterization. Console layouts exist only at import/export.
 class NativeRaster {
 public:
-    NativeRaster(VkPhysicalDevice physical,VkDevice device,VkQueue queue,unsigned family,bool ordered_fragments,unsigned resolution_scale=1);
+    NativeRaster(VkPhysicalDevice physical,VkDevice device,VkQueue queue,unsigned family,bool ordered_fragments,unsigned resolution_scale=1,ImageFilter image_filter=ImageFilter::console);
     ~NativeRaster();
     void upload(std::span<const std::uint32_t> words);
     void write(std::span<const PixelWrite> writes);

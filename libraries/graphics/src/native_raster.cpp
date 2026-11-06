@@ -158,6 +158,7 @@ struct NativeRaster::Impl {
     VkDescriptorSetLayout palette_descriptors{}; VkPipelineLayout palette_layout{}; VkPipeline palette_pipeline{};
     std::uint32_t next_palette=1;
     unsigned resolution_scale=1;
+    std::uint32_t image_filter=0;
     // Slot holding the last CPU palette snapshot uploaded for a GPU decode.
     std::uint32_t uploaded_palette=0; std::array<std::uint32_t,256> uploaded_snapshot{};
     struct PaletteParameters {
@@ -497,8 +498,9 @@ VkPipeline NativeRaster::Impl::make_pipeline(VkRenderPass pass,VkPipelineLayout 
     if (fragment_result!=VK_SUCCESS) { vkDestroyShaderModule(device,modules[0],nullptr); checked(fragment_result,"Create native fragment shader"); }
     std::array<VkPipelineShaderStageCreateInfo,2> stages{};
     for (unsigned i=0;i<2;++i) { stages[i].sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; stages[i].stage=i ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT; stages[i].module=modules[i]; stages[i].pName="main"; }
-    const VkSpecializationMapEntry scale_entry{0,0,sizeof(resolution_scale)};
-    const VkSpecializationInfo fragment_constants{1,&scale_entry,sizeof(resolution_scale),&resolution_scale};
+    const std::array<std::uint32_t,2> constant_values{resolution_scale,image_filter};
+    const std::array<VkSpecializationMapEntry,2> constant_entries{VkSpecializationMapEntry{0,0,4},VkSpecializationMapEntry{1,4,4}};
+    const VkSpecializationInfo fragment_constants{2,constant_entries.data(),sizeof(constant_values),constant_values.data()};
     stages[1].pSpecializationInfo=&fragment_constants;
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO}; ia.topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -1572,8 +1574,9 @@ VkDescriptorSet NativeRaster::Impl::bind_target(Image& color,Image& depth,const 
     }
     return set;
 }
-NativeRaster::NativeRaster(VkPhysicalDevice p,VkDevice d,VkQueue q,unsigned family,bool ordered,unsigned resolution_scale):impl_(std::make_unique<Impl>(p,d,q,ordered)) {
+NativeRaster::NativeRaster(VkPhysicalDevice p,VkDevice d,VkQueue q,unsigned family,bool ordered,unsigned resolution_scale,ImageFilter image_filter):impl_(std::make_unique<Impl>(p,d,q,ordered)) {
     impl_->resolution_scale=resolution_scale;
+    impl_->image_filter=static_cast<std::uint32_t>(image_filter);
     impl_->initialize(family);
 #ifdef ANYPS2_LLVM_TEXTURES
     impl_->initialize_texture_decoder();

@@ -9,8 +9,66 @@
 #include <string_view>
 #include <thread>
 using namespace nt::graphics;
+namespace {
+// Filtered sprites keep console memory exact, leave no seam between adjoining tiles of an
+// atlas, read nothing past their own texels and put detail between console samples.
+void check_image_filters() {
+    constexpr unsigned scale=5,texture_base=64,target_base=0;
+    std::vector<std::uint32_t> source(1024*1024);
+    for (unsigned y=0;y<32;++y) for (unsigned x=0;x<64;++x) {
+        // A flat half-transparent area, then a ramp, then a bright neighbouring atlas tile.
+        const unsigned level=x<16 ? 96 : x<32 ? (x-16)*12+40 : 255;
+        source[rgba_word(texture_base,1,x,y)]=0x40000000U|(level*0x010101U);
+    }
+    const auto tile=[](unsigned left,unsigned right,unsigned u,int phase) {
+        SpriteCommand c{{left,0,right,16,target_base,1,0x80808080,0}};
+        auto& d=c.draw;
+        d.flags=1|4|8|256; d.blend=0x44; d.texture_base=texture_base; d.texture_pitch=1;
+        d.texture_width=64; d.texture_height=32;
+        d.x0=int(left)*16; d.y0=0; d.dx=int(right-left)*16; d.dy=256;
+        d.u0=int(u)*16+phase; d.v0=phase; d.du=int(right-left)*16; d.dv=256;
+        return c;
+    };
+    for (const int phase:{0,8}) {
+        const auto run=[&](ImageFilter filter,std::span<const SpriteCommand> commands,std::vector<std::uint32_t>& memory,unsigned& width) {
+            VulkanRenderer renderer(nullptr,true,RenderPath::native_images,scale,filter);
+            renderer.upload(source);
+            const SpriteCommand clear{{0,0,64,32,target_base,1,0x80000000U,0}};
+            renderer.draw(std::array{clear});
+            renderer.draw(commands);
+            renderer.read(memory);
+            unsigned height=0;
+            return renderer.read_surface_samples(target_base,1,0,width,height);
+        };
+        std::vector<std::uint32_t> console_memory(source.size()),filtered_memory(source.size());
+        unsigned width=0;
+        const std::array seam{tile(0,8,0,phase),tile(8,16,8,phase)};
+        run(ImageFilter::console,seam,console_memory,width);
+        for (const auto filter:{ImageFilter::linear,ImageFilter::cubic}) {
+            const auto samples=run(filter,seam,filtered_memory,width);
+            if (filtered_memory!=console_memory) throw std::runtime_error("Image filter changed console memory");
+            if (samples.empty() || width!=64*scale) throw std::runtime_error("Image filter test has no scaled surface");
+            for (unsigned y=0;y<16*scale;++y) for (unsigned x=0;x<16*scale;++x)
+                if (samples[std::size_t(y)*width+x]!=samples[0])
+                    throw std::runtime_error("Image filter left a seam at sample "+std::to_string(x)+","+std::to_string(y)+
+                        " value="+std::to_string(samples[std::size_t(y)*width+x])+" first="+std::to_string(samples[0])+" phase="+std::to_string(phase));
+            // The last tile before a bright neighbour must not read that neighbour.
+            const std::array edge{tile(16,32,16,phase)};
+            const auto ramp=run(filter,edge,filtered_memory,width);
+            const auto red=[&](unsigned x) { return ramp[std::size_t(8*scale+scale/2)*width+x]&255U; };
+            unsigned highest=0;
+            for (unsigned x=16*scale;x<32*scale;++x) highest=std::max(highest,red(x));
+            if (highest>red(32*scale-scale/2-1)+1) throw std::runtime_error("Image filter read past its sprite's texels");
+            bool between=false;
+            for (unsigned x=20*scale;x<28*scale;++x) between|=red(x)!=red(x+1) && (x%scale)!=scale/2;
+            if (!between) throw std::runtime_error("Image filter added no detail between console samples");
+        }
+    }
+}
+}
 int main(int argc,char** argv) {
     try {
+        check_image_filters();
         VulkanRenderer native(nullptr,true),reference(nullptr,true,RenderPath::reference_compute);
         if (argc>1 && (std::string_view(argv[1])!="--require-llvm-textures" || !native.statistics().llvm_texture_kernels))
             throw std::runtime_error("Expected the LLVM texture kernel renderer");

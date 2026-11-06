@@ -84,9 +84,37 @@ and a read of a rendered surface as data takes the sample at the reader's own po
 so effects that read the frame back keep their detail without being recognized.
 
 Known differences at a scale above 1, all in presentation only: sprites keep one texel
-per console pixel, off-center samples of a triangle may pass a scissor edge by up to one
-console pixel, coverage antialiasing stays on the console grid, field reconstruction is
-skipped, and off-center samples of a 16-bit surface keep full colour without dither.
+per console pixel unless an image filter is chosen, off-center samples of a triangle may
+pass a scissor edge by up to one console pixel, coverage antialiasing stays on the console
+grid, field reconstruction is skipped, and off-center samples of a 16-bit surface keep full
+colour without dither.
+
+`--image-filter linear|cubic` smooths a sprite's off-center samples between its texels.
+It reads only the texels that sprite's console samples read, so a neighbouring tile of an
+atlas stays out, and it leaves console memory exact. It removes blockiness but cannot add
+detail the art does not have. Sprites reading a rendered surface already have that detail.
+Text drawn in tiles can show a faint one-sample vertical line at a tile boundary; the cause
+is not yet known.
+
+## Display shape
+
+`--shape 4:3` shows an analog mode at a television's shape, and `--shape 16:9` stretches
+it. The default shows one display pixel per drawn pixel, which makes a 512-wide mode
+narrower than a television shows it.
+
+`--shape wide` is experimental. Screen-sized targets hold a 16:9 image squeezed to the
+console's width: positions narrow by 3/4 about the center, so the sides show what the
+program drew past its 4:3 view. It is chosen by target size, not by game:
+
+- Only what the program sends can appear. Objects it culled at its own 4:3 view leave
+  gaps near the sides, and objects can appear at the edges later than they should.
+- Plain opaque sprites keep their position, because programs clear in tiles. An opaque
+  screen panel therefore stretches. So do full-width copies of rendered surfaces, which
+  is correct for the squeezed image.
+- Other sprites narrow, so interface art and full-screen pictures keep their shape with
+  empty sides. Use an image filter, because a narrowed sprite otherwise skips texels.
+- Console memory holds the squeezed image, so it is no longer exact, and programs that
+  read pixels back see that image.
 
 The window shows a scaled image at up to the monitor's size. Full screen is a borderless
 window over the whole monitor, at the display's shape with black bars around it.

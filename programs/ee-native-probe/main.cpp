@@ -197,7 +197,7 @@ struct NativeGpu {
     std::unique_ptr<nt::graphics::VulkanRenderer> headless_renderer;
     nt::graphics::VulkanRenderer* renderer=nullptr;
     // GPU primitive assembly is the default where the renderer supports it.
-    bool verify_textures=false,profile_commands=false,gpu_triangles=true,gpu_triangles_required=false,gpu_triangles_enabled=false;
+    bool verify_textures=false,profile_commands=false,gpu_triangles=true,gpu_triangles_required=false,gpu_triangles_enabled=false,wide_view=false;
     nt::graphics::NativeDrawing drawing{true,nt::graphics::NativeDrawing::Completion::recorded};
     nt::graphics::NativeDrawing::Profile drawing_profile{};
     std::unique_ptr<nt::graphics::NativeDrawingWorker> worker;
@@ -336,7 +336,7 @@ nt::ee::Stop execute(nt::runtime::State* state,nt::ee::Memory* memory,std::uint6
 int main(int argc,char** argv) {
     if (argc<2) {
         std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [options]\n"
-                   "  Play: --disc <image.iso> --disc-media cd|dvd --memory-card <folder> --fullscreen --resolution-scale 1|3|5 --close-on-stop --display-stop --run-seconds N --headless\n"
+                   "  Play: --disc <image.iso> --disc-media cd|dvd --memory-card <folder> --fullscreen --resolution-scale 1|3|5 --image-filter console|linear|cubic --shape pixels|4:3|16:9|wide --close-on-stop --display-stop --run-seconds N --headless\n"
                    "  Input: --pad-script <file> --input-latency\n"
                    "  Rendering: --gpu-triangles | --cpu-triangles --validate-graphics --verify-textures\n"
                    "  Profiling: --profile-graphics --sample-threads <file> --trace-services --strict-performance | --native-thread-cycles | --native-pmu\n"
@@ -363,6 +363,9 @@ int main(int argc,char** argv) {
         std::filesystem::path disc,memory_card,capture_directory,stop_directory,graphics_directory,vector_directory,sample_path;
         bool profile_graphics=false,validate_graphics=false,verify_textures=false,gpu_triangles=true,gpu_triangles_required=false,capture_display_only=false,capture_graphics_when_heavy=false;
         unsigned resolution_scale=5; // --resolution-scale 1 draws only the console samples
+        nt::graphics::ImageFilter image_filter=nt::graphics::ImageFilter::console;
+        probe::NativeWindow::Shape display_shape;
+        bool wide_view=false;
         bool start_fullscreen=false;
         bool has_budget=false,native_cycles=false,native_pmu=false,strict_performance=false,show_window=true,hold_window=true;
 #ifdef ANYPS2_NATIVE_IOP
@@ -451,6 +454,25 @@ int main(int argc,char** argv) {
             if (text=="--resolution-scale") {
                 if (index+1==argc) throw std::runtime_error("Expected a resolution scale");
                 resolution_scale=static_cast<unsigned>(std::stoul(argv[++index]));
+                continue;
+            }
+            if (text=="--image-filter") {
+                if (index+1==argc) throw std::runtime_error("Expected an image filter");
+                const std::string_view name=argv[++index];
+                if (name=="console") image_filter=nt::graphics::ImageFilter::console;
+                else if (name=="linear") image_filter=nt::graphics::ImageFilter::linear;
+                else if (name=="cubic") image_filter=nt::graphics::ImageFilter::cubic;
+                else throw std::runtime_error("Expected --image-filter console, linear or cubic");
+                continue;
+            }
+            if (text=="--shape") {
+                if (index+1==argc) throw std::runtime_error("Expected a display shape");
+                const std::string_view name=argv[++index];
+                if (name=="pixels") display_shape={};
+                else if (name=="4:3") display_shape={4,3};
+                else if (name=="16:9") display_shape={16,9};
+                else if (name=="wide") { display_shape={16,9}; wide_view=true; }
+                else throw std::runtime_error("Expected --shape pixels, 4:3, 16:9 or wide");
                 continue;
             }
             if (text=="--sample-threads") {
@@ -566,6 +588,7 @@ int main(int argc,char** argv) {
         }
         std::unique_ptr<probe::NativeWindow> window;
         NativeGpu gpu;
+        gpu.wide_view=wide_view;
         gpu.profile_commands=profile_graphics;
         if (profile_graphics) gpu.drawing.profile=&gpu.drawing_profile;
         gpu.verify_textures=verify_textures;
@@ -774,7 +797,7 @@ int main(int argc,char** argv) {
         services.console_output=[](std::string_view text) { std::cerr<<"program_console: "<<text; };
 #endif
         if (show_window) {
-            window=std::make_unique<probe::NativeWindow>(validate_graphics,resolution_scale,start_fullscreen);
+            window=std::make_unique<probe::NativeWindow>(validate_graphics,resolution_scale,start_fullscreen,image_filter,display_shape);
             gpu.renderer=&window->renderer();
             gpu.renderer->verify_texture_kernels(verify_textures);
             gpu.renderer->profile_commands(profile_graphics);
@@ -837,6 +860,7 @@ int main(int argc,char** argv) {
                     gpu.worker->enqueue([display=window.get(),timing=presented,plan=*plan,profile=profile_graphics,gpu=&gpu](nt::graphics::VulkanRenderer& renderer) mutable {
                         const auto present_started=std::chrono::steady_clock::now();
                         plan.smoothing=gpu->jitter_hold.smoothing(gpu->drawing.take_offset_jitter(),plan.half_height!=0);
+                        if (gpu->wide_view) gpu->drawing.set_wide_display(plan.width);
                         const bool updated=display->present_display(renderer,plan);
                         const auto completed=std::chrono::steady_clock::now();
                         if (profile && updated) {

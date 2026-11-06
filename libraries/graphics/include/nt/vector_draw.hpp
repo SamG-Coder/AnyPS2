@@ -61,6 +61,10 @@ struct VectorAssembly {
     // machine sees them at each position write: color, Q, S, T, UV, fog, XY, Z and
     // a word with bit 0 kick and bit 1 strip restart (first vertex of a new strip).
     std::uint32_t reglist=0;
+    // Nonzero: the target's center in 12.4 units, about which positions narrow by
+    // 3/4 for a wide display (NativeDrawing::set_wide_display).
+    std::int32_t wide_center=0;
+    std::uint32_t wide_image=0; // Its sprites narrow even when they span the whole width.
 };
 // Register kinds of VectorAssembly::store/constant/present.
 enum class VectorRegisterKind : unsigned { color=0, texture=1, uv=2, fog=3, position=4 };

@@ -19,7 +19,7 @@ layout(std430,set=0,binding=3) buffer Status { uint words[]; } status;
 const uint plan_elements=0u, plan_element_words=1u, plan_record_first=2u, plan_primitive=3u;
 const uint plan_shaded=4u, plan_coverage=5u, plan_xyz_register=6u, plan_present=7u;
 const uint plan_offset=8u, plan_scissor=10u, plan_store=14u, plan_constant=34u, plan_state=54u;
-const uint plan_reglist=60u, plan_template=64u;
+const uint plan_reglist=60u, plan_wide_center=61u, plan_wide_image=62u, plan_template=64u;
 // DrawRecord words (native_raster.cpp, native.vert).
 const uint record_words=80u, record_left=0u, record_color=6u, record_vertices=32u, record_fog=65u;
 const uint record_x0=16u, record_depth=31u, record_lod_q=67u, record_flags=12u;
@@ -95,6 +95,11 @@ Vertex vertex(uint element) {
 }
 // Integer division truncates toward zero, as in the C++ planner.
 int ceil_pixel(int value) { return value>=0 ? (value+15)/16 : -((-value)/16); }
+// NativeDrawing::narrowed: a wide display's squeeze, as the C++ planner applies it.
+int narrowed(int x) {
+    const int center=int(P(plan_wide_center)),origin=int(P(plan_offset));
+    return center==0 ? x : clamp(origin+center+((x-origin-center)*3>>2),0,65535);
+}
 void write_vertex(uint base,uint index,Vertex v,int ox,int oy) {
     const uint at=base+record_vertices+index*10u;
     records.words[at]=uint(v.x-ox); records.words[at+1u]=uint(v.y-oy);
@@ -106,10 +111,16 @@ void write_vertex(uint base,uint index,Vertex v,int ox,int oy) {
 // bounds as plan_sprite, texture mapping as plan_sprite_texture (UV only), and
 // color, depth, fog and LOD Q from the kicking vertex.
 void sprite(uint item) {
-    const Vertex first=vertex(item*2u),last=vertex(item*2u+1u);
+    Vertex first=vertex(item*2u),last=vertex(item*2u+1u);
     const uint base=(P(plan_record_first)+item)*record_words;
     for (uint w=0u;w<record_words;++w) records.words[base+w]=P(plan_template+w);
     const int ox=int(P(plan_offset)),oy=int(P(plan_offset+1u));
+    // Plain opaque sprites and those spanning the whole width without showing an image
+    // keep their position (NativeDrawing::set_wide_display).
+    if ((P(plan_template+record_flags)&257u)!=0u && (P(plan_wide_image)!=0u ||
+        !(min(first.x,last.x)-ox<=0 && max(first.x,last.x)-ox>=int(P(plan_wide_center))*2))) {
+        first.x=narrowed(first.x); last.x=narrowed(last.x);
+    }
     const int left=max(ceil_pixel(min(first.x,last.x)-ox),int(P(plan_scissor)));
     const int right=min(ceil_pixel(max(first.x,last.x)-ox),int(P(plan_scissor+1u))+1);
     const int top=max(ceil_pixel(min(first.y,last.y)-oy),int(P(plan_scissor+2u)));
@@ -163,6 +174,7 @@ void main() {
         return;
     }
     Vertex v0=vertex(a),v1=vertex(b),v2=vertex(c);
+    v0.x=narrowed(v0.x); v1.x=narrowed(v1.x); v2.x=narrowed(v2.x);
     const int coverage=P(plan_coverage)!=0u ? 15 : 0;
     const int ox=int(P(plan_offset)),oy=int(P(plan_offset+1u));
     const int x0=max(0,min(v0.x,min(v1.x,v2.x))-coverage),x1=max(v0.x,max(v1.x,v2.x));

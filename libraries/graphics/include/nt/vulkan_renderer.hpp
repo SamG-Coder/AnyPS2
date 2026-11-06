@@ -106,11 +106,14 @@ struct RenderStatistics {
 };
 // Native Vulkan storage and ordered batches. Native window is an HWND on Windows.
 enum class RenderPath { native_images, reference_compute };
+// How a sprite's off-center samples read its texture at a resolution scale above 1.
+// Console samples are unaffected, so console memory stays exact.
+enum class ImageFilter : std::uint32_t { console, linear, cubic };
 class VulkanRenderer {
 public:
     // resolution_scale: samples per console pixel along each axis of rendered surfaces.
     // Odd, so that one sample reproduces console memory. Presentation requires 1.
-    explicit VulkanRenderer(void* native_window = nullptr, bool validation = false, RenderPath path = RenderPath::native_images, unsigned resolution_scale = 1);
+    explicit VulkanRenderer(void* native_window = nullptr, bool validation = false, RenderPath path = RenderPath::native_images, unsigned resolution_scale = 1, ImageFilter image_filter = ImageFilter::console);
     ~VulkanRenderer();
     VulkanRenderer(const VulkanRenderer&) = delete;
     VulkanRenderer& operator=(const VulkanRenderer&) = delete;

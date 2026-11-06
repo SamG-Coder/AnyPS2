@@ -79,6 +79,7 @@ const std::uint32_t scanout_code[] =
 }
 struct VulkanRenderer::Impl {
     unsigned resolution_scale=1;
+    ImageFilter image_filter=ImageFilter::console;
     std::unique_ptr<NativeRaster> native;
     RenderPath path=RenderPath::native_images;
     std::uint32_t api_version=VK_API_VERSION_1_1;
@@ -303,7 +304,7 @@ struct VulkanRenderer::Impl {
 #endif
         check(vkCreateDevice(physical,&dc,nullptr,&device),"Create device"); vkGetDeviceQueue(device,family,0,&queue);
         if (path==RenderPath::native_images) {
-            native=std::make_unique<NativeRaster>(physical,device,queue,family,ordered_fragments,resolution_scale);
+            native=std::make_unique<NativeRaster>(physical,device,queue,family,ordered_fragments,resolution_scale,image_filter);
             if (surface) create_swapchain();
             return;
         }
@@ -434,7 +435,7 @@ struct VulkanRenderer::Impl {
         check(vkWaitForFences(device,1,&fence,VK_TRUE,UINT64_MAX),"Wait for GPU");
     }
 };
-VulkanRenderer::VulkanRenderer(void* window,bool validation,RenderPath path,unsigned resolution_scale):impl_(std::make_unique<Impl>()) {if (!resolution_scale || !(resolution_scale&1) || resolution_scale>5) throw std::invalid_argument("Unsupported resolution scale"); impl_->resolution_scale=resolution_scale; impl_->path=path; impl_->initialize(window,validation);}
+VulkanRenderer::VulkanRenderer(void* window,bool validation,RenderPath path,unsigned resolution_scale,ImageFilter image_filter):impl_(std::make_unique<Impl>()) {if (!resolution_scale || !(resolution_scale&1) || resolution_scale>5) throw std::invalid_argument("Unsupported resolution scale"); impl_->resolution_scale=resolution_scale; impl_->image_filter=image_filter; impl_->path=path; impl_->initialize(window,validation);}
 VulkanRenderer::~VulkanRenderer()=default;
 void VulkanRenderer::synchronize() { if (impl_->native) { impl_->native->finish(); return; } impl_->flush(); check(vkDeviceWaitIdle(impl_->device),"Synchronize graphics"); }
 const std::string& VulkanRenderer::device_name() const {return impl_->name;}
