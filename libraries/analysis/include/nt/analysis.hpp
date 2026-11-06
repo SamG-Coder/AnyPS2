@@ -48,6 +48,11 @@ std::set<std::uint32_t> syscall_callbacks(ByteView bytes,const elf::Executable& 
                                         std::set<std::uint32_t>* registered_calls=nullptr);
 std::set<std::uint32_t> materialized_code_pointers(ByteView bytes,const elf::Executable& executable,
                                                 const Program& program);
+// A reached word store whose constant address lies in a declared EE code section:
+// the program patches its own instructions. value holds the stored word when every
+// path proves it constant; other values (such as a restored backup) remain unknown.
+struct CodeStore { std::uint32_t site,address; std::optional<std::uint32_t> value; };
+std::vector<CodeStore> code_stores(const elf::Executable& executable,const Program& program);
 struct CopiedCode { std::uint32_t source,destination,size; std::set<std::uint32_t> entry_offsets; };
 // Code a program copies out of its own file-backed image and registers as a
 // system-call handler. Evidence requires a constant SetSyscall handler outside

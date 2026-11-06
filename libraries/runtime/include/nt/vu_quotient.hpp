@@ -9,6 +9,9 @@ NT_SHADER_INLINE uint32_t vu_quotient_operand(uint32_t bits) {
 }
 // Convert scalar exception flags to VU current invalid/divide flags. Sticky
 // status is applied when the pending quotient becomes visible, not at issue.
+// The unit has no infinity or NaN, and a result beyond the format saturates. A zero
+// divisor still gives the 0x7f7fffff
+// magnitude that a program can observe.
 NT_SHADER_INLINE ScalarFlagResult vu_divide_finite(uint32_t left, uint32_t right) {
     const auto a = vu_quotient_operand(left), b = vu_quotient_operand(right);
     auto result = divide_finite(a, b);

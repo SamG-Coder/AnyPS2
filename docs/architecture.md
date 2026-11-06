@@ -71,6 +71,13 @@ occupy those segments. Unresolved callbacks remain coverage gaps. See
   time; capacity is a fixed 8000 clusters with no bad blocks; a deleted entry cannot be
   restored; listings are snapshots; the `mc` file device is not registered, so programs
   using `mc0:` paths instead of the library stop; raw page and block calls stop.
+- MFIFO routes scratchpad output through a RAM ring into the vector channel. Only that
+  drain is supported. Filling the ring forwards each complete descriptor in order, and
+  the channel position advances once the consumer owns the bytes. Call and return tags
+  stop, as does a transfer interrupt on the channel.
+- Modules start, stop and unload through the native loader. Starting a file twice needs
+  one converted placement per instance. A stopped module's imports are released, and a
+  restart begins from its pristine image, as a reload from disc would.
 - Video initialization supports reset, bitstream clearing, format/threshold settings
   and uploaded quantization/palette tables. Bounded native input submissions feed
   fixed-length and MPEG variable-length header reads and signal completion as
@@ -99,9 +106,14 @@ occupy those segments. Unresolved callbacks remain coverage gaps. See
   Pitch reads return the value written, while playback rate stops at 0x3fff.
   Stream refills preserve the current decoded block and revise unplayed PCM from
   saved predictor/loop checkpoints at a native processing-pass boundary. Failed
-  revisions leave both encoded data and queued PCM unchanged. Revisions that
-  shorten an already queued extent remain unsupported; they are never padded
-  with silence. Unsupported device features are not advertised.
+  revisions leave both encoded data and queued PCM unchanged. A new end marker in
+  queued PCM ends the sound there, and the rest of the queued extent plays as silence.
+  Voices queue about 75 ms and looping streams queue their next half early, because
+  game-thread services can pause for tens of milliseconds while a frame finishes.
+  Pitch modulation and noise have no native mixer stage and gain sweeps have no timed
+  envelope: voices keep their own pitch and samples, a sweep goes straight to where it
+  ends, and these uses are counted in the native summary. Unsupported device features
+  are not advertised.
 
 Diagnostic hardware models remain for investigation and synthetic regressions.
 They are not evidence of native conversion and must not become runtime fallbacks.

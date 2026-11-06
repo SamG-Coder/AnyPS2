@@ -101,7 +101,16 @@ private:
         auto* volume=volume_();
         const auto& args=request.arguments;
         switch (request.selector) {
+        case 5:
+            if (pending_) return returned(0);
+            if (!volume) { error_=0x12; return returned(0); }
+            // No spindle exists; reads already resume a stopped volume. Retain the
+            // public state and completion edge.
+            stopped_=false; error_=0;
+            if (callback_) pending_=NativeCallback{callback_,5,{}};
+            return returned(1);
         case 6: return read(request,ram,volume);
+        case 10: return search(request,ram,volume);
         case 8: return returned(error_);
         case 11:
             // Both IOP reads and the native EE read RPC publish their bytes
@@ -168,6 +177,30 @@ private:
         }
         default: return {};
         }
+    }
+    // sceCdSearchFile: fills {sector, size, name[16], date[8]} from the mounted
+    // volume. A missing path returns 0, as on the console; dates are not retained.
+    NativeServiceReply search(const NativeServiceRequest& request,std::span<std::uint8_t> ram,disc::Iso9660* volume) {
+        constexpr std::uint32_t record_size=32;
+        const auto& args=request.arguments;
+        const auto checked=output(ram,args[0],record_size);
+        if (checked.status!=NativeServiceStatus::returned) return checked;
+        const auto text=ram_offset(args[1],1,ram.size());
+        if (!text) return {NativeServiceStatus::address_fault,0,args[1]};
+        const auto limit=std::min<std::size_t>(ram.size()-*text,256);
+        const auto first=ram.begin()+*text,end=std::find(first,first+limit,0);
+        if (end==first+limit) return {NativeServiceStatus::address_fault,0,args[1]};
+        if (!volume) { error_=0x12; return {NativeServiceStatus::returned,0}; }
+        const auto record=*ram_offset(args[0],4,ram.size());
+        try {
+            const auto entry=volume->find(std::string(first,end));
+            if (entry.name.size()>15) return {};
+            std::fill_n(ram.begin()+record,record_size,std::uint8_t{0});
+            store_native_word(ram,record,entry.sector);
+            store_native_word(ram,record+4,entry.size);
+            std::copy(entry.name.begin(),entry.name.end(),ram.begin()+record+8);
+        } catch (const disc::PathError&) { return {NativeServiceStatus::returned,0}; }
+        return {NativeServiceStatus::returned,1};
     }
     NativeServiceReply read(const NativeServiceRequest& request,std::span<std::uint8_t> ram,disc::Iso9660* volume) {
         const auto& args=request.arguments;

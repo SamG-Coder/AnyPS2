@@ -2,6 +2,7 @@
 #include <nt/ee_vector_math.hpp>
 #include <nt/vu_quotient.hpp>
 #include "vector_fast.hpp"
+#include <cstring>
 
 extern "C" std::uint32_t nt_ee_vector_memory(nt::ee::Memory* memory,std::uint32_t unit) {
     using nt::ee::Stop;
@@ -10,6 +11,46 @@ extern "C" std::uint32_t nt_ee_vector_memory(nt::ee::Memory* memory,std::uint32_
     const auto result=!region.data ? Stop::unsupported_vector :
         region.active && *region.active ? Stop::vector_pending : Stop::budget;
     return static_cast<std::uint32_t>(result);
+}
+
+// VLQI, VSQI, VLQD, VSQD, VILWR and VISWR on VU0 data memory. Addresses count
+// quadwords and wrap at the memory size. The VU1 register window above 0x400 has
+// no native counterpart and stops.
+extern "C" std::uint32_t nt_ee_vector_transfer(nt::ee::Memory* memory,std::uint32_t kind,
+        std::uint32_t reg,std::uint32_t address_register,std::uint32_t mask) {
+    using nt::ee::Stop;
+    auto* vectors=memory->vectors;
+    const auto& region=memory->vector_data[0];
+    if (!vectors || !region.data || region.bytes<16) return std::uint32_t(Stop::unsupported_vector);
+    if (vectors->active || (region.active && *region.active)) return std::uint32_t(Stop::vector_pending);
+    if (kind>5 || reg>31 || address_register>15 || mask>15) return std::uint32_t(Stop::invalid_state);
+    auto address=address_register ? vectors->integers[address_register-1] : std::uint16_t(0);
+    if (kind==2 || kind==3) address=static_cast<std::uint16_t>(address-1);
+    if ((address&0x7ffU)>=0x400U) return std::uint32_t(Stop::unsupported_vector);
+    auto* row=region.data+((std::uint64_t(address)*16)&(region.bytes-1));
+    const auto word=[&](unsigned lane) { std::uint32_t value; std::memcpy(&value,row+lane*4,4); return value; };
+    const auto store=[&](unsigned lane,std::uint32_t value) { std::memcpy(row+lane*4,&value,4); };
+    if (kind==4) {
+        if (reg&15U) for (unsigned lane=0;lane<4;++lane) if (mask&(8U>>lane)) {
+            vectors->integers[(reg&15U)-1]=static_cast<std::uint16_t>(word(lane));
+            break;
+        }
+        return std::uint32_t(Stop::budget);
+    }
+    if (kind==5) {
+        const auto value=(reg&15U) ? std::uint32_t(vectors->integers[(reg&15U)-1]) : 0U;
+        for (unsigned lane=0;lane<4;++lane) if (mask&(8U>>lane)) store(lane,value);
+        return std::uint32_t(Stop::budget);
+    }
+    const nt::numeric::Vector zero{0,0,0,0x3f800000};
+    if (kind==0 || kind==2) {
+        if (reg) for (unsigned lane=0;lane<4;++lane) if (mask&(8U>>lane)) vectors->values[reg-1][lane]=word(lane);
+    } else {
+        const auto& source=reg ? vectors->values[reg-1] : zero;
+        for (unsigned lane=0;lane<4;++lane) if (mask&(8U>>lane)) store(lane,source[lane]);
+    }
+    if (address_register) vectors->integers[address_register-1]=(kind==0 || kind==1) ? static_cast<std::uint16_t>(address+1) : address;
+    return std::uint32_t(Stop::budget);
 }
 
 extern "C" std::uint32_t nt_ee_vector_launch(nt::ee::Memory* memory,std::uint32_t indirect,std::uint32_t entry) {

@@ -48,6 +48,10 @@ public:
     virtual bool clear_reverb(unsigned core)=0;
     // One owned stereo PCM buffer per core; state comes from the audio engine.
     virtual bool submit_stream(unsigned core,std::span<const std::int16_t> samples)=0;
+    // Replaces the samples of the newest queued stream buffer if the device cannot have
+    // begun reading it. A late game write then still reaches the output, as it would on
+    // hardware that fetches samples while playing. False leaves the buffer as submitted.
+    virtual bool refresh_stream(unsigned,std::span<const std::int16_t>) { return false; }
     virtual bool stream_state(unsigned core,StreamState& state)=0;
     virtual bool stop_stream(unsigned core)=0;
     // Owned mono PCM at the voice's 48 kHz base rate. A nonzero loop length

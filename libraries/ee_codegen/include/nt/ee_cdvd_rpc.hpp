@@ -249,6 +249,16 @@ public:
             return Stop::budget;
         }
         if (method==34) return select_media_mode(memory,protection,args,destination,size);
+        if (method==35) {
+            // One int configures drive access timing; native reads complete
+            // synchronously, so the setting has nothing to change. Reports accepted.
+            if (args.size()<4 || size!=4) return Stop::invalid_state;
+            const auto valid=rpc_output(memory,protection,destination,size);
+            if (valid!=Stop::budget) return valid;
+            const std::uint32_t accepted=1;
+            std::memcpy(memory.data+runtime::default_ram_address(destination),&accepted,4);
+            return Stop::budget;
+        }
         if (method!=1) return Stop::unsupported_system;
         if (!args.empty() || size!=16 || !clock_) return Stop::invalid_state;
         // The RTC belongs to the host platform, not to mounted optical media.

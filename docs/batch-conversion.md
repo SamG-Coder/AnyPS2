@@ -126,6 +126,37 @@ budgets; delay slots and changes in image/payload ownership prevent unsafe
 grouping. Word sign extension, wraparound and untouched upper lanes are retained.
 Future patterns belong in the converter with compiled behavior regressions.
 
+## Assembling a complete program
+
+`convert` builds independent units. A full native environment links them explicitly:
+
+```powershell
+# EE: every declared instruction plus reachable handlers and copies.
+.\build\Release\ps2-recompile.exe work\game\boot.elf work\game-ee --whole-code
+# VU: recover images, then compile the catalog each unit accepts.
+.\build\Release\ps2-vu-extract.exe work\game\boot.elf work\game-vu --elf
+.\build\Release\ps2-vu-recompile.exe --catalog work\game-vu\catalog1.tsv work\game-vu\vu1.ll 1
+# IOP: plain bases start at reset; sealed@ bases start when the program loads them.
+.\build\Release\ps2-iop-recompile.exe --bundle work\game-iop 1000 module.irx sealed@100000 other.irx
+cmake -S work\game-ee -B work\game-ee\build -DANYPS2_ROOT=<source> -DANYPS2_IOP_PROJECT=<absolute>\work\game-iop `
+    -DANYPS2_VU_MODULE=<absolute>\work\game-vu\vu0.ll -DANYPS2_VU1_MODULE=<absolute>\work\game-vu\vu1.ll
+cmake --build work\game-ee\build --config Release --target ps2-native --parallel 16
+.\work\game-ee\build\Release\ps2-native.exe program.data 900000000000 --disc game.iso --disc-media dvd `
+    --iop-default-session <absolute>\work\game-iop\module.data
+```
+
+A catalog has the `file` and `destination_pairs` columns of `images.tsv`, listing the
+images that convert for that unit; converting each image alone shows which do. Whole-image
+conversion makes every pair an entry, but only flow leaders run to their terminator, so its
+output stays linear in program size and an entry inside a straight line runs one pair at a time.
+A program may jump between fully uploaded images, and a catalog program may be written
+directly into VU0 instruction memory; its bytes select compiled code.
+
+The startup modules must announce readiness the way the program expects, which usually
+means the system modules its reboot archive would start and that have no native
+replacement, such as `EESYNC`. Give a module one `sealed@` placement per running
+instance. A bundle with only sealed modules has no startup image.
+
 ## Coverage and measurement limits
 
 For repeated startup validation of an existing converted project, run

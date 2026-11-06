@@ -79,9 +79,10 @@ public:
     std::array<nt::audio::CoreMix,2> core_mix{};
     std::array<nt::audio::StreamState,2> streams{};
     std::array<std::vector<std::int16_t>,2> pcm;
+    std::array<unsigned,2> stream_buffers{};
     bool submit_stream(unsigned core,std::span<const std::int16_t> data) override {
-        if (core>=2 || !opened || streams[core].queued) return false;
-        pcm[core].assign(data.begin(),data.end()); streams[core].queued=true; return true;
+        if (core>=2 || !opened) return false;
+        pcm[core].assign(data.begin(),data.end()); streams[core].queued=true; ++stream_buffers[core]; return true;
     }
     bool stream_state(unsigned core,nt::audio::StreamState& state) override { if (core>=2) return false; state=streams[core]; return true; }
     bool stop_stream(unsigned core) override { if (core>=2) return false; streams[core]={}; pcm[core].clear(); return true; }
@@ -992,6 +993,15 @@ int main() {
                       output.core_mix[1].reverb.depth.left==0.25f && output.core_mix[1].reverb.depth.right==-0.5f,
                       "Compiled effect configuration did not reach the native stereo reverb bus");
             }
+            // LIBSD's mute attribute is the hardware bit where 1 passes the output.
+            const auto left_before=output.core_mix[0].output.left;
+            check(left_before!=0 && call(11,6,1).first.reason==NativeStop::unmapped_code &&
+                  output.core_mix[0].output.left==left_before && call(12,6).second.registers[2]==1,
+                  "Core attribute value 1 must keep the output audible");
+            check(call(11,6,0).first.reason==NativeStop::unmapped_code && output.core_mix[0].output.left==0 &&
+                  call(12,6).second.registers[2]==0,"Core attribute value 0 must silence the output");
+            check(call(11,6,1).first.reason==NativeStop::unmapped_code && output.core_mix[0].output.left==left_before,
+                  "Core attribute value 1 must restore the output");
             check(output.reverb_clears==7 && call(11,3,1).first.reason==NativeStop::unmapped_code &&
                   output.core_mix[1].reverb.enabled && output.core_mix[1].reverb.space==nt::audio::ReverbSpace::pipe,
                   "Native effect activation or history clearing failed");
@@ -1040,6 +1050,23 @@ int main() {
             output.streams[0]={256,false}; sound.take();
             check(call(20,0).second.registers[2]==0,"Completed PCM retained a busy status");
             check(call(18,0,2).first.reason==NativeStop::unmapped_code && output.pcm[0].empty(),"Stream cancellation retained native PCM");
+            {
+                // A looping stream queues its other half before the first runs out, and
+                // signals only when the audible position reaches that half.
+                const auto buffers=output.stream_buffers[0];
+                check(call(18,0,0x10,0x19400,2048).second.registers[2]==0 && output.stream_buffers[0]==buffers+1,"Loop start failed");
+                output.streams[0].frames+=64; sound.voice_poll_interval={}; sound.take();
+                check(output.stream_buffers[0]==buffers+1,"Other half was queued too early");
+                output.streams[0].frames+=100; sound.take();
+                check(output.stream_buffers[0]==buffers+2 && output.streams[0].queued && !sound.failure(),"Other half was not queued ahead");
+                sound.take();
+                check(output.stream_buffers[0]==buffers+2,"Other half was queued twice");
+                check(call(20,0).second.registers[2]==(0x19400U+164U*4U),"Queued half moved the audible position");
+                output.streams[0].frames+=92; sound.take();
+                check((call(20,0).second.registers[2]>>24)==1,"Boundary did not reach the other half");
+                check(call(18,0,2).first.reason==NativeStop::unmapped_code,"Loop cancel failed");
+                output.streams[0]={};
+            }
             check(call(18,0,0x80,0x19400,1024).first.reason==NativeStop::unmapped_code,"Uncompiled refill callback was accepted");
             store_native_word(data,0x19c00,0x19400); store_native_word(data,0x19c04,1024);
             check(call(18,0,0x80,0x19400,1024,0x15180).second.registers[2]==0,"Compiled refill stream failed to start");
@@ -1119,7 +1146,7 @@ int main() {
             check(call(17,0,8,0x19000,0x1fe000,64).first.reason==NativeStop::unmapped_code &&
                   call(9,0x2000,0x1fe000).first.reason==NativeStop::unmapped_code &&
                   call(5,0x200,4096).first.reason==NativeStop::unmapped_code &&
-                  call(7,0x1500,1).first.reason==NativeStop::unmapped_code && output.sample_pcm[0].size()==896,
+                  call(7,0x1500,1).first.reason==NativeStop::unmapped_code && output.sample_pcm[0].size()==3584,
                   "Compiled open-ended key-on did not queue bounded native PCM");
             call(7,0x1700,0);
             check(call(8,0x1700).second.registers[2]==0,"Open stream fabricated ENDX");
@@ -1146,7 +1173,7 @@ int main() {
             call(27,0,0);
             data[0x19001]=1; data[0x19002]=7;
             check(call(17,0,8,0x19000,0x1fe000,16).first.reason==NativeStop::unmapped_code && output.sample_pcm[0][0]==1 &&
-                  call(17,0,8,0x19000,0x1fe200,16).first.reason==NativeStop::unmapped_code,
+                  call(17,0,8,0x19000,0x1fe800,16).first.reason==NativeStop::unmapped_code,
                   "Stream refill lost the current decoded block or rejected unread media");
             data[0x19001]=0; data[0x19002]=0x65;
             const auto before_refill=output.sample_pcm[0];
@@ -1158,15 +1185,23 @@ int main() {
             check(call(17,0,8,0x19000,0x1fe010,16).first.reason==NativeStop::unmapped_code &&
                   output.sample_pcm[0][28]==5 && output.sample_pcm[0][29]==6 && output.samples[0].frames==1 &&
                   output.sample_pcm[0][0]==1,"Future streamed PCM was not revised without restarting playback");
-            output.samples[0]={896,false}; sound.take();
-            check(!sound.failure() && output.sample_pcm[0].size()==924 && output.sample_pcm[0][896]==7 &&
-                  call(8,0x1700).second.registers[2]==0 && call(10,0x2200).second.registers[2]==0x1fe202,
+            output.samples[0]={3584,false}; sound.take();
+            check(!sound.failure() && output.sample_pcm[0].size()==3612 && output.sample_pcm[0][3584]==7 &&
+                  call(8,0x1700).second.registers[2]==0 && call(10,0x2200).second.registers[2]==0x1fe802,
                   "Stream refill reset history, position or fabricated early completion");
-            output.samples[0]={924,false}; sound.take();
+            output.samples[0]={3612,false}; sound.take();
             check(call(8,0x1700).second.registers[2]==1,"Consumed stream end did not latch ENDX");
             data=snapshot;
-            check(call(5,0x980,0x8000).first.reason==NativeStop::import_request && data==snapshot && output.initializations==2,
-                  "Unimplemented sound operation returned success or changed state");
+            // A gain sweep goes straight to where it ends and is counted, never stops.
+            const auto approximated=sound.approximated_settings();
+            check(call(5,0x980,0x8000).first.reason==NativeStop::unmapped_code && call(6,0x980).second.registers[2]==0x3fff &&
+                  call(5,0x980,0xa000).first.reason==NativeStop::unmapped_code && call(6,0x980).second.registers[2]==0 &&
+                  sound.approximated_settings()==approximated+2,"Gain sweep did not settle");
+            check(call(7,0x1300,1).first.reason==NativeStop::unmapped_code && sound.approximated_settings()==approximated+3,
+                  "Pitch modulation must continue without a native stage");
+            check(call(5,0x980,0x2000).first.reason==NativeStop::unmapped_code,"Restoring master gain failed");
+            check(call(7,0x1f00,1).first.reason==NativeStop::import_request && output.initializations==2,
+                  "Unknown switch returned success");
             check(call(4,2).first.reason==NativeStop::import_request && output.initializations==2,"Unsupported sound mode changed output");
             output.allow_initialize=false;
             check(call(4).first.reason==NativeStop::import_request && output.initializations==2,"Failed voice allocation fabricated completion");

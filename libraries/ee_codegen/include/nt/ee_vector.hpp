@@ -14,6 +14,7 @@ struct VectorStorage {
     std::uint16_t launch_address=0;
     std::array<std::uint32_t,4> accumulator{};
     std::uint32_t quotient=0,clip=0,random=0x3f800000,immediate=0;
+    std::uint32_t program_counter=0; // Pair after the last completed program.
 };
 enum class VectorStatus : std::uint32_t { ready, pending, unsupported };
 struct VectorReadResult { VectorStatus status; std::uint32_t value=0; };

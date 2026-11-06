@@ -3122,6 +3122,16 @@ int main() {
             check(presented==2 && platform.graphics.scanout_odd());
             check(edges_seen==std::vector<bool>({false,true,false}));
             check((platform.graphics.read(0x12001000).value&0x2008)==8);
+            {
+                // The first read after VBLANK start, however late the host delivers it,
+                // reports the completed field; the next reports the toggled one.
+                const auto status=[&] { return memory.io.read64(memory.io.context,0x12001000).value; };
+                check((status()&0x2000)!=0);
+                check(!(status()&0x2000));
+                // A first read later than half a field is not excused: it sees the truth.
+                timer_now=edge(1530+300); poll();
+                check((status()&0x2000)!=0 && !platform.graphics.scanout_odd());
+            }
             const auto before=platform.graphics.read(0x12001000).value;
             timer_now-=100; poll(); check(platform.graphics.read(0x12001000).value==before);
             check(configure(99)==nt::ee::Stop::unsupported_system && platform.graphics.mode()->standard==2);
@@ -3275,10 +3285,13 @@ int main() {
                 check(platform.sif_receive.accepting() && !platform.completions.status());
             }
             check(write(0x1000c000,0)==nt::ee::Stop::budget && !platform.sif_receive.accepting());
-            for (const auto address:{0x1000e030U,0x1000e040U,0x1000e050U}) {
+            check(write(0x1000e030,0)==nt::ee::Stop::budget && read(0x1000e030)==0);
+            check(write(0x1000e030,16)==nt::ee::Stop::unsupported_system && read(0x1000e030)==0);
+            check(read(0x1000e000)==0);
+            // The MFIFO ring configuration is stored; only the vector channel can use it.
+            for (const auto address:{0x1000e040U,0x1000e050U}) {
+                check(write(address,16)==nt::ee::Stop::budget && read(address)==16);
                 check(write(address,0)==nt::ee::Stop::budget && read(address)==0);
-                check(write(address,16)==nt::ee::Stop::unsupported_system && read(address)==0);
-                check(read(0x1000e000)==0);
             }
             check(write(0x10008000,0x101)==nt::ee::Stop::unsupported_system && !platform.completions.status());
             check(write(0x1000e000,1)==nt::ee::Stop::budget);

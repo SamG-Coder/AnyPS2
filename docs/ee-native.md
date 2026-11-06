@@ -17,11 +17,16 @@ verification and generation.
 
 For ELF images with declared EE instruction sections, use `ps2-recompile
 <input.elf> <output> --whole-code` (also supported with `--verify-only`). This
-selects every aligned word in those sections without entry-point crawling,
-callback-pattern discovery or runtime observations. `.vutext`, allocated data,
-BSS and inter-section padding remain separate. Unsupported words are reported
-together; they are never silently treated as data. Sectionless or ambiguous
-images need code/data classification before this mode can be used.
+selects every aligned word in those sections in addition to reachable flow, so
+handlers and copied code found by discovery still compile. It takes no runtime
+observations. `.vutext`, allocated data, BSS and inter-section padding remain
+separate. Unsupported words are reported together; they are never silently
+treated as data. Sectionless or ambiguous images need code/data classification
+before this mode can be used.
+
+LOAD segments linked to shared addresses are overlays: only one can be resident,
+and the program loads them itself. They initialize memory in file order but are not
+established code at those addresses, so a call into one compiles to a runtime stop.
 
 For supported packed images, `ps2-unpack <packed> <new.elf> --layout <layout.txt>`
 also accepts an explicit offline classification. The `--disc` form accepts the
@@ -125,6 +130,15 @@ A constant copy from file-backed storage to unloaded memory is treated as code w
 a constant `SetSyscall` handler lands inside it, or when the same routine installed
 such a copy. Its entries are those handlers and words inside it that address
 decodable code within it. `--payloads` remains available for explicit classification.
+
+## Patched instructions
+
+A reached word store with a constant address inside a declared code section means
+the program patches its own instructions. Those words leave write protection and
+compare themselves before running. When the stored value is a proven constant jump,
+the patched form transfers to compiled code, provided its delay slot holds a NOP.
+Restoring the original word needs no proof, since the comparison accepts it. Any
+other value stops with `unpublished_code`; nothing is decoded at runtime.
 
 ## Services and output evidence
 

@@ -13,6 +13,11 @@ Lower decode_lower(const Pair& pair,unsigned unit) {
     const auto& fields=*pair.lower;
     const auto integer=[](unsigned index) { return Register{Bank::integer,index&15U}; };
     const auto vector=[](unsigned index) { return Register{Bank::vector,index}; };
+    if (fields.primary==21) {
+        result.operation=LowerOperation::status_set;
+        result.literal=(fields.encoding&0x7ffU)|((fields.encoding>>10)&0x800U);
+        return result;
+    }
     if (fields.primary==20 || fields.primary==22 || fields.primary==23) {
         result.operation=fields.primary==20 ? LowerOperation::status_equal :
             fields.primary==22 ? LowerOperation::status_and : LowerOperation::status_or;
@@ -132,6 +137,12 @@ Lower decode_lower(const Pair& pair,unsigned unit) {
         if (variant!=1) result.left={Bank::vector,fields.source,(fields.encoding>>21)&3U};
         result.right={Bank::vector,fields.target,(fields.encoding>>23)&3U};
         result.result={Bank::quotient};
+    } else if (fields.subfunction==16) {
+        constexpr std::array randoms{LowerOperation::random_next,LowerOperation::random_get,
+            LowerOperation::random_init,LowerOperation::random_xor};
+        result.operation=randoms[variant];
+        if (variant<2) result.result=vector(fields.target);
+        else { result.left={Bank::vector,fields.source,(fields.encoding>>21)&3U}; result.mask=0; }
     } else if (fields.subfunction==15 && variant>=2) {
         const bool load=variant==2;
         result.operation=load ? LowerOperation::load_integer : LowerOperation::store_integer;
@@ -196,6 +207,11 @@ std::string_view name(LowerOperation operation) {
     case LowerOperation::status_and: return "status_and";
     case LowerOperation::status_or: return "status_or";
     case LowerOperation::status_equal: return "status_equal";
+    case LowerOperation::status_set: return "status_set";
+    case LowerOperation::random_next: return "random_next";
+    case LowerOperation::random_get: return "random_get";
+    case LowerOperation::random_init: return "random_init";
+    case LowerOperation::random_xor: return "random_xor";
     default: return "unsupported";
     }
 }

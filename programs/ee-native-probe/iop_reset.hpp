@@ -45,7 +45,7 @@ public:
           destination_{{ee.data,ee.size},[protection](auto address,auto size) { return !protection(address,size); }} {
         disc_media_=disc_media;
         pad_sample_=std::move(sample); pad_rumble_=std::move(rumble);
-        if (default_reset_ && (!session_ || nt_iop_generated_entries().empty()))
+        if (default_reset_ && !session_)
             throw std::runtime_error("Default reset requires a linked startup module catalog");
         state_=prepare();
         platform_.graphics.edge_context=this;
@@ -136,6 +136,9 @@ public:
             nt::ee::Stop::budget : nt::ee::Stop::unsupported_system;
     }
 private:
+    // A bundle of only sealed modules has no startup image; keep address zero out
+    // of the heap so that a null pointer never names an allocation.
+    std::uint32_t heap_begin() const { return std::max(0x1000U,(module_.base+module_.memory_size+255U)&~255U); }
     std::unique_ptr<Session> prepare() {
         const auto& data=data_;
         const auto& disc=disc_;
@@ -150,7 +153,7 @@ private:
             throw std::runtime_error("Invalid linked IOP startup data");
         std::copy(bytes.begin(),bytes.end(),next->ram.begin()+module_.base);
         next->services=std::make_unique<nt::iop::NativeServiceContext>(next->ram,
-            nt::iop::NativeContextLayout{(module_.base+module_.memory_size+255)&~255U,0x1ed000},
+            nt::iop::NativeContextLayout{heap_begin(),0x1ed000},
             nt_iop_generated_libraries(),nt_iop_generated_imports(),
             [](std::string_view) { return true; },disc,&destination_,0,delivery_);
         next->pads=std::make_unique<nt::input::PadTransactions>(pad_sample_,pad_rumble_);
@@ -189,17 +192,18 @@ private:
         const auto sidecar=data.parent_path()/"sealed.data";
         if (!std::filesystem::is_regular_file(sidecar)) throw std::runtime_error("Sealed module image is missing");
         const auto bytes=nt::read_file(sidecar,0x200000);
-        const auto heap_begin=(module_.base+module_.memory_size+255U)&~255U;
+        const auto heap_start=heap_begin();
         constexpr std::uint32_t heap_limit=0x1ed000;
         const auto image_begin=std::uint64_t(module_.base);
         const auto image_end=image_begin+module_.memory_size;
         std::size_t cursor=0;
+        std::vector<nt::Bytes> pristine;
         for (std::size_t index=0;index<sealed.size();++index) {
             const auto& record=sealed[index];
             if (record.base&255U) throw std::runtime_error("Sealed module base is not 256-byte aligned");
             const auto rounded=(std::uint64_t(record.memory_size)+255U)&~std::uint64_t{255};
             const auto span_end=std::uint64_t(record.base)+rounded;
-            if (!record.memory_size || record.initialized_size>record.memory_size || record.base<heap_begin || span_end>heap_limit)
+            if (!record.memory_size || record.initialized_size>record.memory_size || record.base<heap_start || span_end>heap_limit)
                 throw std::runtime_error("Sealed module is outside the native heap and was not relocated");
             if (record.base<image_end && image_begin<span_end)
                 throw std::runtime_error("Sealed module intersects the startup image and was not relocated");
@@ -216,11 +220,13 @@ private:
             if (std::uint64_t(record.base)+record.initialized_size>next.ram.size())
                 throw std::runtime_error("Sealed module image exceeds IOP RAM");
             std::copy(image.begin(),image.end(),next.ram.begin()+record.base);
+            pristine.emplace_back(image.begin(),image.end());
             if (!next.services->heap.hold(record.base,record.memory_size))
                 throw std::runtime_error("Sealed module overlaps a reserved heap span");
             cursor+=record.initialized_size;
         }
         next.services->modload.attach_sealed(sealed);
+        next.services->modload.attach_sealed_images(std::move(pristine));
     }
     void start(std::uint64_t work_budget=1000000) {
         state_->services->sif_control.publish_main(platform_.sif_link.main_address(),platform_.sif_link.main_flags());
@@ -264,7 +270,14 @@ private:
                 // The launcher explicitly selected this linked bundle as the
                 // default environment. Empty arguments restart its real module
                 // initializers; no ROM image or synthetic completion is used.
-                if (!request.arguments.empty()) return {nt::ee::Stop::unsupported_system};
+                // A named reboot archive holds system modules that native services
+                // replace, so it must exist on the disc but contributes no code.
+                if (!request.arguments.empty()) {
+                    constexpr std::string_view loader="rom0:UDNL ";
+                    if (!request.arguments.starts_with(loader) || self.disc_.empty()) return {nt::ee::Stop::unsupported_system};
+                    nt::disc::Files disc(self.disc_);
+                    nt::disc::parse_reboot_image(disc.read_file(std::string(request.arguments.substr(loader.size())),16*1024*1024));
+                }
             } else {
                 constexpr std::string_view loader="rom0:UDNL ";
                 if (!request.arguments.starts_with(loader) || self.disc_.empty()) return {nt::ee::Stop::unsupported_system};

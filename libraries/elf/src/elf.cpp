@@ -51,6 +51,9 @@ void read_sections(ByteView bytes,Executable& executable) {
         const auto type=le32(bytes,at+4),flags=le32(bytes,at+8);
         if (!(flags&2)) continue; // Only allocated tables belong to the program.
         const auto section_address=le32(bytes,at+12),section_offset=le32(bytes,at+16),section_size=le32(bytes,at+20);
+        if (type==1 && std::any_of(executable.overlay_segments.begin(),executable.overlay_segments.end(),[&](const auto& segment) {
+                return section_offset>=segment.offset && std::uint64_t(section_offset)+section_size<=std::uint64_t(segment.offset)+segment.file_size;
+            })) continue;
         const auto section_name=section_name_at(at);
         const bool vector_code=type==1 && section_name==".vutext";
         if (section_size && (flags&4) && !vector_code) {
@@ -132,11 +135,12 @@ void read_sections(ByteView bytes,Executable& executable) {
                 std::uint64_t(destination)+extent>16384)
                 throw std::runtime_error("Invalid ELF DVP overlay extent");
             std::optional<std::uint32_t> file_offset;
-            for (const auto& segment:executable.segments)
-                if (source>=segment.address && std::uint64_t(source)+extent<=std::uint64_t(segment.address)+segment.file_size) {
-                    if (file_offset) throw std::runtime_error("Ambiguous ELF DVP source mapping");
-                    file_offset=segment.offset+(source-segment.address);
-                }
+            for (const auto* segments:{&executable.segments,&executable.overlay_segments})
+                for (const auto& segment:*segments)
+                    if (source>=segment.address && std::uint64_t(source)+extent<=std::uint64_t(segment.address)+segment.file_size) {
+                        if (file_offset) throw std::runtime_error("Ambiguous ELF DVP source mapping");
+                        file_offset=segment.offset+(source-segment.address);
+                    }
             if (!file_offset) throw std::runtime_error("ELF DVP overlay source is not file-backed");
             require_range(bytes,*file_offset,extent);
             executable.vector_overlays.push_back({name,source,destination,extent,*file_offset});
@@ -214,6 +218,8 @@ Executable parse(ByteView b) {
         if (le32(b, p) != 1) continue;
         Segment s{le32(b, p + 4), le32(b, p + 8), le32(b, p + 16),
                   le32(b, p + 20), le32(b, p + 24), le32(b, p + 28)};
+        // An empty load segment loads nothing, so its placement cannot be invalid.
+        if (!s.file_size && !s.memory_size) continue;
         require_range(b, s.offset, s.file_size);
         if (s.file_size > s.memory_size || std::uint64_t(s.address) + s.memory_size > 0x100000000ULL)
             throw std::runtime_error("Invalid ELF segment extent");
@@ -221,6 +227,22 @@ Executable parse(ByteView b) {
             (s.address % s.alignment != s.offset % s.alignment)))
             throw std::runtime_error("Invalid ELF segment alignment");
         result.segments.push_back(s);
+    }
+    for (std::size_t index=0;index<result.segments.size();) {
+        const auto& s=result.segments[index];
+        const auto overlaps=[&](const Segment& other) {
+            return &other!=&s && s.address<std::uint64_t(other.address)+other.memory_size &&
+                other.address<std::uint64_t(s.address)+s.memory_size;
+        };
+        if (!std::any_of(result.segments.begin(),result.segments.end(),overlaps)) { ++index; continue; }
+        // Move every member of an overlap group, keeping file order.
+        std::vector<Segment> kept;
+        for (const auto& candidate:result.segments) {
+            const auto shares=&candidate==&s || (candidate.address<std::uint64_t(s.address)+s.memory_size &&
+                s.address<std::uint64_t(candidate.address)+candidate.memory_size);
+            (shares ? result.overlay_segments : kept).push_back(candidate);
+        }
+        result.segments=std::move(kept);
     }
     const auto contains_entry = [&](const Segment& s) {
         return (s.flags & 1) && result.entry >= s.address &&
@@ -245,6 +267,9 @@ void describe(std::ostream& out, const Executable& executable) {
     out << "MIPS ELF32 entry " << hex32(executable.entry) << " flags " << hex32(executable.flags) << '\n';
     for (const auto& s : executable.segments)
         out << "  LOAD " << hex32(s.address) << " file=" << s.file_size << " memory=" << s.memory_size
+            << " flags=" << s.flags << " offset=" << s.offset << '\n';
+    for (const auto& s : executable.overlay_segments)
+        out << "  OVERLAY " << hex32(s.address) << " file=" << s.file_size << " memory=" << s.memory_size
             << " flags=" << s.flags << " offset=" << s.offset << '\n';
     out << "Import metadata only; native translation has not been performed.\n";
 }

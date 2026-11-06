@@ -30,12 +30,15 @@ struct CodePayload { std::uint32_t address; std::vector<std::uint8_t> bytes; };
 using LayoutDeclaration=std::array<std::uint32_t,4>;
 struct CodeRange { std::uint32_t address,size,image=0; }; // image 0 is permanently resident.
 // Segments keep the input's bytes, which a handoff compares with loaded memory. Words in
-// patched compile as a CodePatch replaced them, so they may differ from those bytes.
+// patched compile as an InstructionPatch replaced them, so they may differ from those bytes.
 struct ExecutableImage { std::uint32_t entry,id; std::vector<CodePayload> segments; std::vector<std::uint32_t> patched{}; };
 // An opt-in change to one compiled instruction, given to conversion by the user. Conversion
 // stops unless an input holds expected at address and it is selected EE code. Loaded
 // memory is unchanged: only the compiled program differs.
-struct CodePatch { std::uint32_t address=0,expected=0,replacement=0; };
+struct InstructionPatch { std::uint32_t address=0,expected=0,replacement=0; };
+// A constant jump the program stores over an instruction. The word stays writable,
+// each execution compares it, and the patched form transfers to compiled code.
+struct CodePatch { std::uint32_t address,word,target; };
 // Emits a sorted, bounded set of compiled instructions. Additional ranges protect
 // executable ELF contents that have not yet been reached by discovery.
 // An optional stream factory splits code into bounded LLVM modules identified
@@ -49,7 +52,8 @@ void emit_llvm(std::ostream& output,std::span<const r5900::Instruction> instruct
                std::span<const ExecutableImage> images = {},
                const std::function<std::ostream&(std::size_t)>& module_output = {},
                std::uint64_t input_identity=0,
-               std::span<const CodeRange> unverified_code = {});
+               std::span<const CodeRange> unverified_code = {},
+               std::span<const CodePatch> code_patches = {});
 // True when the generator can lower this word. next is the instruction compiled
 // at the following address, or null when that address has no compiled word.
 bool lowerable(const r5900::Instruction& instruction,const r5900::Instruction* next);
@@ -60,7 +64,7 @@ void project(const std::filesystem::path& input,const std::filesystem::path& out
              std::span<const PayloadMapping> payloads = {},
              std::span<const std::filesystem::path> images = {},
              std::span<const std::filesystem::path> observations = {}, bool function_symbols=false, bool whole_code=false,
-             std::span<const CodePatch> patches = {});
+             std::span<const InstructionPatch> patches = {});
 struct FlowVerification {
     std::size_t instructions=0,passes=0,unmapped_targets=0,unresolved_indirect=0;
     std::size_t unclassified_references=0,record_binding_candidates=0,service_boundaries=0;
@@ -77,7 +81,7 @@ FlowVerification verify_flow(const std::filesystem::path& input,const std::files
                              std::span<const PayloadMapping> payloads = {},
                              std::span<const std::filesystem::path> images = {},
                              std::span<const std::filesystem::path> observations = {}, bool function_symbols=false, bool whole_code=false,
-                             std::span<const CodePatch> patches = {});
+                             std::span<const InstructionPatch> patches = {});
 // Unsupported operations and encodings in an already decoded instruction list.
 // Empty means this list can be lowered. No text is emitted.
 struct EeRejection {

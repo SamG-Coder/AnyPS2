@@ -7,7 +7,7 @@
 namespace nt::ee_codegen {
 void project(const std::filesystem::path& input,const std::filesystem::path& destination,std::span<const PayloadMapping> mappings,
              std::span<const std::filesystem::path> images,std::span<const std::filesystem::path> observations,bool function_symbols,bool whole_code,
-             std::span<const CodePatch> patches) {
+             std::span<const InstructionPatch> patches) {
     const auto prepared=project_detail::prepare_project(input,mappings,images,false,observations,function_symbols,whole_code,patches);
     // An unmapped target inside a loaded image is a discovery gap and stops
     // conversion. A target outside every loaded image (for example console
@@ -31,7 +31,7 @@ void project(const std::filesystem::path& input,const std::filesystem::path& des
 FlowVerification verify_flow(const std::filesystem::path& input,const std::filesystem::path& destination,
                              std::span<const PayloadMapping> mappings,std::span<const std::filesystem::path> images,
                              std::span<const std::filesystem::path> observations,bool function_symbols,bool whole_code,
-                             std::span<const CodePatch> patches) {
+                             std::span<const InstructionPatch> patches) {
     const auto prepared=project_detail::prepare_project(input,mappings,images,true,observations,function_symbols,whole_code,patches);
     const auto diagnostics=project_detail::diagnose_flow(prepared);
     StagedDirectory staged(destination);

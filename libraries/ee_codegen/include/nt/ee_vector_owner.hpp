@@ -18,6 +18,7 @@ public:
         case 20: return {VectorStatus::ready,storage.random};
         case 21: return {VectorStatus::ready,storage.immediate};
         case 22: return {VectorStatus::ready,storage.quotient};
+        case 26: return {VectorStatus::ready,storage.program_counter};
         case 27: return {VectorStatus::ready,storage.launch_address};
         case 28: return {VectorStatus::ready,0};
         case 29: return {VectorStatus::ready,storage.active ? 1U : 0U};

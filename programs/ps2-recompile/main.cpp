@@ -12,7 +12,7 @@ int main(int argc,char** argv) {
     try {
         std::vector<nt::ee_codegen::PayloadMapping> payloads;
         std::vector<std::filesystem::path> images,observations;
-        std::vector<nt::ee_codegen::CodePatch> patches;
+        std::vector<nt::ee_codegen::InstructionPatch> patches;
         bool payload_option=false,verify_only=false,function_symbols=false,whole_code=false;
         for (int index=3;index<argc;++index) {
             const std::string_view option=argv[index];
@@ -41,7 +41,7 @@ int main(int argc,char** argv) {
                 while (std::getline(input,line)) {
                     if (line.empty() || line[0]=='#') continue;
                     std::istringstream fields(line);
-                    nt::ee_codegen::CodePatch patch;
+                    nt::ee_codegen::InstructionPatch patch;
                     std::string extra;
                     if (!(fields>>std::hex>>patch.address>>patch.expected>>patch.replacement) || (fields>>extra))
                         throw std::runtime_error("Expected hexadecimal address, expected word and new word per patch line");

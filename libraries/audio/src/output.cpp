@@ -135,16 +135,36 @@ public:
     bool submit_stream(unsigned core,std::span<const std::int16_t> samples) override {
         if (core>=2 || !graph_.streams[core] || samples.empty() || samples.size()%2 || samples.size()>4*1024*1024) return false;
         StreamState state;
-        if (!stream_state(core,state) || state.queued) return false;
-        auto& storage=graph_.pcm[core]; storage.assign(samples.begin(),samples.end());
+        if (!stream_state(core,state)) return false;
+        // Buffers may queue ahead so playback never drains between them. The engine
+        // reads each until it is played, so retired ones are released only here.
+        auto& queued=graph_.pcm[core];
+        while (!queued.empty() && queued.front().end<=state.frames) queued.pop_front();
+        if (queued.size()>=4) return false;
+        queued.push_back({{samples.begin(),samples.end()},graph_.stream_submitted[core]+samples.size()/2});
+        const auto& storage=queued.back().pcm;
         // Keep the stream cursor cumulative across refill buffers. XAudio2
         // resets SamplesPlayed at END_OF_STREAM, obscuring the consumed count.
         XAUDIO2_BUFFER buffer{};
         buffer.AudioBytes=static_cast<UINT32>(storage.size()*sizeof(std::int16_t));
         buffer.pAudioData=reinterpret_cast<const BYTE*>(storage.data());
         auto result=graph_.streams[core]->SubmitSourceBuffer(&buffer);
-        if (SUCCEEDED(result)) result=graph_.streams[core]->Start();
+        if (SUCCEEDED(result)) { graph_.stream_submitted[core]=queued.back().end; result=graph_.streams[core]->Start(); }
+        else queued.pop_back();
         error_=static_cast<std::uint32_t>(result); return SUCCEEDED(result);
+    }
+    bool refresh_stream(unsigned core,std::span<const std::int16_t> samples) override {
+        if (core>=2 || !graph_.streams[core]) return false;
+        auto& queued=graph_.pcm[core];
+        if (queued.size()<2 || queued.back().pcm.size()!=samples.size()) return false;
+        StreamState state;
+        if (!stream_state(core,state)) return false;
+        // The engine consumes a source voice one 10 ms pass (480 frames) ahead of
+        // SamplesPlayed. Stay a further pass clear so that it never reads a partial write.
+        const auto begins=queued.back().end-samples.size()/2;
+        if (begins<state.frames+960) return false;
+        std::copy(samples.begin(),samples.end(),queued.back().pcm.begin());
+        return true;
     }
     bool stream_state(unsigned core,StreamState& state) override {
         if (core>=2 || !graph_.streams[core]) return false;
@@ -154,7 +174,7 @@ public:
     bool stop_stream(unsigned core) override {
         if (core>=2 || !graph_.streams[core]) return false;
         // DestroyVoice waits for the audio engine before owned PCM is released.
-        graph_.streams[core]->DestroyVoice(); graph_.streams[core]=nullptr; graph_.pcm[core].clear();
+        graph_.streams[core]->DestroyVoice(); graph_.streams[core]=nullptr; graph_.pcm[core].clear(); graph_.stream_submitted[core]=0;
         const WAVEFORMATEX stereo{WAVE_FORMAT_PCM,2,48000,192000,4,16,0};
         const auto sends=destinations(graph_.mix[core],graph_.wet[core]);
         auto result=engine_->CreateSourceVoice(&graph_.streams[core],&stereo,0,1.0f,nullptr,&sends.list);
@@ -396,9 +416,10 @@ private:
         std::array<IXAudio2SubmixVoice*,48> envelope{};
         std::array<IXAudio2SubmixVoice*,2> mix{},wet{};
         std::array<IXAudio2SourceVoice*,2> streams{};
-        std::array<std::vector<std::int16_t>,2> pcm;
-        std::array<std::vector<std::int16_t>,48> voice_pcm;
         struct QueuedPcm { std::vector<std::int16_t> pcm; std::uint64_t end; };
+        std::array<std::deque<QueuedPcm>,2> pcm;
+        std::array<std::uint64_t,2> stream_submitted{};
+        std::array<std::vector<std::int16_t>,48> voice_pcm;
         std::array<std::deque<QueuedPcm>,48> voice_queue;
         std::array<std::uint64_t,48> voice_submitted{};
         std::array<bool,48> voice_loop{};

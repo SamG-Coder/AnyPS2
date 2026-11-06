@@ -338,6 +338,24 @@ void packets(VulkanRenderer& gpu,VulkanRenderer& cpu) {
             (textured ? " textured" : " colored")+(reglist ? " REGLIST" : " PACKED")+(depth ? " depth" : ""));
         ++batches;
     }
+    // Points fill their nearest pixels, and clipped points draw nothing.
+    {
+        NativeDrawing generated(true),packets(true);
+        require(generated.assemble_triangles_on_gpu(gpu),"GPU packet assembly unavailable");
+        setup(generated,gpu,0); setup(packets,cpu,0);
+        Packet points{{0x8000U|8U,0x20000000,0x51,0}};
+        const std::array<std::array<unsigned,3>,8> at{{{40*16,20*16,0xff},{41*16+7,20*16,0xff00},{41*16+8,21*16+8,0xff0000},
+            {42*16+15,22*16+1,0x808080},{0,0,0x40},{60000,60000,0x4000},{50*16,25*16,0x400000},{50*16,25*16,0x20}}};
+        for (const auto& [x,y,color]:at) {
+            points.push_back({color&255,(color>>8)&255,(color>>16)&255,128});
+            points.push_back({x,y,7,0});
+        }
+        const auto before=generated.gpu_packet_batches();
+        generated.submit(gpu,std::span(&points,1)); packets.submit(cpu,std::span(&points,1));
+        require(generated.gpu_packet_batches()==before+1,"Eligible point packet was not assembled on the GPU");
+        require(generated.pixels()==packets.pixels(),"GPU-assembled point pixels differ");
+        ++batches;
+    }
     // A texture in the frame's pages keeps the CPU planner and still matches.
     Fixture fixture;
     NativeDrawing generated(true),packets(true);

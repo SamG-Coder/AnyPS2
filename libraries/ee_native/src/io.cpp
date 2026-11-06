@@ -113,6 +113,14 @@ extern "C" std::uint64_t nt_ee_io_read32(nt::ee::Memory* memory,std::uint32_t ad
     publish(*memory,result.status,address);
     return (std::uint64_t(result.status)<<32)|result.value;
 }
+// A byte read of a device register observes that byte of the whole register.
+extern "C" std::uint64_t nt_ee_io_read8(nt::ee::Memory* memory,std::uint32_t address) {
+    const auto word=address&~3U;
+    const auto result=memory->io.read32 ? memory->io.read32(memory->io.context,word) :
+        nt::ee::IoRead{nt::ee::Stop::memory_fault};
+    publish(*memory,result.status,address);
+    return (std::uint64_t(result.status)<<32)|((result.value>>((address&3U)*8U))&255U);
+}
 extern "C" std::uint64_t nt_ee_test_completions(nt::ee::Memory* memory) {
     // Drain actual host completion notifications before observing the selection.
     publish(*memory,nt::ee::Stop::budget,0);

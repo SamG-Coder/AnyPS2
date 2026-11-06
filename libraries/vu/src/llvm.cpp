@@ -395,7 +395,7 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
         batch_q &= upper.operand!=Operand::quotient && lower!=LowerOperation::divide &&
             lower!=LowerOperation::square_root && lower!=LowerOperation::reciprocal_square_root &&
             lower!=LowerOperation::wait_quotient && lower!=LowerOperation::status_and &&
-            lower!=LowerOperation::status_or && lower!=LowerOperation::status_equal;
+            lower!=LowerOperation::status_or && lower!=LowerOperation::status_equal && lower!=LowerOperation::status_set;
         batch_p &= !p_result(lower) && lower!=LowerOperation::wait_p && lower!=LowerOperation::move_p;
         batch_clip &= upper.operation!=Arithmetic::clip && lower!=LowerOperation::clip_set &&
             lower!=LowerOperation::clip_and && lower!=LowerOperation::clip_or &&
@@ -617,6 +617,14 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
             writer.integer_result(lower.result.index,writer.value(std::string(lower.operation==LowerOperation::status_equal ? "zext i1 " : "trunc i32 ")+value+" to i16"));
             break;
         }
+        case LowerOperation::status_set: {
+            // FSSET replaces the sticky bits and keeps the current bits. The same
+            // pair's MAC update, if any, has already been queued with its own sticky bits.
+            const auto literal=std::to_string(lower.literal&0xfc0U);
+            for (const auto offset:{offsetof(State,status),offsetof(State,visible_status)})
+                writer.pending.push_back({"i32",writer.value("or i32 "+writer.value("and i32 "+writer.load("i32",offset)+", 63")+", "+literal),offset});
+            break;
+        }
         case LowerOperation::clip_set:
             writer.clip_result(std::to_string(lower.literal));
             break;
@@ -655,6 +663,24 @@ static void emit_region(std::ostream& output,std::span<const Pair> pairs,unsigne
                 writer.value("zext i1 "+writer.value("icmp eq i16 "+flags+", "+operand)+" to i16") :
                 writer.value(std::string(lower.operation==LowerOperation::mac_and ? "and" : "or")+" i16 "+flags+", "+operand);
             writer.integer_result(lower.result.index,value);
+            break;
+        }
+        case LowerOperation::random_next: case LowerOperation::random_get: {
+            // The generator keeps 23 mantissa bits below a fixed 1.0 exponent;
+            // RNEXT shifts in the XOR of bits 4 and 22.
+            auto random=writer.load("i32",offsetof(State,random));
+            if (lower.operation==LowerOperation::random_next) {
+                const auto feedback=writer.value("and i32 "+writer.value("xor i32 "+writer.value("lshr i32 "+random+", 4")+", "+writer.value("lshr i32 "+random+", 22"))+", 1");
+                random=writer.value("or i32 "+writer.value("and i32 "+writer.value("or i32 "+writer.value("shl i32 "+random+", 1")+", "+feedback)+", 8388607")+", 1065353216");
+                writer.pending.push_back({"i32",random,offsetof(State,random)});
+            }
+            if (lower.result.index) for (unsigned lane=0;lane<4;++lane) if (lower.mask&(8U>>lane)) writer.vector_result(lower.result.index,lane,random);
+            break;
+        }
+        case LowerOperation::random_init: case LowerOperation::random_xor: {
+            auto source=writer.vector(lower.left.index,lower.left.component);
+            if (lower.operation==LowerOperation::random_xor) source=writer.value("xor i32 "+source+", "+writer.load("i32",offsetof(State,random)));
+            writer.pending.push_back({"i32",writer.value("or i32 "+writer.value("and i32 "+source+", 8388607")+", 1065353216"),offsetof(State,random)});
             break;
         }
         case LowerOperation::wait_p: break;
@@ -929,13 +955,29 @@ static std::size_t emit_program_module(std::ostream& output,std::span<const Pair
     // Build transactionally: a late unsupported block must not leave a partial module.
     std::ostringstream module;
     std::map<unsigned,std::array<std::optional<unsigned>,2>> successors;
+    // Whole-image conversion makes every pair an entry. Blocks run to their
+    // terminator only from flow leaders; an entry inside a straight line takes one
+    // exact pair at a time until it meets a block, which keeps output linear in
+    // the image size at the cost of speed only for such entries.
+    std::set<unsigned> leaders;
+    if (all_entries) {
+        const auto mask=unit ? 2047U : 511U;
+        leaders.insert(pairs.front().address);
+        for (const auto& pair:pairs) {
+            const auto transfer=control(pair,unit);
+            if (transfer.target) leaders.insert(*transfer.target);
+            if (pair.end || transfer.branch!=Branch::none) leaders.insert((pair.address+2)&mask);
+            else if (decode_lower(pair,unit).operation==LowerOperation::graphics_kick) leaders.insert((pair.address+1)&mask);
+        }
+    }
     for (const auto root:roots) {
         const auto found=std::find_if(pairs.begin(),pairs.end(),[&](const Pair& pair) { return pair.address==root; });
         if (found==pairs.end()) throw std::invalid_argument("Missing VU block entry");
         auto end=found;
         while (end!=pairs.end() && !end->end && control(*end,unit).branch==Branch::none &&
                decode_lower(*end,unit).operation!=LowerOperation::graphics_kick) ++end;
-        const bool fallthrough=end==pairs.end();
+        const bool step=all_entries && end!=found && !leaders.contains(root);
+        const bool fallthrough=step || end==pairs.end();
         if (fallthrough && !all_entries) throw std::invalid_argument("Missing VU block terminator");
         const bool graphics=!fallthrough && !end->end && decode_lower(*end,unit).operation==LowerOperation::graphics_kick;
         if (!fallthrough && !graphics && end+1==pairs.end()) throw std::invalid_argument("Missing VU delay pair");
@@ -955,14 +997,15 @@ static std::size_t emit_program_module(std::ostream& output,std::span<const Pair
                     declarations=false;
                 }
             }
-            emit_region(module,std::span<const Pair>(found,fallthrough ? end : end+(graphics ? 1 : 2)),unit,std::string(symbol)+"_"+std::to_string(root),declarations,fallthrough,
-                NumericPath::automatic,target);
+            emit_region(module,std::span<const Pair>(found,step ? found+1 : fallthrough ? end : end+(graphics ? 1 : 2)),unit,std::string(symbol)+"_"+std::to_string(root),declarations,fallthrough,
+                step ? NumericPath::exact : NumericPath::automatic,target);
         } catch (const std::invalid_argument& error) {
             throw std::invalid_argument("VU block at pair "+std::to_string(root)+": "+error.what());
         }
         declarations=false;
         auto& links=successors[root];
-        if (fallthrough) links[0]=(pairs.back().address+1)&(unit ? 2047U : 511U);
+        if (step) links[0]=(found->address+1)&(unit ? 2047U : 511U);
+        else if (fallthrough) links[0]=(pairs.back().address+1)&(unit ? 2047U : 511U);
         else if (!graphics && !end->end && !direct_delayed_branch(*end,*(end+1),unit)) {
             const auto transfer=control(*end,unit);
             links[0]=transfer.target;

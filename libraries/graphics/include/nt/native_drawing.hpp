@@ -325,7 +325,7 @@ private:
         std::array<Context,2> contexts;
         unsigned primitive=0,attributes=0,color=0,x=0,y=0;
         unsigned scan_mask=0;
-        std::uint32_t uv=0,first_uv=0;
+        std::uint32_t uv=0,first_uv=0,first_s=0,first_t=0,first_q=0;
         std::uint64_t texa=0;
         std::uint32_t s=0,t=0,q=0x3f800000,packed_q=0x3f800000;
         std::uint32_t fog_color=0,fog=0;
@@ -433,16 +433,18 @@ private:
         bool textured,bool reglist=false) {
         const auto primitive=state.primitive&7;
         auto attributes=state.use_primitive ? state.primitive : state.attributes;
-        const bool sprites=primitive==6;
-        // As NativeDrawing::command: sprites have no edge coverage and ignore FIX.
-        if (sprites) attributes&=~(128U|1024U);
-        if (primitive<3 || primitive>6 || (attributes&~(sprites ? 0x37fU : 0x3ffU)))
-            throw std::invalid_argument("Vector drawing supports triangle lists, strips, fans and sprites only");
+        const bool points=primitive==0,sprites=primitive==6;
+        // As NativeDrawing::command: points and sprites have no edge coverage,
+        // sprites ignore FIX, and points are untextured.
+        if (points || sprites) attributes&=~128U;
+        if (sprites) attributes&=~1024U;
+        if ((!points && primitive<3) || primitive>6 || (attributes&~(points ? 0x3cfU : sprites ? 0x37fU : 0x3ffU)))
+            throw std::invalid_argument("Vector drawing supports point lists, triangle lists, strips, fans and sprites only");
         if ((attributes&16) && !textured) throw std::invalid_argument("Textured vector drawing is not supported");
         if (sprites && (attributes&16) && !(attributes&256)) throw std::invalid_argument("Perspective sprite textures are unsupported");
         if (state.vertex_count || state.first || (state.unknown&unknown_vertices))
             throw std::invalid_argument("Vector drawing cannot continue an existing primitive; write PRIM first");
-        if (elements<(sprites ? 2U : 3U) || vertex.empty() || vertex.size()>5)
+        if (elements<(points ? 1U : sprites ? 2U : 3U) || vertex.empty() || vertex.size()>5)
             throw std::invalid_argument("Invalid vector vertex layout or element count");
         VectorPlan plan;
         auto& assembly=plan.assembly;
@@ -486,7 +488,7 @@ private:
         target=sprite_target(context.frame);
         target.left=assembly.scissor[0]; target.right=assembly.scissor[1]+1;
         target.top=assembly.scissor[2]; target.bottom=assembly.scissor[3]+1;
-        if (!sprites) target.flags|=triangle_flag|(assembly.shaded ? shaded_triangle_flag : 0);
+        if (!points && !sprites) target.flags|=triangle_flag|(assembly.shaded ? shaded_triangle_flag : 0);
         else assembly.shaded=0;
         configure_draw(state,context,attributes,target);
         if (attributes&16) {
@@ -562,7 +564,7 @@ private:
         PacketVectors batch;
         batch.layout=resolved_layout(); batch.registers=5; batch.words=resolved_words;
         try {
-            const auto plan=plan_vectors(state,batch.layout,(state.primitive&7)==6 ? 2 : 3,batch.words,true,true);
+            const auto plan=plan_vectors(state,batch.layout,(state.primitive&7)==0 ? 1 : (state.primitive&7)==6 ? 2 : 3,batch.words,true,true);
             batch.assembly=plan.assembly; batch.target=plan.target; batch.levels=plan.levels;
         } catch (const std::invalid_argument& error) { return fallback(error.what()); }
         batch.assembly.reglist=2;
@@ -585,8 +587,8 @@ private:
         auto a=previous->assembly,b=batch.assembly;
         a.state={}; b.state={};
         const auto primitive=a.primitive;
-        if ((primitive!=3 && primitive!=4 && primitive!=6) ||
-            (primitive!=4 && previous->elements%(primitive==3 ? 3 : 2)) ||
+        if ((primitive!=0 && primitive!=3 && primitive!=4 && primitive!=6) ||
+            ((primitive==3 && previous->elements%3) || (primitive==6 && previous->elements%2)) ||
             vector_primitives(primitive,previous->elements+batch.elements)>4096U ||
             std::memcmp(&a,&b,sizeof(a)) || previous->levels.control!=batch.levels.control ||
             previous->levels.base!=batch.levels.base || previous->levels.pitch!=batch.levels.pitch ||
@@ -634,10 +636,12 @@ private:
         }
         const auto ceil_pixel=[](int value) { return value>=0 ? (value+15)/16 : value/16; };
         const int coverage=a.coverage ? 15 : 0;
-        const int left=std::max(ceil_pixel(std::max(0,low_x-coverage)-a.offset_x),int(a.scissor[0]));
-        const int right=std::min(ceil_pixel(high_x-a.offset_x),int(a.scissor[1])+1);
-        const int top=std::max(ceil_pixel(std::max(0,low_y-coverage)-a.offset_y),int(a.scissor[2]));
-        const int bottom=std::min(ceil_pixel(high_y-a.offset_y),int(a.scissor[3])+1);
+        // A point fills the pixel nearest its position, as plan_line_or_point.
+        const bool points=a.primitive==0;
+        const int left=std::max(points ? nearest_pixel(low_x-a.offset_x) : ceil_pixel(std::max(0,low_x-coverage)-a.offset_x),int(a.scissor[0]));
+        const int right=std::min(points ? nearest_pixel(high_x-a.offset_x)+1 : ceil_pixel(high_x-a.offset_x),int(a.scissor[1])+1);
+        const int top=std::max(points ? nearest_pixel(low_y-a.offset_y) : ceil_pixel(std::max(0,low_y-coverage)-a.offset_y),int(a.scissor[2]));
+        const int bottom=std::min(points ? nearest_pixel(high_y-a.offset_y)+1 : ceil_pixel(high_y-a.offset_y),int(a.scissor[3])+1);
         // Nothing draws: no batch, and the CPU planner would not draw either.
         if (!primitives || left>=right || top>=bottom) { batch.elements=0; return true; }
         // Pixels past the surface width wrap into later pages, as draws planned
@@ -720,7 +724,8 @@ private:
             }
             state.upload=ImageUpload::begin(state.transfer_buffer,state.transfer_position,state.transfer_extent,unsigned(value&3)); return;
         case 0x61: draws.emplace_back(Finish{}); return;
-        case 0xf: case 0x7f: return;
+        // Addresses with no GS register, or its no-operation: writes have no effect.
+        case 0xe: case 0xf: case 0x7f: return;
         case 4: case 5: case 12: case 13: break;
         default: throw std::invalid_argument("Unsupported native graphics command: "+std::to_string(reg));
         }
@@ -751,6 +756,28 @@ private:
             state.vertex_count=primitive==2 ? 1 : 0;
             if (primitive==2) state.vertices[0]=vertices[1];
             if (reg==12 || reg==13) return;
+            if (primitive && (attributes&16U) && !(attributes&~0x3ffU)) {
+                // A textured line draws as a one-pixel-wide quad through the triangle
+                // path, which owns texture sampling. Its covered pixels can differ
+                // from the GS line walk by part of a pixel.
+                if (state.suppress_draws) return;
+                const auto& context=state.contexts[(attributes>>9)&1];
+                if (context.wraps) throw std::invalid_argument("Line on a wrapping zero-width frame is unsupported");
+                const bool flat=std::abs(vertices[1].x-vertices[0].x)>=std::abs(vertices[1].y-vertices[0].y);
+                auto a=vertices[0],b=vertices[0],c=vertices[1],d=vertices[1];
+                (flat ? a.y : a.x)-=8; (flat ? b.y : b.x)+=8;
+                (flat ? c.y : c.x)-=8; (flat ? d.y : d.x)+=8;
+                for (const auto& corners:{std::array<RasterVertex,3>{a,b,c},std::array<RasterVertex,3>{b,c,d}}) {
+                    if (auto draw=plan_triangle(context.frame,context.offset,context.scissor,corners,(attributes&8)!=0,false)) {
+                        configure_draw(state,context,attributes,draw->draw);
+                        auto levels=plan_texture(draw->draw,context.texture,context.filter,context.clamp,state.texa,context.mipmap_bases);
+                        if (!(attributes&256)) draw->draw.flags|=perspective_triangle_flag;
+                        draws.push_back(Draw{draw->draw,unsigned((context.texture>>56)&(palette_is16(context.texture) ? 31 : 15)),draw->triangle,state.fog_color,state.fog,palette_is16(context.texture),state.texa,levels});
+                    }
+                }
+                return;
+            }
+            if (state.suppress_draws) return; // A GPU batch draws this point.
             if (attributes&~0x3cfU)
                 throw std::invalid_argument("Unsupported native point/line attributes: "+std::to_string(attributes));
             const auto& context=state.contexts[(attributes>>9)&1];
@@ -791,12 +818,12 @@ private:
             if (reg==12 || reg==13) {
                 // Vertex writes with a suppressed kick initialize the latch;
                 // unsupported primitives still stop when a draw is requested.
-                state.x=x; state.y=y; state.first_uv=state.uv; state.first=true; return;
+                state.x=x; state.y=y; state.first_uv=state.uv; state.first_s=state.s; state.first_t=state.t; state.first_q=state.q; state.first=true; return;
             }
             throw std::invalid_argument("Unsupported native primitive/attributes: "+
                 std::to_string(state.primitive&7)+"/"+std::to_string(attributes));
         }
-        if (!state.first) { state.x=x; state.y=y; state.first_uv=state.uv; state.first=true; return; }
+        if (!state.first) { state.x=x; state.y=y; state.first_uv=state.uv; state.first_s=state.s; state.first_t=state.t; state.first_q=state.q; state.first=true; return; }
         state.first=false;
         if (reg==12 || reg==13 || state.suppress_draws) return;
         const auto& context=state.contexts[(attributes>>9)&1];
@@ -814,8 +841,21 @@ private:
             TextureLevels levels{};
             if (attributes&16) {
                 // Sprites use the Q latched with their final vertex for LOD.
-                levels=plan_sprite_texture(*draw,attributes,context.texture,context.filter,context.clamp,state.texa,
-                    context.mipmap_bases,context.offset,first_x,state.y,last_x,y,state.first_uv,state.uv,std::bit_cast<float>(state.q));
+                // A sprite has no perspective across it: its S/T/Q corners project to
+                // the fixed-point texel coordinates the UV form carries directly.
+                const auto project=[&](std::uint32_t s,std::uint32_t t,std::uint32_t q) {
+                    const auto axis=[&](std::uint32_t coordinate,unsigned shift) {
+                        const auto extent=float(1U<<std::min(unsigned((context.texture>>shift)&15U),10U));
+                        const auto scaled=std::bit_cast<float>(coordinate)/std::bit_cast<float>(q)*extent*16.0f;
+                        return std::isfinite(scaled) ? std::uint32_t(std::clamp(scaled+0.5f,0.0f,16383.0f)) : 0U;
+                    };
+                    return axis(s,26)|(axis(t,30)<<16);
+                };
+                const bool projected=!(attributes&256U);
+                levels=plan_sprite_texture(*draw,attributes|256U,context.texture,context.filter,context.clamp,state.texa,
+                    context.mipmap_bases,context.offset,first_x,state.y,last_x,y,
+                    projected ? project(state.first_s,state.first_t,state.first_q) : state.first_uv,
+                    projected ? project(state.s,state.t,state.q) : state.uv,std::bit_cast<float>(state.q));
             }
             const Draw planned{*draw,unsigned((context.texture>>56)&(palette_is16(context.texture) ? 31 : 15)),{},state.fog_color,state.fog,palette_is16(context.texture),state.texa,levels};
             if (!context.wraps) { draws.push_back(planned); return; }
@@ -903,7 +943,8 @@ private:
                     const auto z=(reg&1) ? q[2] : (q[2]>>4)&0xffffffU;
                     const auto fog=(reg&1) ? 0ULL : (std::uint64_t((q[3]>>4)&255)<<56);
                     command(state,target,(q[0]&65535)|(std::uint64_t(q[1]&65535)<<16)|(std::uint64_t(z)<<32)|fog,draws);
-                } else throw std::invalid_argument("Unsupported packed native graphics register");
+                } else if (reg>=6 && reg<=9) command(state,reg,half(q,0),draws); // TEX0 and CLAMP pass through.
+                else throw std::invalid_argument("Unsupported packed native graphics register "+std::to_string(reg));
             };
             // Runs of vertex entries may be drawn by GPU assembly, planned from the
             // GS state at the run; state entries end a run and apply normally, as

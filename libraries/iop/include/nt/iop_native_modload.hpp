@@ -1,5 +1,6 @@
 #pragma once
 #include <nt/iop_native_services.hpp>
+#include <nt/iop_native_libraries.hpp>
 #include <nt/iop_native_code.hpp>
 #include <nt/iop_native_heap.hpp>
 #include <nt/iop_native_threads.hpp>
@@ -22,6 +23,7 @@ struct SealedModule {
     std::uint64_t image_hash=0;
     std::uint32_t base=0, entry=0, initialized_size=0, memory_size=0, global_pointer=0;
     NativeModuleDetails details;
+    std::uint32_t source_size=0; // Bytes of the source file source_hash covers.
 };
 // Native loader ABI ownership. Callback registration does not load a module,
 // authenticate executable content, or mark any module resident.
@@ -66,7 +68,10 @@ public:
         }
         if (request.selector==15) return boot_device(a[0],ram);
         if (request.selector==7) return load_start(request,ram);
-        if (request.selector==8) return start_module(a[0]);
+        if (request.selector==8) return start_module(request,ram);
+        if (request.selector==10) return load_buffer(a[0],ram);
+        if (request.selector==20) return stop_module(request,ram);
+        if (request.selector==21) return unload_module(a[0],ram);
         if ((request.selector>=16 && request.selector<=18) || request.selector==22 || request.selector==23)
             return query(request,ram);
         // Other lifecycle ABIs can be compiled, but cannot succeed until their
@@ -76,6 +81,7 @@ public:
     void attach_disc(const std::filesystem::path& image) { files_=std::make_unique<disc::Files>(image); }
     void attach_heap(NativeHeapServices& heap) { heap_=&heap; }
     void attach_scheduler(NativeThreadServices& threads) { threads_=&threads; }
+    void attach_libraries(NativeLibraryServices& libraries) { libraries_=&libraries; }
     // A running initializer owns its continuation until completion. Cancellation
     // cannot discard it while other modules may retain its published callbacks.
     bool cancel_wait(std::uint32_t,std::uint32_t) override { return false; }
@@ -86,6 +92,9 @@ public:
         if (!pending_) return {};
         return pending_->module.module.details.version;
     }
+    // Pristine images, one per sealed module in order. With them a module that was
+    // unloaded can start again from clean data, as a reload from disc would.
+    void attach_sealed_images(std::vector<Bytes> images) { sealed_images_=std::move(images); }
     // Startup and disc-loaded entries share one actual lifecycle registry.
     // A compiled catalog entry is not registered until initialization begins.
     std::uint32_t begin_startup(const NativeModule& module) {
@@ -290,7 +299,16 @@ private:
         }
         load_bytes_=image.size();
         load_hash_=fingerprint(image);
-        const auto sealed=std::find_if(sealed_.begin(),sealed_.end(),[&](const SealedModule& module) {
+        // A program may start one file several times. Each instance needs its own
+        // converted placement, so prefer one that is not resident yet.
+        const auto resident_at=[&](const SealedModule& module) {
+            return std::any_of(resident_.begin(),resident_.end(),[&](const ResidentModule& item) {
+                return item.hash==module.source_hash && item.module.base==module.base; });
+        };
+        auto sealed=std::find_if(sealed_.begin(),sealed_.end(),[&](const SealedModule& module) {
+            return module.source_hash==load_hash_ && !resident_at(module);
+        });
+        if (sealed==sealed_.end()) sealed=std::find_if(sealed_.begin(),sealed_.end(),[&](const SealedModule& module) {
             return module.source_hash==load_hash_;
         });
         // A hash without a sealed entry is not a module start. The file stays
@@ -304,11 +322,91 @@ private:
     // StartModule addresses a module id. This owner has no loaded-but-unstarted
     // image, so a known id is already started and every other id is unknown.
     // The name, argument span, and stack result pointer are not read.
-    NativeServiceReply start_module(std::uint32_t id) {
+    NativeServiceReply start_module(const NativeServiceRequest& request,std::span<std::uint8_t> ram) {
+        const auto id=request.arguments[0];
+        const auto buffered=std::find_if(loaded_.begin(),loaded_.end(),[&](const LoadedModule& item) { return item.id==id; });
+        if (buffered!=loaded_.end()) {
+            // The module result pointer is the fifth argument, on the caller's stack.
+            if (!request.context) return {NativeServiceStatus::unavailable};
+            const auto sp=request.context->registers[29];
+            const auto slot=ram_offset(sp+16,4,ram.size());
+            if (!slot) return {NativeServiceStatus::address_fault,0,sp+16};
+            auto start=request;
+            start.arguments={0,request.arguments[2],request.arguments[3],load_native_word(ram,*slot)};
+            const auto module=buffered->module;
+            loaded_.erase(buffered);
+            const auto next=next_id_;
+            next_id_=id;
+            const auto reply=begin_sealed(start,sealed_[module],"",start.arguments,ram);
+            next_id_=next;
+            return reply;
+        }
         const auto known=id && ((pending_ && pending_->id==id) ||
             std::any_of(resident_.begin(),resident_.end(),[&](const ResidentModule& item) { return item.id==id; }));
         load_decision_=known ? 14 : 15;
         return {NativeServiceStatus::returned,static_cast<std::uint32_t>(known ? -206 : -202)};
+    }
+    // StopModule calls a removable module's entry with a negative argument count.
+    // Its result decides whether it stopped, as module start results do.
+    NativeServiceReply stop_module(const NativeServiceRequest& request,std::span<std::uint8_t> ram) {
+        const auto& a=request.arguments;
+        const auto found=std::find_if(resident_.begin(),resident_.end(),[&](const ResidentModule& item) { return item.id==a[0]; });
+        if (found==resident_.end()) return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-202)};
+        if (found->stopped) return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-208)};
+        if (found->flags!=completion_flags(2)) { load_decision_=19; return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-209)}; }
+        if (pending_ || !request.context || !heap_ || !threads_) return {NativeServiceStatus::unavailable};
+        const auto waiter=threads_->current_waiter();
+        if (!waiter || request.context!=&threads_->state(*waiter)) return {NativeServiceStatus::unavailable};
+        constexpr std::uint32_t stack_size=0x1000;
+        const auto stack=heap_->invoke({4,{0,stack_size,0},NativeServiceKind::sysmem},ram);
+        if (stack.status!=NativeServiceStatus::returned) return stack;
+        if (!stack.value) return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-400)};
+        auto caller=*request.context;
+        pending_=Pending{request.context,caller,a[3],found->id,0,0,0,stack.value,*found};
+        pending_->stopping=true;
+        Cpu worker; worker.pc=found->module.entry; worker.registers[28]=found->module.global_pointer;
+        worker.registers[29]=stack.value+stack_size-16U;
+        worker.registers[31]=native_service_return; worker.native_call_owner=this;
+        worker.registers[4]=static_cast<std::uint32_t>(-1);
+        try { pending_->worker=threads_->admit(worker); }
+        catch (...) { pending_.reset(); release(stack.value,ram); throw; }
+        pending_->waiter=*waiter;
+        threads_->suspend_wait(*waiter,found->id,NativeWaitKind::module,*this);
+        load_decision_=7;
+        return {NativeServiceStatus::yielded};
+    }
+    NativeServiceReply unload_module(std::uint32_t id,std::span<std::uint8_t> ram) {
+        const auto found=std::find_if(resident_.begin(),resident_.end(),[&](const ResidentModule& item) { return item.id==id; });
+        if (found==resident_.end()) return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-202)};
+        if (!found->stopped) return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-210)};
+        if (libraries_) libraries_->set_module_imports(found->module.base,found->module.memory_size,false);
+        release(found->module.base,ram);
+        if (found->arguments) release(found->arguments,ram);
+        resident_.erase(found);
+        return {NativeServiceStatus::returned,id};
+    }
+    // A file the program placed in memory itself. Bytes of a converted module select
+    // its compiled code; StartModule later runs it. Unknown bytes have no code to run.
+    NativeServiceReply load_buffer(std::uint32_t address,std::span<const std::uint8_t> ram) {
+        const auto at=ram_offset(address,4,ram.size());
+        if (!at) return {NativeServiceStatus::address_fault,0,address};
+        for (std::size_t index=0;index<sealed_.size();++index) {
+            const auto& module=sealed_[index];
+            if (!module.source_size || module.source_size>ram.size()-*at ||
+                fingerprint(ram.subspan(*at,module.source_size))!=module.source_hash) continue;
+            const auto resident=std::any_of(resident_.begin(),resident_.end(),[&](const ResidentModule& item) {
+                return item.hash==module.source_hash && item.module.base==module.base; });
+            const auto waiting=std::any_of(loaded_.begin(),loaded_.end(),[&](const LoadedModule& item) { return item.module==index; });
+            if (resident || waiting) continue;
+            if (next_id_>=0x7fffffffU) return {NativeServiceStatus::unavailable};
+            load_hash_=module.source_hash;
+            load_bytes_=module.source_size;
+            load_decision_=16;
+            loaded_.push_back({next_id_,index});
+            return {NativeServiceStatus::returned,next_id_++};
+        }
+        load_decision_=17;
+        return {NativeServiceStatus::unavailable};
     }
     NativeServiceReply finish_load(const NativeServiceRequest& request,std::span<std::uint8_t> ram) {
         if (!pending_ || !request.context || request.context->native_call_owner!=this)
@@ -317,6 +415,22 @@ private:
         if (worker ? (!threads_ || request.context!=&threads_->state(pending_->worker)) : request.context!=pending_->owner)
             return {};
         const auto entry_result=request.arguments[0];
+        if (pending_->stopping) {
+            if (pending_->result) {
+                const auto stored=store_word(pending_->result,entry_result,ram);
+                if (stored.status!=NativeServiceStatus::returned) return stored;
+            }
+            release(pending_->stack,ram);
+            const auto id=pending_->id,waiter=pending_->waiter;
+            const auto found=std::find_if(resident_.begin(),resident_.end(),[&](const ResidentModule& item) { return item.id==id; });
+            const bool stopped=(entry_result&3U)==1U;
+            if (stopped && found!=resident_.end()) found->stopped=true;
+            threads_->resume_wait(waiter,static_cast<std::int32_t>(stopped ? id : static_cast<std::uint32_t>(-209)));
+            pending_.reset();
+            load_decision_=20+(entry_result&3U);
+            auto exit=request; exit.kind=NativeServiceKind::thbase; exit.selector=8; exit.arguments={};
+            return threads_->invoke(exit,ram);
+        }
         if (pending_->result) {
             const auto stored=store_word(pending_->result,entry_result,ram);
             if (stored.status!=NativeServiceStatus::returned) return stored;
@@ -333,6 +447,7 @@ private:
             release(pending_->arguments,ram);
         } else {
             pending_->module.flags=completion_flags(entry_result);
+            pending_->module.arguments=pending_->arguments;
             resident_.push_back(pending_->module);
         }
         auto caller=pending_->caller;
@@ -368,12 +483,26 @@ private:
         const auto waiter=threads_ ? threads_->current_waiter() : std::nullopt;
         if (threads_ && (!waiter || request.context!=&threads_->state(*waiter)))
             return {NativeServiceStatus::unavailable};
+        // Checked first: a resident module's writable data no longer matches its image.
+        if (std::find_if(resident_.begin(),resident_.end(),[&](const ResidentModule& item) {
+                return item.hash==module.source_hash && item.module.base==module.base; })!=resident_.end()) {
+            load_decision_=10;
+            return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-206)};
+        }
         if (!module.memory_size || module.initialized_size>module.memory_size ||
             module.entry<module.base || module.entry-module.base>=module.memory_size) {
             load_decision_=9;
             return {NativeServiceStatus::unavailable};
         }
-        if (module.initialized_size) {
+        if (const auto index=static_cast<std::size_t>(&module-sealed_.data());index<sealed_images_.size()) {
+            const auto image=ram_offset(module.base,1,ram.size());
+            if (!image || ram.size()-*image<module.memory_size || sealed_images_[index].size()!=module.initialized_size) {
+                load_decision_=9;
+                return {NativeServiceStatus::unavailable};
+            }
+            std::copy(sealed_images_[index].begin(),sealed_images_[index].end(),ram.begin()+*image);
+            std::fill(ram.begin()+*image+module.initialized_size,ram.begin()+*image+module.memory_size,std::uint8_t{0});
+        } else if (module.initialized_size) {
             const auto image=ram_offset(module.base,1,ram.size());
             if (!image || ram.size()-*image<module.initialized_size || 0x200000-*image<module.initialized_size) {
                 load_decision_=9;
@@ -389,11 +518,7 @@ private:
             load_decision_=9;
             return {NativeServiceStatus::unavailable};
         }
-        if (std::find_if(resident_.begin(),resident_.end(),[&](const ResidentModule& item) {
-                return item.hash==module.source_hash; })!=resident_.end()) {
-            load_decision_=10;
-            return {NativeServiceStatus::returned,static_cast<std::uint32_t>(-206)};
-        }
+        if (libraries_) libraries_->set_module_imports(module.base,module.memory_size,true);
         std::vector<nt::ByteView> segments;
         segments.push_back(nt::ByteView(reinterpret_cast<const std::uint8_t*>(path.data()),path.size()));
         if (a[1]) {
@@ -517,6 +642,8 @@ private:
         std::uint32_t id=0;
         NativeModule module;
         std::uint16_t flags=0;
+        std::uint32_t arguments=0; // Loader allocation released when unloaded.
+        bool stopped=false;
     };
     struct Pending {
         const Cpu* owner;
@@ -524,10 +651,15 @@ private:
         std::uint32_t result,id,image,arguments,info,stack;
         ResidentModule module;
         std::uint32_t waiter=0,worker=0;
+        bool stopping=false;
     };
     NativeHeapServices* heap_=nullptr;
     NativeThreadServices* threads_=nullptr;
+    NativeLibraryServices* libraries_=nullptr;
     std::vector<SealedModule> sealed_;
+    std::vector<Bytes> sealed_images_;
+    struct LoadedModule { std::uint32_t id; std::size_t module; };
+    std::vector<LoadedModule> loaded_;
     std::vector<ResidentModule> resident_;
     std::optional<Pending> pending_;
     std::uint32_t next_id_=1;

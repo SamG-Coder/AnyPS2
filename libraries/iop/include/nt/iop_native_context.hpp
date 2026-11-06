@@ -71,6 +71,7 @@ public:
         modload.attach_heap(heap);
         memory_card.attach_loader(modload);
         modload.attach_scheduler(threads);
+        modload.attach_libraries(libraries);
         if (!disc.empty()) modload.attach_disc(disc);
     }
     NativeServiceContext(const NativeServiceContext&)=delete;
@@ -92,6 +93,9 @@ public:
             sif_control.invoke({27,{packet_buffer_,0,0,0},NativeServiceKind::sifman},arena_);
         }
         commands.initialize_system_handlers();
+        // The command layer is ready, as a started SIFCMD module announces to the
+        // EE. Programs that wait for this bit read the buffer address next.
+        sif_control.invoke({24,{0x20000,0,0,0},NativeServiceKind::sifman},arena_);
         return {NativeServiceStatus::returned};
     }
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {

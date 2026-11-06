@@ -51,7 +51,7 @@ public:
         const auto time=clock_();
         completed_lines_=horizontal_ticks(time);
         mode_=DisplayMode{interlace,standard,frame}; epoch_=time; ticks_=0; delivered_ticks_=0;
-        flags_=0; field_=0; events_=0; edge_lost_=false; scanout_odd_=false;
+        flags_=0; field_=0; events_=0; edge_lost_=false; scanout_odd_=false; completed_field_unread_=false;
         vsync_profile_start_.reset();
         return Stop::budget;
     }
@@ -66,6 +66,15 @@ public:
     }
     bool half_height_output() const { return mode_ && mode_->interlace && mode_->frame; }
     bool scanout_odd() const { return scanout_odd_; }
+    // Whether the next FIELD read should report the field that VBLANK start completed,
+    // consuming that view. See NativePlatform::read_graphics.
+    std::optional<bool> take_completed_field() {
+        if (!completed_field_unread_ || !mode_) return std::nullopt;
+        completed_field_unread_=false;
+        const auto period=timing().period,blank=timing().blank;
+        const auto within=ticks_>=blank ? (ticks_-blank)%period : period;
+        return within<period/2 ? std::optional<bool>(scanout_odd_) : std::nullopt;
+    }
     // Monotonic nominal line deadlines share the display clock, independent of
     // presentation rate. A mode reset freezes the count until reconfigured.
     std::uint64_t horizontal_ticks(std::uint64_t time) const {
@@ -135,7 +144,7 @@ public:
                         if (reset!=Stop::budget) return reset;
                     }
                     completed_lines_=horizontal_ticks(clock_());
-                    mask_=0x7f00; flags_=0; field_=0; events_=0; scanout_odd_=false; mode_.reset(); output_={}; readback_enabled_=false; ++resets_;
+                    mask_=0x7f00; flags_=0; field_=0; events_=0; scanout_odd_=false; completed_field_unread_=false; mode_.reset(); output_={}; readback_enabled_=false; ++resets_;
                     return Stop::budget;
                 }
             }
@@ -257,6 +266,7 @@ private:
             // The completed field is still current at VBLANK start; FIELD
             // toggles at the later GS sync edge (zero denotes the even field).
             scanout_odd_=((edges(ticks,period,blank)-1)&1)!=0;
+            completed_field_unread_=true;
         }
         const auto syncs=edges(ticks,period,sync)-edges(ticks_,period,sync);
         if (syncs) {
@@ -275,7 +285,7 @@ private:
     NativeClock clock_;
     std::optional<std::uint64_t> vsync_profile_start_;
     Output output_;
-    bool edge_lost_=false,scanout_odd_=false,readback_enabled_=false;
+    bool edge_lost_=false,scanout_odd_=false,readback_enabled_=false,completed_field_unread_=false;
     std::optional<DisplayMode> mode_;
     std::uint32_t mask_=0x7f00,flags_=0,field_=0,events_=0;
     std::uint64_t epoch_=0,ticks_=0,delivered_ticks_=0,resets_=0,completed_lines_=0;

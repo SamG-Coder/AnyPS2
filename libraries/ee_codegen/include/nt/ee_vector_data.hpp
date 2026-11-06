@@ -127,6 +127,46 @@ inline bool emit_vector_writes(std::size_t storage_size,const NativeVectorDataVi
         }
         return true;
     }
+    // Mode 0 never changes the rows, so without filling or V3 lookahead what each lane
+    // receives depends only on the write's mask group. Resolve that once per view:
+    // streamed pixel planes reach this for every point of every frame.
+    if (!filling && !upload.mode && upload.components!=3 && upload.format!=NativeVectorFormat::packed5551) {
+        struct Group { unsigned lanes=15,constant_lanes=0; std::array<std::uint32_t,4> constants{}; };
+        std::array<Group,4> groups;
+        if (upload.mask) for (unsigned group=0;group<4;++group) for (unsigned lane=0;lane<4;++lane) {
+            const auto selection=(upload.mask->selectors>>(group*8+lane*2))&3U;
+            if (selection==3) groups[group].lanes&=~(1U<<lane);
+            else if (selection) {
+                groups[group].constant_lanes|=1U<<lane;
+                groups[group].constants[lane]=selection==1 ? rows[lane] : upload.mask->row_column[4+group];
+            }
+        }
+        const auto width=stride/upload.components;
+        const auto load=[&](std::size_t offset) {
+            auto value=read(offset,width);
+            if (width<4 && !upload.unsigned_values && (value&(1U<<(width*8-1)))) value|=~0U<<(width*8);
+            return value;
+        };
+        const auto cycle=upload.mask ? upload.mask->cycle : 0U;
+        unsigned within=0,group_index=0;
+        std::size_t cycle_start=0;
+        for (unsigned index=0;index<outputs;++index) {
+            const auto offset=std::size_t(index)*stride;
+            const auto& group=groups[std::min(group_index,3U)];
+            const auto position=upload.destination+cycle_start+within;
+            NativeVectorWrite write;
+            write.destination=unsigned(position<storage_size ? position : position%storage_size);
+            write.lanes=group.lanes;
+            if (upload.components==1) write.values.fill(load(offset));
+            else for (unsigned lane=0;lane<4;++lane) write.values[lane]=load(offset+(lane%upload.components)*width);
+            if (group.constant_lanes) for (unsigned lane=0;lane<4;++lane)
+                if (group.constant_lanes&(1U<<lane)) write.values[lane]=group.constants[lane];
+            emit(write);
+            if (++within==upload.writes_per_cycle) { within=0; cycle_start+=upload.destination_cycle; }
+            if (cycle && ++group_index==cycle) group_index=0;
+        }
+        return true;
+    }
     for (unsigned index=0;index<outputs;++index) {
         const auto within=index%upload.writes_per_cycle;
         const bool fill=filling && within>=upload.destination_cycle;

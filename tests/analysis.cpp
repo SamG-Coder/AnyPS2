@@ -14,6 +14,31 @@ void put(nt::Bytes& bytes, std::size_t offset, std::uint32_t word) {
 int main() {
     try {
         {
+            // A tail call passing zero is not the only way into a called function.
+            nt::Bytes image(0x60,0);
+            nt::elf::Executable fixture{0x1000,0,{{0,0x1000,0x60,0x60,5,4}}};
+            put(image,0x00,0x0c000404); put(image,0x04,0x24070005); // JAL 0x1010, a3=5.
+            put(image,0x08,0x08000410); // J 0x1040.
+            put(image,0x10,0x10e00004); // BEQ a3,zero,0x1024.
+            put(image,0x18,0x24020001); put(image,0x1c,0x03e00008);
+            put(image,0x24,0x24020002); put(image,0x28,0x03e00008);
+            put(image,0x40,0x08000404); put(image,0x44,0x0000382d); // Tail call, a3=0.
+            const auto program=nt::analysis::discover(image,fixture,100);
+            check(program.instructions.contains(0x1018),"Tail-call constant pruned a path reached by a call");
+            // Constant word stores into code sections, proven and not.
+            nt::Bytes patch(0x40,0);
+            nt::elf::Executable patched{0x1000,0,{{0,0x1000,0x40,0x40,5,4}}};
+            patched.code_sections.push_back({0x1000,0x40});
+            put(patch,0x00,0x24041030); // a0 = code address.
+            put(patch,0x04,0x3c030800); put(patch,0x08,0x34630404); // v1 = J 0x1010.
+            put(patch,0x0c,0xac830000); // Constant jump over the word.
+            put(patch,0x10,0x8fa30000); put(patch,0x14,0xac830004); // A value from memory.
+            put(patch,0x18,0x03e00008);
+            const auto stores=nt::analysis::code_stores(patched,nt::analysis::discover(patch,patched,100));
+            check(stores.size()==2 && stores[0].address==0x1030 && stores[0].value==0x08000404U,"Constant code patch was not proven");
+            check(stores[1].address==0x1034 && !stores[1].value,"Value from memory was reported as constant");
+        }
+        {
             auto image=fixture::long_frame_callback_elf();
             const auto executable=nt::elf::parse(image);
             const auto roots=[&] {

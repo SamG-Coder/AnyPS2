@@ -128,7 +128,7 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
     w.out<<"  br i1 "<<available<<", label %region_ready"<<suffix<<", label %vu_stop"<<suffix<<"\nvu_stop"<<suffix<<":\n";
     w.store("i32",address,offsetof(ee::Memory,fault_address),"%memory");
     w.out<<"  ret i32 "<<ownership<<"\nregion_ready"<<suffix<<":\n";
-    const bool native_io=(access.bytes==4 || access.bytes==8 || access.bytes==16 || (access.bytes==1 && access.write)) && access.bank==RegisterBank::integer;
+    const bool native_io=(access.bytes==1 || access.bytes==4 || access.bytes==8 || access.bytes==16) && access.bank==RegisterBank::integer && i.op!=Op::cache;
     if (native_io) {
         const auto device_address=w.binary("and","i1",w.value("icmp uge i32 "+physical+", 268435456"),
             w.value("icmp ult i32 "+physical+", 536870912"));
@@ -153,12 +153,13 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
                 w.value("call i32 @nt_ee_io_read64(ptr %state, ptr %memory, i32 "+io_address+", i32 "+std::to_string(i.rt)+")");
         } else if (access.write) status=w.value(std::string("call i32 @nt_ee_io_write")+(access.bytes==1 ? "8" : "32")+"(ptr %memory, i32 "+io_address+", i32 "+w.narrow(w.reg(i.rt))+")");
         else {
-            const auto packed=w.value("call i64 @nt_ee_io_read32(ptr %memory, i32 "+io_address+")");
+            const auto packed=w.value(std::string("call i64 @nt_ee_io_read")+(access.bytes==1 ? "8" : "32")+"(ptr %memory, i32 "+io_address+")");
             status=w.narrow(w.binary("lshr","i64",packed,"32"));
             const auto ready=w.value("icmp eq i32 "+status+", 0");
             w.out<<"  br i1 "<<ready<<", label %io_read"<<suffix<<", label %io_stop"<<suffix<<"\nio_read"<<suffix<<":\n";
             if (i.rt) {
-                const auto word=w.narrow(packed);
+                auto word=w.narrow(packed);
+                if (access.bytes==1 && access.sign) word=w.value("sext i8 "+w.value("trunc i32 "+word+" to i8")+" to i32");
                 w.store("i64",access.sign ? w.extend(word) : w.value("zext i32 "+word+" to i64"),offsetof(runtime::State,gpr)+i.rt*sizeof(runtime::Register));
             }
             w.out<<"  br label %memory_done"<<suffix<<"\nio_stop"<<suffix<<":\n  ret i32 "<<status<<"\nram"<<suffix<<":\n";

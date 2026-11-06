@@ -78,7 +78,7 @@ public:
         if (length<16 || length>112 || ((length+15)&~15U)!=packet.bytes.size()) return {Stop::invalid_state};
         const auto command=word(packet.bytes,8),option=word(packet.bytes,12);
         if (command==0x8000000a) {
-            if (!ready || length<56 || option || word(packet.bytes,48)!=1) return {Stop::unsupported_system};
+            if (!ready || length<56 || word(packet.bytes,48)!=1) return {Stop::unsupported_system};
             NativeRpcService* service=nullptr;
             for (auto* item:services_) if (item->server==word(packet.bytes,52)) service=item;
             if (!service) return {Stop::unsupported_system};

@@ -101,7 +101,11 @@ inline std::vector<Quadword> collect_packet(std::span<const Quadword> ring,unsig
         const auto low=std::uint64_t(tag[0])|(std::uint64_t(tag[1])<<32);
         const auto payload=payload_words(tag);
         if (payload>ring.size()-consumed-1) throw std::invalid_argument("Graphics packet exceeds source ring bound");
-        for (std::size_t i=0;i<=payload;++i) packet.push_back(ring[(start+consumed+i)%ring.size()]);
+        // A tag and its payload wrap the ring at most once.
+        const auto first=(start+consumed)%ring.size();
+        const auto contiguous=std::min<std::size_t>(static_cast<std::size_t>(payload)+1,ring.size()-first);
+        packet.insert(packet.end(),ring.begin()+first,ring.begin()+first+contiguous);
+        packet.insert(packet.end(),ring.begin(),ring.begin()+(static_cast<std::size_t>(payload)+1-contiguous));
         consumed+=static_cast<std::size_t>(payload)+1;
         if (low&0x8000U) return packet;
     }

@@ -43,7 +43,9 @@ public:
 
     // Validate every chunk before changing coverage. Rejecting an upload batch
     // leaves the binding unchanged, just as the caller must leave its packet state.
-    bool upload(unsigned unit,std::span<const UploadView> uploads) {
+    // Direct memory writes may also hold bytes no program owns, such as the padding
+    // after a program copied with a rounded size. These only remove coverage.
+    bool upload(unsigned unit,std::span<const UploadView> uploads,bool allow_unknown=false) {
         if (unit!=this->unit() || uploads.empty()) return false;
         for (const auto& upload:uploads) {
             if (upload.bytes.empty() || upload.bytes.size()%8 ||
@@ -54,7 +56,7 @@ public:
                 return offset<=image.bytes.size() && upload.bytes.size()<=image.bytes.size()-offset &&
                     std::equal(upload.bytes.begin(),upload.bytes.end(),image.bytes.begin()+offset);
             };
-            if (std::none_of(catalog_->begin(),catalog_->end(),matches) &&
+            if (!allow_unknown && std::none_of(catalog_->begin(),catalog_->end(),matches) &&
                 std::none_of(catalog_->begin(),catalog_->end(),[&](const Image& image) { return part_of(image,upload.bytes); }))
                 return false;
         }
@@ -116,7 +118,7 @@ public:
         active_=selected; relocated_base_=base;
         state.graphics_completes=0;
         state.next_pair=compiled_entry;
-        return (*catalog_)[*active_].program.run(state,budget,profile);
+        return follow(state,(*catalog_)[*active_].program.run(state,budget,profile),budget,profile);
     }
     // Attaches loop substitutes to one catalog artifact. Call before copying the
     // binding to execution owners; existing copies keep their programs.
@@ -127,10 +129,25 @@ public:
         catalog_=std::make_shared<const Catalog>(std::move(catalog));
     }
     std::size_t artifacts() const { return catalog_->size(); }
-    RunResult resume(State& state,std::uint64_t budget,ExecutionProfile* profile=nullptr) const {
-        return active_ && (relocated_base_ || ready(*active_)) ? (*catalog_)[*active_].program.run(state,budget,profile) : RunResult{RunStatus::unbound_program,0};
+    RunResult resume(State& state,std::uint64_t budget,ExecutionProfile* profile=nullptr) {
+        return active_ && (relocated_base_ || ready(*active_)) ?
+            follow(state,(*catalog_)[*active_].program.run(state,budget,profile),budget,profile) : RunResult{RunStatus::unbound_program,0};
     }
 private:
+    // A program can jump to another one uploaded beside it, as with routines placed
+    // at a fixed address and shared between programs. The target must be fully
+    // loaded compiled code; otherwise the unmapped stop stands.
+    RunResult follow(State& state,RunResult result,std::uint64_t budget,ExecutionProfile* profile) {
+        while (result.status==RunStatus::unmapped_block && !relocated_base_ && result.blocks<budget) {
+            const auto next=select(state.next_pair);
+            if (!next || next==active_) break;
+            active_=next;
+            const auto blocks=result.blocks;
+            result=(*catalog_)[*active_].program.run(state,budget-blocks,profile);
+            result.blocks+=blocks;
+        }
+        return result;
+    }
     struct Image {
         Program program;
         unsigned destination;

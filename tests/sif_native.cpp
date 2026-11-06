@@ -175,7 +175,7 @@ int main() {
         require(context.initialize_commands().status==NativeServiceStatus::unavailable && !control.ready() && !control.sub_flags());
         control.publish_main(0x6000,0x10000);
         require(context.initialize_commands().status==NativeServiceStatus::returned && control.sub_address()==0xce00);
-        require(context.initialize_commands().status==NativeServiceStatus::returned && control.sub_flags()==0x10000);
+        require(context.initialize_commands().status==NativeServiceStatus::returned && control.sub_flags()==0x30000);
         {
             // A batch not addressed to the command buffer is plain DMA into IOP
             // memory. It is atomic and never replaces compiled code.

@@ -9,7 +9,7 @@ enum class LowerOperation { unsupported, literal, branch, integer_add, integer_s
     reciprocal_square_root, wait_quotient, load_quad, store_quad, load_integer, store_integer,
     input_top, input_itop, reciprocal_length, sine, efu_square_root, efu_sum_squares, efu_reciprocal_sum_squares, efu_length, efu_sum, efu_reciprocal, efu_reciprocal_square_root, move_p, wait_p, mac_and, mac_or, mac_equal, graphics_kick,
     clip_and, clip_or, clip_equal, clip_set, clip_get,
-    status_and, status_or, status_equal };
+    status_and, status_or, status_equal, random_next, random_get, random_init, random_xor, status_set };
 enum class AddressUpdate { none, increment, decrement };
 enum class Bank { none, vector, integer, immediate, quotient };
 struct Register {

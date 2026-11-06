@@ -4,6 +4,7 @@
 #include <source_location>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 extern "C" nt::ee::Stop nt_ee_generated_run(nt::runtime::State*,nt::ee::Memory*,std::uint64_t);
 namespace {
@@ -12,8 +13,62 @@ void check(bool ok,std::source_location location=std::source_location::current()
 }
 void word(std::uint8_t* bytes,unsigned offset,std::uint32_t value) { std::memcpy(bytes+offset,&value,4); }
 }
+namespace {
+std::vector<std::uint8_t> mfifo_received;
+nt::ee::Stop mfifo_consumer_result=nt::ee::Stop::budget;
+void run_mfifo_tests() {
+    using nt::ee::Stop;
+    std::array<std::uint8_t,1024> ram{};
+    nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.attach(memory);
+    platform.scratchpad_copy.protection=[](std::uint32_t,std::uint32_t) { return false; };
+    platform.packet_submission.consumer.consume_with_origins=[](void*,unsigned,std::span<const std::uint8_t> bytes,std::span<const nt::ee::NativePacketOrigin>) {
+        if (mfifo_consumer_result==Stop::budget) mfifo_received.insert(mfifo_received.end(),bytes.begin(),bytes.end());
+        return mfifo_consumer_result;
+    };
+    nt::runtime::State state;
+    const auto write=[&](unsigned address,unsigned value) {
+        state.pc=0x360000; state.set(4,address); state.set(8,value);
+        return nt_ee_generated_run(&state,&memory,1);
+    };
+    const auto read=[&](unsigned address) {
+        state.pc=0x360008; state.set(4,address);
+        check(nt_ee_generated_run(&state,&memory,1)==Stop::budget);
+        return static_cast<unsigned>(state.gpr[8].lo);
+    };
+    constexpr unsigned from=0x1000d000,vector=0x10009000;
+    // Ring 0x100..0x180; the descriptor sits at its end and its data wraps.
+    check(write(0x1000e050,0x100)==Stop::budget && write(0x1000e040,0x70)==Stop::budget);
+    check(write(0x1000e000,9)==Stop::budget);
+    check(write(from+0x10,0x170)==Stop::budget);
+    check(write(vector+0x30,0x170)==Stop::budget && write(vector,0x14d)==Stop::budget);
+    check(mfifo_received.empty() && (read(vector)&0x100));
+    word(memory.scratchpad,0,0x10000001); word(memory.scratchpad,8,0x11111111); word(memory.scratchpad,12,0x22222222);
+    word(memory.scratchpad,16,0x33333333);
+    check(write(from+0x20,2)==Stop::budget && write(from+0x80,0)==Stop::budget);
+    check(write(from,0x100)==Stop::budget);
+    check(read(from+0x10)==0x110 && read(vector+0x30)==0x110);
+    check(mfifo_received.size()==24);
+    std::uint32_t first,payload;
+    std::memcpy(&first,mfifo_received.data(),4); std::memcpy(&payload,mfifo_received.data()+8,4);
+    check(first==0x11111111 && payload==0x33333333);
+    // A busy consumer refuses a batch without losing it; the fill loop's poll retries.
+    mfifo_consumer_result=Stop::vector_pending;
+    word(memory.scratchpad,32,0x10000000);
+    check(write(from+0x20,1)==Stop::budget && write(from+0x80,32)==Stop::budget && write(from,0x100)==Stop::budget);
+    check(read(from+0x10)==0x120 && mfifo_received.size()==24);
+    mfifo_consumer_result=Stop::budget;
+    check(read(vector+0x30)==0x120 && mfifo_received.size()==32);
+    // Restarting drains from the configured position only, not stale ring contents.
+    check(write(vector,0x4d)==Stop::budget);
+    check(write(from+0x10,0x100)==Stop::budget && write(vector+0x30,0x100)==Stop::budget && write(vector,0x14d)==Stop::budget);
+    check(read(vector+0x30)==0x100 && mfifo_received.size()==32);
+    // Only the vector channel has an MFIFO consumer.
+    check(write(vector,0x4d)==Stop::budget && write(0x1000e000,13)==Stop::unsupported_system);
+}
+}
 void run_scratchpad_tests() {
     using nt::ee::Stop;
+    run_mfifo_tests();
     std::array<std::uint8_t,1024> ram{};
     for (unsigned n=0;n<128;++n) ram[n]=static_cast<std::uint8_t>(n);
     nt::ee::Memory memory{ram.data(),ram.size()}; nt::ee::NativePlatform platform; platform.attach(memory);

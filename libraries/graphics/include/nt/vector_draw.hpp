@@ -48,7 +48,7 @@ struct VectorLaunch {
 // Host-planned, data-independent part of primitive assembly. Field order is
 // the GPU plan layout in vector_assembly.comp.
 struct VectorAssembly {
-    std::uint32_t primitive=0;              // 3 list, 4 strip, 5 fan, 6 sprite
+    std::uint32_t primitive=0;              // 0 point, 3 list, 4 strip, 5 fan, 6 sprite
     std::uint32_t shaded=0,coverage=0,xyz_register=0;
     std::uint32_t present=0;                // bit n: register kind n is in the record
     std::int32_t offset_x=0,offset_y=0;     // XYOFFSET in 12.4 units
@@ -69,6 +69,6 @@ struct VectorAssembly {
 // Register kinds of VectorAssembly::store/constant/present.
 enum class VectorRegisterKind : unsigned { color=0, texture=1, uv=2, fog=3, position=4 };
 inline constexpr unsigned vector_primitives(unsigned primitive,unsigned vertices) {
-    return primitive==3 ? vertices/3 : primitive==6 ? vertices/2 : vertices>=2 ? vertices-2 : 0;
+    return primitive==0 ? vertices : primitive==3 ? vertices/3 : primitive==6 ? vertices/2 : vertices>=2 ? vertices-2 : 0;
 }
 }

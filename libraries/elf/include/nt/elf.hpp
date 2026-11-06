@@ -14,6 +14,10 @@ struct VectorOverlay {
 struct Executable {
     std::uint32_t entry, flags;
     std::vector<Segment> segments;
+    // LOAD segments linked to shared addresses. Only one can be resident at a time
+    // and the program loads them itself, so their bytes are not established code at
+    // those addresses. They initialize memory in file order, as a loader would.
+    std::vector<Segment> overlay_segments;
     // Metadata roots only; application startup retains invocation order.
     std::vector<std::uint32_t> lifecycle_entries;
     // An AnyPS2 import note records that the source container had no section

@@ -34,6 +34,23 @@ void test_elf() {
     const auto good = make_elf();
     const auto parsed = nt::elf::parse(good);
     check(parsed.entry == 0x100000 && parsed.segments.size() == 1, "ELF metadata differs");
+    {
+        // An empty load segment places nothing, even when misaligned, and segments
+        // sharing addresses are overlays rather than resident code.
+        auto layered = good;
+        layered[44] = 4;
+        const auto segment = [&](unsigned index, unsigned offset, unsigned address, unsigned size, unsigned alignment) {
+            const auto at = 52 + index * 32;
+            put32(layered, at, 1); put32(layered, at + 4, offset); put32(layered, at + 8, address);
+            put32(layered, at + 16, size); put32(layered, at + 20, size); put32(layered, at + 24, 7); put32(layered, at + 28, alignment);
+        };
+        segment(1, 257, 0, 0, 0x1000);
+        segment(2, 256, 0x200000, 4, 4);
+        segment(3, 256, 0x200000, 4, 4);
+        const auto overlays = nt::elf::parse(layered);
+        check(overlays.segments.size() == 1 && overlays.segments[0].address == 0x100000, "Overlay segments stayed resident");
+        check(overlays.overlay_segments.size() == 2 && overlays.overlay_segments[0].address == 0x200000, "Overlay segments were lost");
+    }
     for (std::size_t length = 0; length < good.size(); ++length)
         rejects([&] { nt::elf::parse(nt::ByteView(good).first(length)); });
     for (const auto offset : {18U, 42U, 44U}) {

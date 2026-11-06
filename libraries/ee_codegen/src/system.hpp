@@ -65,6 +65,8 @@ inline void emit_system_transfer(Writer& w,const r5900::Instruction& i,std::size
         if (i.rt) w.store("i64",w.extend(w.narrow(result)),offsetof(runtime::State,gpr)+i.rt*sizeof(runtime::Register));
         return;
     }
+    // Debug breakpoint registers have no native counterpart. Reaching one stops.
+    if (i.rd==24) { w.out<<"  ret i32 10\ndebug_transfer_unreachable"<<i.pc<<":\n"; return; }
     // Converted native allocations have fixed lifetime and no eviction policy.
     // A reservation within the compiled plan needs no console register state.
     // Readback is deliberately unsupported, rather than fabricating a value.
