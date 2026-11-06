@@ -41,8 +41,8 @@ and [homebrew testing](ps2-test-programs.md#larger-homebrew-tests).
 
 ## Commercial and provenance boundaries
 
-GT4 has displayed its opening warning through Vulkan. Its title screen and playable
-gameplay have not been demonstrated. Homebrew progress does not establish GT4 support.
+GT4 reaches its menus and races in local runs through Vulkan, driven by a user with a
+controller. It is incomplete: unexplained stops remain and it does not hold 60 fps. Homebrew progress does not establish GT4 support.
 
 Public references include PCSX2, PS2SDK, Play! and recompilation projects. Their
 roles, pins and licenses are recorded in the [provenance ledger](source-references.md).

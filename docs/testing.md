@@ -65,38 +65,13 @@ check actual game/demo pixels and interaction; synthetic raster tests alone do n
 establish visual correctness. Separate displayed updates, simulation rate and CPU/GPU
 cost when reporting performance. See [batch conversion](batch-conversion.md).
 
-For repeatable menu measurements, `ps2-native --pad-script <file>` replaces the host
-controllers with timed port-0 presses. Each line is `<start-ms> <hold-ms>
-<button>[+<button>...]`, timed from the start of execution, with `#` comments. The
-scripted pad is a standard controller whose rumble motors produce no output.
-`--capture-display <directory>` records scanout frames headlessly as well as with a
-window. Times follow host execution, so check captured frames to confirm that a
-script reached the intended screen before comparing runs. Keep scripts and
-captures for commercial games under ignored `work/`. With a pad script,
-`--input-latency` reports, for each press, the display updates and milliseconds
-until the shown image visibly changes; it reads frames back around presses and
-ignores pixels that change during the 300 ms before a press (animation). Small
-highlights below the change threshold time out after 2 s. `--profile-graphics` also lists the program locations where execution
-waits for native vector jobs (`job_wait_profile`), and which enabled INTC lines
-and DMAC channels end idle spans while every thread waits (`idle_wake_profile`).
-
-`ps2-native --capture-vectors <new-private-directory>` records accepted vector
-submissions for the most recent 16 displayed frames into `submissions.tsv`:
-microcode uploads, data unpacks (destination, format, count, size, content
-fingerprint), direct graphics packets and program launches. It observes after
-acceptance and does not alter execution. Use it to measure render structure, such
-as which streams are unchanged between frames; keep captures under ignored `work/`.
-
-`ps2-native --capture-packets <private-file>` records accepted VIF and GIF transfers:
-program uploads from the start, the rest once a heavy scene arms it, up to 1.5 GB.
-`ps2-native <program.data> 1000 --replay-packets <private-file>` then runs those
-transfers through the real packet path and compiled VU programs, with no game code,
-window or GPU, and prints what the program's thread pays per channel and a hash of
-everything drawn. Each submission finishes before the next, so the costs exclude
-queueing. A change to this path must leave the hash unchanged; add `--profile-graphics`
-for VU thread time, or `--sample-threads <file>` to sample the replay. The recording
-starts mid-game, so VU memory differs from the original run: the hash compares builds
-and says nothing about the original frames.
+For repeatable measurements, use a [pad script](commands.md#scripted-input) and
+[captures](commands.md#captures). Keep scripts and captures for commercial games under
+ignored `work/`. `--profile-graphics` also lists where execution waits for native vector
+jobs (`job_wait_profile`), and which enabled INTC lines and DMAC channels end idle spans
+while every thread waits (`idle_wake_profile`). Render changes can be checked without the
+game using [`ps2-graphics-replay`](commands.md#ps2-graphics-replay-replay-graphics-without-the-game)
+and [`--replay-packets`](commands.md#testing-without-the-game).
 
 ## Before committing
 

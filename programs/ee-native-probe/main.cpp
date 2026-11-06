@@ -334,7 +334,14 @@ nt::ee::Stop execute(nt::runtime::State* state,nt::ee::Memory* memory,std::uint6
 }
 int main(int argc,char** argv) {
     if (argc<2) {
-        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [--trace-services] [--profile-graphics] [--validate-graphics] [--verify-textures] [--gpu-triangles | --cpu-triangles] [--run-seconds N] [--headless | --display-stop | --close-on-stop] [--strict-performance | --native-thread-cycles | --native-pmu] [--disc <image.iso>] [--disc-media cd|dvd] [--capture-vu <new-private-directory>] [--capture-vectors <new-private-directory>] [--capture-stop <new-private-directory>] [--capture-graphics <new-private-directory> | --capture-display <new-private-directory>]\n";
+        std::cerr<<"Usage: ps2-native <program.data> [operation-budget] [options]\n"
+                   "  Play: --disc <image.iso> --disc-media cd|dvd --fullscreen --resolution-scale 1|3|5 --close-on-stop --display-stop --run-seconds N --headless\n"
+                   "  Input: --pad-script <file> --input-latency\n"
+                   "  Rendering: --gpu-triangles | --cpu-triangles --validate-graphics --verify-textures\n"
+                   "  Profiling: --profile-graphics --sample-threads <file> --trace-services --strict-performance | --native-thread-cycles | --native-pmu\n"
+                   "  Capture: --capture-graphics <dir> --capture-graphics-when-heavy --capture-display <dir> --capture-packets <file> --capture-vectors <dir> --capture-vu <dir> --vu-capture <file> <jobs> <start-ms> --capture-stop <dir>\n"
+                   "  Without the game: --replay-packets <file> --vu-regions check|cpu\n"
+                   "See docs/commands.md.\n";
 #ifdef ANYPS2_NATIVE_IOP
         std::cerr<<"Linked IOP investigation: --probe-iop-reset <module.data> (stops without acknowledging reset)\n";
         std::cerr<<"Explicit selected-bundle execution: --iop-reset-session <module.data> --disc <image.iso>\n";

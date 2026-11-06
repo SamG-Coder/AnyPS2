@@ -88,19 +88,16 @@ per console pixel, off-center samples of a triangle may pass a scissor edge by u
 console pixel, coverage antialiasing stays on the console grid, field reconstruction is
 skipped, and off-center samples of a 16-bit surface keep full colour without dither.
 
-The window shows a scaled image at up to the monitor's size. `--fullscreen`, F11 or
-Alt+Enter switch to a borderless window over the whole monitor, at the display's
-shape with black bars around it.
+The window shows a scaled image at up to the monitor's size. Full screen is a borderless
+window over the whole monitor, at the display's shape with black bars around it.
 
 ## Measuring without the game
 
-`--capture-graphics <new-directory> --capture-graphics-when-heavy` records submitted
-graphics data once a scene is heavy. `ps2-graphics-replay [--scale n] <packets.bin> [repeat] [surface.ppm:fbp:fbw:psm:width:height]`
-replays it through the native renderer and reports its cost and a hash of the
-resulting memory, so two builds with the same hash rendered that capture identically.
-A capture excludes EE and VU work and may start mid-scene. `--sample-threads <file>`
-records a 30-second statistical profile of every thread, also from a heavy scene.
-Keep captures and samples under the ignored `work/` directory.
+A captured frame can be replayed through the renderer alone with
+[`ps2-graphics-replay`](commands.md#ps2-graphics-replay-replay-graphics-without-the-game),
+which reports its cost and a hash of the resulting memory.
+[`--replay-packets`](commands.md#testing-without-the-game) does the same for the path from
+a VIF transfer to a queued VU job.
 
 ## VIF transfers and VU jobs
 
@@ -115,8 +112,7 @@ shows what was drawn before it. A failed job keeps reporting failure on later po
 Vector data that cannot fail planning and leaves the row registers unchanged is
 checked for shape on the program's thread and expanded on the VU thread, directly
 into VU memory. Other data is planned on the program's thread as before, so what is
-rejected and when does not change. `--replay-packets` (see [testing](testing.md))
-runs this path by itself.
+rejected and when does not change.
 
 ## Submitting to the GPU
 

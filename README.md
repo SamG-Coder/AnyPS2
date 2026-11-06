@@ -6,7 +6,7 @@ AnyPS2 is an experimental, BIOS-free C++20 toolchain for converting user-owned P
 
 **Gran Turismo 4 is the first integration target.** The long-term goal is a reusable conversion pipeline, not a one-off GT4 port.
 
-> **Work in progress:** AnyPS2 is not a general-purpose PS2 game launcher. GT4 has rendered its opening warning through Vulkan and progressed into subsequent graphics/startup work, but it has **not reached the title screen or playable gameplay**.
+> **Work in progress:** AnyPS2 is not a general-purpose PS2 game launcher. GT4 reaches its menus and races in local runs through Vulkan, but it is incomplete, unexplained stops remain, and it does not hold 60 fps. No other commercial game has been shown to work.
 
 **Homebrew milestones:** locally adapted Cubes, Console/Input, Audio/Sound and
 Dungeon demos from [glampert/ps2-homebrew](https://github.com/glampert/ps2-homebrew)
@@ -56,10 +56,10 @@ Native services aim to reproduce the *observable behavior* of console operations
 | EE (Emotion Engine) | Experimental ahead-of-time LLVM conversion of a growing R5900 instruction/control-flow subset; native startup services and compiled callbacks |
 | IOP | Standalone LLVM conversion for supported IRX code and a growing set of native kernel, file, thread, RPC and device services; full integration remains incomplete |
 | VU / VIF / GIF | Bounded vector-code conversion, native vector services and supported packet paths; incomplete game integration and unsupported operations remain |
-| Graphics | Vulkan sprite, texture and triangle paths, including synthetic compiled VU-to-GPU tests; not a complete PS2 Graphics Synthesizer replacement |
+| Graphics | Vulkan sprite, texture and triangle paths, resolution scaling and full screen; not a complete PS2 Graphics Synthesizer replacement |
 | Audio | Native audsrv mono ADPCM sample playback, volume and looping through XAudio2; broader LIBSD/game audio and streaming remain incomplete |
 | Code discovery | Direct/indirect call and callback analysis; verification mode reports remaining flow and callback-binding gaps before LLVM generation or compilation |
-| Game compatibility | **GT4 is not playable.** No general game-compatibility claim |
+| Game compatibility | **GT4 reaches menus and races in local runs**, with known stops and performance limits. No general game-compatibility claim |
 
 ## Build
 
@@ -84,43 +84,41 @@ Initial configuration downloads the pinned zlib importer dependency. Tests use s
 Use your **own lawfully obtained game files**. Keep commercial inputs and generated output under the ignored `work/` directory. See [DISCLAIMER.md](DISCLAIMER.md) before use.
 
 ```powershell
-.\build\Release\AnyPS2.exe convert 'C:\path\to\owned-game.iso' --jobs 4
+.\build\Release\AnyPS2.exe convert 'C:\path\to\owned-game.iso' work\game-native --jobs 4
 ```
 
-This runs the experimental conversion/build workflow and produces a build plan identifying converted targets and gaps. It does **not** guarantee a runnable or playable game.
+This runs the experimental conversion and build. It does **not** guarantee a runnable or playable game, and converted commercial game data is not distributed with the project. Output directories must be new.
 
-For separate import, inspection and EE experimentation:
+To run the result:
 
 ```powershell
-.\build\Release\AnyPS2.exe import 'C:\path\to\owned-game.iso' work\game
-.\build\Release\AnyPS2.exe inspect work\game\boot.elf --flow
-.\build\Release\AnyPS2.exe recompile work\game\boot.elf work\ee-project
+.\work\game-native\bin\ps2-native.exe .\work\game-native\bin\program.data --disc 'C:\path\to\owned-game.iso' --fullscreen
 ```
 
-Generated output directories must be new. Converted commercial game data is not distributed with the project.
-
-To check EE discovery before generating LLVM or starting a native build:
-
-```powershell
-.\build\Release\ps2-recompile.exe work\game\boot.elf work\flow-report --verify-only
-```
-
-Verification returns exit code `2` when flow remains unresolved. It writes the full
-gap inventory and likely callback-record relationships without promoting uncertain
-data pointers to code. Supply the same payload mappings and secondary images used
-for conversion. See [flow verification](docs/flow-verification.md) for the reports
-and the limits of static verification.
+The [command reference](docs/commands.md) covers every program and option.
 
 ## Technical documentation
 
-- [Project history and working demo](docs/project-history.md) — development path, evidence and limits
-- [Source references](docs/source-references.md) — pinned references and provenance
-- [Contributing](CONTRIBUTING.md) — contribution and publication rules
-- [Architecture](docs/architecture.md) — conversion boundaries and native services
-- [Technical debt](docs/technical-debt.md) — concrete maintenance boundaries and completion criteria
-- [EE native conversion](docs/ee-native.md) — R5900 conversion, LLVM generation, memory, call discovery and limits
-- [Flow verification](docs/flow-verification.md) — check discovery closure and callback-binding gaps before a native build
-- [Testing](docs/testing.md) — synthetic fixtures and opt-in local game validation
-- [Original PS2 test programs](docs/ps2-test-programs.md) — cross-compiled C++ cases and native/reference comparisons
-- [Batch conversion](docs/batch-conversion.md) — conversion workflow, LLVM build and performance measurements
-- [Usage and ownership disclaimer](DISCLAIMER.md) — game-file requirements
+**Using AnyPS2**
+
+- [Command reference](docs/commands.md): every program and option
+- [Batch conversion](docs/batch-conversion.md): conversion output, compiler settings and limits
+- [Flow verification](docs/flow-verification.md): check discovery gaps before a native build
+- [Testing](docs/testing.md): choosing tests and validating local games
+- [Original PS2 test programs](docs/ps2-test-programs.md): cross-compiled test cases
+- [Usage and ownership disclaimer](DISCLAIMER.md): game-file requirements
+
+**How it works**
+
+- [Architecture](docs/architecture.md): conversion boundaries and native services
+- [EE native conversion](docs/ee-native.md): R5900 conversion, memory and call discovery
+- [File I/O](docs/fileio.md): disc-backed file RPC
+- [Render modernization](docs/render-modernization.md): the renderer and its direction
+- [Loop lifting](docs/render-loop-lifting.md): lifting VU loops to native kernels
+- [Technical debt](docs/technical-debt.md): maintenance boundaries and completion criteria
+
+**Project**
+
+- [Contributing](CONTRIBUTING.md): contribution and publication rules
+- [Project history](docs/project-history.md): development path, evidence and limits
+- [Licensing](docs/licensing.md) and [source references](docs/source-references.md): licenses and provenance
