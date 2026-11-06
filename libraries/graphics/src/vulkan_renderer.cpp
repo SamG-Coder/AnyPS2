@@ -64,7 +64,7 @@ constexpr VkDeviceSize display_offset=9*1024*1024+1024;
 constexpr VkDeviceSize display_bytes=2048*2048*4;
 constexpr VkDeviceSize buffer_bytes=display_offset+display_bytes;
 static_assert(writes_offset+max_writes*sizeof(PixelWrite)<display_offset-4);
-static_assert(sizeof(DisplayPlan)==120 && sizeof(DisplayPlan)<=128);
+static_assert(sizeof(DisplayPlan)==128 && sizeof(DisplayPlan)<=128);
 static_assert(sizeof(PixelWrite)==12);
 static_assert(sizeof(RasterVertex)==40);
 static_assert(sizeof(Sprite)==128);
@@ -832,7 +832,12 @@ bool VulkanRenderer::present_display(DisplayPlan plan) {
     if (v.native) {
         if (!v.swapchain) throw std::runtime_error("Presentation requires a window");
         // The surface may report another size while the window is being changed.
-        if (plan.presented_width()!=v.extent.width || plan.presented_height()!=v.extent.height) return false;
+        // An image smaller than the window sits inside it at its offset; without an
+        // offset on an axis it must fill that axis.
+        const auto fits=[](std::uint32_t offset,std::uint32_t size,std::uint32_t available) {
+            return offset ? offset+size<=available : size==available;
+        };
+        if (!fits(plan.output_x,plan.presented_width(),v.extent.width) || !fits(plan.output_y,plan.presented_height(),v.extent.height)) return false;
         if (!v.native->changed(plan)) return false;
         auto& frame=v.present_frames[v.present_frame];
         v.native->wait_submission(frame.submission);
@@ -842,7 +847,7 @@ bool VulkanRenderer::present_display(DisplayPlan plan) {
         const auto acquired=vkAcquireNextImageKHR(v.device,v.swapchain,UINT64_MAX,frame.acquired,VK_NULL_HANDLE,&index);
         if (acquired==VK_ERROR_OUT_OF_DATE_KHR) { refresh_surface(); return false; }
         if (acquired!=VK_SUBOPTIMAL_KHR) check(acquired,"Acquire native image");
-        frame.submission=v.native->present(plan,v.images[index],v.format,frame.acquired,v.present_ready[index]);
+        frame.submission=v.native->present(plan,v.images[index],v.extent,v.format,frame.acquired,v.present_ready[index]);
         VkPresentInfoKHR p{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR}; p.waitSemaphoreCount=1; p.pWaitSemaphores=&v.present_ready[index]; p.swapchainCount=1; p.pSwapchains=&v.swapchain; p.pImageIndices=&index;
         const auto presented=vkQueuePresentKHR(v.queue,&p);
         v.present_frame=(v.present_frame+1)%v.present_frames.size();

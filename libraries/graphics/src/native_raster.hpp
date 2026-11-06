@@ -38,7 +38,7 @@ public:
     void wait_submission(std::uint64_t token);
     bool changed(const DisplayPlan& plan);
     void release_presentation();
-    std::uint64_t present(const DisplayPlan& plan,VkImage image,VkFormat format,VkSemaphore acquired,VkSemaphore rendered);
+    std::uint64_t present(const DisplayPlan& plan,VkImage target,VkExtent2D target_extent,VkFormat format,VkSemaphore acquired,VkSemaphore rendered);
     Scanout capture(const DisplayPlan& plan);
     const RenderStatistics& statistics() const;
     void verify_texture_kernels(bool enable);

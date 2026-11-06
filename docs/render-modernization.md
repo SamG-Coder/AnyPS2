@@ -87,6 +87,10 @@ per console pixel, off-center samples of a triangle may pass a scissor edge by u
 console pixel, coverage antialiasing stays on the console grid, field reconstruction is
 skipped, and the window shows up to 1080 lines.
 
+The window shows a scaled image at up to the monitor's size. `--fullscreen`, F11 or
+Alt+Enter switch to a borderless window over the whole monitor, at the display's
+shape with black bars around it.
+
 ## Measuring without the game
 
 `--capture-graphics <new-directory> --capture-graphics-when-heavy` records submitted

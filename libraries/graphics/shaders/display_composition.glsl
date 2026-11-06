@@ -1,7 +1,7 @@
 struct Surface { uint base,pitch,x,y,width,height,offset_x,offset_y,format; };
 layout(push_constant) uniform Display {
     Surface surfaces[2];
-    uint width,height,control,background,half_height,bgra,field,history_valid,smoothing,output_width,output_height,scale;
+    uint width,height,control,background,half_height,bgra,field,history_valid,smoothing,output_width,output_height,scale,output_x,output_y;
 } display;
 uint sample_surface(uint index,uint x,uint y);
 bool contains_surface(uint index,uint x,uint y) {

@@ -2239,7 +2239,7 @@ void NativeRaster::wait_submission(std::uint64_t token) {
     throw std::logic_error("Native graphics submission retired without completion");
 }
 
-std::uint64_t NativeRaster::present(const DisplayPlan& source_plan,VkImage target,VkFormat format,VkSemaphore acquired,VkSemaphore rendered) {
+std::uint64_t NativeRaster::present(const DisplayPlan& source_plan,VkImage target,VkExtent2D target_extent,VkFormat format,VkSemaphore acquired,VkSemaphore rendered) {
     auto& r=*impl_;
     auto plan=source_plan;
     plan.scale=r.resolution_scale;
@@ -2270,7 +2270,7 @@ std::uint64_t NativeRaster::present(const DisplayPlan& source_plan,VkImage targe
     if (!fb) {
         VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO}; vi.image=target; vi.viewType=VK_IMAGE_VIEW_TYPE_2D; vi.format=format; vi.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
         VkImageView view{}; checked(vkCreateImageView(r.device,&vi,nullptr,&view),"Create swapchain view"); r.present_views.push_back(view);
-        VkFramebufferCreateInfo f{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO}; f.renderPass=r.present_pass; f.attachmentCount=1; f.pAttachments=&view; f.width=plan.presented_width(); f.height=plan.presented_height(); f.layers=1;
+        VkFramebufferCreateInfo f{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO}; f.renderPass=r.present_pass; f.attachmentCount=1; f.pAttachments=&view; f.width=target_extent.width; f.height=target_extent.height; f.layers=1;
         checked(vkCreateFramebuffer(r.device,&f,nullptr,&fb),"Create display framebuffer");
     }
     auto& set=r.present_sets[{images[0],images[1]}];
@@ -2279,11 +2279,16 @@ std::uint64_t NativeRaster::present(const DisplayPlan& source_plan,VkImage targe
         VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}; w.dstSet=set; w.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w.descriptorCount=2; w.pImageInfo=info;
         vkUpdateDescriptorSets(r.device,1,&w,0,nullptr);
     }
-    r.order(); VkRenderPassBeginInfo b{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO}; b.renderPass=r.present_pass; b.framebuffer=fb; b.renderArea.extent={plan.presented_width(),plan.presented_height()};
+    r.order(); VkRenderPassBeginInfo b{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO}; b.renderPass=r.present_pass; b.framebuffer=fb; b.renderArea.extent=target_extent;
     vkCmdBeginRenderPass(r.command,&b,VK_SUBPASS_CONTENTS_INLINE); r.in_pass=true;
     vkCmdBindPipeline(r.command,VK_PIPELINE_BIND_POINT_GRAPHICS,r.present_pipeline);
     vkCmdBindDescriptorSets(r.command,VK_PIPELINE_BIND_POINT_GRAPHICS,r.present_layout,0,1,&set,0,nullptr);
-    const VkViewport vp{0,0,float(plan.presented_width()),float(plan.presented_height()),0,1}; const VkRect2D scissor{{0,0},{plan.presented_width(),plan.presented_height()}};
+    // Bars around an image of a different shape than its window.
+    const VkClearAttachment bars{VK_IMAGE_ASPECT_COLOR_BIT,0,{.color={.float32={0,0,0,1}}}};
+    const VkClearRect whole{{{0,0},target_extent},0,1};
+    vkCmdClearAttachments(r.command,1,&bars,1,&whole);
+    const VkViewport vp{float(plan.output_x),float(plan.output_y),float(plan.presented_width()),float(plan.presented_height()),0,1};
+    const VkRect2D scissor{{std::int32_t(plan.output_x),std::int32_t(plan.output_y)},{plan.presented_width(),plan.presented_height()}};
     vkCmdSetViewport(r.command,0,1,&vp); vkCmdSetScissor(r.command,0,1,&scissor);
     vkCmdPushConstants(r.command,r.present_layout,VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(plan),&plan); vkCmdDraw(r.command,3,1,0,0);
     r.flush(acquired,rendered,false);

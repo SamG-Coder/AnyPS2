@@ -355,6 +355,7 @@ int main(int argc,char** argv) {
         std::filesystem::path disc,capture_directory,stop_directory,graphics_directory,vector_directory,sample_path;
         bool profile_graphics=false,validate_graphics=false,verify_textures=false,gpu_triangles=true,gpu_triangles_required=false,capture_display_only=false,capture_graphics_when_heavy=false;
         unsigned resolution_scale=1;
+        bool start_fullscreen=false;
         bool has_budget=false,native_cycles=false,native_pmu=false,strict_performance=false,show_window=true,hold_window=true;
 #ifdef ANYPS2_NATIVE_IOP
         std::filesystem::path iop_data;
@@ -438,6 +439,7 @@ int main(int argc,char** argv) {
                 continue;
             }
             if (text=="--capture-graphics-when-heavy") { capture_graphics_when_heavy=true; continue; }
+            if (text=="--fullscreen") { start_fullscreen=true; continue; }
             if (text=="--resolution-scale") {
                 if (index+1==argc) throw std::runtime_error("Expected a resolution scale");
                 resolution_scale=static_cast<unsigned>(std::stoul(argv[++index]));
@@ -753,7 +755,7 @@ int main(int argc,char** argv) {
         if (iop_reset) services.idle_pump=[&] { return iop_reset->pump(); };
 #endif
         if (show_window) {
-            window=std::make_unique<probe::NativeWindow>(validate_graphics,resolution_scale);
+            window=std::make_unique<probe::NativeWindow>(validate_graphics,resolution_scale,start_fullscreen);
             gpu.renderer=&window->renderer();
             gpu.renderer->verify_texture_kernels(verify_textures);
             gpu.renderer->profile_commands(profile_graphics);
@@ -808,12 +810,7 @@ int main(int argc,char** argv) {
                 auto plan=nt::graphics::plan_display(output.control,output.buffers,output.displays,
                     platform.graphics.half_height_output(),std::uint32_t(output.background),display_field(),platform.graphics.clocks_per_pixel());
                 if (!plan) return;
-                if (resolution_scale>1) {
-                    // Show the scaled surfaces at up to 1080 lines, keeping the display shape.
-                    const auto shown_width=plan->presented_width(),shown_height=plan->presented_height();
-                    plan->output_height=std::min(shown_height*resolution_scale,1080U);
-                    plan->output_width=shown_width*plan->output_height/shown_height;
-                }
+                if (window) window->fit(*plan);
                 if (window && window->presentable()) {
                     gpu.ensure_renderer();
                     if (window->needs_resize(*plan)) { gpu.join(); window->prepare(*plan); }

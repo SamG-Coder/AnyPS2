@@ -36,7 +36,7 @@ void main() {
     if (display.scale>1u) {
         // Filter between surface samples, which supersamples when the window is smaller.
         const uvec2 samples=uvec2(display.width,display.height)*display.scale;
-        const vec2 position=max(gl_FragCoord.xy*vec2(samples)/vec2(display.output_width,display.output_height)-0.5,vec2(0.0));
+        const vec2 position=max((gl_FragCoord.xy-vec2(display.output_x,display.output_y))*vec2(samples)/vec2(display.output_width,display.output_height)-0.5,vec2(0.0));
         const uvec2 first=min(uvec2(position),samples-1u),last=min(first+1u,samples-1u);
         const vec2 weight=fract(position);
         rgb=mix(mix(composed_sample(first),composed_sample(uvec2(last.x,first.y)),weight.x),
@@ -44,7 +44,7 @@ void main() {
     } else if (display.output_width!=0) {
         // A resized digital mode filters between composed pixels, so uneven
         // scaling does not make rows and columns visibly different sizes.
-        const vec2 position=max(gl_FragCoord.xy*vec2(display.width,display.height)/vec2(display.output_width,display.output_height)-0.5,vec2(0.0));
+        const vec2 position=max((gl_FragCoord.xy-vec2(display.output_x,display.output_y))*vec2(display.width,display.height)/vec2(display.output_width,display.output_height)-0.5,vec2(0.0));
         const uvec2 first=min(uvec2(position),uvec2(display.width,display.height)-1u);
         const uvec2 last=min(first+1u,uvec2(display.width,display.height)-1u);
         const vec2 weight=fract(position);
