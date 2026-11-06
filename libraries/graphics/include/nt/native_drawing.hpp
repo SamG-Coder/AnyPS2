@@ -395,16 +395,18 @@ private:
         bool textured,bool reglist=false) {
         const auto primitive=state.primitive&7;
         auto attributes=state.use_primitive ? state.primitive : state.attributes;
-        const bool sprites=primitive==6;
-        // As NativeDrawing::command: sprites have no edge coverage and ignore FIX.
-        if (sprites) attributes&=~(128U|1024U);
-        if (primitive<3 || primitive>6 || (attributes&~(sprites ? 0x37fU : 0x3ffU)))
-            throw std::invalid_argument("Vector drawing supports triangle lists, strips, fans and sprites only");
+        const bool points=primitive==0,sprites=primitive==6;
+        // As NativeDrawing::command: points and sprites have no edge coverage,
+        // sprites ignore FIX, and points are untextured.
+        if (points || sprites) attributes&=~128U;
+        if (sprites) attributes&=~1024U;
+        if ((!points && primitive<3) || primitive>6 || (attributes&~(points ? 0x3cfU : sprites ? 0x37fU : 0x3ffU)))
+            throw std::invalid_argument("Vector drawing supports point lists, triangle lists, strips, fans and sprites only");
         if ((attributes&16) && !textured) throw std::invalid_argument("Textured vector drawing is not supported");
         if (sprites && (attributes&16) && !(attributes&256)) throw std::invalid_argument("Perspective sprite textures are unsupported");
         if (state.vertex_count || state.first || (state.unknown&unknown_vertices))
             throw std::invalid_argument("Vector drawing cannot continue an existing primitive; write PRIM first");
-        if (elements<(sprites ? 2U : 3U) || vertex.empty() || vertex.size()>5)
+        if (elements<(points ? 1U : sprites ? 2U : 3U) || vertex.empty() || vertex.size()>5)
             throw std::invalid_argument("Invalid vector vertex layout or element count");
         VectorPlan plan;
         auto& assembly=plan.assembly;
@@ -446,7 +448,7 @@ private:
         target=sprite_target(context.frame);
         target.left=assembly.scissor[0]; target.right=assembly.scissor[1]+1;
         target.top=assembly.scissor[2]; target.bottom=assembly.scissor[3]+1;
-        if (!sprites) target.flags|=triangle_flag|(assembly.shaded ? shaded_triangle_flag : 0);
+        if (!points && !sprites) target.flags|=triangle_flag|(assembly.shaded ? shaded_triangle_flag : 0);
         else assembly.shaded=0;
         configure_draw(state,context,attributes,target);
         if (attributes&16) {
@@ -522,7 +524,7 @@ private:
         PacketVectors batch;
         batch.layout=resolved_layout(); batch.registers=5; batch.words=resolved_words;
         try {
-            const auto plan=plan_vectors(state,batch.layout,(state.primitive&7)==6 ? 2 : 3,batch.words,true,true);
+            const auto plan=plan_vectors(state,batch.layout,(state.primitive&7)==0 ? 1 : (state.primitive&7)==6 ? 2 : 3,batch.words,true,true);
             batch.assembly=plan.assembly; batch.target=plan.target; batch.levels=plan.levels;
         } catch (const std::invalid_argument& error) { return fallback(error.what()); }
         batch.assembly.reglist=2;
@@ -545,8 +547,8 @@ private:
         auto a=previous->assembly,b=batch.assembly;
         a.state={}; b.state={};
         const auto primitive=a.primitive;
-        if ((primitive!=3 && primitive!=4 && primitive!=6) ||
-            (primitive!=4 && previous->elements%(primitive==3 ? 3 : 2)) ||
+        if ((primitive!=0 && primitive!=3 && primitive!=4 && primitive!=6) ||
+            ((primitive==3 && previous->elements%3) || (primitive==6 && previous->elements%2)) ||
             vector_primitives(primitive,previous->elements+batch.elements)>4096U ||
             std::memcmp(&a,&b,sizeof(a)) || previous->levels.control!=batch.levels.control ||
             previous->levels.base!=batch.levels.base || previous->levels.pitch!=batch.levels.pitch ||
@@ -589,10 +591,12 @@ private:
         }
         const auto ceil_pixel=[](int value) { return value>=0 ? (value+15)/16 : value/16; };
         const int coverage=a.coverage ? 15 : 0;
-        const int left=std::max(ceil_pixel(std::max(0,low_x-coverage)-a.offset_x),int(a.scissor[0]));
-        const int right=std::min(ceil_pixel(high_x-a.offset_x),int(a.scissor[1])+1);
-        const int top=std::max(ceil_pixel(std::max(0,low_y-coverage)-a.offset_y),int(a.scissor[2]));
-        const int bottom=std::min(ceil_pixel(high_y-a.offset_y),int(a.scissor[3])+1);
+        // A point fills the pixel nearest its position, as plan_line_or_point.
+        const bool points=a.primitive==0;
+        const int left=std::max(points ? nearest_pixel(low_x-a.offset_x) : ceil_pixel(std::max(0,low_x-coverage)-a.offset_x),int(a.scissor[0]));
+        const int right=std::min(points ? nearest_pixel(high_x-a.offset_x)+1 : ceil_pixel(high_x-a.offset_x),int(a.scissor[1])+1);
+        const int top=std::max(points ? nearest_pixel(low_y-a.offset_y) : ceil_pixel(std::max(0,low_y-coverage)-a.offset_y),int(a.scissor[2]));
+        const int bottom=std::min(points ? nearest_pixel(high_y-a.offset_y)+1 : ceil_pixel(high_y-a.offset_y),int(a.scissor[3])+1);
         // Nothing draws: no batch, and the CPU planner would not draw either.
         if (!primitives || left>=right || top>=bottom) { batch.elements=0; return true; }
         // Pixels past the surface width wrap into later pages, as draws planned
@@ -728,6 +732,7 @@ private:
                 }
                 return;
             }
+            if (state.suppress_draws) return; // A GPU batch draws this point.
             if (attributes&~0x3cfU)
                 throw std::invalid_argument("Unsupported native point/line attributes: "+std::to_string(attributes));
             const auto& context=state.contexts[(attributes>>9)&1];

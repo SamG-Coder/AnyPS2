@@ -131,6 +131,25 @@ void sprite(uint item) {
         records.words[base+record_lod_q]=last.q;
     }
 }
+// A point fills the pixel nearest its position, as plan_line_or_point, with the
+// color, depth and fog of a sprite's kicking vertex.
+int nearest_pixel(int value) { const int shifted=value+8; return shifted>=0 ? shifted/16 : (shifted-15)/16; }
+void point(uint item) {
+    const Vertex v=vertex(item);
+    const uint base=(P(plan_record_first)+item)*record_words;
+    for (uint w=0u;w<record_words;++w) records.words[base+w]=P(plan_template+w);
+    const int x=nearest_pixel(v.x-int(P(plan_offset))),y=nearest_pixel(v.y-int(P(plan_offset+1u)));
+    const int left=max(x,int(P(plan_scissor))),right=min(x+1,int(P(plan_scissor+1u))+1);
+    const int top=max(y,int(P(plan_scissor+2u))),bottom=min(y+1,int(P(plan_scissor+3u))+1);
+    if (!v.kick || left>=right || top>=bottom) {
+        for (uint w=0u;w<4u;++w) records.words[base+record_left+w]=0u;
+        return;
+    }
+    records.words[base+record_left]=uint(left); records.words[base+record_left+1u]=uint(top);
+    records.words[base+record_left+2u]=uint(right); records.words[base+record_left+3u]=uint(bottom);
+    records.words[base+record_color]=v.color; records.words[base+record_depth]=v.z;
+    records.words[base+record_fog]=v.fog;
+}
 void main() {
     const uint id=gl_GlobalInvocationID.x;
     const uint batches=table.words[0];
@@ -146,6 +165,7 @@ void main() {
     const uint count=P(plan_elements);
     if (item<count && memory.words[record_base+item*P(plan_element_words)]!=0u) atomicAdd(status.words[table.words[entry+3u]],1u);
     const uint primitive=P(plan_primitive);
+    if (primitive==0u) { if (item<count) point(item); return; }
     if (primitive==6u) { if (item<count/2u) sprite(item); return; }
     const uint primitives=primitive==3u ? count/3u : (count>=2u ? count-2u : 0u);
     if (item>=primitives) return;

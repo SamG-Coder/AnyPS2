@@ -1981,8 +1981,9 @@ void NativeRaster::draw_vectors(const VectorLaunch& launch,const VectorAssembly&
     if (!r.initialized || !r.vectors) throw std::invalid_argument("Vector drawing requires initialized storage and enabled vector batches");
     r.vectors->validate(launch);
     const auto count=vector_primitives(assembly.primitive,launch.elements);
-    const bool sprites=assembly.primitive==6;
-    if (assembly.primitive<3 || assembly.primitive>6 || !count || count>records_per_slot ||
+    // A point draws as a one-pixel rectangle: the sprite record and pipeline.
+    const bool sprites=assembly.primitive==6 || assembly.primitive==0;
+    if ((assembly.primitive && assembly.primitive<3) || assembly.primitive>6 || !count || count>records_per_slot ||
         bool(target.flags&triangle_flag)==sprites || (target.flags&(texture_flags|line_flag)) ||
         (sprites && (target.flags&(shaded_triangle_flag|perspective_triangle_flag|coverage_flag))) ||
         ((target.flags&perspective_triangle_flag) && !(target.flags&1)) ||
