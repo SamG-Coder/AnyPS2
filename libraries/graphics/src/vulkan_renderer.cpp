@@ -457,6 +457,15 @@ void VulkanRenderer::verify_texture_kernels(bool enable) {
     else if (enable) throw std::runtime_error("LLVM texture verification requires the native renderer");
 }
 namespace {
+std::string describe_target(const Sprite& draw) {
+    return " rect="+std::to_string(draw.left)+','+std::to_string(draw.top)+','+std::to_string(draw.right)+','+std::to_string(draw.bottom)+
+        " base="+std::to_string(draw.base)+" pitch="+std::to_string(draw.pitch)+" flags="+std::to_string(draw.flags)+
+        " test="+std::to_string(draw.test)+" blend="+std::to_string(draw.blend)+" mask="+std::to_string(draw.mask)+
+        " x0="+std::to_string(draw.x0)+" y0="+std::to_string(draw.y0)+" dx="+std::to_string(draw.dx)+" dy="+std::to_string(draw.dy)+
+        " u0="+std::to_string(draw.u0)+" v0="+std::to_string(draw.v0)+" du="+std::to_string(draw.du)+" dv="+std::to_string(draw.dv)+
+        " texture_base="+std::to_string(draw.texture_base)+" texture_pitch="+std::to_string(draw.texture_pitch)+
+        " texture="+std::to_string(draw.texture_width)+'x'+std::to_string(draw.texture_height);
+}
 void validate_sprite(const Sprite& draw) {
     if ((draw.flags&indexed8_flag) && !(draw.flags&64)) throw std::runtime_error("Invalid indexed texture flags");
 
@@ -471,7 +480,7 @@ void validate_sprite(const Sprite& draw) {
     if ((draw.flags&(256|depth_test_flag)) || (draw.test&0x4000)) {
         if ((draw.right>draw.pitch*64 && !can_map_wrapped_sprite(draw)) ||
             ((draw.bottom-1)/32-draw.top/32)*draw.pitch+(draw.right-1)/64-draw.left/64>=512)
-            throw std::runtime_error("Destination-dependent sprite requires non-aliased framebuffer");
+            throw std::runtime_error("Destination-dependent sprite requires non-aliased framebuffer:"+describe_target(draw));
         if (draw.flags&256) for (unsigned shift=0;shift<8;shift+=2)
             if (((draw.blend>>shift)&3)>2) throw std::runtime_error("Unsupported Vulkan blend selector");
     }

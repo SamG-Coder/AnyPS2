@@ -142,6 +142,13 @@ extern "C" std::uint32_t nt_ee_io_write64(nt::ee::Memory* memory,std::uint32_t a
     publish(*memory,result,address);
     return static_cast<std::uint32_t>(result);
 }
+extern "C" std::uint32_t nt_ee_io_read128(nt::runtime::State* state,nt::ee::Memory* memory,std::uint32_t address,std::uint32_t reg) {
+    nt::runtime::Register value{};
+    const auto result=memory->io.read128 ? memory->io.read128(memory->io.context,address,value) : nt::ee::Stop::memory_fault;
+    publish(*memory,result,address);
+    if (result==nt::ee::Stop::budget && reg<32) state->set128(reg,value);
+    return static_cast<std::uint32_t>(result);
+}
 extern "C" std::uint32_t nt_ee_io_write128(nt::ee::Memory* memory,std::uint32_t address,std::uint64_t low,std::uint64_t high) {
     const auto result=memory->io.write128 ? memory->io.write128(memory->io.context,address,{low,high}) : nt::ee::Stop::memory_fault;
     publish(*memory,result,address);

@@ -11,7 +11,7 @@ struct PixelWrite { unsigned address; std::uint32_t value,mask; };
 // the packed pixel stream (32, 16, 8 or 4 bits per pixel).
 struct ImageRect {
     unsigned base=0,pitch=0,x=0,y=0,width=0,first=0,bits=32,count=0;
-    bool alternate_16=false;
+    bool alternate_16=false,depth_layout=false;
     std::vector<std::uint32_t> words;
     std::uint32_t value(std::size_t index) const {
         if (bits==32) return words[index];
@@ -21,7 +21,7 @@ struct ImageRect {
     // The memory word, bit shift and unshifted mask a pixel occupies.
     void place(std::size_t index,unsigned& word,unsigned& shift,std::uint32_t& mask) const {
         const auto pixel=first+unsigned(index),px=x+pixel%width,py=y+pixel/width;
-        if (bits==32) { word=rgba_word(base,pitch,px,py); shift=0; mask=0xffffffffU; }
+        if (bits==32) { word=stored_word(base,pitch,px,py,depth_layout); shift=0; mask=0xffffffffU; }
         else if (bits==16) { const auto half=rgba_halfword(base,pitch,px,py,alternate_16); word=half/2; shift=(half%2)*16; mask=65535U; }
         else if (bits==8) { const auto byte=indexed_byte(base,pitch,px,py); word=byte/4; shift=(byte%4)*8; mask=255U; }
         else { const auto nibble=indexed_nibble(base,pitch,px,py); word=nibble/8; shift=(nibble%8)*4; mask=15U; }
@@ -39,13 +39,14 @@ struct ImageRect {
 struct ImageUpload {
     unsigned base=0,pitch=0,x=0,y=0,width=0,height=0,bits=0,pixel=0,pending_bits=0;
     std::uint64_t pending=0;
-    bool alternate_16=false;
+    bool alternate_16=false,depth_layout=false;
     static ImageUpload begin(std::uint64_t buffer,std::uint64_t position,std::uint64_t extent,unsigned direction) {
         if (direction==3) return {};
         if (direction) throw std::invalid_argument("Native image upload requires host-to-local direction");
         const unsigned format=(buffer>>56)&63;
         const unsigned traversal=(position>>59)&3;
-        if ((format>2 && format!=10 && format!=19 && format!=20) || traversal)
+        const bool depth_layout=format==0x30 || format==0x31;
+        if ((format>2 && format!=10 && format!=19 && format!=20 && !depth_layout) || traversal)
             throw std::invalid_argument("Unsupported native image upload: format="+std::to_string(format)+
                 " traversal="+std::to_string(traversal));
         ImageUpload upload;
@@ -53,8 +54,8 @@ struct ImageUpload {
         upload.x=(position>>32)&2047; upload.y=(position>>48)&2047;
         upload.width=extent&4095; upload.height=(extent>>32)&4095;
         if (!upload.pitch || !upload.width || !upload.height) throw std::invalid_argument("Empty native image upload surface");
-        upload.bits=format==20 ? 4 : format==19 ? 8 : (format==2 || format==10) ? 16 : format ? 24 : 32;
-        upload.alternate_16=format==10;
+        upload.bits=format==20 ? 4 : format==19 ? 8 : (format==2 || format==10) ? 16 : (format==1 || format==0x31) ? 24 : 32;
+        upload.alternate_16=format==10; upload.depth_layout=depth_layout;
         return upload;
     }
     // Data arriving on a pixel boundary, other than 24-bit, is kept as a
@@ -62,7 +63,7 @@ struct ImageUpload {
     bool whole_words() const { return bits && bits!=24 && pending_bits==0; }
     void append(std::span<const Quadword> values,ImageRect& rect) {
         rect.base=base; rect.pitch=pitch; rect.x=x; rect.y=y; rect.width=width; rect.first=pixel;
-        rect.bits=bits; rect.alternate_16=alternate_16;
+        rect.bits=bits; rect.alternate_16=alternate_16; rect.depth_layout=depth_layout;
         if (pixel>=width*height) return;
         rect.count=unsigned(std::min<std::size_t>(std::size_t(width)*height-pixel,values.size()*128/bits));
         const auto used=(std::size_t(rect.count)*bits+31)/32;
@@ -88,7 +89,7 @@ struct ImageUpload {
             if (pixel>=width*height) break;
             if (bits==32 && pending_bits==0) {
                 for (unsigned word=0;word<4 && pixel<width*height;++word) {
-                    writes.push_back({rgba_word(base,pitch,x+column,y+row),value[word],0xffffffffU});
+                    writes.push_back({stored_word(base,pitch,x+column,y+row,depth_layout),value[word],0xffffffffU});
                     advance();
                 }
                 continue;
@@ -113,7 +114,7 @@ struct ImageUpload {
                         writes.push_back({half/2,(std::uint32_t(pending)&65535U)<<shift,65535U<<shift});
                     } else {
                         const auto pixel_mask=bits==32 ? 0xffffffffU : 0xffffffU;
-                        writes.push_back({rgba_word(base,pitch,x+column,y+row),std::uint32_t(pending)&pixel_mask,pixel_mask});
+                        writes.push_back({stored_word(base,pitch,x+column,y+row,depth_layout),std::uint32_t(pending)&pixel_mask,pixel_mask});
                     }
                     pending>>=bits; pending_bits-=bits; advance();
                 }

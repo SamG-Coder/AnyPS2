@@ -405,7 +405,7 @@ void emit_declarations(Writer& w) {
     w.out<<"declare i32 @nt_ee_wait_display(ptr, i32)\n";
     w.out<<"declare i64 @nt_ee_io_read32(ptr, i32)\ndeclare i32 @nt_ee_io_write32(ptr, i32, i32)\ndeclare i32 @nt_ee_io_write8(ptr, i32, i32)\n";
     w.out<<"declare i32 @nt_ee_io_read64(ptr, ptr, i32, i32)\ndeclare i32 @nt_ee_io_write64(ptr, i32, i64)\n";
-    w.out<<"declare i32 @nt_ee_io_write128(ptr, i32, i64, i64)\n";
+    w.out<<"declare i32 @nt_ee_io_write128(ptr, i32, i64, i64)\ndeclare i32 @nt_ee_io_read128(ptr, ptr, i32, i32)\n";
     declare_packed_intrinsics(w.out);
     w.out<<"declare i64 @nt_ee_square_root_finite(i32)\n"
          <<"declare i64 @nt_ee_reciprocal_square_root_finite(i32, i32)\n"

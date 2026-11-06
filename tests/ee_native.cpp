@@ -354,6 +354,35 @@ int main() {
             }
         }
         {
+            // Compiled quadword loads drain prepared image output in order.
+            nt::ee::NativePlatform platform; platform.packet_setup.interrupt_latency={}; nt::ee::Memory memory; platform.attach(memory);
+            struct Output { std::array<std::uint32_t,8> words{1,2,3,4,5,6,7,8}; std::size_t offset=0; } output;
+            platform.graphics.context=&output;
+            platform.graphics.synchronize=[](void*) { return nt::ee::Stop::budget; };
+            platform.graphics.readback_status=[](void* raw) -> nt::ee::IoRead {
+                const auto& source=*static_cast<Output*>(raw);
+                return {nt::ee::Stop::budget,static_cast<std::uint32_t>(sizeof(source.words)-source.offset)};
+            };
+            platform.graphics.readback=[](void* raw,std::span<std::uint8_t> bytes) {
+                auto& source=*static_cast<Output*>(raw);
+                std::memcpy(bytes.data(),reinterpret_cast<const std::uint8_t*>(source.words.data())+source.offset,bytes.size());
+                source.offset+=bytes.size(); return nt::ee::Stop::budget;
+            };
+            const auto load=[&](std::uint32_t address,nt::runtime::State& state) {
+                state={}; state.pc=0x4f0010; state.set(4,address); state.set128(7,{0xaa,0xbb});
+                return nt_ee_generated_run(&state,&memory,4);
+            };
+            nt::runtime::State state;
+            check(load(0x10005000,state)==nt::ee::Stop::unsupported_system && !output.offset && state.gpr[7].lo==0xaa && !state.executed);
+            check(platform.packet_setup.write(0x10003c00,0x800000)==nt::ee::Stop::budget &&
+                  platform.graphics.write(0x12001040,1)==nt::ee::Stop::budget);
+            check(((memory.io.read32(memory.io.context,0x10003c00).value>>24)&31)==2);
+            check(load(0xb0005008,state)==nt::ee::Stop::syscall && state.gpr[7].lo==0x0000000200000001ULL && state.gpr[7].hi==0x0000000400000003ULL);
+            check(load(0x10005000,state)==nt::ee::Stop::syscall && state.gpr[7].lo==0x0000000600000005ULL && state.gpr[7].hi==0x0000000800000007ULL);
+            check(load(0x10005000,state)==nt::ee::Stop::unsupported_system && memory.fault_address==0x10005000 && state.gpr[7].lo==0xaa && state.pc==0x4f0010);
+            check(load(0x10004000,state)==nt::ee::Stop::memory_fault && output.offset==32);
+        }
+        {
             std::vector<std::uint8_t> ram(0x2100);
             nt::ee::Memory memory; memory.data=ram.data(); memory.size=ram.size();
             const auto put=[&](unsigned at,std::uint32_t word) { std::memcpy(ram.data()+at,&word,4); };

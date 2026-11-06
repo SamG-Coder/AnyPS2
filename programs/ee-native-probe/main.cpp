@@ -953,6 +953,7 @@ int main(int argc,char** argv) {
                     <<" native_job_waits="<<(execution_profile.job_waits-previous_execution.job_waits)
                     <<" display_sleep_ms="<<(execution_profile.display_sleep_ns-previous_execution.display_sleep_ns)/1e6
                     <<" native_job_sleep_ms="<<(execution_profile.job_sleep_ns-previous_execution.job_sleep_ns)/1e6
+                    <<" native_job_spin_ms="<<(execution_profile.job_spin_ns-previous_execution.job_spin_ns)/1e6
                     <<" compiled_entries="<<execution_profile.entries-previous_execution.entries
                     <<" retired_operations="<<execution_profile.operations-previous_execution.operations
                     <<" status_reads="<<display_profile.status_reads-previous_display.status_reads

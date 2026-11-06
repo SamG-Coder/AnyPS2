@@ -77,7 +77,7 @@ The principal source areas consulted at those pins are:
 - **Input and audio:** PS2SDK PADMAN `sio2Cmds.c`, `padCmds.c`, `libpad.c`, audsrv,
   `iopheap.c`, `tools/adpenc/src/adpcm.c`, LIBSD `voice.c` and `block.c`;
   PCSX2 `SIO/Sio2.cpp`, `SIO/SioTypes.h`, `SIO/Pad/PadDualshock2.cpp` (command negotiation)
-  and `SPU2/Mixer.cpp`;
+  and `SPU2/Mixer.cpp`, `SPU2/spu2sys.cpp` (pitch register and playback limit);
   public psx-spx controller and USB HID specifications.
 
 Native services replace supported operations with explicit host ownership and

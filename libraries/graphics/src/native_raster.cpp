@@ -1827,7 +1827,7 @@ void NativeRaster::write(const ImageRect& rect) {
     auto& pairs=r.rect_pairs; pairs.resize(rect.words.size()*2);
     unsigned low=store_words,high=0,column=rect.first%rect.width,row=rect.first/rect.width;
     for (std::size_t i=0;i<rect.words.size();++i) {
-        const auto address=rgba_word(rect.base,rect.pitch,rect.x+column,rect.y+row);
+        const auto address=stored_word(rect.base,rect.pitch,rect.x+column,rect.y+row,rect.depth_layout);
         pairs[i*2]=address; pairs[i*2+1]=rect.words[i];
         low=std::min(low,address); high=std::max(high,address);
         if (++column==rect.width) { column=0; ++row; }

@@ -17,7 +17,7 @@ struct ImageDownload {
             if (s.bits==16) word=rgba_halfword(s.base,s.pitch,s.x+x,s.y+y,s.alternate_16)/2;
             else if (s.bits==8) word=indexed_byte(s.base,s.pitch,s.x+x,s.y+y)/4;
             else if (s.bits==4) word=indexed_nibble(s.base,s.pitch,s.x+x,s.y+y)/8;
-            else word=rgba_word(s.base,s.pitch,s.x+x,s.y+y);
+            else word=stored_word(s.base,s.pitch,s.x+x,s.y+y,s.depth_layout);
             low=std::min(low,word); high=std::max(high,word);
         }
         return {low,high};
@@ -41,7 +41,7 @@ struct ImageDownload {
             } else if (s.bits==4) {
                 const auto a=indexed_nibble(s.base,s.pitch,s.x+x,s.y+y);
                 value=(words[a/8]>>((a%8)*4))&15;
-            } else value=words[rgba_word(s.base,s.pitch,s.x+x,s.y+y)];
+            } else value=words[stored_word(s.base,s.pitch,s.x+x,s.y+y,s.depth_layout)];
             if (s.bits==4) { result[bit/8]|=std::uint8_t(value<<(bit%8)); bit+=4; }
             else for (unsigned b=0;b<s.bits;b+=8,bit+=8) result[bit/8]=std::uint8_t(value>>b);
         }
@@ -73,7 +73,7 @@ struct ImageCopy {
             if (image.bits==16) { const auto a=rgba_halfword(image.base,image.pitch,image.x+x,image.y+y,image.alternate_16); word=a/2; shift=(a%2)*16; mask=65535U; }
             else if (image.bits==8) { const auto a=indexed_byte(image.base,image.pitch,image.x+x,image.y+y); word=a/4; shift=(a%4)*8; mask=255U; }
             else if (image.bits==4) { const auto a=indexed_nibble(image.base,image.pitch,image.x+x,image.y+y); word=a/8; shift=(a%8)*4; mask=15U; }
-            else { word=rgba_word(image.base,image.pitch,image.x+x,image.y+y); shift=0; mask=image.bits==24 ? 0xffffffU : 0xffffffffU; }
+            else { word=stored_word(image.base,image.pitch,image.x+x,image.y+y,image.depth_layout); shift=0; mask=image.bits==24 ? 0xffffffU : 0xffffffffU; }
         };
         for (unsigned row=0;row<to.height;++row) for (unsigned column=0;column<to.width;++column) {
             const auto x=(direction&2) ? to.width-1-column : column;

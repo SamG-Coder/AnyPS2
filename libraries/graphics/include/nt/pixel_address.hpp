@@ -29,6 +29,10 @@ inline unsigned rgba_word(unsigned base,unsigned pitch,unsigned x,unsigned y) {
     const auto word=(x&1)|((y&1)<<1)|((x&6)<<1)|((y&6)<<3);
     return (base*64+page*2048+block*64+word)&0xfffff;
 }
+// PSMZ32 and PSMZ24 keep PSMCT32's pixels within a block but use another block order.
+inline unsigned stored_word(unsigned base,unsigned pitch,unsigned x,unsigned y,bool depth_layout) {
+    return rgba_word(base,pitch,x,y)^(depth_layout ? 0x600U : 0U);
+}
 inline unsigned indexed_byte(unsigned base,unsigned pitch,unsigned x,unsigned y) {
     x&=2047; y&=2047;
     const auto page=(y/64)*(pitch/2)+x/128;

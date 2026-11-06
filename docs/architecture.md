@@ -96,6 +96,7 @@ occupy those segments. Unresolved callbacks remain coverage gaps. See
   Per-voice envelopes run on downstream 48 kHz native mixing stages. Zero pitch
   stops source consumption and holds its last resampled value while the envelope
   continues; source stop/resume and hold changes commit together in XAudio2.
+  Pitch reads return the value written, while playback rate stops at 0x3fff.
   Stream refills preserve the current decoded block and revise unplayed PCM from
   saved predictor/loop checkpoints at a native processing-pass boundary. Failed
   revisions leave both encoded data and queued PCM unchanged. Revisions that
@@ -156,6 +157,9 @@ gathered the same way. Host image transfers into a rendered 32-bit surface are
 applied to the surface by a compute pass as well; the written pages stay owned by
 the surface. Draws carry the palette slot instead of palette words; other uses
 read a slot back once.
+Image transfers also address Z32 and Z24 surfaces in the depth block order; Z16
+transfers stop with a diagnostic. Image output prepared for the host is read
+through reverse VIF1 submissions or quadword loads from the VIF1 FIFO.
 TEX1 level-of-detail sampling binds MIPTBP levels 1-6 as separate native textures
 and selects the magnification or minification filter per pixel. LOD is computed
 in single-precision floating point from interpolated Q (or the sprite's Q), with

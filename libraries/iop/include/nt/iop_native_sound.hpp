@@ -273,7 +273,8 @@ private:
                     (c.route[2]&bit) && (c.mix&0x400) ? fixed_gain(v.volume[1]) : 0};
         mix.effect={(c.route[1]&bit) && (c.mix&0x200) ? fixed_gain(v.volume[0]) : 0,
                     (c.route[3]&bit) && (c.mix&0x100) ? fixed_gain(v.volume[1]) : 0};
-        mix.rate=static_cast<float>(v.pitch)/4096.0f;
+        // The register keeps any 16-bit value for reads; playback advances at most 0x3fff.
+        mix.rate=static_cast<float>(std::min<std::uint16_t>(v.pitch,0x3fff))/4096.0f;
         return output_.configure_voice(index,mix);
     }
     bool apply_core(unsigned core,const Core& c) {
@@ -307,7 +308,6 @@ private:
             else return unavailable();
             if (!writing) return returned(*field);
             if (kind<2 && (value&0x8000)) return unavailable(); // Dynamic gain sweeps need a timed envelope.
-            if (kind==2 && value>0x3fff) return unavailable();
             if (kind==2 && value>0 && value<4) return unavailable(); // Below the native resampler's range.
             *field=value;
             if (kind>=3 && !output_.configure_envelope(index,envelope_spec(v))) return unavailable();

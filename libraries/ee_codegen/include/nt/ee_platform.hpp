@@ -73,7 +73,7 @@ public:
     NativeSifReceive sif_receive;
     NativeSifLink sif_link{sif_receive};
     NativeSifOutbound sif_outbound;
-    void attach(Memory& memory) { memory_=&memory; memory.vector_control=vector_owner.interface(); memory.vectors=&vector_owner.storage; memory.graphics=&graphics; memory.scratchpad=scratchpad_.data(); memory.scratchpad_bytes=scratchpad_.size(); memory.interrupts=&interrupts; memory.completions=&completions; memory.sif_link=&sif_link; memory.sif_outbound=&sif_outbound; memory.io={this,read,write,poll,read64,write64,write8,test_completions,write128}; }
+    void attach(Memory& memory) { memory_=&memory; memory.vector_control=vector_owner.interface(); memory.vectors=&vector_owner.storage; memory.graphics=&graphics; memory.scratchpad=scratchpad_.data(); memory.scratchpad_bytes=scratchpad_.size(); memory.interrupts=&interrupts; memory.completions=&completions; memory.sif_link=&sif_link; memory.sif_outbound=&sif_outbound; memory.io={this,read,write,poll,read64,write64,write8,test_completions,write128,read128}; }
 private:
     static IoRead test_completions(void* context) {
         const auto& self=*static_cast<NativePlatform*>(context);
@@ -131,6 +131,20 @@ private:
         const auto channel=(address-0x10004000)/0x1000;
         const auto bytes=std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(&value),sizeof(value));
         return self.packet_setup.consume(channel,bytes,self.vector_owner.storage.active);
+    }
+    // Programmed reads drain the same prepared image output as reverse submissions.
+    static Stop read128(void* context,std::uint32_t address,runtime::Register& value) {
+        if (address!=0x10005000) return Stop::memory_fault;
+        auto& self=*static_cast<NativePlatform*>(context);
+        if (!self.packet_setup.reverse_output() || !self.graphics.readback_enabled() ||
+            !self.graphics.readback_status || !self.graphics.readback) return Stop::unsupported_system;
+        const auto available=self.graphics.readback_status(self.graphics.context);
+        if (available.status!=Stop::budget) return available.status;
+        if (available.value<sizeof(value)) return Stop::unsupported_system;
+        std::array<std::uint8_t,sizeof(value)> bytes;
+        const auto result=self.graphics.readback(self.graphics.context,bytes);
+        if (result==Stop::budget) std::memcpy(&value,bytes.data(),sizeof(value));
+        return result;
     }
     static Stop write64(void* context,std::uint32_t address,std::uint64_t value) {
         if (NativeVideo::maps(address)) return write(context,address,static_cast<std::uint32_t>(value));

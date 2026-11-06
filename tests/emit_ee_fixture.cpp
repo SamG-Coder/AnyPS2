@@ -467,6 +467,8 @@ int main(int argc,char** argv) try {
     }
     code.push_back(nt::r5900::decode(0x4f0000,0x7c860000));
     code.push_back(nt::r5900::decode(0x4f0004,12));
+    code.push_back(nt::r5900::decode(0x4f0010,0x78870000));
+    code.push_back(nt::r5900::decode(0x4f0014,12));
     {
         const std::uint32_t merges[]{0xb0880007,0xb4880000,0x68880007,0x6c880000,
             0xa8880003,0xb8880000,0x88880003,0x98880000};

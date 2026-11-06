@@ -1138,6 +1138,10 @@ int main() {
                   call(6,0x200).second.registers[2]==0 && output.samples[0].queued &&
                   call(5,0x200,4096).first.reason==NativeStop::unmapped_code && output.voice_mix[0].rate==1,
                   "Compiled pitch hold/resume lost source ownership or native rate");
+            check(call(5,0x200,0xfedb).first.reason==NativeStop::unmapped_code &&
+                  output.voice_mix[0].rate==0x3fff/4096.0f && call(6,0x200).second.registers[2]==0xfedb &&
+                  call(5,0x200,4096).first.reason==NativeStop::unmapped_code && output.voice_mix[0].rate==1,
+                  "Out-of-range pitch was refused, lost its register value or played above the voice limit");
             check(!sound.take(),"Same audio frame delivered the callback twice");
             call(27,0,0);
             data[0x19001]=1; data[0x19002]=7;

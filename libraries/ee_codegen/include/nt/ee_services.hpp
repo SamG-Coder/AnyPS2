@@ -28,7 +28,7 @@ struct MainThread { runtime::InitialStack stack; std::uint32_t global_pointer,ro
 struct ExecutionProfile {
     std::uint64_t entry_ns=0,service_ns=0,idle_ns=0,entries=0,operations=0;
     std::uint64_t longest_entry_ns=0;
-    std::uint64_t display_waits=0,job_waits=0,display_sleep_ns=0,job_sleep_ns=0;
+    std::uint64_t display_waits=0,job_waits=0,display_sleep_ns=0,job_sleep_ns=0,job_spin_ns=0;
     struct Site { std::uint64_t nanoseconds=0,operations=0,calls=0; };
     std::map<std::uint32_t,Site> sites;
     // Native-job waits by program counter and stop reason (pc<<8|reason):
@@ -448,10 +448,18 @@ inline Stop run(Entry entry,runtime::State& state,Memory& memory,std::uint64_t b
                     const auto event=memory.graphics->event_wait_ns();
                     if (event) *delay=std::min(*delay,*event);
                 }
-                if (std::chrono::steady_clock::now()-waiting_since>=services.idle_timeout) return job_wait ? Stop::native_wait : Stop::display_wait;
+                const auto start=std::chrono::steady_clock::now();
+                if (start-waiting_since>=services.idle_timeout) return job_wait ? Stop::native_wait : Stop::display_wait;
+                // Vector jobs usually finish in far less time than the shortest host
+                // timer sleep, so a short wait yields and polls. Longer waits sleep.
+                if (job_wait && start-waiting_since<std::chrono::microseconds(200)) {
+                    std::this_thread::yield();
+                    if (services.profile) services.profile->job_spin_ns+=
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count();
+                    continue;
+                }
                 // Bound host sleep by the next display deadline and the existing
                 // native service-pump cadence so input, timers and IOP work run.
-                const auto start=std::chrono::steady_clock::now();
                 native_service_wait(*delay);
                 if (services.profile) {
                     const auto slept=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count();

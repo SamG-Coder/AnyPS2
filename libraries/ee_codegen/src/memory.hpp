@@ -128,7 +128,7 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
     w.out<<"  br i1 "<<available<<", label %region_ready"<<suffix<<", label %vu_stop"<<suffix<<"\nvu_stop"<<suffix<<":\n";
     w.store("i32",address,offsetof(ee::Memory,fault_address),"%memory");
     w.out<<"  ret i32 "<<ownership<<"\nregion_ready"<<suffix<<":\n";
-    const bool native_io=(access.bytes==4 || access.bytes==8 || ((access.bytes==1 || access.bytes==16) && access.write)) && access.bank==RegisterBank::integer;
+    const bool native_io=(access.bytes==4 || access.bytes==8 || access.bytes==16 || (access.bytes==1 && access.write)) && access.bank==RegisterBank::integer;
     if (native_io) {
         const auto device_address=w.binary("and","i1",w.value("icmp uge i32 "+physical+", 268435456"),
             w.value("icmp ult i32 "+physical+", 536870912"));
@@ -144,8 +144,10 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
         const auto io_address=access.merge==Merge::none ? physical : w.binary("and","i32",physical,std::to_string(~std::uint32_t(access.bytes-1)));
         if (access.bytes==16) {
             const auto packet_address=w.binary("and","i32",physical,"4294967280");
-            const auto high=i.rt ? w.load("i64",offsetof(runtime::State,gpr)+i.rt*sizeof(runtime::Register)+offsetof(runtime::Register,hi)) : "0";
-            status=w.value("call i32 @nt_ee_io_write128(ptr %memory, i32 "+packet_address+", i64 "+w.reg(i.rt)+", i64 "+high+")");
+            if (access.write) {
+                const auto high=i.rt ? w.load("i64",offsetof(runtime::State,gpr)+i.rt*sizeof(runtime::Register)+offsetof(runtime::Register,hi)) : "0";
+                status=w.value("call i32 @nt_ee_io_write128(ptr %memory, i32 "+packet_address+", i64 "+w.reg(i.rt)+", i64 "+high+")");
+            } else status=w.value("call i32 @nt_ee_io_read128(ptr %state, ptr %memory, i32 "+packet_address+", i32 "+std::to_string(i.rt)+")");
         } else if (access.bytes==8) {
             status=access.write ? w.value("call i32 @nt_ee_io_write64(ptr %memory, i32 "+io_address+", i64 "+w.reg(i.rt)+")") :
                 w.value("call i32 @nt_ee_io_read64(ptr %state, ptr %memory, i32 "+io_address+", i32 "+std::to_string(i.rt)+")");
@@ -161,7 +163,7 @@ inline void emit_memory(Writer& w,const r5900::Instruction& i,MemoryOperation ac
             }
             w.out<<"  br label %memory_done"<<suffix<<"\nio_stop"<<suffix<<":\n  ret i32 "<<status<<"\nram"<<suffix<<":\n";
         }
-        if (access.write || access.bytes==8) {
+        if (access.write || access.bytes>=8) {
             const auto ready=w.value("icmp eq i32 "+status+", 0");
             w.out<<"  br i1 "<<ready<<", label %memory_done"<<suffix<<", label %io_stop"<<suffix
                  <<"\nio_stop"<<suffix<<":\n  ret i32 "<<status<<"\nram"<<suffix<<":\n";

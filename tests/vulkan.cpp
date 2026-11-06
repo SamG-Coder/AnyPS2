@@ -52,6 +52,39 @@ void bulk_transfers() {
         a.clear(); bulk.append(payload,a);
         if (a.size()!=pixels || bulk.pixel!=pixels) throw std::runtime_error("New image transfer did not restart");
     }
+    {
+        // Depth uploads keep their format's size and use the depth block order.
+        constexpr std::uint64_t depth_buffer=(640ULL<<32)|(2ULL<<48);
+        constexpr std::uint64_t position=(3ULL<<32)|(5ULL<<48),extent=2|(1ULL<<32);
+        const auto word_at=[](unsigned x) { return rgba_word(640,2,x,5)^0x600U; };
+        auto z24=ImageUpload::begin(depth_buffer|(0x31ULL<<56),position,extent,0);
+        std::vector<PixelWrite> z24_writes;
+        z24.append(Quadword{0x66112233,0x4455,0,0},z24_writes);
+        if (z24_writes.size()!=2 || z24_writes[0].address!=word_at(3) || z24_writes[0].value!=0x112233 ||
+            z24_writes[0].mask!=0xffffffU || z24_writes[1].address!=word_at(4) || z24_writes[1].value!=0x445566 ||
+            z24_writes[1].mask!=0xffffffU) throw std::runtime_error("Z24 upload changed pixels, layout or the preserved high byte");
+        auto z32=ImageUpload::begin(depth_buffer|(0x30ULL<<56),position,extent,0);
+        ImageRect z32_rect;
+        const std::array<Quadword,1> z32_payload{Quadword{0x11223344,0x55667788,0,0}};
+        const bool z32_whole=z32.whole_words();
+        z32.append(z32_payload,z32_rect);
+        const auto z32_writes=z32_rect.writes();
+        if (!z32_whole || z32_writes.size()!=2 || z32_writes[0].address!=word_at(3) || z32_writes[0].value!=0x11223344 ||
+            z32_writes[1].address!=word_at(4) || z32_writes[1].mask!=0xffffffffU)
+            throw std::runtime_error("Z32 upload rectangle lost its depth layout");
+        std::vector<std::uint32_t> memory(1024*1024);
+        memory[word_at(3)]=0x89abcdef;
+        const auto readback=ImageDownload::begin(640|(2ULL<<16)|(0x30ULL<<24),3|(5ULL<<16),1|(1ULL<<32));
+        const auto bytes=readback.pack(memory);
+        if (bytes[0]!=0xef || bytes[3]!=0x89) throw std::runtime_error("Z32 readback ignored the depth layout");
+        const auto copy=ImageCopy::begin(640|(2ULL<<16)|(0x30ULL<<24)|(640ULL<<32)|(2ULL<<48)|(0x30ULL<<56),
+            3|(5ULL<<16)|(4ULL<<32)|(5ULL<<48),1|(1ULL<<32));
+        copy.apply(memory);
+        if (memory[word_at(4)]!=0x89abcdef) throw std::runtime_error("Depth-layout copy moved the wrong words");
+        bool z16_rejected=false;
+        try { ImageUpload::begin(depth_buffer|(0x32ULL<<56),position,extent,0); } catch (const std::invalid_argument&) { z16_rejected=true; }
+        if (!z16_rejected) throw std::runtime_error("Z16 upload was accepted without its own layout");
+    }
     bool uninitialized_rejected=false;
     std::vector<PixelWrite> uninitialized;
     try {ImageUpload{}.append(Quadword{},uninitialized);} catch(const std::invalid_argument&) {uninitialized_rejected=true;}
