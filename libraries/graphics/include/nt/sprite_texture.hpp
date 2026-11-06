@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdio>
 #include <nt/vulkan_renderer.hpp>
 #include <array>
 #include <stdexcept>
@@ -38,14 +39,24 @@ inline TextureLevels plan_texture_levels(std::uint64_t filter,const std::array<s
 }
 inline TextureLevels plan_texture(Sprite& draw,std::uint64_t texture,
     std::uint64_t filter,std::uint64_t clamp,std::uint64_t texa,const std::array<std::uint64_t,2>& mipmap_bases) {
-    const unsigned format=(texture>>20)&63,function=(texture>>35)&3;
+    // A format the GS does not define samples as PSMCT32. Gran Turismo 4 requires this: see
+    // "Undefined texture formats" in docs/render-modernization.md.
+    const unsigned written_format=(texture>>20)&63,function=(texture>>35)&3;
+    const bool defined=written_format<=2 || written_format==10 || written_format==19 || written_format==20 ||
+        written_format==0x1b || written_format==0x24 || written_format==0x2c ||
+        written_format==0x30 || written_format==0x31 || written_format==0x32 || written_format==0x3a;
+    const unsigned format=defined ? written_format : 0;
     const bool depth_layout=format==0x30 || format==0x31;
     // PSMT8H (0x1b), PSMT4HL (0x24) and PSMT4HH (0x2c) index the palette from
     // the top bits of 32-bit words.
     const bool high_index=format==0x1b || format==0x24 || format==0x2c;
     const bool direct_16=format==2 || format==10;
     if (format>1 && format!=19 && format!=20 && !depth_layout && !high_index && !direct_16)
-        throw std::invalid_argument("Unsupported texture format PSM="+std::to_string(format)+" TFX="+std::to_string(function));
+        {
+        char value[32];
+        std::snprintf(value,sizeof value,"%016llx",static_cast<unsigned long long>(texture));
+        throw std::invalid_argument("Unsupported texture format PSM="+std::to_string(format)+" TFX="+std::to_string(function)+" TEX0=0x"+value);
+    }
     bool linear=false;
     auto levels=plan_texture_levels(filter,mipmap_bases,linear);
     if (linear) draw.flags|=128;

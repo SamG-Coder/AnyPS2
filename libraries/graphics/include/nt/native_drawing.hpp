@@ -838,7 +838,7 @@ private:
             const auto method=unsigned((context.test>>17)&3);
             const bool write=!(context.depth&(1ULL<<32));
             if ((write || method>=2) && format>1)
-                throw std::invalid_argument("Unsupported native depth format");
+                throw std::invalid_argument("Unsupported native depth format PSM="+std::to_string(format+0x30)+" TEST="+std::to_string(method)+(write ? " with writes" : " read-only"));
             draw.depth_base=unsigned(context.depth&511)*32;
             draw.flags|=depth_test_flag|(write ? depth_write_flag : 0)|(format==1 ? depth_24_flag : 0);
         }

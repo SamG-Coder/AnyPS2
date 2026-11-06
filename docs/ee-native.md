@@ -157,3 +157,17 @@ not established. Homebrew results and adaptation limits are summarized in
 [project history](project-history.md). Current regression commands are in
 [testing](testing.md); historical per-operation logs belong in Git history or local
 investigation output, not this guide.
+
+## Code patches
+
+`ps2-recompile --patch <file>` changes individual compiled instructions, for a result
+reusable behavior cannot provide, such as turning on a mode a game already has. Each
+line holds hexadecimal `address expected replacement`; lines starting with `#` are comments.
+Conversion stops if an input holds a different word, if no input holds the address, or if
+the address is not selected EE code. Nothing selects a patch by game: the file is what asks
+for it. Keep game-specific files under ignored `work/`.
+
+A patch changes only the compiled program. Loaded memory keeps the original bytes, and
+the check at `ExecPS2` still compares against them, so program reads of that word see the
+original value. `executable-images.txt` lists patched instructions. Patches are part of the
+input identity, so captured observations must match them.

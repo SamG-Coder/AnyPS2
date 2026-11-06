@@ -29,7 +29,13 @@ struct PayloadMapping {
 struct CodePayload { std::uint32_t address; std::vector<std::uint8_t> bytes; };
 using LayoutDeclaration=std::array<std::uint32_t,4>;
 struct CodeRange { std::uint32_t address,size,image=0; }; // image 0 is permanently resident.
-struct ExecutableImage { std::uint32_t entry,id; std::vector<CodePayload> segments; };
+// Segments keep the input's bytes, which a handoff compares with loaded memory. Words in
+// patched compile as a CodePatch replaced them, so they may differ from those bytes.
+struct ExecutableImage { std::uint32_t entry,id; std::vector<CodePayload> segments; std::vector<std::uint32_t> patched{}; };
+// An opt-in change to one compiled instruction, given to conversion by the user. Conversion
+// stops unless an input holds expected at address and it is selected EE code. Loaded
+// memory is unchanged: only the compiled program differs.
+struct CodePatch { std::uint32_t address=0,expected=0,replacement=0; };
 // Emits a sorted, bounded set of compiled instructions. Additional ranges protect
 // executable ELF contents that have not yet been reached by discovery.
 // An optional stream factory splits code into bounded LLVM modules identified
@@ -53,7 +59,8 @@ bool lowerable(const r5900::Instruction& instruction,const r5900::Instruction* n
 void project(const std::filesystem::path& input,const std::filesystem::path& output,
              std::span<const PayloadMapping> payloads = {},
              std::span<const std::filesystem::path> images = {},
-             std::span<const std::filesystem::path> observations = {}, bool function_symbols=false, bool whole_code=false);
+             std::span<const std::filesystem::path> observations = {}, bool function_symbols=false, bool whole_code=false,
+             std::span<const CodePatch> patches = {});
 struct FlowVerification {
     std::size_t instructions=0,passes=0,unmapped_targets=0,unresolved_indirect=0;
     std::size_t unclassified_references=0,record_binding_candidates=0,service_boundaries=0;
@@ -69,7 +76,8 @@ struct FlowVerification {
 FlowVerification verify_flow(const std::filesystem::path& input,const std::filesystem::path& output,
                              std::span<const PayloadMapping> payloads = {},
                              std::span<const std::filesystem::path> images = {},
-                             std::span<const std::filesystem::path> observations = {}, bool function_symbols=false, bool whole_code=false);
+                             std::span<const std::filesystem::path> observations = {}, bool function_symbols=false, bool whole_code=false,
+                             std::span<const CodePatch> patches = {});
 // Unsupported operations and encodings in an already decoded instruction list.
 // Empty means this list can be lowered. No text is emitted.
 struct EeRejection {

@@ -81,7 +81,9 @@ odd scale puts one sample on the console sample point: that sample is what conso
 memory holds, so memory stays exact where it
 is tested by the replay hash. Every other sample runs the same work at its own position,
 and a read of a rendered surface as data takes the sample at the reader's own position,
-so effects that read the frame back keep their detail without being recognized.
+so effects that read the frame back keep their detail without being recognized. A draw
+reading the surface it renders to reads a copy of the region it needs, so a pass that
+filters a frame onto itself keeps that detail as well.
 
 Known differences at a scale above 1, all in presentation only: sprites keep one texel
 per console pixel unless an image filter is chosen, off-center samples of a triangle may
@@ -115,6 +117,16 @@ program drew past its 4:3 view. It is chosen by target size, not by game:
   empty sides. Use an image filter, because a narrowed sprite otherwise skips texels.
 - Console memory holds the squeezed image, so it is no longer exact, and programs that
   read pixels back see that image.
+
+## Undefined texture formats
+
+A texture whose `TEX0` names a format the GS does not define samples as PSMCT32. This is
+required for Gran Turismo 4, which otherwise stops with `Unsupported texture format
+PSM=6`. The value there is not a texture setting: `TEX0` and `TEX1` hold the first bytes
+of an unrelated program object. It is not known whether the program does this on a console
+or an earlier conversion error causes it, and the behavior of a console for these formats
+is not established here, so what such a draw shows may differ. Replace this rule if that
+cause is found.
 
 The window shows a scaled image at up to the monitor's size. Full screen is a borderless
 window over the whole monitor, at the display's shape with black bars around it.

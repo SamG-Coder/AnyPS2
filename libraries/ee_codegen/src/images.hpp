@@ -39,7 +39,8 @@ inline void validate_images(std::span<const ExecutableImage> images, std::span<c
                 const auto offset=i.pc-segment.address;
                 std::uint32_t word=0;
                 for (unsigned b=0;b<4;++b) word|=std::uint32_t(segment.bytes[offset+b])<<(b*8);
-                if (word!=i.word) throw std::invalid_argument("Compiled image instruction differs from expected bytes");
+                if (word!=i.word && std::find(image.patched.begin(),image.patched.end(),i.pc)==image.patched.end())
+                    throw std::invalid_argument("Compiled image instruction differs from expected bytes");
             }
         }
         if (!compiled_entry) throw std::invalid_argument("Native image entry has no owned compiled code");

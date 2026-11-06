@@ -314,9 +314,34 @@ PreparedProject prepare(ByteView bytes,std::span<const PayloadMapping> mappings,
     return result;
 }
 }
+// The bytes to compile for one input: a copy with the patches it holds applied.
+Bytes apply_code_patches(ByteView source,std::span<const CodePatch> patches,std::vector<bool>& applied,std::vector<std::uint32_t>& addresses) {
+    Bytes result(source.begin(),source.end());
+    if (patches.empty()) return result;
+    const auto executable=elf::parse(source);
+    const auto hex=[](std::uint32_t value) { std::ostringstream text; text<<"0x"<<std::hex<<value; return text.str(); };
+    for (std::size_t n=0;n<patches.size();++n) {
+        const auto& patch=patches[n];
+        for (const auto& segment:executable.segments) {
+            if (patch.address<segment.address || std::uint64_t(patch.address)+4>std::uint64_t(segment.address)+segment.file_size) continue;
+            const auto at=segment.offset+(patch.address-segment.address);
+            std::uint32_t held=0;
+            for (unsigned b=0;b<4;++b) held|=std::uint32_t(result.at(at+b))<<(b*8);
+            if (held!=patch.expected) throw std::runtime_error("Code patch at "+hex(patch.address)+" expected "+hex(patch.expected)+" but the input holds "+hex(held));
+            for (unsigned b=0;b<4;++b) result.at(at+b)=std::uint8_t(patch.replacement>>(b*8));
+            applied[n]=true; addresses.push_back(patch.address);
+            break;
+        }
+    }
+    return result;
+}
 PreparedProject prepare_project(const std::filesystem::path& input,std::span<const PayloadMapping> mappings,
                          std::span<const std::filesystem::path> images,bool diagnose_flow,
-                         std::span<const std::filesystem::path> observation_paths,bool function_symbols,bool whole_code) {
+                         std::span<const std::filesystem::path> observation_paths,bool function_symbols,bool whole_code,
+                         std::span<const CodePatch> patches) {
+    if (patches.size()>256) throw std::invalid_argument("Too many code patches");
+    for (const auto& patch:patches) if (patch.address%4) throw std::invalid_argument("Code patch address is not aligned");
+    std::vector<bool> applied(patches.size(),false);
     if (whole_code && !observation_paths.empty())
         throw std::invalid_argument("Whole-code conversion does not use runtime observations");
     if (images.size()>31) throw std::invalid_argument("Too many secondary executable images");
@@ -330,6 +355,7 @@ PreparedProject prepare_project(const std::filesystem::path& input,std::span<con
     std::vector<std::pair<std::size_t,std::uint64_t>> image_identities;
     identity<<"anyps2-ee-input-v1\n"<<bytes.size()<<' '<<fingerprint(bytes)<<'\n';
     if (whole_code) identity<<"whole-code\n";
+    for (const auto& patch:patches) identity<<"patch "<<patch.address<<' '<<patch.expected<<' '<<patch.replacement<<'\n';
     if (function_symbols) identity<<"function-symbols\n";
     for (const auto& mapping:mappings) {
         identity<<"payload "<<mapping.source<<' '<<mapping.destination<<' '<<mapping.size;
@@ -352,27 +378,31 @@ PreparedProject prepare_project(const std::filesystem::path& input,std::span<con
         if (edge.image>images.size()+1) throw std::runtime_error("Native observation refers to an unknown executable image");
         observed[edge.image-1].push_back(std::move(edge));
     }
-    auto prepared=prepare(bytes,mappings,diagnose_flow,observed[0],function_symbols,whole_code);
+    std::vector<std::uint32_t> primary_patched;
+    const auto compiled_bytes=apply_code_patches(bytes,patches,applied,primary_patched);
+    auto prepared=prepare(compiled_bytes,mappings,diagnose_flow,observed[0],function_symbols,whole_code);
     // Additional images have native lifetimes that swept extents cannot overlap.
     if (!whole_code && prepared.executable.writable_code && images.empty())
-        prepared.unverified_code=sweep_mixed_code(bytes,prepared.executable,prepared.discovered);
+        prepared.unverified_code=sweep_mixed_code(compiled_bytes,prepared.executable,prepared.discovered);
     prepared.input_identity=input_identity;
     if (!images.empty()) {
-        const auto snapshot=[](ByteView source,const elf::Executable& executable,std::uint32_t id) {
-            ExecutableImage image{executable.entry,id,{}};
+        const auto snapshot=[](ByteView source,const elf::Executable& executable,std::uint32_t id,std::vector<std::uint32_t> patched) {
+            ExecutableImage image{executable.entry,id,{},std::move(patched)};
             for (const auto& segment:executable.segments) if (segment.file_size)
                 image.segments.push_back({segment.address,Bytes(source.begin()+segment.offset,source.begin()+segment.offset+segment.file_size)});
             return image;
         };
         for (auto& range:prepared.ranges) range.image=1;
-        prepared.images.push_back(snapshot(bytes,elf::parse(bytes),1));
+        prepared.images.push_back(snapshot(bytes,elf::parse(bytes),1,primary_patched));
         auto occupied=prepared.executable.segments;
         for (const auto& path:images) {
             const auto source=read_file(path);
             const auto id=static_cast<std::uint32_t>(prepared.images.size()+1);
             if (source.size()!=image_identities[id-2].first || fingerprint(source)!=image_identities[id-2].second)
                 throw std::runtime_error("Executable image changed during conversion; retry with stable input files");
-            auto extra=prepare(source,{},diagnose_flow,observed[id-1],function_symbols,whole_code);
+            std::vector<std::uint32_t> image_patched;
+            const auto compiled_source=apply_code_patches(source,patches,applied,image_patched);
+            auto extra=prepare(compiled_source,{},diagnose_flow,observed[id-1],function_symbols,whole_code);
             for (const auto& [image,entry]:extra.function_roots) prepared.function_roots.emplace_back(id,entry);
             for (const auto& section:extra.executable.segments) {
                 for (const auto& old:occupied)
@@ -398,9 +428,14 @@ PreparedProject prepare_project(const std::filesystem::path& input,std::span<con
             for (auto range:extra.ranges) { range.image=id; prepared.ranges.push_back(range); }
             for (auto region:extra.selected_regions) { region.image=id; prepared.selected_regions.push_back(region); }
             prepared.layouts.insert(prepared.layouts.end(),extra.layouts.begin(),extra.layouts.end());
-            prepared.images.push_back(snapshot(source,extra.executable,id));
+            prepared.images.push_back(snapshot(source,extra.executable,id,std::move(image_patched)));
         }
         for (const auto& [pc,instruction]:prepared.discovered.instructions) prepared.discovered.unresolved.erase(pc);
+    }
+    for (std::size_t n=0;n<patches.size();++n) {
+        if (!applied[n]) throw std::runtime_error("Code patch is not in any input");
+        if (!prepared.discovered.instructions.contains(patches[n].address))
+            throw std::runtime_error("Code patch is not selected EE code");
     }
     return prepared;
 }

@@ -6,12 +6,13 @@
 #include <stdexcept>
 int main(int argc,char** argv) {
     if (argc<3) {
-        std::cerr<<"Usage: ps2-recompile <boot.elf> <new-output-directory> [--verify-only] [--whole-code] [--function-symbols] [--payloads mapping-file] [--image secondary.elf ...] [--observation native-stop-directory ...]\n"
+        std::cerr<<"Usage: ps2-recompile <boot.elf> <new-output-directory> [--verify-only] [--whole-code] [--function-symbols] [--payloads mapping-file] [--image secondary.elf ...] [--observation native-stop-directory ...] [--patch patch-file]\n"
                  <<"Use --whole-code to compile every declared EE code word without caller discovery.\n"; return 2;
     }
     try {
         std::vector<nt::ee_codegen::PayloadMapping> payloads;
         std::vector<std::filesystem::path> images,observations;
+        std::vector<nt::ee_codegen::CodePatch> patches;
         bool payload_option=false,verify_only=false,function_symbols=false,whole_code=false;
         for (int index=3;index<argc;++index) {
             const std::string_view option=argv[index];
@@ -31,6 +32,23 @@ int main(int argc,char** argv) {
             if (option=="--image") {
                 if (images.size()==31) throw std::runtime_error("Too many secondary images");
                 images.emplace_back(argv[index]); continue;
+            }
+            if (option=="--patch") {
+                if (!patches.empty()) throw std::runtime_error("Duplicate --patch option");
+                std::ifstream input(argv[index]);
+                if (!input) throw std::runtime_error("Cannot open code patch file");
+                std::string line;
+                while (std::getline(input,line)) {
+                    if (line.empty() || line[0]=='#') continue;
+                    std::istringstream fields(line);
+                    nt::ee_codegen::CodePatch patch;
+                    std::string extra;
+                    if (!(fields>>std::hex>>patch.address>>patch.expected>>patch.replacement) || (fields>>extra))
+                        throw std::runtime_error("Expected hexadecimal address, expected word and new word per patch line");
+                    patches.push_back(patch);
+                }
+                if (patches.empty()) throw std::runtime_error("Code patch file has no entries");
+                continue;
             }
             if (option=="--observation") {
                 if (observations.size()==64) throw std::runtime_error("Too many native observations");
@@ -66,7 +84,7 @@ int main(int argc,char** argv) {
             }
         }
         if (verify_only) {
-            const auto result=nt::ee_codegen::verify_flow(argv[1],argv[2],payloads,images,observations,function_symbols,whole_code);
+            const auto result=nt::ee_codegen::verify_flow(argv[1],argv[2],payloads,images,observations,function_symbols,whole_code,patches);
             const bool selected_code_ready=result.instructions && result.lowering_supported && result.layout_supported && !result.unmapped_targets;
             std::cout<<(whole_code ? "Whole declared EE code inventory" : "Reached-flow verification")<<": "
                 <<(whole_code ? (selected_code_ready ? "lowerable" : "conversion gaps") : (result.closed() ? "closed" : "incomplete"))
@@ -77,7 +95,7 @@ int main(int argc,char** argv) {
             if (whole_code) return selected_code_ready ? 0 : 2;
             return result.closed() ? 0 : 2;
         }
-        nt::ee_codegen::project(argv[1],argv[2],payloads,images,observations,function_symbols,whole_code);
+        nt::ee_codegen::project(argv[1],argv[2],payloads,images,observations,function_symbols,whole_code,patches);
         std::cout<<"Generated EE LLVM project. Compile it with ps2-build. Game boot is not established.\n";
         return 0;
     } catch(const std::exception& error) { std::cerr<<"EE conversion: "<<error.what()<<'\n'; return 1; }

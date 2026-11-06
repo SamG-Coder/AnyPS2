@@ -213,6 +213,8 @@ struct NativeRaster::Impl {
         std::array<std::uint64_t,512> pages{};
         VkDeviceSize allocation_bytes=0;
         std::unique_ptr<Image> console_view;
+        // Scaled copy that a draw reading this surface as its own texture samples.
+        std::unique_ptr<Image> feedback;
         Image(VkDevice d,unsigned w,unsigned h):device(d),width(w),height(h) {}
         ~Image() {
             if (view) vkDestroyImageView(device,view,nullptr);
@@ -320,6 +322,7 @@ struct NativeRaster::Impl {
     bool current(const Image&,const Sprite&) const;
     // Publishes the surface's newer pages within `requested` to `source`.
     void blit_console_samples(const Image& source,Image& destination,unsigned first_row,unsigned last_row);
+    Image& feedback_copy(Image& source,const Sprite& draw);
     void export_image(Image&,Region requested={0,store_words}); void synchronize_source(Region); void clear_views();
     void trim_surfaces();
     Image& surface(unsigned base,unsigned pitch,unsigned height,bool depth,bool scratch=false,bool display=false,const Sprite* draw=nullptr,unsigned format=0);
@@ -1701,10 +1704,39 @@ void NativeRaster::release_palette(std::uint32_t slot) {
     r.surface_palette_blocks.reset();
     for (const auto& palette:r.surface_palettes) for (const auto address:palette.addresses) r.surface_palette_blocks.set(address/64);
 }
-// A scaled surface a draw can read at each sample's own position: plain 32-bit, holding
-// the newest copy of every page of the texture, and not the draw's own target.
+// Copies the part of a scaled surface that a draw on that same surface reads, because an
+// image cannot be sampled while it is the render target. A sprite copies only its source
+// rectangle, plus a margin for filtering, so a pass drawn in strips copies about one
+// frame in total. A primitive that may wrap, and any triangle, copies the whole surface.
+NativeRaster::Impl::Image& NativeRaster::Impl::feedback_copy(Image& source,const Sprite& d) {
+    if (!source.feedback) {
+        source.feedback=image(source.width,source.height,source.scale);
+        source.feedback->base=source.base; source.feedback->pitch=source.pitch;
+    }
+    int x0=0,y0=0,x1=int(source.width),y1=int(source.height);
+    if (!(d.flags&triangle_flag) && d.dx && d.dy) {
+        const auto texel=[](std::int64_t origin,std::int64_t start,std::int64_t position,std::int64_t step,std::int64_t span) {
+            return (origin+(position*16-start)*step/span)>>4;
+        };
+        const auto u0=texel(d.u0,d.x0,d.left,d.du,d.dx),u1=texel(d.u0,d.x0,d.right,d.du,d.dx);
+        const auto v0=texel(d.v0,d.y0,d.top,d.dv,d.dy),v1=texel(d.v0,d.y0,d.bottom,d.dv,d.dy);
+        const auto low_x=std::min(u0,u1)-2,high_x=std::max(u0,u1)+3,low_y=std::min(v0,v1)-2,high_y=std::max(v0,v1)+3;
+        if (low_x>=0 && low_y>=0 && high_x<=source.width && high_y<=source.height) {
+            x0=int(low_x); y0=int(low_y); x1=int(high_x); y1=int(high_y);
+        }
+    }
+    order();
+    VkImageCopy copy{}; copy.srcSubresource=copy.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
+    copy.srcOffset=copy.dstOffset={x0*int(source.scale),y0*int(source.scale),0};
+    copy.extent={unsigned(x1-x0)*source.scale,unsigned(y1-y0)*source.scale,1};
+    vkCmdCopyImage(command,source.image,VK_IMAGE_LAYOUT_GENERAL,source.feedback->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
+    order();
+    return *source.feedback;
+}
+// A scaled surface a draw can read at each sample's own position: plain 32-bit and holding
+// the newest copy of every page of the texture. A draw on that same surface reads a copy.
 NativeRaster::Impl::Image* NativeRaster::Impl::sampled_surface(const Sprite& d,Region source) {
-    if (resolution_scale==1 || (d.base==d.texture_base && d.pitch==d.texture_pitch)) return nullptr;
+    if (resolution_scale==1) return nullptr;
     for (auto& [key,image]:surfaces) {
         if (!image || !image->valid || image->scratch || image->format || image->depth || image->base%32 || !image->pitch ||
             !image->region.overlaps(source)) continue;
@@ -1715,7 +1747,8 @@ NativeRaster::Impl::Image* NativeRaster::Impl::sampled_surface(const Sprite& d,R
             holds=image->pages[page]==source_revisions[page] && (relative/image->pitch)*32+32<=image->height;
             const unsigned step=std::min(left,2048-word%2048); word=(word+step)%store_words; left-=step;
         }
-        if (holds) return image.get();
+        if (!holds) continue;
+        return d.base==d.texture_base && d.pitch==d.texture_pitch ? &feedback_copy(*image,d) : image.get();
     }
     return nullptr;
 }

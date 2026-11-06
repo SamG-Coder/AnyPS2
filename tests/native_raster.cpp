@@ -287,6 +287,20 @@ int main(int argc,char** argv) {
                 for (unsigned y=0;y<30;++y) for (unsigned x=0;x<30;++x)
                     if ((samples[(y*3+1)*sample_width+x*3+1]&0xffffffU)!=(exact_drawing.pixels()[rgba_word(8*32,1,x,y)]&0xffffffU))
                         throw std::runtime_error("A scaled center sample differs from console memory");
+                // A surface drawn onto itself keeps its samples too, and console memory stays exact.
+                Packet feedback(1); ad(feedback,0x4c,4|(1ULL<<16)); ad(feedback,6,(4ULL*32)|(1ULL<<14)|(6ULL<<26)|(6ULL<<30)|(1ULL<<34)|(1ULL<<35));
+                ad(feedback,0,0x116); ad(feedback,3,0); ad(feedback,5,0); ad(feedback,3,(32*16)|((32*16ULL)<<16)); ad(feedback,5,(32*16)|((32*16ULL)<<16));
+                finish(feedback);
+                exact_drawing.submit(exact,std::array{feedback}); scaled_drawing.submit(scaled,std::array{feedback});
+                if (exact_drawing.pixels()!=scaled_drawing.pixels()) throw std::runtime_error("A surface drawn onto itself changed console memory");
+                const auto kept=scaled.read_surface_samples(4*32,1,0,sample_width,sample_height);
+                bool kept_detail=false;
+                for (unsigned y=0;!kept_detail && y<32*3;y+=3) for (unsigned x=0;x<32;++x) {
+                    const auto first=kept[y*sample_width+x*3];
+                    for (unsigned sy=0;sy<3;++sy) for (unsigned sx=0;sx<3;++sx)
+                        kept_detail=kept_detail || kept[(y+sy)*sample_width+x*3+sx]!=first;
+                }
+                if (!kept_detail) throw std::runtime_error("A surface drawn onto itself lost its samples");
             }
             // A full texture cache reuses same-sized images instead of draining the
             // GPU to evict, and a reused image shows its new texture.
@@ -968,6 +982,17 @@ int main(int argc,char** argv) {
             expect(render(sprite,lod_filter(0,2,0,4,1,-16),0.5f),5,5,level_colors[1],"scaled Q with bias");
             expect(render(sprite,lod_filter(0,2,0,2,0,0),2.0f),5,5,level_colors[0],"magnification");
             expect(render(sprite,lod_filter(0,0,0,1,0,0),0.5f),5,5,level_colors[0],"mixed filtering");
+            // A format the GS does not define samples as PSMCT32; a defined but unsupported one stops.
+            {
+                Sprite undefined_format{},plain{};
+                const auto tex0=[](std::uint64_t format) { return (format<<20)|(4ULL<<26)|(4ULL<<30); };
+                plan_texture(undefined_format,tex0(6),0,0,0,bases); plan_texture(plain,tex0(0),0,0,0,bases);
+                if (undefined_format.flags!=plain.flags) throw std::runtime_error("An undefined texture format did not sample as PSMCT32");
+                bool stopped=false;
+                try { Sprite z16{}; plan_texture(z16,tex0(0x32),0,0,0,bases); } catch (const std::invalid_argument&) { stopped=true; }
+                if (!stopped) throw std::runtime_error("An unsupported defined texture format did not stop");
+                checks+=2;
+            }
             bool linear=false;
             if (plan_texture_levels(lod_filter(1,4,0,0,0,0),bases,linear).control || linear ||
                 plan_texture_levels(lod_filter(1,2,1,5,0,-8),bases,linear).control || !linear)

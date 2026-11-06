@@ -235,7 +235,7 @@ See [EE native conversion](ee-native.md#workflow) for the layout format.
 ```text
 ps2-recompile <boot.elf> <new-output-directory> [--verify-only] [--whole-code]
     [--function-symbols] [--payloads mapping-file] [--image secondary.elf ...]
-    [--observation native-stop-directory ...]
+    [--observation native-stop-directory ...] [--patch patch-file]
 ```
 
 | Option | Effect |
@@ -246,6 +246,7 @@ ps2-recompile <boot.elf> <new-output-directory> [--verify-only] [--whole-code]
 | `--payloads <file>` | Copied payload mappings |
 | `--image <file>` | Secondary executable image. Repeatable |
 | `--observation <dir>` | A `--capture-stop` directory that names an indirect destination. Repeatable |
+| `--patch <file>` | Opt-in per-game instruction changes. See [code patches](ee-native.md#code-patches) |
 
 Use the same mappings and images for verification and generation. See
 [flow verification](flow-verification.md) for the reports.

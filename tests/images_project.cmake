@@ -56,6 +56,25 @@ if(NOT audit MATCHES "dependency audit passed")
     message(FATAL_ERROR "Native image output failed dependency audit")
 endif()
 
+# A patch changes the compiled instruction while handoff still checks the input's bytes.
+file(WRITE "${run}/patch.txt" "# Synthetic fixture\n3000 24020056 24020063\n")
+checked("${CONVERTER}" "${run}/fixture.elf.loader" "${run}/patched" --image "${run}/fixture.elf.image" --patch "${run}/patch.txt")
+checked("${CMAKE_COMMAND}" -S "${run}/patched" -B "${run}/patched-build" -G "${GENERATOR}" ${platform} "-DANYPS2_ROOT=${ROOT}")
+checked("${CMAKE_COMMAND}" --build "${run}/patched-build" --config Release --target ps2-native --parallel 2)
+execute_process(COMMAND "${run}/patched-build/Release/ps2-native${EXE_SUFFIX}" "${run}/patched/program.data" --headless
+    RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
+if(NOT result EQUAL 3 OR NOT out MATCHES "stop=1 pc=0x00003008.*v0=99" OR NOT out MATCHES "native_image=2")
+    message(FATAL_ERROR "A code patch did not change the compiled program: ${out} ${err}")
+endif()
+foreach(rejected "3000 24020057 24020063" "7000 00000000 00000001" "3002 24020056 24020063")
+    file(WRITE "${run}/bad-patch.txt" "${rejected}\n")
+    execute_process(COMMAND "${CONVERTER}" "${run}/fixture.elf.loader" "${run}/bad-patch" --image "${run}/fixture.elf.image" --patch "${run}/bad-patch.txt"
+        RESULT_VARIABLE result ERROR_VARIABLE err)
+    if(NOT result EQUAL 1 OR NOT err MATCHES "Code patch" OR EXISTS "${run}/bad-patch")
+        message(FATAL_ERROR "An invalid code patch was accepted: ${rejected} ${err}")
+    endif()
+endforeach()
+
 # No ELF section names or manually supplied callback addresses: recover the
 # referenced list, compile both callbacks and observe their combined writes.
 checked("${CONVERTER}" "${run}/fixture.elf.constructors" "${run}/constructors")

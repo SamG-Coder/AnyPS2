@@ -75,6 +75,7 @@ void write_project_reports(const std::filesystem::path& output,const PreparedPro
             manifest<<"image "<<executable_image.id<<" entry "<<hex32(executable_image.entry)<<'\n';
             for (const auto& segment:executable_image.segments)
                 manifest<<"  section "<<hex32(segment.address)<<" bytes "<<segment.bytes.size()<<'\n';
+            for (const auto address:executable_image.patched) manifest<<"  patched instruction "<<hex32(address)<<'\n';
         }
         manifest<<"Only image 1 is initialized at launch. Other images must be loaded and validated at ExecPS2.\n";
         write_text_file(output/"executable-images.txt",manifest.str());

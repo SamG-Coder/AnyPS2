@@ -39,7 +39,8 @@ struct FlowDiagnostics {
 
 PreparedProject prepare_project(const std::filesystem::path& input,std::span<const PayloadMapping> mappings,
     std::span<const std::filesystem::path> images,bool diagnose_flow,
-    std::span<const std::filesystem::path> observations,bool function_symbols,bool whole_code);
+    std::span<const std::filesystem::path> observations,bool function_symbols,bool whole_code,
+    std::span<const CodePatch> patches={});
 FlowDiagnostics diagnose_flow(const PreparedProject& prepared);
 void emit_project(const std::filesystem::path& output,const PreparedProject& prepared);
 void write_project_reports(const std::filesystem::path& output,const PreparedProject& prepared,

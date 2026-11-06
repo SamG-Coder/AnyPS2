@@ -12,6 +12,14 @@ disc ID, hash, instruction address, or observed GT4 register values. Unsupported
 behavior must stop with actionable diagnostics. Do not fake successful services
 to advance a trace. Do not require, embed, or reconstruct a proprietary BIOS.
 
+The one exception is an opt-in per-game patch, for a result that reusable behavior
+cannot provide, such as turning on a mode the game already has. A patch is a file the
+user passes at conversion. Each entry states its address, expected value and new value,
+and conversion stops if the input does not match. Patches apply at conversion, never at
+runtime, and a patch never selects itself by game title or disc identity. Keep them under
+ignored work/ unless the user decides otherwise. Prefer reusable behavior when it can
+provide the result.
+
 ## Native conversion is mandatory
 
 - Convert PS2 program code into typed IR and compile it ahead of time through
