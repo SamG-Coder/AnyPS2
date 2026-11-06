@@ -1,6 +1,7 @@
 #pragma once
 #include <nt/adpcm.hpp>
 #include <deque>
+#include <iterator>
 
 namespace nt::audio {
 // Incremental compressed-media cursor. PCM ownership and elapsed playback are
@@ -64,6 +65,33 @@ public:
         if (result!=SampleError::none) return result;
         // Changing the queued extent needs a native queue replacement, not
         // padding with silence or silently retaining an obsolete end marker.
+        if (next.frames_!=frames_) return SampleError::unsupported;
+        begin=first->begin; *this=std::move(next); return SampleError::none;
+    }
+    // The device reads its loop address when a block ends, so a new address
+    // applies to every jump it has not taken, including jumps decoded ahead of
+    // it. Queued blocks after the one being played are decoded again.
+    SampleError retarget(std::span<const std::uint8_t> source,std::uint64_t played,std::uint32_t address,
+                         std::uint64_t& begin,std::vector<std::int16_t>& pcm) {
+        pcm.clear(); begin=frames_;
+        if (address%16 || address>=source.size()) return SampleError::malformed;
+        const auto first=std::find_if(pending_.begin(),pending_.end(),[&](const auto& block) { return block.begin>played; });
+        // The block before the first replaced one is at or before the device,
+        // and its end flag has not been followed until that block finishes.
+        const bool jump_pending=first!=pending_.begin() && std::prev(first)->end;
+        if (first==pending_.end()) {
+            repeat_=address;
+            if (jump_pending && !finished_) cursor_=address;
+            return SampleError::none;
+        }
+        auto next=*this;
+        const auto count=static_cast<unsigned>(pending_.end()-first);
+        next.cursor_=jump_pending ? address : first->address;
+        next.history_=first->history; next.repeat_=address;
+        next.frames_=first->begin; next.finished_=false;
+        next.pending_.erase(next.pending_.begin()+(first-pending_.begin()),next.pending_.end());
+        const auto result=next.decode(source,count,pcm);
+        if (result!=SampleError::none) return result;
         if (next.frames_!=frames_) return SampleError::unsupported;
         begin=first->begin; *this=std::move(next); return SampleError::none;
     }

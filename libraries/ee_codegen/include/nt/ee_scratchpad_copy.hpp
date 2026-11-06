@@ -49,15 +49,36 @@ private:
         channel=(address-0x1000d000)/0x400; field=(address&0xff)/16;
         return field<=5 || field==8;
     }
-    static Stop source_view(const Memory& memory,std::uint32_t raw,std::uint32_t size,
-                            std::span<const std::uint8_t>& result) {
+    static bool vector_data_address(std::uint32_t address) {
+        return (address>=0x11004000 && address<0x11008000) || (address>=0x1100c000 && address<0x11010000);
+    }
+    static Stop memory_view(const Memory& memory,std::uint32_t raw,std::uint32_t size,std::span<std::uint8_t>& result) {
         if (raw%16) return Stop::memory_fault;
         if ((raw&0x70000000U)==0x70000000U) return Stop::unsupported_system; // Aliased self-copy needs ordered overlap semantics.
         const auto address=raw&0x1fffffffU;
+        // VU data is the storage compiled loads and stores use, under the same
+        // rule: a running job owns it, so the copy retries once that job ends.
+        // VU code storage has upload identities and stays refused.
+        if (vector_data_address(address)) {
+            const bool vu1=address>=0x1100c000;
+            const auto& region=memory.vector_data[vu1 ? 1 : 0];
+            if (!region.data) return Stop::unsupported_vector;
+            if (region.active && *region.active) return Stop::vector_pending;
+            const auto offset=address&(vu1 ? 16383U : 4095U);
+            if (std::uint64_t(offset)+size>region.bytes) return Stop::memory_fault;
+            result={region.data+offset,size}; return Stop::budget;
+        }
         if (address>=0x11000000 && address<0x11010000) return Stop::unsupported_vector;
         if (!memory.data || std::uint64_t(address)+size>memory.size || std::uint64_t(address)+size>0x2000000U)
             return Stop::memory_fault;
         result={memory.data+address,size}; return Stop::budget;
+    }
+    static Stop source_view(const Memory& memory,std::uint32_t raw,std::uint32_t size,
+                            std::span<const std::uint8_t>& result) {
+        std::span<std::uint8_t> view;
+        const auto status=memory_view(memory,raw,size,view);
+        if (status==Stop::budget) result=view;
+        return status;
     }
     static void scratch_copy(Memory& memory,std::uint32_t& offset,std::span<std::uint8_t> bytes,bool to_scratch) {
         while (!bytes.empty()) {
@@ -86,16 +107,17 @@ private:
         return Stop::budget;
     }
     Stop from_scratch(Memory& memory,Config& next,unsigned mode) const {
-        struct Write { std::uint32_t destination; std::vector<std::uint8_t> bytes; };
+        struct Write { std::uint8_t* destination; std::vector<std::uint8_t> bytes; };
         std::vector<Write> writes;
         const auto append=[&](std::uint32_t raw,std::uint32_t size)->Stop {
-            std::span<const std::uint8_t> destination;
-            const auto valid=source_view(memory,raw,size,destination);
+            std::span<std::uint8_t> destination;
+            const auto valid=memory_view(memory,raw,size,destination);
             if (valid!=Stop::budget) return valid;
             if (!protection) return Stop::invalid_state;
             const auto physical=raw&0x1fffffffU;
-            if (size && protection(physical,size)) { memory.fault_address=raw; return Stop::code_write; }
-            writes.push_back({physical,std::vector<std::uint8_t>(size)});
+            // Protection covers executable main memory; VU data holds no EE code.
+            if (size && !vector_data_address(physical) && protection(physical,size)) { memory.fault_address=raw; return Stop::code_write; }
+            writes.push_back({destination.data(),std::vector<std::uint8_t>(size)});
             scratch_copy(memory,next[8],writes.back().bytes,false);
             next[1]=raw+size; return Stop::budget;
         };
@@ -122,7 +144,7 @@ private:
             if (!ended) return Stop::invalid_state;
         }
         for (const auto& write:writes)
-            if (!write.bytes.empty()) std::memcpy(memory.data+write.destination,write.bytes.data(),write.bytes.size());
+            if (!write.bytes.empty()) std::memcpy(write.destination,write.bytes.data(),write.bytes.size());
         return Stop::budget;
     }
 };

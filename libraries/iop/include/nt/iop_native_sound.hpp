@@ -372,8 +372,36 @@ private:
         else if (kind==0x21) field=&voices_[core*24+voice].loop;
         else return unavailable();
         if (!writing) return returned(*field);
-        if (value>=sample_capacity || (kind==0x21 && playback_[core*24+voice].active)) return unavailable();
+        if (value>=sample_capacity) return unavailable();
+        if (kind==0x21 && playback_[core*24+voice].active) return retarget_voice(core*24+voice,value&~15U);
         *field=kind==0x1d ? value|0x1ffffU : value&~15U;
+        return returned();
+    }
+    // Streaming programs move a playing voice's loop point to steer its next jump.
+    NativeServiceReply retarget_voice(unsigned index,std::uint32_t address) {
+        if (!refresh_voice(index,false)) return unavailable();
+        auto& playback=playback_[index];
+        if (!playback.active || !playback.stream) { voices_[index].loop=address; return returned(); }
+        std::optional<audio::AdpcmStream> revised;
+        bool decode_failed=false;
+        const auto accepted=output_.revise_voices([&](std::span<const audio::StreamState> states,std::vector<audio::VoiceRevision>& edits) {
+            if (states.size()!=playback_.size()) return false;
+            revised=playback.stream;
+            audio::VoiceRevision edit; edit.voice=index;
+            const auto result=revised->retarget(samples_,states[index].frames,address,edit.begin,edit.pcm);
+            if (result!=audio::SampleError::none) {
+                rejected_voice_=index; sample_error_=result; decode_failed=true;
+                return false;
+            }
+            if (!edit.pcm.empty()) edits.push_back(std::move(edit));
+            return true;
+        });
+        if (!accepted) {
+            transfer_failure_=decode_failed ? "stream-revision-decode" : "host-stream-revision";
+            return unavailable();
+        }
+        playback.stream=std::move(revised);
+        voices_[index].loop=address;
         return returned();
     }
     NativeServiceReply core_attribute(std::uint16_t entry,std::uint16_t value,bool writing) {

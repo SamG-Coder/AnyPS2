@@ -1105,6 +1105,11 @@ int main() {
             check(call(8,0x1700).second.registers[2]==0,"Acknowledged loop completion reappeared without progress");
             output.samples[0].frames=56;
             check(call(8,0x1700).second.registers[2]==1,"Subsequent loop end did not relatch completion");
+            // A playing voice accepts a new loop point, as streaming programs rely on.
+            check(call(9,0x2100,0x1010).first.reason==NativeStop::unmapped_code && call(10,0x2100).second.registers[2]==0x1010,
+                  "A playing voice refused a new loop address");
+            check(call(9,0x2100,0x200000).first.reason==NativeStop::import_request && call(10,0x2100).second.registers[2]==0x1010,
+                  "A playing voice accepted a loop address outside sample memory");
             output.envelopes[0]={}; sound.take();
             const auto snapshot=data;
             // An unfinished uploaded stream must start without a fabricated end.

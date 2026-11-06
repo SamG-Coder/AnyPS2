@@ -507,7 +507,10 @@ private:
         bool interrupt=false,interrupt_stall=false;
         bool double_buffer=false,path3_masked=false;
         unsigned base=0,offset=0,tops=0,top=0,itops=0,itop=0;
-        std::uint32_t error_mask=0,mark=0,mode=0,mask=0,cycle=0,code=0;
+        // No BIOS runs before the program, so CL=WL=1 stands in for its kernel's
+        // initialization: programs may UNPACK contiguously without ever issuing
+        // STCYCL. Equal CL and WL unpack identically, whatever the console's value.
+        std::uint32_t error_mask=0,mark=0,mode=0,mask=0,cycle=0x101,code=0;
         std::array<std::uint32_t,8> row_column{};
     };
     struct Pending { std::vector<std::uint8_t> bytes; std::size_t offset=0; std::vector<NativePacketOrigin> origins; };

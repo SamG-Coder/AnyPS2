@@ -4,6 +4,7 @@
 #include <nt/ee_timers.hpp>
 #include <nt/ee_platform.hpp>
 #include <nt/ee_performance.hpp>
+#include <nt/vu_quotient.hpp>
 #include <iostream>
 #include <stdexcept>
 #include <array>
@@ -579,7 +580,8 @@ int main() {
             check(execute(2)==nt::ee::Stop::budget && vectors.quotient==0x40c00000);
             check(execute(3)==nt::ee::Stop::budget);
             vectors.values[1][2]=0x7f800000; vectors.status=123;
-            check(execute(0)==nt::ee::Stop::unsupported_numeric && !state.executed && vectors.quotient==0x40c00000 && vectors.status==123);
+            // The macro path shares VU quotient rules: exponent 255 reads as the largest normal.
+            check(execute(0)==nt::ee::Stop::budget && vectors.quotient==nt::numeric::vu_divide_finite(0x41400000,0x7f7fffff).bits);
             vectors.values[0]={0x40c00000,0xc0a00000,0x40000000,0}; vectors.values[1][3]=0x40800000; vectors.clip=3;
             check(execute(4)==nt::ee::Stop::budget && vectors.clip==201 && owner.read(18,false).value==201);
             vectors.values[0]={0x40000000,0x40400000,0x40800000,0};
@@ -3115,6 +3117,26 @@ int main() {
                 check(platform.graphics.configure(0,0x51,0)==nt::ee::Stop::unsupported_system);
                 check(platform.graphics.configure(1,0x52,0)==nt::ee::Stop::unsupported_system);
                 check(platform.graphics.configure(0,0x1a,0)==nt::ee::Stop::unsupported_system);
+
+                // A direct SMODE2 write changes field/frame output inside the standard
+                // and leaves the running display deadlines alone.
+                platform.interrupts.write(0x1000f000,15);
+                const auto start=timer_now;
+                check(platform.graphics.configure(1,2,1)==nt::ee::Stop::budget && platform.graphics.half_height_output());
+                check(platform.graphics.write(0x12000020,1)==nt::ee::Stop::budget);
+                check(platform.graphics.read(0x12000020).value==1 && !platform.graphics.half_height_output());
+                check(platform.graphics.mode()->standard==2 && platform.graphics.mode()->frame==0);
+                const auto ntsc_blank=(480*2002000ULL+62)/63;
+                timer_now=start+ntsc_blank-2; poll(); check(!(platform.interrupts.read(0x1000f000).value&4));
+                check(platform.graphics.write(0x12000020,3)==nt::ee::Stop::budget && platform.graphics.half_height_output());
+                timer_now=start+ntsc_blank+1; poll(); check((platform.interrupts.read(0x1000f000).value&4)!=0);
+                check(platform.graphics.write(0x12000020,0)==nt::ee::Stop::budget && platform.graphics.read(0x12000020).value==0);
+                // DPMS states and scan types outside a digital standard preserve the mode.
+                check(platform.graphics.write(0x12000020,5)==nt::ee::Stop::unsupported_system && platform.graphics.read(0x12000020).value==0);
+                check(platform.graphics.configure(0,0x50,0)==nt::ee::Stop::budget);
+                check(platform.graphics.write(0x12000020,1)==nt::ee::Stop::unsupported_system && platform.graphics.read(0x12000020).value==0);
+                check(platform.graphics.configure(1,0x51,0)==nt::ee::Stop::budget);
+                check(platform.graphics.write(0x12000020,0)==nt::ee::Stop::unsupported_system && platform.graphics.read(0x12000020).value==1);
                 timer_now=epoch;
             }
             check(configure(3,0)==nt::ee::Stop::budget && platform.graphics.read(0x12000020).value==1);
@@ -3123,6 +3145,7 @@ int main() {
             check(edges_seen.size()<300 && platform.graphics.edge_overflow());
             check((platform.interrupts.read(0x1000f000).value&12)==12);
             check(platform.graphics.write(0x12001000,0x200)==nt::ee::Stop::budget && !platform.graphics.mode());
+            check(platform.graphics.write(0x12000020,1)==nt::ee::Stop::unsupported_system);
             platform.interrupts.write(0x1000f000,15); timer_now+=1000000000; poll(); check(!memory.pending_interrupts);
             struct Receiver { unsigned capacity=0; std::vector<bool> edges; } receiver;
             platform.graphics.display_edge=nullptr;

@@ -94,9 +94,23 @@ an explicit offline mapping and conversion, not an interpreter.
 Scratchpad submissions use synchronous, validated native copy batches with
 16 KiB wrapping. Normal copies work in both directions; supported source chains
 can include full descriptor transfers, and destination chains use explicit RAM
-write ranges. Completion is published after all copies commit. Interleave,
-scratchpad self-copy, VU-storage transfers and unsupported descriptor kinds stop
-explicitly. Native RAM destinations remain subject to compiled-code protection.
+write ranges. Completion is published after all copies commit. Copies to and from
+VU data memory use the storage compiled loads and stores use, and wait for a
+running job that owns it. Interleave, scratchpad self-copy, VU code storage and
+unsupported descriptor kinds stop explicitly. Native RAM destinations remain
+subject to compiled-code protection.
+
+Reset and numeric state that a console's kernel or hardware would establish is
+provided natively, without a BIOS. VIF units begin at `CL=WL=1`; the console's
+exact value is unverified, but any equal pair unpacks identically. DIV, SQRT and
+RSQRT read exponent-255 operands as the largest normal of their sign and saturate
+overflow to it without a flag, following public emulator references rather than
+hardware captures. A direct SMODE2 write changes scan and field or frame output
+without disturbing display deadlines; DPMS states stay refused.
+
+A playing voice accepts a new loop address (LSAX). It applies to every loop jump
+the voice has not taken, including jumps already decoded ahead of playback; a
+loop-start flag read after the write replaces it.
 
 ## Mixed code and data sections
 

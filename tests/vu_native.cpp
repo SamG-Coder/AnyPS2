@@ -93,6 +93,67 @@ extern "C" std::uint32_t nt_vu_whole_count();
 extern "C" const nt::vu::Block* nt_vu_mac_pipeline_blocks();
 extern "C" std::uint32_t nt_vu_mac_pipeline_count();
 namespace {
+// A program may UNPACK without ever issuing STCYCL: no BIOS ran to initialize the
+// unit, so its reset cycle must already write contiguous vectors.
+void check_reset_unpack_cycle(nt::vu::Binding binding) {
+    nt::ee::NativeVuLaunch owner(binding);
+    nt::ee::NativePacketSetup packets;
+    owner.connect(packets);
+    if (packets.read(0x10003840).value!=0x101 || packets.read(0x10003c40).value!=0x101)
+        throw std::runtime_error("VIF units did not reset to a usable write cycle");
+    std::vector<std::uint8_t> bytes;
+    const auto add=[&](std::uint32_t word) {
+        for (unsigned byte=0;byte<4;++byte) bytes.push_back(static_cast<std::uint8_t>(word>>(byte*8)));
+    };
+    add(0x6c020010);
+    for (std::uint32_t value=1;value<=8;++value) add(value);
+    if (packets.consume(1,bytes,false)!=nt::ee::Stop::budget ||
+        owner.state.data[16]!=std::array<std::uint32_t,4>{1,2,3,4} || owner.state.data[17]!=std::array<std::uint32_t,4>{5,6,7,8})
+        throw std::runtime_error("UNPACK without STCYCL did not write contiguous vectors");
+}
+// Kept out of the large memory-transaction test, whose frame is near the stack limit.
+void check_compiled_quotient_operand(const nt::vu::State& pending) {
+    const auto exponent=std::make_unique<nt::vu::State>(pending);
+    const auto largest=std::make_unique<nt::vu::State>(pending);
+    exponent->vectors[1][0]=0x7f800000;
+    largest->vectors[1][0]=0x7f7fffff;
+    if (nt_vu_q_finish(exponent.get())!=nt::vu::Result::complete || nt_vu_q_finish(largest.get())!=nt::vu::Result::complete ||
+        exponent->quotient!=largest->quotient || exponent->status!=largest->status)
+        throw std::runtime_error("Native Q did not read exponent 255 as the largest normal magnitude");
+}
+void check_quotient_saturation() {
+    using nt::numeric::vu_divide_finite;
+    using nt::numeric::vu_reciprocal_square_root_finite;
+    using nt::numeric::vu_square_root_finite;
+    const auto same=[](auto first,auto second) {
+        return first.supported && second.supported && first.bits==second.bits && first.flags==second.flags;
+    };
+    const auto expect=[](auto result,std::uint32_t bits,std::uint32_t flags) {
+        return result.supported && result.bits==bits && result.flags==flags;
+    };
+    // Finite overflow saturates by sign and reports no flag.
+    if (!expect(vu_divide_finite(0x7f000000,0x00800000),0x7f7fffff,0) ||
+        !expect(vu_divide_finite(0xff000000,0x00800000),0xff7fffff,0) ||
+        !expect(vu_divide_finite(0x7f000000,0x80800000),0xff7fffff,0) ||
+        !expect(vu_reciprocal_square_root_finite(0x7f000000,0x00800000),0x7f7fffff,0))
+        throw std::runtime_error("VU quotient overflow did not saturate");
+    // Every exponent-255 encoding reads as the largest normal of its sign.
+    for (const auto special:{0x7f800000U,0x7f800001U,0x7fffffffU}) {
+        const auto negative=special|0x80000000U;
+        if (!same(vu_divide_finite(special,0x3f800000),vu_divide_finite(0x7f7fffff,0x3f800000)) ||
+            !same(vu_divide_finite(negative,0x3f800000),vu_divide_finite(0xff7fffff,0x3f800000)) ||
+            !same(vu_divide_finite(0x3f800000,special),vu_divide_finite(0x3f800000,0x7f7fffff)) ||
+            !same(vu_square_root_finite(special),vu_square_root_finite(0x7f7fffff)) ||
+            !same(vu_square_root_finite(negative),vu_square_root_finite(0xff7fffff)) ||
+            !same(vu_reciprocal_square_root_finite(special,0x3f800000),vu_reciprocal_square_root_finite(0x7f7fffff,0x3f800000)) ||
+            !same(vu_reciprocal_square_root_finite(0x3f800000,special),vu_reciprocal_square_root_finite(0x3f800000,0x7f7fffff)))
+            throw std::runtime_error("VU quotient exponent 255 operand differs from the largest normal");
+    }
+    // Exception flags still come from the operands, not the saturation.
+    if (!expect(vu_divide_finite(0x7f800000,0),0x7f7fffff,0x20) ||
+        vu_square_root_finite(0xff800000).flags!=0x10 || vu_square_root_finite(0x7f800000).flags!=0)
+        throw std::runtime_error("VU quotient exponent 255 exception flags failed");
+}
 void test_clip_publication() {
     auto storage=std::make_unique<nt::vu::State>();
     const std::span blocks(nt_vu_clip_blocks(),nt_vu_clip_count());
@@ -684,10 +745,7 @@ int run_core_tests() {
         if (quotient_program.run(q,1).status!=nt::vu::RunStatus::complete || q.quotient!=0x40800000 ||
             q.quotient_pending || q.vectors[3][0]!=0x40c00000 || q.vectors[4][0]!=0x40c00000 || q.vectors[5][0]!=0x41400000)
             throw std::runtime_error("Native synchronized quotient operations failed");
-        auto invalid_q=pending_q; invalid_q.vectors[1][0]=0x7f800000;
-        const auto invalid_q_before=invalid_q;
-        if (nt_vu_q_finish(&invalid_q)!=nt::vu::Result::unsupported_numeric || invalid_q!=invalid_q_before)
-            throw std::runtime_error("Native Q numeric failure partially committed");
+        check_compiled_quotient_operand(pending_q);
         auto negative_q=pending_q; negative_q.vectors[1][0]=0xc0800000;
         if (nt_vu_q_finish(&negative_q)!=nt::vu::Result::complete || negative_q.quotient!=0x40800000 ||
             (negative_q.status&0xc30)!=0x410)
@@ -699,6 +757,7 @@ int run_core_tests() {
         if (div_zero.bits!=0xff7fffff || div_zero.flags!=0x20 || div_invalid.flags!=0x10 ||
             root_zero.bits!=0 || root_zero.flags!=0 || reciprocal_zero.bits!=0x80000000 || reciprocal_zero.flags!=0x30)
             throw std::runtime_error("VU quotient exceptional results failed");
+        check_quotient_saturation();
         if (nt_vu_program_count()!=3) throw std::runtime_error("Incorrect generated VU block count");
         const nt::vu::Program generated_program(0,{nt_vu_program_blocks(),nt_vu_program_count()});
         for (const bool taken:{false,true}) {
@@ -896,6 +955,7 @@ int run_core_tests() {
             {nt_vu_data_image(),nt_vu_data_size()});
         if (!data_binding.upload(1,std::array{nt::vu::UploadView{0,{nt_vu_data_image(),nt_vu_data_size()}}}))
             throw std::runtime_error("Synthetic data module did not bind");
+        check_reset_unpack_cycle(data_binding);
         nt::ee::NativeVuLaunch data_owner(data_binding);
         for (std::size_t q=0;q<data_owner.state.data.size();++q)
             for (unsigned lane=0;lane<4;++lane) data_owner.state.data[q][lane]=0x12340000U+std::uint32_t(q*4+lane);

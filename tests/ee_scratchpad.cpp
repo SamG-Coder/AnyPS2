@@ -87,6 +87,38 @@ void run_scratchpad_tests() {
     word(memory.scratchpad,20,1024); set(from,0,0,0x3ff0);
     check(write(from,0x104)==Stop::memory_fault && ram[0x180]==0x33 && read(from+0x80)==0x3ff0);
     check(!(platform.completions.status()&0x300));
+    // VU data shares the backing and ownership rule of compiled loads and stores.
+    std::array<std::uint8_t,16384> vu1{};
+    std::array<std::uint8_t,4096> vu0{};
+    bool vu1_active=true;
+    std::fill_n(memory.scratchpad+0x300,32,0x6d);
+    set(from,0x1100c010,2,0x300);
+    check(write(from,0x100)==Stop::unsupported_vector && read(from+0x20)==2);
+    memory.vector_data[1]={vu1.data(),vu1.size(),&vu1_active};
+    check(write(from,0x100)==Stop::vector_pending && !vu1[0x10]);
+    check(read(from+0x20)==2 && read(from+0x80)==0x300 && !(platform.completions.status()&0x300));
+    vu1_active=false;
+    check(write(from,0x100)==Stop::budget && vu1[0x10]==0x6d && vu1[0x2f]==0x6d && !vu1[0x30]);
+    check(read(from+0x10)==0x1100c030 && !read(from+0x20) && (platform.completions.status()&0x100));
+    clear();
+    std::fill_n(vu1.begin()+0x40,16,std::uint8_t{0x2a});
+    set(to,0x1100c040,1,0x400);
+    check(write(to,0x100)==Stop::budget && memory.scratchpad[0x400]==0x2a && memory.scratchpad[0x40f]==0x2a);
+    clear();
+    memory.vector_data[0]={vu0.data(),vu0.size(),nullptr};
+    set(from,0x11004ff0,2,0x300);
+    check(write(from,0x100)==Stop::memory_fault && !vu0[0xff0]);
+    set(from,0x11004ff0,1,0x300);
+    check(write(from,0x100)==Stop::budget && vu0[0xff0]==0x6d);
+    clear();
+    set(from,0x11008000,1,0x300);
+    check(write(from,0x100)==Stop::unsupported_vector);
+    // Executable-memory protection does not apply to VU data.
+    platform.scratchpad_copy.protection=[](std::uint32_t,std::uint32_t) { return true; };
+    set(from,0x1100c000,1,0x300);
+    check(write(from,0x100)==Stop::budget && vu1[0]==0x6d);
+    clear();
+    memory.vector_data[0]={}; memory.vector_data[1]={};
     // All native writes require the generated code-protection predicate.
     platform.scratchpad_copy.protection=[](std::uint32_t address,std::uint32_t bytes) { return address<0x1a0 && address+bytes>0x180; };
     set(from,0x180,1,0);

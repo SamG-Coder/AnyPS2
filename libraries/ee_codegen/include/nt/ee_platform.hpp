@@ -141,10 +141,11 @@ private:
     Stop write_graphics(std::uint32_t address,std::uint64_t value) {
         // Interrupt controls do not consume vector output, so they may change while a
         // compiled VU job is still producing geometry. Flush/reset affect the drawing
-        // owner, and a display buffer change shows what was drawn before it: both must
-        // await the publication of queued work.
+        // owner, and a display buffer or scan change shows what was drawn before it:
+        // all must await the publication of queued work.
         const bool buffer_change=(address==0x12000070 || address==0x12000090) && graphics.displayed_buffer((address-0x12000070)/32)!=value;
-        if (((address==0x12001000 && (value&0x300)) || buffer_change) && packet_setup.working())
+        const bool scan_change=address==0x12000020 && graphics.scan_control()!=value;
+        if (((address==0x12001000 && (value&0x300)) || buffer_change || scan_change) && packet_setup.working())
             return Stop::native_wait;
         return graphics.write(address,value);
     }

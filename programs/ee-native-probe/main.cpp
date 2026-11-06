@@ -470,6 +470,9 @@ int main(int argc,char** argv) {
                 auto& path=text=="--capture-packets" ? packet_capture_path : packet_replay_path;
                 if (!path.empty() || index+1==argc) throw std::runtime_error("Expected one private packet capture file");
                 path=argv[++index];
+#ifndef ANYPS2_NATIVE_VU1
+                if (text=="--replay-packets") throw std::runtime_error("--replay-packets requires a build linked with converted VU1 code");
+#endif
                 continue;
             }
             if (text=="--capture-vectors") {
@@ -1232,9 +1235,13 @@ int main(int argc,char** argv) {
         std::cout<<"native_completion_status="<<nt::hex32(platform.completions.status())
                  <<" native_interrupt_pending="<<nt::hex32(platform.interrupts.read(0x1000f000).value)
                  <<" native_interrupt_enabled="<<nt::hex32(platform.interrupts.read(0x1000f010).value)<<'\n';
-        for (unsigned channel=0;channel<3;++channel)
+        for (unsigned channel=0;channel<3;++channel) {
             std::cout<<"packet_channel="<<channel<<" control="<<nt::hex32(platform.packet_submission.read(0x10008000+channel*0x1000).value)
-                     <<" consumer_pending="<<platform.packet_setup.pending(channel)<<'\n';
+                     <<" consumer_pending="<<platform.packet_setup.pending(channel);
+            if (channel<2) std::cout<<" vif_cycle="<<nt::hex32(platform.packet_setup.read(0x10003840+channel*0x400).value)
+                <<" vif_mode="<<platform.packet_setup.read(0x10003850+channel*0x400).value;
+            std::cout<<'\n';
+        }
         std::cout<<"stop="<<static_cast<unsigned>(stop)<<" pc="<<nt::hex32(state.pc)
                  <<" executed="<<state.executed<<" v0="<<state.gpr[2].lo
                  <<(stop==nt::ee::Stop::syscall ? " syscall=" : " v1=")<<state.gpr[3].lo;

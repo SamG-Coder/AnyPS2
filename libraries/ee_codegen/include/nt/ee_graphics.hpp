@@ -44,10 +44,7 @@ public:
     void* scanout_context=nullptr;
     void (*scanout_ready)(void*)=nullptr;
     Stop configure(std::uint32_t interlace,std::uint32_t standard,std::uint32_t frame) {
-        // NTSC and PAL may be either; the digital modes each define one scan type.
-        const bool supported=(standard==2 || standard==3) ? interlace<=1 :
-            (standard==0x50 || standard==0x52) ? interlace==0 : standard==0x51 && interlace==1;
-        if (!supported || frame>1) return Stop::unsupported_system;
+        if (!scan_supported(standard,interlace) || frame>1) return Stop::unsupported_system;
         if (!synchronize) return Stop::unsupported_system;
         const auto ready=synchronize(context);
         if (ready!=Stop::budget) return ready;
@@ -59,6 +56,8 @@ public:
         return Stop::budget;
     }
     const std::optional<DisplayMode>& mode() const { return mode_; }
+    // The SMODE2 INT and FFMD bits of the current mode, or zero when unconfigured.
+    std::uint64_t scan_control() const { return mode_ ? mode_->interlace|(mode_->frame<<1) : 0; }
     // Display clocks per pixel of a digital mode, whose clocks are square. NTSC
     // and PAL return zero: their output keeps one window pixel per plan pixel.
     unsigned clocks_per_pixel() const {
@@ -88,7 +87,7 @@ public:
             const auto slot=(address-0x12000070)/16;
             return {Stop::budget,slot&1 ? output_.displays[slot/2] : output_.buffers[slot/2]};
         }
-        if (address==0x12000020) return {Stop::budget,mode_ ? mode_->interlace|(mode_->frame<<1) : 0};
+        if (address==0x12000020) return {Stop::budget,scan_control()};
         if (address==0x12001000) {
             if (profile) { ++profile->status_reads; profile->finish_not_ready+=!(flags_&2); profile->vsync_not_ready+=!(flags_&8); }
             if (profile && vsync_profile_start_ && (flags_&8)) {
@@ -117,7 +116,13 @@ public:
             return Stop::budget;
         }
         if (address==0x12000020) {
-            return mode_ && value==(mode_->interlace|(mode_->frame<<1)) ? Stop::budget : Stop::unsupported_system;
+            // INT and FFMD choose the scan type and field or frame output within
+            // the configured standard, so display deadlines continue unchanged.
+            // Power-saving DPMS states have no native output and remain refused.
+            if (!mode_ || value>3 || !scan_supported(mode_->standard,static_cast<std::uint32_t>(value&1))) return Stop::unsupported_system;
+            mode_->interlace=static_cast<std::uint32_t>(value&1);
+            mode_->frame=static_cast<std::uint32_t>(value>>1);
+            return Stop::budget;
         }
         if (address==0x12001000) {
             if (value&0x300) {
@@ -180,6 +185,11 @@ public:
         return deadline>now ? deadline-now : 0;
     }
 private:
+    // NTSC and PAL may be either; the digital modes each define one scan type.
+    static bool scan_supported(std::uint32_t standard,std::uint32_t interlace) {
+        return (standard==2 || standard==3) ? interlace<=1 :
+            (standard==0x50 || standard==0x52) ? interlace==0 : standard==0x51 && interlace==1;
+    }
     // In scan ticks per displayed field or frame. The duration of one tick is
     // denominator/numerator nanoseconds: half lines when interlaced or NTSC/PAL,
     // lines for digital progressive modes. Rates are 60000/1001 for NTSC and

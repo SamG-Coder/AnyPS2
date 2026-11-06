@@ -40,7 +40,8 @@ applications are never bundled with these dependencies.
 The principal source areas consulted at those pins are:
 
 - **EE and memory:** PCSX2 `R5900OpcodeTables.cpp`, `R5900OpcodeImpl.cpp`, `MMI.cpp`,
-  `FPU.cpp`, `COP0.cpp`, `R5900.cpp` (exception boundaries), `Cache.cpp`, `x86/iFPUd.cpp`; Play! `Source/ee/PS2OS.cpp`;
+  `FPU.cpp`, `COP0.cpp`, `R5900.cpp` (exception boundaries), `Cache.cpp`, `x86/iFPUd.cpp`; Play! `Source/ee/PS2OS.cpp`
+  and `Source/ee/Vif.cpp` (reset CYCLE value);
   PS2SDK `ee/startup`, `ee/kernel` (including Cause, BadVAddr and BadPAddr
   selector names in `kernel.h`) and public ELF section/symbol specifications.
 - **IOP and native services:** PS2SDK `iop/system`, `iop/kernel`, `iop/fs`, `iop/cdvd`,

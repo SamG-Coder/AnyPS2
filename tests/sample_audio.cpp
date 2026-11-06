@@ -129,6 +129,65 @@ int main() {
             check(cursor.revise(replacement,35,32,16,begin,revised)==nt::audio::SampleError::unsupported && cursor.frames()==saved.frames(),
                   "Shortened queued stream was silently padded or partially committed");
         }
+        {
+            // A block filled with one nibble decodes to that constant, so each
+            // sample shows which source block supplied it.
+            const auto media=[](std::initializer_list<std::pair<unsigned,unsigned>> blocks) {
+                std::vector<std::uint8_t> bytes;
+                for (const auto [value,flags]:blocks) {
+                    const auto first=bytes.size();
+                    bytes.resize(first+16,static_cast<std::uint8_t>(value|(value<<4)));
+                    bytes[first]=12; bytes[first+1]=static_cast<std::uint8_t>(flags);
+                }
+                return bytes;
+            };
+            const auto sources=[](const std::vector<std::int16_t>& pcm) {
+                std::vector<int> values;
+                for (std::size_t i=0;i<pcm.size();i+=28) values.push_back(pcm[i]);
+                return values;
+            };
+            using nt::audio::AdpcmStream;
+            using nt::audio::SampleError;
+            const auto loops=media({{1,0},{2,3},{3,0},{4,3},{5,3}});
+            std::vector<std::int16_t> pcm,revised;
+            std::uint64_t begin=0;
+            // Blocks at 0,16,32,48,32,48 are queued; the second is playing, so its
+            // end-of-block jump has not happened and follows the new address.
+            AdpcmStream jump(0,32);
+            check(jump.decode(loops,6,pcm)==SampleError::none && sources(pcm)==std::vector<int>({1,2,3,4,3,4}),"Loop retarget setup");
+            check(jump.retarget(loops,35,64,begin,revised)==SampleError::none && begin==56 &&
+                  sources(revised)==std::vector<int>({5,5,5,5}),"A playing block's pending jump ignored the new loop address");
+            // A block not yet reached takes its jump to the new address.
+            AdpcmStream ahead(0,32); pcm.clear();
+            check(ahead.decode(loops,6,pcm)==SampleError::none,"Queued retarget setup");
+            check(ahead.retarget(loops,5,64,begin,revised)==SampleError::none && begin==28 &&
+                  sources(revised)==std::vector<int>({2,5,5,5,5}),"A queued jump kept the old loop address");
+            // A jump the device already took stays taken, and the next one moves.
+            AdpcmStream taken(0,32); pcm.clear();
+            check(taken.decode(loops,6,pcm)==SampleError::none,"Taken retarget setup");
+            check(taken.retarget(loops,60,64,begin,revised)==SampleError::none && begin==84 &&
+                  sources(revised)==std::vector<int>({4,5,5}),"Retarget rewrote audio the device already reached");
+            // A loop-start flag read after the write replaces the written address.
+            const auto flagged=media({{1,0},{2,4},{3,3},{4,3}});
+            AdpcmStream later(0,48); pcm.clear();
+            check(later.decode(flagged,4,pcm)==SampleError::none && sources(pcm)==std::vector<int>({1,2,3,2}),"Flagged retarget setup");
+            check(later.retarget(flagged,5,48,begin,revised)==SampleError::none && begin==28 &&
+                  sources(revised)==std::vector<int>({2,3,2}),"A later loop-start flag did not replace the written address");
+            // With nothing left to replace, the next decode still honours the write.
+            AdpcmStream drained(0,32); pcm.clear();
+            check(drained.decode(loops,2,pcm)==SampleError::none,"Drained retarget setup");
+            check(drained.retarget(loops,30,64,begin,revised)==SampleError::none && revised.empty(),"Drained retarget produced audio");
+            pcm.clear();
+            check(drained.decode(loops,1,pcm)==SampleError::none && sources(pcm)==std::vector<int>({5}),"Drained jump ignored the new loop address");
+            // Invalid addresses leave the decoder untouched.
+            AdpcmStream invalid(0,32); pcm.clear();
+            check(invalid.decode(loops,2,pcm)==SampleError::none,"Invalid retarget setup");
+            check(invalid.retarget(loops,5,8,begin,revised)==SampleError::malformed &&
+                  invalid.retarget(loops,5,static_cast<std::uint32_t>(loops.size()),begin,revised)==SampleError::malformed,
+                  "An invalid loop address was accepted");
+            pcm.clear();
+            check(invalid.decode(loops,1,pcm)==SampleError::none && sources(pcm)==std::vector<int>({3}),"A rejected retarget changed the decoder");
+        }
         std::vector<std::uint8_t> ram(0x10000);
         Memory memory{}; memory.data=ram.data(); memory.size=ram.size();
         NativeCompletions completions; memory.completions=&completions;
