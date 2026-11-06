@@ -1132,7 +1132,10 @@ int main(int argc,char** argv) {
             {
                 const auto& sound=iop_reset->sound();
                 std::cout<<"native_sound_activity key_ons="<<sound.key_ons()<<" stream_submissions="<<sound.stream_submissions()
-                    <<" sample_bytes="<<sound.sample_bytes()<<" active_voices="<<sound.active_voices();
+                    <<" sample_bytes="<<sound.sample_bytes()<<" active_voices="<<sound.active_voices()
+                    <<" approximated_settings="<<sound.approximated_settings()
+                    <<" stream_underruns="<<sound.stream_underruns()<<" voice_underruns="<<sound.voice_underruns()
+                    <<" stream_bytes="<<sound.stream_bytes()<<" longest_service_gap_ms="<<sound.longest_service_gap_ms();
                 for (unsigned core=0;core<2;++core)
                     std::cout<<" core"<<core<<"_master="<<nt::hex32(sound.master(core,0))<<','<<nt::hex32(sound.master(core,1))
                         <<" mix="<<nt::hex32(sound.mix_flags(core))<<" stream="<<sound.stream_active(core)<<" output="<<sound.core_output_enabled(core);

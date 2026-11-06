@@ -37,6 +37,12 @@ public:
     }
     const auto& voice_volume(unsigned index) const { return voices_[index].volume; }
     bool core_output_enabled(unsigned core) const { return cores_[core].output_enabled; }
+    // Sound settings played as the nearest native form; none ends the program.
+    std::uint64_t approximated_settings() const { return approximated_settings_; }
+    std::uint64_t stream_underruns() const { return stream_underruns_; }
+    std::uint64_t voice_underruns() const { return voice_underruns_; }
+    std::uint32_t stream_bytes() const { return stream_bytes_; }
+    double longest_service_gap_ms() const { return longest_service_gap_ms_; }
     std::array<std::uint32_t,3> rejected_sample() const {
         const auto& voice=voices_[rejected_voice_];
         return {voice.start,voice.loop,voice.pitch};
@@ -49,6 +55,8 @@ public:
         // of game code. Host playback advances asynchronously, so polling once a
         // millisecond observes the same progress; game reads still refresh directly.
         const auto now=std::chrono::steady_clock::now();
+        if (next_voice_poll_!=std::chrono::steady_clock::time_point{})
+            longest_service_gap_ms_=std::max(longest_service_gap_ms_,std::chrono::duration<double,std::milli>(now-next_voice_poll_).count());
         if (now>=next_voice_poll_) {
             next_voice_poll_=now+voice_poll_interval;
             for (unsigned index=0;index<playback_.size();++index) if (playback_[index].active && !refresh_voice(index)) {
@@ -59,15 +67,37 @@ public:
                 if (!stream.active) continue;
                 audio::StreamState state;
                 if (!output_.stream_state(core,state)) { failure_=NativeResult{NativeStop::service_request,stream.pc,0,18}; return {}; }
+                // Queue the other half of a looping stream before this one runs out,
+                // while the program, signalled at the last boundary, has filled it.
+                const auto half_frames=std::uint64_t(stream.size)/4;
+                if (stream.loop && !stream.refill.address && !stream.next_queued && state.queued &&
+                    stream.boundary-std::min(stream.boundary,state.frames)<=half_frames/2) {
+                    if (!submit_stream(core,stream.half^1U,0)) { failure_=NativeResult{NativeStop::service_request,stream.pc,0,18}; return {}; }
+                    stream.next_queued=true;
+                }
+                if (stream.loop && !stream.refill.address && state.queued && state.frames>=stream.boundary) {
+                    // The audible position crossed into the queued half.
+                    stream.half^=1; stream.start=0;
+                    stream.origin=stream.boundary; stream.boundary+=half_frames; stream.next_queued=false;
+                    notify(core);
+                    continue;
+                }
                 if (state.queued) continue;
+                ++stream_underruns_;
                 if (stream.refill.address) {
                     store_native_word(arena_,scratch_,0); store_native_word(arena_,scratch_+4,0);
                     active_=true; active_stream_=core;
                     return NativeCallback{stream.refill.address,core,stream.refill.argument,stream.refill.gp,scratch_,scratch_+4};
                 }
                 if (stream.loop) {
-                    stream.half^=1; stream.start=0;
-                    if (!submit_stream(core)) { failure_=NativeResult{NativeStop::service_request,stream.pc,0,18}; return {}; }
+                    // Drained before the host could queue ahead: restart from here.
+                    if (stream.next_queued) { stream.half^=1; stream.next_queued=false; }
+                    else {
+                        stream.half^=1;
+                        if (!submit_stream(core,stream.half,0)) { failure_=NativeResult{NativeStop::service_request,stream.pc,0,18}; return {}; }
+                    }
+                    stream.start=0;
+                    stream.origin=state.frames; stream.boundary=state.frames+half_frames;
                 } else stream.active=false;
                 notify(core);
             }
@@ -88,7 +118,7 @@ public:
             failure_=NativeResult{NativeStop::address_fault,stream.refill.address,pointer}; return;
         }
         stream.address=*address; stream.size=size;
-        if (!submit_stream(core)) failure_=NativeResult{NativeStop::service_request,stream.pc,pointer,18};
+        if (!submit_stream(core,stream.half,stream.start)) failure_=NativeResult{NativeStop::service_request,stream.pc,pointer,18};
     }
     std::optional<NativeResult> failure() const override { return failure_; }
     NativeServiceReply invoke(const NativeServiceRequest& request,std::span<std::uint8_t> ram) override {
@@ -154,7 +184,10 @@ public:
         }
     }
 private:
-    std::uint64_t key_ons_=0,stream_submissions_=0,sample_bytes_=0;
+    std::uint64_t approximated_settings_=0;
+    std::uint64_t key_ons_=0,stream_submissions_=0,sample_bytes_=0,stream_underruns_=0,voice_underruns_=0;
+    std::uint32_t stream_bytes_=0;
+    double longest_service_gap_ms_=0;
     std::array<std::uint32_t,5> last_call_{};
     const char* transfer_failure_="none";
     std::array<std::uint32_t,5> transfer_arguments_{};
@@ -201,6 +234,7 @@ private:
         if (!playback.active) return true;
         audio::StreamState stream; audio::EnvelopeState envelope;
         if (!output_.sample_state(index,stream)) return false;
+        if (!stream.queued && playback.stream && !playback.stream->finished()) ++voice_underruns_;
         if (playback.stream) {
             auto& decoder=*playback.stream;
             for (const auto& block:decoder.pending()) {
@@ -235,9 +269,11 @@ private:
         return true;
     }
     static unsigned stream_blocks(const Voice& voice) {
-        // About 19 ms of source PCM at the current pitch, bounded independently
-        // of program polling frequency. The audio engine owns elapsed frames.
-        return std::clamp((32U*voice.pitch+4095)/4096,8U,128U);
+        // About 75 ms of source PCM at the current pitch, bounded independently
+        // of program polling frequency, which covers the pauses between services
+        // while a frame finishes. Writes over queued PCM revise it, so this adds no
+        // delay to key-on, key-off or volume. The audio engine owns elapsed frames.
+        return std::clamp((128U*voice.pitch+4095)/4096,32U,224U);
     }
     NativeServiceReply key_on(unsigned core,std::uint32_t mask) {
         key_ons_+=std::popcount(mask);
@@ -248,7 +284,7 @@ private:
         for (unsigned voice=0;voice<24;++voice) if (mask&(1U<<voice)) {
             const auto index=core*24+voice; const auto& v=voices_[index];
             streams[voice].emplace(v.start,v.loop);
-            const auto error=streams[voice]->decode(samples_,stream_blocks(v),decoded[voice]);
+            const auto error=streams[voice]->decode(samples_,std::min(stream_blocks(v),128U),decoded[voice]);
             if (error!=audio::SampleError::none) { rejected_voice_=index; sample_error_=error; return unavailable(); }
             starts.push_back({index,decoded[voice],0,0,envelope_spec(v)});
         }
@@ -273,7 +309,7 @@ private:
         bool output_enabled=true;
     };
     struct Handler { std::uint32_t address=0,argument=0,gp=0; };
-    struct Stream { bool active=false,loop=false; unsigned half=0; std::uint32_t address=0,size=0,pc=0,start=0; std::uint64_t origin=0; Handler refill; };
+    struct Stream { bool active=false,loop=false; unsigned half=0; std::uint32_t address=0,size=0,pc=0,start=0; std::uint64_t origin=0,boundary=0; bool next_queued=false; Handler refill; };
     static NativeServiceReply returned(std::uint32_t value=0) { return {NativeServiceStatus::returned,value}; }
     static NativeServiceReply unavailable() { return {NativeServiceStatus::unavailable}; }
     static float fixed_gain(std::uint16_t value) {
@@ -307,6 +343,12 @@ private:
         for (unsigned v=core*24;v<(core+1)*24;++v) if (!apply_voice(v,voices_[v],c)) return false;
         return true;
     }
+    // Bit 15 selects a sweep; bit 13 selects a falling one.
+    std::uint16_t settled_gain(std::uint16_t value) {
+        if (!(value&0x8000)) return value;
+        ++approximated_settings_;
+        return (value&0x2000) ? 0 : 0x3fff;
+    }
     NativeServiceReply parameter(std::uint16_t entry,std::uint16_t value,bool writing) {
         const unsigned core=entry&1U,kind=entry>>8,voice=(entry&0x3e)>>1;
         if (kind<=7) {
@@ -324,9 +366,13 @@ private:
             }
             else return unavailable();
             if (!writing) return returned(*field);
-            if (kind<2 && (value&0x8000)) return unavailable(); // Dynamic gain sweeps need a timed envelope.
-            if (kind==2 && value>0x3fff) return unavailable();
-            if (kind==2 && value>0 && value<4) return unavailable(); // Below the native resampler's range.
+            // A gain sweep has no timed native envelope: go straight to where it ends.
+            if (kind<2) value=settled_gain(value);
+            // Keep pitch inside the native resampler's range.
+            if (kind==2 && (value>0x3fff || (value>0 && value<4))) {
+                ++approximated_settings_;
+                value=value>0x3fff ? 0x3fff : 4;
+            }
             *field=value;
             if (kind>=3 && !output_.configure_envelope(index,envelope_spec(v))) return unavailable();
             if (!apply_voice(index,v,cores_[core])) return unavailable();
@@ -342,7 +388,7 @@ private:
         else if (kind<=18 && !writing) return returned(static_cast<std::uint16_t>(c.master[kind-17]<<1));
         else return unavailable();
         if (!writing) return returned(*field);
-        if ((kind==9 || kind==10) && (value&0x8000)) return unavailable();
+        if (kind==9 || kind==10) value=settled_gain(value);
         if (kind==8 && value>0xfff) return unavailable();
         *field=value;
         if (!apply_core(core,c)) return unavailable();
@@ -351,7 +397,12 @@ private:
     NativeServiceReply routing(std::uint16_t entry,std::uint32_t value,bool writing) {
         if (entry&0xfe) return unavailable();
         const unsigned core=entry&1U,kind=entry>>8; value&=0xffffff;
-        if (kind==0x13 || kind==0x14) return (!writing || !value) ? returned() : unavailable();
+        // Pitch modulation and noise have no native mixer stage. Voices keep their
+        // own pitch and samples, so such a sound differs, but the program continues.
+        if (kind==0x13 || kind==0x14) {
+            if (writing && value) ++approximated_settings_;
+            return returned();
+        }
         if (kind==0x17) {
             for (unsigned index=core*24;index<(core+1)*24;++index) if (!refresh_voice(index)) return unavailable();
             auto& ended=cores_[core].end_mask;
@@ -502,12 +553,12 @@ private:
             callbacks_.push_back({handlers_[2].address,1U<<core,handlers_[2].argument,handlers_[2].gp});
         return returned((mode&8) ? 0U : requested);
     }
-    bool submit_stream(unsigned core) {
+    bool submit_stream(unsigned core,unsigned half,std::uint32_t skip) {
         ++stream_submissions_;
+        stream_bytes_=streams_[core].size;
         auto& stream=streams_[core];
         // A stream started part way through a buffer plays only its remainder once.
-        const auto skip=stream.start;
-        const auto address=stream.address+stream.half*stream.size+skip;
+        const auto address=stream.address+half*stream.size+skip;
         const auto bytes=stream.size-skip;
         if (address>arena_.size() || bytes>arena_.size()-address || !bytes || stream.size%1024) return false;
         std::vector<std::int16_t> pcm(bytes/2);
@@ -522,7 +573,9 @@ private:
                 }
         audio::StreamState state;
         if (!output_.stream_state(core,state)) return false;
-        stream.origin=state.frames;
+        // A queued half keeps the position of the half still playing.
+        if (!stream.next_queued && !stream.boundary) { stream.origin=state.frames; stream.boundary=state.frames+bytes/4; }
+        else if (!stream.loop || stream.refill.address) { stream.origin=state.frames; stream.boundary=state.frames+bytes/4; }
         return output_.submit_stream(core,pcm);
     }
     NativeServiceReply stream_status(unsigned core) {
@@ -583,7 +636,7 @@ private:
         streams_[core]={true,loop,half,*source,size,request.call_site};
         streams_[core].start=start;
         streams_[core].refill=refill;
-        if (!submit_stream(core)) { streams_[core]={}; return unavailable(); }
+        if (!submit_stream(core,half,start)) { streams_[core]={}; return unavailable(); }
         return returned();
     }
     NativeServiceReply clear_effect(unsigned core,std::uint32_t channel,std::uint32_t mode) {

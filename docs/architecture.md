@@ -98,9 +98,14 @@ occupy those segments. Unresolved callbacks remain coverage gaps. See
   continues; source stop/resume and hold changes commit together in XAudio2.
   Stream refills preserve the current decoded block and revise unplayed PCM from
   saved predictor/loop checkpoints at a native processing-pass boundary. Failed
-  revisions leave both encoded data and queued PCM unchanged. Revisions that
-  shorten an already queued extent remain unsupported; they are never padded
-  with silence. Unsupported device features are not advertised.
+  revisions leave both encoded data and queued PCM unchanged. A new end marker in
+  queued PCM ends the sound there, and the rest of the queued extent plays as silence.
+  Voices queue about 75 ms and looping streams queue their next half early, because
+  game-thread services can pause for tens of milliseconds while a frame finishes.
+  Pitch modulation and noise have no native mixer stage and gain sweeps have no timed
+  envelope: voices keep their own pitch and samples, a sweep goes straight to where it
+  ends, and these uses are counted in the native summary. Unsupported device features
+  are not advertised.
 
 Diagnostic hardware models remain for investigation and synthetic regressions.
 They are not evidence of native conversion and must not become runtime fallbacks.

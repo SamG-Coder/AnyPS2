@@ -126,8 +126,11 @@ int main() {
             check(cursor.revise(replacement,35,32,16,begin,revised)==nt::audio::SampleError::unsupported && cursor.frames()==saved.frames(),
                   "Malformed refill changed the committed decoder cursor");
             replacement=bytes; replacement[33]=1;
-            check(cursor.revise(replacement,35,32,16,begin,revised)==nt::audio::SampleError::unsupported && cursor.frames()==saved.frames(),
-                  "Shortened queued stream was silently padded or partially committed");
+            // A new end marker ends the sound there; queued buffers keep their length.
+            const auto queued=saved.frames();
+            check(cursor.revise(replacement,35,32,16,begin,revised)==nt::audio::SampleError::none && cursor.finished() &&
+                  revised.size()==queued-begin && revised.back()==0 && cursor.frames()==begin+28,
+                  "End marker in queued audio did not end the stream at its block");
         }
         std::vector<std::uint8_t> ram(0x10000);
         Memory memory{}; memory.data=ram.data(); memory.size=ram.size();

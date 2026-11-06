@@ -62,9 +62,11 @@ public:
         next.pending_.erase(next.pending_.begin()+(first-pending_.begin()),next.pending_.end());
         const auto result=next.decode(source,count,pcm);
         if (result!=SampleError::none) return result;
-        // Changing the queued extent needs a native queue replacement, not
-        // padding with silence or silently retaining an obsolete end marker.
-        if (next.frames_!=frames_) return SampleError::unsupported;
+        // A new end marker inside the queued range ends the sound there. Queued
+        // buffers keep their length, so the rest of the extent plays as silence;
+        // the end is reported when the marker's block is consumed.
+        if (next.frames_>frames_) return SampleError::unsupported;
+        pcm.resize(static_cast<std::size_t>(frames_-first->begin),0);
         begin=first->begin; *this=std::move(next); return SampleError::none;
     }
     std::uint32_t source_position(std::uint64_t played) const {
